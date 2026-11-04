@@ -5,14 +5,22 @@
   ansible.builtin.import_playbook: ../../apply/docker-apply.yml
   tags: [docker]
 
+- name: Deploy the actual independent SIEM receiver before forwarding
+  ansible.builtin.import_playbook: ../../apply/log-server-apply.yml
+  tags: [log-server]
+
 - name: Deploy the central Wazuh stack first
   ansible.builtin.import_playbook: ../../apply/wazuh-manager-apply.yml
-  vars:
-    # Configuration assertions C10/C11 only. There is no SIEM receiver and no
-    # claim of SIEM delivery; agent -> central transport is tested separately.
-    siem_forward_host: "127.0.0.1"
   tags: [wazuh-manager]
 
 - name: Deploy compatible Wazuh agents second
   ansible.builtin.import_playbook: ../../apply/wazuh-fim-apply.yml
   tags: [wazuh-fim]
+
+
+# Explicit diagnostic fixture emits one genuine engine alert and a new receiver
+# challenge each apply. It is deferred during the mandatory pristine dry-run.
+- name: Generate a fresh native alert challenge for actual receiver verification
+  ansible.builtin.import_playbook: wazuh-alert-delivery-fixtures.yml
+  when: not ansible_check_mode
+  tags: [wazuh-delivery]

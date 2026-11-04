@@ -36,6 +36,7 @@ groupVars:
   - {name: siem_relp_key_pem, type: string, required: false, secret: true}
   - {name: wazuh_docker_version, type: string, required: false, default: "4.14.1", secret: false}
   - {name: wazuh_version, type: string, required: false, secret: false}
+  - {name: wazuh_ack_rsyslog_downtime_and_replay, type: boolean, required: false, default: false, secret: false}
 endpoints:
   - {name: agent, scheme: tcp, port: 1514}
   - {name: agentAuth, scheme: tcp, port: 1515}

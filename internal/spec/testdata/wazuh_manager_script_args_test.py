@@ -22,8 +22,8 @@ RECEIVER=r'''
 import argparse,importlib.util,json,os,sys
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('action')
-for name in ('version','legacy','owner','component','mode','family','manager','agent-id','agent-name'):p.add_argument('--'+name,default='')
-for name in ('upgrade','preview','recover','confirm-previous-stopped'):p.add_argument('--'+name,action='store_true')
+for name in ('version','legacy','owner','component','mode','family','manager','agent-id','agent-name','reader-desired-json','reader-checker-sha256'):p.add_argument('--'+name,default='')
+for name in ('upgrade','preview','recover','confirm-previous-stopped','ack-rsyslog-downtime-and-replay'):p.add_argument('--'+name,action='store_true')
 a=p.parse_args();record={'argv':sys.argv[1:],'guard':None,'native_calls':0};status=0
 if a.preview and a.recover:
  s=importlib.util.spec_from_file_location('real_product_gate',os.environ['WAZUH_REAL_HELPER'])
@@ -60,6 +60,9 @@ class ManagerScriptArgumentTests(unittest.TestCase):
   reset=picked(source,"Reset this play's selected manager replacement plan")
   mark=picked(source,"Mark this run's selected Wazuh manager installation plan")
   central=picked(source,'Inspect compatibility or execute the explicitly authorized central upgrade')
+  reset_reader=picked(source,"Reset this play's actual forwarding selection")
+  mark_reader=picked(source,'Mark selected forwarding intent without granting container authority')
+  reader_request=picked(source,'Build the secret-free selected reader request')
   original=central['ansible.builtin.script']['cmd']
   self.assertEqual(original.count('files/wazuh-transaction.py'),1)
   batches=[
@@ -69,19 +72,19 @@ class ManagerScriptArgumentTests(unittest.TestCase):
     ('legacy',{'wazuh_docker_version':'4.14.9'},'','4.14.9',False,False,False),
     ('both',{'wazuh_version':'4.14.9','wazuh_docker_version':'4.14.9'},'4.14.9','4.14.9',False,False,False),
     ('empty-common',{'wazuh_version':'','wazuh_docker_version':'4.14.9'},'','4.14.9',False,False,False),
-    ('upgrade',{'wazuh_upgrade':True,'wazuh_version':'4.14.9'},'4.14.9','4.14.9',True,False,False),
+    ('upgrade',{'wazuh_upgrade':True,'wazuh_ack_rsyslog_downtime_and_replay':True,'wazuh_version':'4.14.9'},'4.14.9','4.14.9',True,False,False),
     ('recover',{'wazuh_recover':True,'wazuh_version':'4.14.9'},'4.14.9','4.14.9',False,False,True)]),
    ('check-full',('--check',),[
     ('normal',{'wazuh_version':'4.14.9'},'4.14.9','4.14.9',False,True,False),
     ('legacy',{'wazuh_docker_version':'4.14.9'},'','4.14.9',False,True,False),
     ('upgrade',{'wazuh_upgrade':True,'wazuh_version':'4.14.9'},'4.14.9','4.14.9',True,True,False),
     ('recover-refused',{'wazuh_recover':True,'wazuh_version':'4.14.9'},'4.14.9','4.14.9',False,True,True)])]
-  for row in ('C1','C2','C3','C5'):
+  for row in ('C1','C2','C3','C5','C10','C11','C12'):
    for check in (False,True):
     flags=('--tags',row,*(['--check'] if check else []))
     batches.append(('tag-'+row+('-check' if check else '-apply'),flags,[
-     ('common-upgrade',{'wazuh_upgrade':True,'wazuh_version':'4.14.9'},'4.14.9','4.14.9',row!='C5',check,False),
-     ('legacy-upgrade',{'wazuh_upgrade':True,'wazuh_docker_version':'4.14.9'},'','4.14.9',row!='C5',check,False)]))
+     ('common-upgrade',{'wazuh_upgrade':True,'wazuh_version':'4.14.9'},'4.14.9','4.14.9',row in ('C1','C2','C3'),check,False),
+     ('legacy-upgrade',{'wazuh_upgrade':True,'wazuh_docker_version':'4.14.9'},'','4.14.9',row in ('C1','C2','C3'),check,False)]))
   with tempfile.TemporaryDirectory(prefix='wazuh-manager-real-script-') as temporary:
    root=Path(temporary);receiver=root/'receiver.py';receiver.write_text(RECEIVER);receiver.chmod(0o700)
    unexpected=root/'unexpected-shell-effect';quoted="literal ' spaces; $(touch "+str(unexpected)+")"
@@ -98,11 +101,21 @@ class ManagerScriptArgumentTests(unittest.TestCase):
      # Keep the actual task and result behavior. Rescue only collects expected
      # fail-closed check+recover without aborting the harmless matrix batch.
      wrapper={'block':[command],'rescue':[{'ansible.builtin.set_fact':{'script_case_rescued':True},'tags':['always']}],'tags':['always']}
-     values={'wazuh_writer_owner':OWNER,'docker_pre':{'rc':0},**variables}
+     tools={'pilot-wazuh-delivery':'a'*64,'pilot-siem-relp-check':'c'*64}
+     values={'wazuh_writer_owner':OWNER,'docker_pre':{'rc':0},'siem_forwarding_enabled':False,
+             'siem_forward_host':'','siem_forward_transport':'tcp','siem_forward_port':'514',
+             'siem_relp_port':20514,'wazuh_reader_tools':tools,'wazuh_reader_checker_hash':'b'*64,**variables}
      record={'ansible.builtin.copy':{'content':"{{ {'rc': wazuh_central_transaction.rc, 'rescued': script_case_rescued} | to_json }}",'dest':str(result_path),'mode':'0600'},'check_mode':False,'tags':['always']}
      plays.append({'name':stem,'hosts':stem,'connection':'local','gather_facts':False,'vars':values,
-                   'tasks':[gate,defaults,reset,mark,{'ansible.builtin.set_fact':{'script_case_rescued':False},'tags':['always']},wrapper,record]})
+                   'tasks':[gate,defaults,reset,mark,reset_reader,mark_reader,reader_request,{'ansible.builtin.set_fact':{'script_case_rescued':False},'tags':['always']},wrapper,record]})
      argv=['central','--version',common,'--legacy',legacy,'--owner',values['wazuh_writer_owner']]
+     selected=not flags or '--tags' not in flags or flags[flags.index('--tags')+1] in ('C10','C11')
+     wanted={'selected':selected,'enabled':False,'host':'','transport':'tcp','port':'514','peer':'',
+             'tls':{'ca.pem':__import__('hashlib').sha256(b'').hexdigest(),
+                    'cert.pem':__import__('hashlib').sha256(b'').hexdigest(),
+                    'key.pem':__import__('hashlib').sha256(b'').hexdigest()},'tools':tools}
+     argv+=['--reader-desired-json',json.dumps(wanted),'--reader-checker-sha256','b'*64]
+     if variables.get('wazuh_ack_rsyslog_downtime_and_replay'):argv+=['--ack-rsyslog-downtime-and-replay']
      if upgrade:argv+=['--upgrade']
      if preview:argv+=['--preview']
      if recover:argv+=['--recover']
@@ -125,7 +138,7 @@ class ManagerScriptArgumentTests(unittest.TestCase):
       else:self.assertIsNone(actual['guard'])
       cases_run+=1
     self.assertFalse(unexpected.exists(),'quoted argument executed as a shell command')
-   self.assertEqual(invocations,11);self.assertEqual(cases_run,28)
+   self.assertEqual(invocations,17);self.assertEqual(cases_run,40)
    print('REAL_SCRIPT_MATRIX invocations='+str(invocations)+' cases='+str(cases_run))
 
 
@@ -191,6 +204,32 @@ class ManagerScriptArgumentTests(unittest.TestCase):
    self.assertEqual(run.returncode,0,(run.stdout,run.stderr))
    for record,argv in expected:self.assertEqual(json.loads(record.read_text())['argv'],argv)
    print('REAL_SIBLING_SCRIPT_MATRIX cases='+str(len(cases)))
+
+
+ def test_reader_code_hashes_follow_the_actual_imported_apply_context(self):
+  import hashlib,shutil
+  source=yaml.safe_load(MANAGER.read_text())[0]
+  binder=picked(source,'Bind desired forwarding and tracked proof code to this version inspection')
+  with tempfile.TemporaryDirectory(prefix='wazuh-reader-import-') as temporary:
+   root=Path(temporary);apply=root/'playbooks/apply';fixtures=root/'playbooks/test/fixtures';files=root/'playbooks/files'
+   for path in (apply,fixtures,files):path.mkdir(parents=True)
+   expected={}
+   for name in ('pilot-wazuh-heartbeat','pilot-wazuh-delivery','pilot-siem-relp-check'):
+    payload=(REPO/'playbooks/files'/name).read_bytes();(files/name).write_bytes(payload)
+    expected[name]=hashlib.sha256(payload).hexdigest()
+   assertion={'ansible.builtin.assert':{'that':[
+    'wazuh_reader_checker_hash == '+repr(expected['pilot-wazuh-heartbeat']),
+    'wazuh_reader_tools["pilot-wazuh-delivery"] == '+repr(expected['pilot-wazuh-delivery']),
+    'wazuh_reader_tools["pilot-siem-relp-check"] == '+repr(expected['pilot-siem-relp-check'])]}}
+   child=apply/'safe-apply.yml';child.write_text(yaml.safe_dump([{'hosts':'localhost','connection':'local',
+        'gather_facts':False,'tasks':[binder,assertion]}],sort_keys=False))
+   wrapper=fixtures/'wrapper.yml';wrapper.write_text(yaml.safe_dump([{'ansible.builtin.import_playbook':'../../apply/safe-apply.yml'}]))
+   env=dict(os.environ,ANSIBLE_CONFIG=str(REPO/'ansible.cfg'),ANSIBLE_LOCAL_TEMP=str(root/'local'),
+            ANSIBLE_REMOTE_TEMP=str(root/'remote'),ANSIBLE_CACHE_PLUGIN='memory')
+   run=subprocess.run(['ansible-playbook','-i','localhost,',str(wrapper)],cwd=REPO,env=env,
+                      capture_output=True,text=True,timeout=90)
+   self.assertEqual(run.returncode,0,(run.stdout,run.stderr))
+
 
 
 if __name__=='__main__':unittest.main(verbosity=2)

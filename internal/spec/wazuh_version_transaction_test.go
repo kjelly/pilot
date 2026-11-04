@@ -44,3 +44,10 @@ func TestWazuhSelectionTaskGraph(t *testing.T) {
 		t.Fatalf("real Ansible Wazuh selection/failure-authority graph failed: %v\n%s", err, output)
 	}
 }
+
+func TestWazuhReaderCustodyBehavior(t *testing.T) {
+	cmd := exec.Command("python3", "testdata/wazuh_reader_test.py")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Wazuh reader custody controls failed: %v\n%s", err, output)
+	}
+}

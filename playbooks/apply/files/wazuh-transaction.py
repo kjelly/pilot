@@ -18,6 +18,8 @@ import io
 import fnmatch
 import json
 import os
+import pwd
+import grp
 from pathlib import Path
 import re
 import shutil
@@ -1564,12 +1566,1039 @@ class Transaction:
         sync_tree(source)
 
 
+
+# These descriptors are software qualifications, not operator-supplied passes.
+# V4 demonstrated only this native classic LinkedList mechanism. Systemd and
+# integrated producer/recovery evidence is separately required for a candidate.
+READER_ENGINES = {
+    'd6ae52a9a0b5451ba10f3e936e81a10ddae8c0acc0f9618c54544dad2af9e3c8':
+        {
+            'version': '8.2312.0', 'package': '8.2312.0-3ubuntu9.2',
+            'imfile_sha256': '8117d858deb8bbaef7c967e3af128fab5cd08ad930ffa943824c737a723f3c1b',
+            'engine': 'classic-linked-list', 'transport': 'tcp'},
+}
+READER_PHASES = {
+    'admitted', 'producer-stop-intent', 'producers-stopped', 'drained',
+    'reader-stop-intent', 'reader-stopped', 'queue-sealed', 'cursor-prepare-intent',
+    'cursor-prepared', 'cursor-retire-intent', 'cursor-retired',
+    'cursor-publish-intent', 'cursor-published', 'exposure-intent',
+    'reader-active', 'producers-start-intent', 'active', 'final',
+}
+
+
+class ReaderData:
+    """Pinned service-data capability. Syslog parents are not root controlled."""
+    def __init__(self, path):
+        self.path = canonical(path)
+        restore_sources({str(self.path): 'directory'}, ROOT)
+        self.fd = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.stamp = self.identity(os.fstat(self.fd))
+
+    @staticmethod
+    def identity(info):
+        return [info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
+                info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)]
+
+    def close(self):
+        os.close(self.fd)
+
+    def namespace(self):
+        if (self.identity(self.path.lstat()) != self.stamp
+                or self.identity(os.fstat(self.fd)) != self.stamp
+                or os.readlink('/proc/self/fd/' + str(self.fd)) != str(self.path)):
+            raise Refused('reader service-data namespace changed')
+        restore_sources({str(self.path): 'directory'}, ROOT)
+
+    @contextlib.contextmanager
+    def file(self, name, directory=None):
+        if not isinstance(name, str) or name in ('', '.', '..') or '/' in name or '\0' in name:
+            raise Refused('invalid reader data child')
+        parent = self.fd if directory is None else directory
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            value = os.fstat(fd)
+            if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+                raise Refused('reader data has unsupported type or external alias')
+            yield fd, value
+        finally:
+            os.close(fd)
+
+    def files(self, fd, prefix=None, copy_to=None):
+        names, result, size = sorted(os.listdir(fd)), {}, 0
+        if len(names) > 2048:
+            raise Refused('reader file count exceeds qualified bound')
+        for name in names:
+            if prefix and not name.startswith(prefix):
+                continue
+            if prefix and not re.fullmatch(r'wazuh_alerts(?:\.[0-9]+|\.qi|\.da-engine)?', name):
+                raise Refused('unknown native Wazuh queue file family')
+            with self.file(name, fd) as (opened, info):
+                if info.st_uid not in (0, self.stamp[3]):
+                    raise Refused('foreign reader data owner')
+                size += info.st_size
+                if size > 512 * 1024 ** 2:
+                    raise Refused('reader data exceeds qualified capacity bound')
+                attrs = {key: os.getxattr(opened, key).hex() for key in sorted(os.listxattr(opened))}
+                value = hashlib.sha256()
+                destination = open(Path(copy_to) / name, 'xb') if copy_to is not None else None
+                try:
+                    while True:
+                        block = os.read(opened, 1024 * 1024)
+                        if not block:
+                            break
+                        value.update(block)
+                        if destination:
+                            destination.write(block)
+                    if destination:
+                        destination.flush()
+                        os.fchmod(destination.fileno(), 0o600)
+                        os.fsync(destination.fileno())
+                    os.fsync(opened)
+                    if os.fstat(opened) != info:
+                        # atime may change from the read; content identities
+                        # below deliberately compare every persistent field.
+                        after = os.fstat(opened)
+                        if any(getattr(after, field) != getattr(info, field) for field in
+                               ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid',
+                                'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')):
+                            raise Refused('reader data changed during cold seal')
+                finally:
+                    if destination:
+                        destination.close()
+                result[name] = {'identity': self.identity(info), 'links': info.st_nlink,
+                                'size': info.st_size, 'mtime': info.st_mtime_ns,
+                                'sha256': value.hexdigest(), 'xattrs': attrs}
+        os.fsync(fd)
+        if copy_to is not None:
+            sync_directory(copy_to)
+        self.namespace()
+        return result
+
+    def layout(self, fd, queue=False):
+        names = os.listdir(fd)
+        if len(names) > 2048:
+            raise Refused('reader namespace exceeds qualified file count')
+        total = 0
+        for name in names:
+            if queue and not name.startswith('wazuh_alerts'):
+                continue
+            if queue and not re.fullmatch(r'wazuh_alerts(?:\.[0-9]+|\.qi|\.da-engine)?', name):
+                raise Refused('unknown reader queue file family')
+            with self.file(name, fd) as (_, info):
+                if info.st_uid not in (0, self.stamp[3]):
+                    raise Refused('reader namespace has foreign ownership')
+                total += info.st_size
+        if total > 512 * 1024 ** 2:
+            raise Refused('reader namespace exceeds qualified size')
+        self.namespace()
+
+    def queue(self, copy_to=None):
+        return self.files(self.fd, 'wazuh_alerts', copy_to)
+
+    @contextlib.contextmanager
+    def directory(self, name='state'):
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.fd)
+        try:
+            value = os.fstat(fd)
+            if value.st_uid != self.stamp[3] or stat.S_IMODE(value.st_mode) != 0o700:
+                raise Refused('unsupported cursor directory ownership')
+            yield fd
+        finally:
+            os.close(fd)
+
+
+class ReaderUnits:
+    """Narrow native unit protocol. A stop request is never a save proof."""
+    SERVICE, SOCKET = 'rsyslog.service', 'syslog.socket'
+    STATIC = ('Id', 'Names', 'FragmentPath', 'DropInPaths', 'Requires', 'After', 'Triggers',
+              'TriggeredBy', 'UnitFileState', 'ExecStart', 'Listen', 'Accept',
+              'RemoveOnStop', 'KillMode', 'SendSIGKILL', 'Restart', 'TimeoutStopUSec',
+              'ExecStartPre', 'ExecStartPost', 'ExecStop', 'ExecStopPost', 'ExecStopPre',
+              'RefuseManualStart', 'RefuseManualStop')
+    RUNTIME = ('LoadState', 'ActiveState', 'SubState', 'MainPID', 'InvocationID',
+               'ControlGroup', 'Result', 'ExecMainCode', 'ExecMainStatus', 'ExecMainStartTimestampMonotonic', 'ExecMainExitTimestampMonotonic', 'ControlPID', 'Job')
+    def __init__(self, runner):
+        self.r = runner
+
+    def show(self, unit):
+        text = self.r.run(['systemctl', 'show', unit, '--no-pager'] +
+                          [value for field in self.STATIC + self.RUNTIME for value in ('-p', field)],
+                          timeout=20, operation='reader native unit state').stdout
+        result = dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
+        required = {'LoadState', 'ActiveState', 'SubState', 'InvocationID', 'ControlGroup',
+                    'Result', 'ControlPID', 'Job'}
+        if unit == self.SERVICE:
+            required.update({'MainPID', 'ExecMainCode', 'ExecMainStatus',
+                             'ExecMainStartTimestampMonotonic', 'ExecMainExitTimestampMonotonic'})
+        if not required.issubset(result) or result.get('LoadState') != 'loaded':
+            raise Refused('unknown reader native unit properties')
+        return result
+
+    @staticmethod
+    def control(value):
+        result = {key: value.get(key, '') for key in ReaderUnits.STATIC}
+        # ExecStart includes runtime timestamps/PID. Compare the declared
+        # executable+argv, separately from the invocation being stopped.
+        if result['ExecStart']:
+            match = re.search(r'path=([^ ;]+) ; argv\[\]=([^;]+) ;', result['ExecStart'])
+            if not match:
+                raise Refused('unknown reader ExecStart declaration')
+            result['ExecStart'] = [match[1], match[2].strip()]
+        for key in ('Names', 'Requires', 'After', 'Triggers', 'TriggeredBy'):
+            result[key] = sorted(result[key].split())
+        return result
+
+    @staticmethod
+    def process(pid):
+        result = AuditRuntime.process(pid)
+        path = Path('/proc') / str(pid)
+        fields = (path / 'stat').read_text().rsplit(') ', 1)[1].split()
+        if fields[0] in ('Z', 'X', 'x'):
+            raise Refused('reader process is not live')
+        status = (path / 'status').read_text()
+        result.update(boot=AuditRuntime.boot(), mac=(path / 'attr/current').read_text().strip(),
+                      executable_sha256=digest(path / 'exe'),
+                      uid=re.search(r'^Uid:\s+(.+)$', status, re.M)[1].split(),
+                      gid=re.search(r'^Gid:\s+(.+)$', status, re.M)[1].split())
+        return result
+
+    def admit(self):
+        release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
+                       if '=' in line)
+        if release.get('ID', '').strip('"') != 'ubuntu' or release.get('VERSION_ID', '').strip('"') != '24.04':
+            raise Refused('reader pause supports the qualified Ubuntu24 unit lifecycle only')
+        service, socket = self.show(self.SERVICE), self.show(self.SOCKET)
+        for value, unit, enabled in ((service, self.SERVICE, 'enabled'), (socket, self.SOCKET, 'static')):
+            if (value['Id'] != unit or value['ActiveState'] != 'active'
+                    or value['UnitFileState'] != enabled or value['DropInPaths']
+                    or value['Job'] not in ('', '0')):
+                raise Refused('unsupported reader unit state or extra activation')
+        if (set(service['Names'].split()) != {'rsyslog.service', 'syslog.service'}
+                or socket['Names'].split() != ['syslog.socket']
+                or set(service['After'].split()) != {'sysinit.target', 'system.slice', 'syslog.socket',
+                                                    'systemd-journald.socket', 'basic.target'}
+                or set(socket['After'].split()) != {'-.mount', 'system.slice'}
+                or set(service['Requires'].split()) != {'sysinit.target', 'syslog.socket', 'system.slice'}
+                or service['TriggeredBy'].split() != [self.SOCKET] or service['Triggers']
+                or socket['TriggeredBy'] or socket['Triggers'].split() != [self.SERVICE]
+                or set(socket['Requires'].split()) != {'-.mount', 'system.slice'}
+                or socket['Listen'] != '/run/systemd/journal/syslog (Datagram)'
+                or socket['Accept'] != 'no' or socket['RemoveOnStop'] != 'no'
+                or service['KillMode'] != 'control-group' or service['SendSIGKILL'] != 'yes'
+                or service['Restart'] != 'on-failure' or service['TimeoutStopUSec'] not in ('1min 30s', '90s')
+                or any(value.get(hook) for value in (service, socket)
+                       for hook in ('ExecStartPre', 'ExecStartPost', 'ExecStop', 'ExecStopPost', 'ExecStopPre'))
+                or any(value.get(key) == 'yes' for value in (service, socket)
+                       for key in ('RefuseManualStart', 'RefuseManualStop'))):
+            raise Refused('unsupported reader unit/socket dependency graph')
+        if service['ControlGroup'] != '/system.slice/rsyslog.service':
+            raise Refused('reader cgroup escaped qualified service scope')
+        process = self.process(int(service['MainPID']))
+        if (process['argv'] != ['/usr/sbin/rsyslogd', '-n', '-iNONE']
+                or process['exe'] != '/usr/sbin/rsyslogd'
+                or process['mac'] != 'rsyslogd (enforce)'):
+            raise Refused('unsupported loaded reader executable/config/MAC')
+        files = {}
+        for value in (service, socket):
+            filename = canonical(value['FragmentPath'])
+            info = filename.stat()
+            if info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022:
+                raise Refused('unsafe reader unit fragment')
+            files[str(filename)] = digest(filename)
+        for policy in (Path('/etc/apparmor.d/usr.sbin.rsyslogd'), Path('/etc/apparmor.d/local/usr.sbin.rsyslogd')):
+            if policy.exists() or policy.is_symlink():
+                path_shape(policy, 'file')
+                if policy.stat().st_uid != 0 or policy.stat().st_mode & 0o022:
+                    raise Refused('reader MAC policy has unknown ownership')
+                files[str(policy)] = digest(policy)
+        return {'units': {self.SERVICE: self.control(service), self.SOCKET: self.control(socket)},
+                'process': process, 'invocation': service['InvocationID'],
+                'cgroup': service['ControlGroup'], 'start_monotonic': service['ExecMainStartTimestampMonotonic'], 'fragments': files,
+                'boot': AuditRuntime.boot()}
+
+    def boundary(self, proof):
+        if AuditRuntime.boot() != proof['boot']:
+            raise Refused('reader lifecycle reboot is not qualified')
+        for unit, expected in proof['units'].items():
+            if self.control(self.show(unit)) != expected:
+                raise Refused('reader unit policy changed during transaction')
+        if any(digest(path) != value for path, value in proof['fragments'].items()):
+            raise Refused('reader unit fragment changed during transaction')
+
+    def stop(self, proof, requested=False):
+        self.boundary(proof)
+        if not requested:
+            if self.process(proof['process']['pid']) != proof['process']:
+                raise Refused('reader invocation changed before stop')
+            self.r.run(['systemctl', 'stop', '--no-block', self.SOCKET, self.SERVICE],
+                       timeout=20, operation='request graceful reader unit stop')
+        if requested:
+            current = self.show(self.SERVICE)
+            if current['ActiveState'] == 'active' and current['Job'] in ('', '0'):
+                if self.process(int(current['MainPID'])) != proof['process']:
+                    raise Refused('reader reactivated with an unknown invocation')
+                self.r.run(['systemctl', 'stop', '--no-block', self.SOCKET, self.SERVICE],
+                           timeout=20, operation='reconcile recorded reader stop intent')
+        deadline = time.monotonic() + 110
+        while True:
+            service, socket = self.show(self.SERVICE), self.show(self.SOCKET)
+            self.boundary(proof)
+            old = Path('/proc') / str(proof['process']['pid'])
+            if service['ActiveState'] == socket['ActiveState'] == 'inactive':
+                if (service['ExecMainStartTimestampMonotonic'] != proof['start_monotonic']
+                        or not service['ExecMainExitTimestampMonotonic'].isdigit()
+                        or int(service['ExecMainExitTimestampMonotonic']) < int(proof['start_monotonic'])
+                        or service['ControlPID'] != '0'
+                        or service['InvocationID'] not in ('', proof['invocation'])
+                        or service['Job'] not in ('', '0') or socket['Job'] not in ('', '0')
+                        or service['Result'] != 'success' or socket['Result'] != 'success'
+                        or service['ExecMainCode'] != '1' or service['ExecMainStatus'] != '0'
+                        or old.exists() or service['MainPID'] != '0'):
+                    raise Refused('reader did not prove a qualified graceful exit')
+                cgroup = Path('/sys/fs/cgroup') / proof['cgroup'].lstrip('/')
+                if cgroup.exists() and any((node / 'cgroup.procs').read_text().strip()
+                                           for node in [cgroup] + list(cgroup.rglob('*'))
+                                           if node.is_dir() and (node / 'cgroup.procs').exists()):
+                    raise Refused('reader cgroup still has processes')
+                # A stale filesystem pathname is permitted, a live kernel
+                # activation socket/held socket FD is not.
+                if any(line.split()[-1:] == ['/run/systemd/journal/syslog']
+                       for line in Path('/proc/net/unix').read_text().splitlines()[1:]):
+                    raise Refused('reader activation socket remains held in the kernel')
+                return {'graceful': True, 'invocation': proof['invocation'],
+                        'exit': [service['ExecMainCode'], service['ExecMainStatus']]}
+            if time.monotonic() >= deadline:
+                raise Refused('reader stop timed out; no queue save authority')
+            time.sleep(0.25)
+
+    def start(self, proof):
+        self.boundary(proof)
+        # These are exactly the prior-active admitted units; never enable,
+        # disable, mask, relabel, kill or rewrite policy.
+        self.r.run(['systemctl', 'start', self.SOCKET, self.SERVICE], timeout=110,
+                   operation='resume prior active reader units')
+        service, socket = self.show(self.SERVICE), self.show(self.SOCKET)
+        self.boundary(proof)
+        if service['ActiveState'] != 'active' or socket['ActiveState'] != 'active':
+            raise Refused('reader prior active units did not resume')
+        return self.process(int(service['MainPID']))
+
+
+READER_TRANSITIONS = {
+    'admitted': {'producer-stop-intent', 'producers-stopped', 'final'},
+    'producer-stop-intent': {'producers-stopped', 'final'},
+    'producers-stopped': {'drained', 'queue-sealed', 'exposure-intent', 'producers-start-intent', 'final'},
+    'drained': {'reader-stop-intent'},
+    'reader-stop-intent': {'reader-stopped'},
+    'reader-stopped': {'queue-sealed', 'exposure-intent', 'final'},
+    'queue-sealed': {'reader-stopped', 'cursor-prepare-intent', 'cursor-retire-intent', 'cursor-publish-intent', 'cursor-published', 'exposure-intent', 'producers-start-intent', 'final'},
+    'cursor-prepare-intent': {'cursor-prepared', 'reader-stopped', 'queue-sealed'},
+    'cursor-prepared': {'cursor-retire-intent', 'cursor-publish-intent', 'reader-stopped', 'queue-sealed'},
+    'cursor-retire-intent': {'cursor-retired', 'cursor-publish-intent', 'reader-stopped', 'queue-sealed'},
+    'cursor-retired': {'cursor-publish-intent', 'reader-stopped', 'queue-sealed'},
+    'cursor-publish-intent': {'cursor-published', 'reader-stopped', 'queue-sealed'},
+    'cursor-published': {'exposure-intent', 'producers-start-intent', 'reader-stopped', 'queue-sealed', 'final'},
+    'exposure-intent': {'reader-active', 'drained'},
+    'reader-active': {'producers-start-intent', 'drained', 'final'},
+    'producers-start-intent': {'active', 'drained', 'final'},
+    'active': {'drained', 'reader-stopped', 'queue-sealed', 'producers-start-intent', 'final'},
+    'final': {'drained', 'reader-stopped', 'queue-sealed', 'producers-start-intent', 'final'},
+}
+
+
+class Reader:
+    """Current queue custody. Cursor archives/evidence are never restore input."""
+    PROC = Path('/proc')
+    SPOOL = Path('/var/spool/rsyslog/pilot-wazuh')
+    PROFILE = Path('/etc/rsyslog.d/pilot-wazuh/profile.json')
+    CONFIG = Path('/etc/rsyslog.d/31-pilot-wazuh.conf')
+    CHECKER = Path('/usr/local/libexec/pilot-wazuh-heartbeat')
+    def __init__(self, central, checker_hash='', request=None, ack=False):
+        self.t, self.r = central, central.r
+        self.checker_hash, self.request, self.ack = checker_hash, request or {}, ack
+        self.units = ReaderUnits(self.r)
+
+    @classmethod
+    def check_tool_destinations(cls):
+        folder = Path('/usr/local/libexec')
+        path_shape(folder, 'directory', missing=True)
+        for parent in (folder, *folder.parents):
+            if parent.exists() and (parent.stat().st_uid != 0 or parent.stat().st_mode & 0o022):
+                raise Refused('reader control-code directory is writable or foreign')
+        for name in ('pilot-wazuh-heartbeat', 'pilot-wazuh-delivery', 'pilot-siem-relp-check'):
+            path = folder / name
+            if path.exists() or path.is_symlink():
+                path_shape(path, 'file')
+                if path.stat().st_uid != 0 or path.stat().st_mode & 0o022:
+                    raise Refused('reader control-code target has foreign ownership or permissions')
+        return {'control_code_scope': True, 'create_directory': not folder.exists()}
+
+    def inspect(self):
+        # Old journals and fresh unmanaged hosts need no adjacent helper.
+        resources = any(path.exists() or path.is_symlink() for path in
+                        (self.PROFILE, self.CONFIG, self.SPOOL))
+        if not self.checker_hash:
+            if resources:
+                raise Refused('configured reader requires the pinned inspection helper')
+            return {'schema': 1, 'mode': 'never', 'files': {}, 'profile': None, 'pid': 0}
+        path_shape(self.CHECKER, 'file')
+        info = self.CHECKER.stat()
+        if info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022 or digest(self.CHECKER) != self.checker_hash:
+            raise Refused('reader inspection helper differs from tracked source')
+        return self.r.json([self.CHECKER, 'inspect-reader'], timeout=40,
+                           operation='inspect effective owned reader baseline')
+
+    def source(self, state):
+        # Bind directly to the actual manager's selected mount, not a stale
+        # profile path. Native inspect has private output under no_log.
+        manager = self.r.json(['docker', 'inspect', state['images']['wazuh.manager']['container']],
+                              timeout=30, operation='reader actual producer mount')[0]
+        values = [entry['Source'] for entry in manager['Mounts']
+                  if entry['Destination'] == '/var/ossec/logs']
+        if len(values) != 1 or values[0] not in state['paths']:
+            raise Refused('reader producer source is not an observed persistent root')
+        return values[0]
+
+
+    def source_users(self, state, source, reader_pid=None, producers=True, reader_fds=True):
+        """Account for actual source inodes across namespaces, not FD spelling."""
+        layout = ScopeLayout.inspect({str(source): 'directory'}, self.t.root)
+        inodes = {tuple(node['scope_identity'][:2]) for node in layout['nodes'].values()
+                  if node['type'] == 'file'}
+        containers = {entry['container'] for entry in state['images'].values()} if producers else set()
+        for process in self.PROC.iterdir():
+            if not process.name.isdecimal() or int(process.name) == os.getpid():
+                continue
+            try:
+                executable = os.readlink(process / 'exe')
+                pid = int(process.name)
+                if Path(executable.removesuffix(' (deleted)')).name == 'rsyslogd' and pid != reader_pid:
+                    raise Refused('unknown additional native reader invocation')
+                cgroups = (process / 'cgroup').read_text()
+                container = any(re.search(r'(?:/docker/' + re.escape(identity) + r'(?:/|$)|/docker-' + re.escape(identity) + r'\.scope(?:/|$))', cgroups)
+                                for identity in containers if re.fullmatch('[a-f0-9]{64}', identity))
+                for link in (process / 'fd').iterdir():
+                    try:
+                        info = link.stat()
+                    except FileNotFoundError:
+                        continue
+                    if (stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) in inodes
+                            and not (reader_fds and pid == reader_pid) and not container):
+                        raise Refused('unowned process retains a Wazuh producer source FD')
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+
+    def fds(self, pid, source, drained=False):
+        if not pid:
+            return []
+        result, source = [], canonical(source)
+        folder = Path('/proc') / str(pid) / 'fd'
+        for link in folder.iterdir():
+            try:
+                name = os.readlink(link)
+                info = link.stat()
+            except FileNotFoundError:
+                raise Refused('reader FD set changed during classification')
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            if name.startswith(str(source) + '/'):
+                if name.endswith(' (deleted)') or not name.startswith(str(source / 'alerts') + '/'):
+                    raise Refused('unknown or deleted Wazuh reader source FD')
+                fields = dict(line.split(':', 1) for line in
+                              (folder.parent / 'fdinfo' / link.name).read_text().splitlines() if ':' in line)
+                position = int(fields['pos'])
+                if drained and position != info.st_size:
+                    raise Refused('Wazuh input has unread data after producer freeze')
+                result.append({'device': info.st_dev, 'inode': info.st_ino,
+                               'size': info.st_size, 'position': position})
+        return result
+
+    def qualify(self, baseline):
+        engine = canonical('/usr/sbin/rsyslogd')
+        qualification = READER_ENGINES.get(digest(engine))
+        action = baseline.get('action', {})
+        if (not qualification or baseline['profile']['transport'] != qualification['transport']
+                or action.get('queue.diskqueuetype') is not None
+                or qualification['engine'] != 'classic-linked-list'):
+            raise Refused('actual native reader queue engine has not been qualified')
+        # New software/file engines are not inferred from a familiar selector.
+        native = self.r.run([engine, '-v'], timeout=15, operation='reader software build').stdout
+        if qualification['version'] not in native:
+            raise Refused('reader native software identity differs from qualification')
+        package = self.r.run(['dpkg-query', '-W', '-f=$' + '{Version}', 'rsyslog'], timeout=15,
+                             operation='reader native package build').stdout.strip()
+        module = canonical('/usr/lib/x86_64-linux-gnu/rsyslog/imfile.so')
+        if package != qualification['package'] or digest(module) != qualification['imfile_sha256']:
+            raise Refused('reader package/module differs from qualified software build')
+        if baseline['pid']:
+            info = module.stat()
+            maps = (Path('/proc') / str(baseline['pid']) / 'maps').read_text().splitlines()
+            entries = [line.split() for line in maps if str(module) in line]
+            device = format(os.major(info.st_dev), '02x') + ':' + format(os.minor(info.st_dev), '02x')
+            if not entries or any(len(entry) != 6 or entry[3] != device
+                                  or entry[4] != str(info.st_ino) or entry[5] != str(module)
+                                  for entry in entries):
+                raise Refused('loaded imfile module differs from qualified on-disk identity')
+        return dict(qualification, sha256=digest(engine))
+
+    def admit(self, state, preview=False):
+        observed = self.inspect()
+        mode = observed['mode']
+        if mode not in ('never', 'disabled', 'enabled'):
+            raise Refused('unknown reader baseline mode')
+        if self.request.get('selected'):
+            requested_enabled = self.request.get('enabled')
+            if type(requested_enabled) is not bool:
+                raise Refused('unknown desired forwarding request')
+            actual_enabled = mode == 'enabled'
+            if requested_enabled != actual_enabled:
+                raise Refused('mixed forwarding/profile and version transition refused')
+            if mode != 'never':
+                profile = observed['profile']
+                if self.request.get('transport') != profile['transport']:
+                    raise Refused('mixed forwarding transport and version transition refused')
+                if actual_enabled:
+                    action = observed['action']
+                    if str(self.request.get('port')) != action.get('port'):
+                        raise Refused('mixed receiver port and version transition refused')
+                    hostlines = Path('/etc/hosts').read_text().splitlines()
+                    addresses = [line.split('#', 1)[0].split()[0] for line in hostlines
+                                 if 'siem-log-server' in line.split('#', 1)[0].split()[1:]]
+                    if addresses != [self.request.get('host')]:
+                        raise Refused('mixed receiver address and version transition refused')
+                    if profile['transport'] == 'relp':
+                        tls = Path('/etc/rsyslog.d/pilot-relp-wazuh-sender')
+                        expected = self.request.get('tls', {})
+                        for name in ('ca.pem', 'cert.pem', 'key.pem'):
+                            if digest(canonical(tls / name)) != expected.get(name):
+                                raise Refused('mixed TLS material and version transition refused')
+                        if observed['action'].get('tls.permittedpeer') != self.request.get('peer'):
+                            raise Refused('mixed TLS peer and version transition refused')
+        result = {'schema': 1, 'mode': mode, 'phase': 'admitted', 'cycle': 0,
+                  'generation': None, 'checkpoints': [], 'checker_sha256': self.checker_hash,
+                  'baseline': observed, 'ack': self.ack, 'request': self.request,
+                  'source': self.source(state) if mode != 'never' else None}
+        if mode == 'never':
+            source = self.source(state)
+            result['source'] = source
+            self.source_users(state, source, observed['pid'] or None, reader_fds=False)
+            if observed['pid'] and (self.fds(observed['pid'], source)
+                    or any(fnmatch.fnmatchcase(str(Path(source) / 'alerts/alerts.json'), entry.get('file', ''))
+                           for entry in observed.get('imfile_inputs', []))):
+                raise Refused('unowned Wazuh runtime reader cannot be treated as absent')
+            if self.SPOOL.exists():
+                raise Refused('retained Wazuh data cannot be classified as never configured')
+            return result
+        source = result['source']
+        self.source_users(state, source, observed['pid'] or None, reader_fds=mode == 'enabled')
+        if observed['profile']['source'] not in (source, ''):
+            raise Refused('owned reader profile source differs from the actual volume')
+        if self.SPOOL.exists():
+            restore_sources(dict({path: 'directory' for path in state['paths']}, **{str(self.SPOOL): 'directory'}), self.t.root)
+            ScopeLayout.inspect({str(self.SPOOL): 'directory'}, self.t.root)
+            data = ReaderData(self.SPOOL)
+            try:
+                # Live admission is namespace-only. File data may still change.
+                native_user, native_group = pwd.getpwnam('syslog'), grp.getgrnam('syslog')
+                if data.stamp[3:] != [native_user.pw_uid, native_group.gr_gid, 0o700]:
+                    raise Refused('managed reader spool is not private native syslog data')
+                result['spool_identity'] = data.stamp
+                result['cursor_present'] = 'state' in os.listdir(data.fd)
+                result['cursor_identity'] = data.identity(os.stat('state', dir_fd=data.fd, follow_symlinks=False)) if result['cursor_present'] else None
+                if result['cursor_present']:
+                    with data.directory() as cursor:
+                        data.layout(cursor)
+                data.layout(data.fd, queue=True)
+                names = os.listdir(data.fd)
+                if mode == 'enabled' and any(name.endswith(('.da-engine', '.segq')) for name in names):
+                    raise Refused('actual reader queue uses an unqualified file engine')
+                if any(name.startswith('wazuh_alerts') and not re.fullmatch(
+                        r'wazuh_alerts(?:\.[0-9]+|\.qi|\.da-engine)?', name) for name in names):
+                    raise Refused('unknown actual native queue file engine')
+                result['queue_present'] = any(name.startswith('wazuh_alerts') for name in names)
+            finally:
+                data.close()
+        else:
+            result.update(spool_identity=None, cursor_present=False, queue_present=False, cursor_identity=None)
+        if mode == 'disabled':
+            if result['cursor_present'] or result['queue_present']:
+                result['engine'] = self.qualify(dict(observed, pid=0))
+                if any(name.endswith(('.da-engine', '.segq')) for name in names):
+                    raise Refused('retained disabled queue uses an unqualified engine')
+            if self.fds(observed['pid'], source):
+                raise Refused('disabled Wazuh reader still holds source FDs')
+            if (result['cursor_present'] or result['queue_present']) and not self.ack and not preview:
+                raise Refused('disabled retained reader recovery requires replay acknowledgement')
+            return result
+        if not self.ack and not preview:
+            raise Refused('configured version upgrade requires rsyslog downtime and replay acknowledgement')
+        result['engine'] = self.qualify(observed)
+        result['units'] = self.units.admit()
+        self.verify_tools()
+        self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
+                   operation='current effective local C11 baseline')
+        return result
+
+    def verify_tools(self):
+        tools = self.request.get('tools', {})
+        for name in ('pilot-wazuh-delivery', 'pilot-siem-relp-check'):
+            path = Path('/usr/local/libexec') / name
+            path_shape(path, 'file')
+            if path.stat().st_uid != 0 or path.stat().st_mode & 0o022 or digest(path) != tools.get(name):
+                raise Refused('reader proof tool differs from tracked source')
+
+    def use(self, item):
+        value = item['reader']
+        if value.get('schema') != 1 or value.get('phase') not in READER_PHASES:
+            raise Refused('unknown durable reader phase')
+        self.checker_hash = value['checker_sha256']
+        self.request = value['request']
+        return value
+
+    def write(self, item, phase):
+        if phase not in READER_PHASES:
+            raise Refused('invalid reader phase transition')
+        value = self.use(item)
+        if phase != value['phase'] and phase not in READER_TRANSITIONS[value['phase']]:
+            raise Refused('reader phase cannot grant this next effect')
+        value['phase'] = phase
+        if phase.startswith('cursor-') and value.get('generation'):
+            value['generation']['phase'] = phase
+        if value.get('generation'):
+            value.setdefault('generations', {})[value['generation']['id']] = copy.deepcopy(value['generation'])
+        self.t.write(item, item['phase'])
+
+    def boundary(self, item, running=False):
+        value = self.use(item)
+        if value['mode'] == 'never':
+            current = self.inspect()
+            if current['mode'] != 'never':
+                raise Refused('reader appeared during version-only transaction')
+            return
+        current = self.inspect() if running else None
+        baseline = value['baseline']
+        # inspect-reader runtime checks require an active reader. Cold boundary
+        # checks immutable physical config/profile hashes without invoking it.
+        for path, checksum in baseline['files'].items():
+            if digest(canonical(path)) != checksum:
+                raise Refused('reader include/config boundary changed')
+        if digest(canonical(self.PROFILE)) != baseline['profile_sha256']:
+            raise Refused('reader profile boundary changed')
+        if current and (current['mode'] != value['mode'] or current['files'] != baseline['files']):
+            raise Refused('reader runtime boundary differs from admitted baseline')
+        if value['mode'] == 'enabled':
+            self.units.boundary(value['units'])
+        if value.get('engine'):
+            software = current if current else dict(baseline, pid=0)
+            if self.qualify(software) != value['engine']:
+                raise Refused('native reader software/engine changed before an effect')
+
+
+    def pause(self, item, restoring=False):
+        value = self.use(item)
+        if value['mode'] == 'never':
+            self.boundary(item)
+            self.source_users(item, value['source'], value['baseline']['pid'] or None,
+                              producers=False, reader_fds=False)
+            return
+        self.boundary(item)
+        current_pid = int(self.units.show(ReaderUnits.SERVICE)['MainPID']) if value['mode'] == 'enabled' else value['baseline']['pid']
+        self.source_users(item, value['source'], current_pid or None, producers=False,
+                          reader_fds=value['mode'] == 'enabled')
+        if value['mode'] == 'enabled':
+            state = self.units.show(ReaderUnits.SERVICE)
+            if state['ActiveState'] == 'active':
+                process = self.units.process(int(state['MainPID']))
+                expected = value.get('resumed_process', value['units']['process'])
+                if process != expected and value['phase'] != 'exposure-intent':
+                    raise Refused('reader invocation changed outside a recorded exposure')
+                # A crash immediately after a recorded start may precede the
+                # new PID proof. Re-admit its exact native policy/build/MAC;
+                # never accept an arbitrary executable/activation graph.
+                proof = self.units.admit()
+                if proof['units'] != value['units']['units'] or proof['fragments'] != value['units']['fragments']:
+                    raise Refused('recovery reader differs from the admitted native policy')
+                value['units'] = proof
+                source = Path(value['source']) / 'alerts/alerts.json'
+                info = source.stat()
+                with source.open('rb') as stream:
+                    if info.st_size:
+                        stream.seek(-1, os.SEEK_END)
+                        if stream.read(1) != b'\n':
+                            raise Refused('frozen Wazuh input has an incomplete record')
+                deadline = time.monotonic() + 30
+                while True:
+                    try:
+                        value['drain'] = self.fds(process['pid'], value['source'], drained=True)
+                        if not any((fd['device'], fd['inode']) == (info.st_dev, info.st_ino)
+                                   for fd in value['drain']):
+                            raise Refused('native reader has no classified current input FD')
+                        break
+                    except Refused:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.25)
+                after = source.stat()
+                if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != (
+                        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+                    raise Refused('producer source changed after producer freeze')
+                self.write(item, 'drained')
+                self.write(item, 'reader-stop-intent')
+                value['exit'] = self.units.stop(proof)
+            elif state['ActiveState'] == 'inactive' and (
+                    value.get('exit') or value['phase'] == 'reader-stop-intent'):
+                value['exit'] = self.units.stop(value['units'], requested=True)
+            else:
+                raise Refused('reader stop has unknown or unfinished native state')
+            self.write(item, 'reader-stopped')
+        self.source_users(item, value['source'], None if value['mode'] == 'enabled' else current_pid or None,
+                          producers=False, reader_fds=False)
+        if not value.get('spool_identity'):
+            return
+        ScopeLayout.inspect({str(self.SPOOL): 'directory'}, self.t.root)
+        data = ReaderData(self.SPOOL)
+        try:
+            if data.stamp != value['spool_identity']:
+                raise Refused('reader spool identity changed')
+            # The exact native queue and cursor must be cold, including link
+            # and full content stability. Live admission never froze content.
+            if 'state' in os.listdir(data.fd):
+                with data.directory() as cursor:
+                    data.files(cursor)
+            cycle = value['cycle'] + 1
+            destination = Path(item['backup']) / ('reader-queue-evidence-' + uuid.uuid4().hex)
+            # Unique names are intent recorded before creating any evidence.
+            value.setdefault('checkpoint_intents', []).append({'cycle': cycle, 'evidence': str(destination)})
+            self.t.write(item, item['phase'])
+            if destination.exists():
+                raise Refused('reader evidence name already exists')
+            private_dir(destination)
+            queue = data.queue(destination)
+            value['cycle'] = cycle
+            value['checkpoints'].append({'cycle': cycle, 'kind': 'CURRENT_EVIDENCE_ONLY',
+                                         'queue': queue, 'evidence': str(destination)})
+            self.write(item, 'queue-sealed')
+        finally:
+            data.close()
+
+    def resume_unmodified(self, item):
+        """Pre-backup failure may cancel safely while the old reader is live."""
+        value = self.use(item)
+        if value['mode'] != 'enabled':
+            return
+        state, socket = self.units.show(ReaderUnits.SERVICE), self.units.show(ReaderUnits.SOCKET)
+        if (state['ActiveState'] == socket['ActiveState'] == 'active'
+                and state['Job'] in ('', '0') and socket['Job'] in ('', '0')
+                and self.units.process(int(state['MainPID'])) == value['units']['process']):
+            self.boundary(item, running=True)
+            return
+        if (state['ActiveState'] == 'inactive' and value['checkpoints']
+                and value['phase'] in ('reader-stopped', 'queue-sealed')):
+            self.units.stop(value['units'], requested=True)
+            self.unchanged_queue(item)
+        else:
+            self.pause(item)
+        self.resume(item)
+
+    def unchanged_queue(self, item):
+        value = self.use(item)
+        if value['mode'] == 'never' or not value.get('spool_identity'):
+            return
+        if not value['checkpoints']:
+            raise Refused('cold restore lacks CURRENT queue authority')
+        data = ReaderData(self.SPOOL)
+        try:
+            if data.stamp != value['spool_identity'] or data.queue() != value['checkpoints'][-1]['queue']:
+                raise Refused('CURRENT reader queue changed before resume')
+        finally:
+            data.close()
+
+
+    def retire_cursor(self, item):
+        value = self.use(item)
+        if value['mode'] == 'never' or not value.get('spool_identity'):
+            return
+        self.unchanged_queue(item)
+        if not value.get('cursor_present') and not value.get('queue_present'):
+            return
+        data = ReaderData(self.SPOOL)
+        try:
+            generation = value.get('generation')
+            if not generation or generation.get('data_epoch') != value.get('data_epoch'):
+                old = os.stat('state', dir_fd=data.fd, follow_symlinks=False) if 'state' in os.listdir(data.fd) else None
+                epoch = uuid.uuid4().hex
+                generation = {'id': epoch, 'data_epoch': value['data_epoch'],
+                              'old': data.identity(old) if old else None,
+                              'prepared': '.state-prepared-' + epoch,
+                              'retired': '.state-retired-' + epoch, 'exposed': False}
+                if value.get('generation'):
+                    previous = value['generation']
+                    value.setdefault('generations', {})[previous['id']] = copy.deepcopy(previous)
+                value['generation'] = generation
+                self.write(item, 'cursor-prepare-intent')
+            if 'new' not in generation:
+                # The creation intent grants only an empty, private directory
+                # at one unique name. It never grants replacement of unknown
+                # content, another owner, a linked object or a mount.
+                old = os.stat('state', dir_fd=data.fd, follow_symlinks=False) if 'state' in os.listdir(data.fd) else None
+                if (data.identity(old) if old else None) != generation['old']:
+                    raise Refused('cursor changed before generation preparation')
+                if old:
+                    with data.directory() as cursor:
+                        captured = data.files(cursor)
+                        if generation.get('sealed_cursor') not in (None, captured):
+                            raise Refused('cursor changed while its archive was prepared')
+                        generation['sealed_cursor'] = captured
+                        if not generation.get('archive'):
+                            archive = Path(item['backup']) / ('reader-cursor-' + uuid.uuid4().hex + '.tar')
+                            generation.setdefault('archive_intents', []).append(str(archive))
+                            self.t.write(item, item['phase'])
+                            with tarfile.open(archive, 'x') as output:
+                                for name, node in captured.items():
+                                    with data.file(name, cursor) as (fd, info):
+                                        entry = tarfile.TarInfo(name)
+                                        entry.size, entry.uid, entry.gid = info.st_size, info.st_uid, info.st_gid
+                                        entry.mode, entry.mtime = stat.S_IMODE(info.st_mode), info.st_mtime
+                                        with os.fdopen(os.dup(fd), 'rb') as stream:
+                                            output.addfile(entry, stream)
+                            os.chmod(archive, 0o600)
+                            sync_file(archive)
+                            generation['archive'] = {'path': str(archive), 'sha256': digest(archive)}
+                            self.t.write(item, item['phase'])
+                        private_file(generation['archive']['path'], item['backup'])
+                        if digest(generation['archive']['path']) != generation['archive']['sha256']:
+                            raise Refused('retained cursor archive changed')
+                name = generation['prepared']
+                if name not in os.listdir(data.fd):
+                    os.mkdir(name, mode=0o700, dir_fd=data.fd)
+                    os.fsync(data.fd)
+                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=data.fd)
+                try:
+                    info = os.fstat(fd)
+                    if (os.listdir(fd) or info.st_uid not in (os.geteuid(), data.stamp[3])
+                            or stat.S_IMODE(info.st_mode) != 0o700 or info.st_nlink != 2):
+                        raise Refused('unknown prepared cursor object; refusing adoption')
+                    os.fchown(fd, data.stamp[3], data.stamp[4])
+                    os.fchmod(fd, 0o700)
+                    os.fsync(fd)
+                    generation['new'] = data.identity(os.fstat(fd))
+                finally:
+                    os.close(fd)
+                os.fsync(data.fd)
+                self.write(item, 'cursor-prepared')
+            if generation.get('archive'):
+                private_file(generation['archive']['path'], item['backup'])
+                if digest(generation['archive']['path']) != generation['archive']['sha256']:
+                    raise Refused('retained cursor archive changed before retirement')
+            self.reconcile_cursor(item, data, generation)
+        finally:
+            data.close()
+
+    def reconcile_cursor(self, item, data, generation):
+        if generation.get('exposed'):
+            if 'state' not in os.listdir(data.fd) or data.identity(
+                    os.stat('state', dir_fd=data.fd, follow_symlinks=False)) != generation['new']:
+                raise Refused('exposed reader generation changed; refusing reset')
+            return
+        names = os.listdir(data.fd)
+        identify = lambda name: data.identity(os.stat(name, dir_fd=data.fd, follow_symlinks=False)) if name in names else None
+        old, prepared, retired = identify('state'), identify(generation['prepared']), identify(generation['retired'])
+        if old == generation.get('old') and prepared == generation.get('new') and retired is None:
+            self.write(item, 'cursor-retire-intent')
+            if old is not None:
+                os.rename('state', generation['retired'], src_dir_fd=data.fd, dst_dir_fd=data.fd)
+                os.fsync(data.fd)
+            self.write(item, 'cursor-retired')
+            old, retired = None, generation.get('old')
+        if old is None and prepared == generation.get('new') and retired == generation.get('old'):
+            self.write(item, 'cursor-publish-intent')
+            os.rename(generation['prepared'], 'state', src_dir_fd=data.fd, dst_dir_fd=data.fd)
+            os.fsync(data.fd)
+            self.write(item, 'cursor-published')
+        elif old != generation.get('new') or prepared is not None or retired != generation.get('old'):
+            raise Refused('cursor generation arrangement is unknown; preserving all objects')
+        else:
+            if generation.get('phase') not in ('cursor-publish-intent', 'cursor-published'):
+                raise Refused('published cursor lacks its prior durable publication intent')
+            self.write(item, 'cursor-published')
+        data.namespace()
+
+    def resume(self, item):
+        value = self.use(item)
+        if value['mode'] != 'enabled':
+            self.boundary(item)
+            return
+        self.boundary(item)
+        self.unchanged_queue(item)
+        if value.get('generation'):
+            data = ReaderData(self.SPOOL)
+            try:
+                self.reconcile_cursor(item, data, value['generation'])
+            finally:
+                data.close()
+            value['generation']['exposed'] = True
+        self.write(item, 'exposure-intent')
+        value['resumed_process'] = self.units.start(value['units'])
+        expected, current = value['units']['process'], value['resumed_process']
+        for field in ('exe', 'argv', 'executable_sha256', 'uid', 'gid', 'mac', 'boot'):
+            if current.get(field) != expected.get(field):
+                raise Refused('resumed reader differs from admitted executable/privileges/MAC')
+        self.write(item, 'reader-active')
+        self.boundary(item, running=True)
+        self.r.run(['runuser', '-u', 'syslog', '--', 'test', '-r',
+                    str(Path(value['source']) / 'alerts/alerts.json')], timeout=15,
+                   operation='restored reader source access')
+        deadline = time.monotonic() + 20
+        while not self.fds(value['resumed_process']['pid'], value['source']):
+            if time.monotonic() >= deadline:
+                raise Refused('resumed native reader does not watch the restored source')
+            time.sleep(0.25)
+
+    def final(self, item):
+        value = self.use(item)
+        if value.get('spool_identity'):
+            data = ReaderData(self.SPOOL)
+            try:
+                expected = value['generation']['new'] if value.get('generation') else value.get('cursor_identity')
+                actual = data.identity(os.stat('state', dir_fd=data.fd, follow_symlinks=False)) if 'state' in os.listdir(data.fd) else None
+                if data.stamp != value['spool_identity'] or actual != expected:
+                    raise Refused('reader final generation or spool identity differs')
+            finally:
+                data.close()
+        self.boundary(item, running=value['mode'] == 'enabled')
+        if value['mode'] == 'enabled':
+            self.verify_tools()
+            self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
+                       operation='final effective local C11')
+        if (value['mode'] == 'disabled' and value.get('data_epoch') and value.get('spool_identity')
+                and (value.get('cursor_present') or value.get('queue_present'))):
+            ReplayReceipt(self.t).publish(item)
+        self.write(item, 'final')
+
+
+class ReplayReceipt:
+    """Local replay ACK/custody record, never a remote delivery certificate."""
+    def __init__(self, central):
+        self.t, self.r = central, central.r
+        self.path = central.root / 'reader-replay-pending.json'
+
+    def inspect(self):
+        if not self.path.exists() and not self.path.is_symlink():
+            return None
+        private_file(self.path, self.t.root)
+        value = json.loads(self.path.read_text())
+        if value.get('schema') != 1 or value.get('kind') != 'LOCAL_REPLAY_ACK':
+            raise Refused('unknown local replay receipt')
+        return value
+
+    def publish(self, item):
+        reader = item['reader']
+        value = {'schema': 1, 'kind': 'LOCAL_REPLAY_ACK', 'central_owner': item['owner'],
+                 'source': reader['source'], 'profile_sha256': reader['baseline']['profile_sha256'],
+                 'spool_identity': reader['spool_identity'], 'generation': reader['generation'],
+                 'checkpoint': reader['checkpoints'][-1] if reader['checkpoints'] else None,
+                 'status': 'pending', 'attempt': None, 'tools': reader['request'].get('tools', {})}
+        existing = self.inspect()
+        if existing and existing['central_owner'] != item['owner']:
+            # A new disabled restore must explicitly carry forward the prior
+            # receipt, never discard unacknowledged custody.
+            if item.get('previous_reader_receipt') != existing:
+                raise Refused('unknown earlier replay receipt prevents finalization')
+            value['previous'] = digest(self.path)
+        atomic_json(self.path, value)
+
+    def operation(self, owner, operation, action, ack=False, preview=False):
+        if not re.fullmatch('[a-f0-9]{32}', operation):
+            raise Refused('invalid local replay invocation identity')
+        with self.t.lock(owner=owner):
+            self.t.idle()
+            value = self.inspect()
+            if not value:
+                if action == 'verify':
+                    self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
+                               operation='selected precommit local C11')
+                return {'pending': False}
+            if action == 'admit':
+                if not ack:
+                    raise Refused('pending replay requires a new explicit acknowledgement before enable')
+                current_hash = digest(canonical(Reader.PROFILE))
+                if current_hash != value['profile_sha256']:
+                    prior = value.get('attempt') or {}
+                    current = json.loads(Reader.PROFILE.read_text())
+                    permitted = (prior.get('verified_profile_sha256') == current_hash
+                                 or (prior.get('owner') == owner and prior.get('exposed')))
+                    if (not permitted or current.get('enabled') is not True
+                            or current.get('source') != value['source']):
+                        raise Refused('pending replay profile changed outside its recorded enable attempt')
+                    Reader(self.t, request={'tools': value.get('tools', {})}).verify_tools()
+                    self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
+                               operation='reconcile previous local replay enable attempt')
+                if not Reader.SPOOL.exists():
+                    raise Refused('pending reader spool disappeared')
+                data = ReaderData(Reader.SPOOL)
+                try:
+                    if data.stamp != value['spool_identity']:
+                        raise Refused('pending replay spool identity changed')
+                    generation = value['generation']
+                    if generation and data.identity(os.stat('state', dir_fd=data.fd, follow_symlinks=False)) != generation['new']:
+                        raise Refused('pending cursor generation changed')
+                finally:
+                    data.close()
+                if preview:
+                    return {'pending': True, 'planned': True}
+                value['attempt'] = {'owner': owner, 'operation': operation, 'exposed': False}
+            else:
+                if (value.get('attempt') or {}).get('owner') != owner or (value.get('attempt') or {}).get('operation') != operation:
+                    raise Refused('replay receipt operation owner mismatch')
+                if value['attempt'].get('failed') and action in ('expose', 'verify', 'complete'):
+                    raise Refused('failed local enable requires a fresh acknowledged invocation')
+                if action == 'expose':
+                    value['attempt']['exposed'] = True
+                elif action == 'failed':
+                    value['attempt']['failed'] = True
+                elif action == 'verify':
+                    proof = Reader(self.t, request={'tools': value.get('tools', {})})
+                    proof.verify_tools()
+                    self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
+                               operation='committed local replay enable convergence')
+                    value['attempt']['verified_profile_sha256'] = digest(canonical(Reader.PROFILE))
+                elif action == 'complete':
+                    if (not value['attempt'].get('verified_profile_sha256')
+                            or digest(canonical(Reader.PROFILE)) != value['attempt']['verified_profile_sha256']):
+                        raise Refused('local replay enable has not passed its precommit native proof')
+                    generation = value.get('generation')
+                    if generation:
+                        data = ReaderData(Reader.SPOOL)
+                        try:
+                            if data.identity(os.stat('state', dir_fd=data.fd, follow_symlinks=False)) != generation['new']:
+                                raise Refused('verified replay cursor generation changed before commit')
+                        finally:
+                            data.close()
+                    value['status'] = 'locally_acknowledged'
+                    history = self.t.root / ('reader-replay-ack-' + operation + '.json')
+                    if history.exists():
+                        private_file(history, self.t.root)
+                        if json.loads(history.read_text()) != value:
+                            raise Refused('replay acknowledgement history would be overwritten')
+                    else:
+                        atomic_json(history, value)
+                    durable_unlink(self.path)
+                    return {'pending': False, 'local_acknowledged': True, 'remote_delivery_certified': False}
+                else:
+                    raise Refused('unknown local replay operation')
+            atomic_json(self.path, value)
+            return {'pending': True, 'operation': operation}
+
 class Central(Transaction):
     def __init__(self, managed_root=Path('/opt/pilot/wazuh-docker'), **kwargs):
         super().__init__('central', **kwargs)
         # Internal filesystem seam for discovery tests; the CLI never exposes
         # this setting and always enforces the production pilot-owned root.
         self.managed_root = Path(managed_root)
+        self.reader = self.make_reader()
+
+    def make_reader(self, checker_hash='', request=None, ack=False):
+        return Reader(self, checker_hash, request, ack)
 
     def project_directory(self, directory):
         directory = canonical(directory)
@@ -1745,6 +2774,7 @@ class Central(Transaction):
                 'docker_root': str(docker_root), 'compose_sha256': digest(compose)}
 
     def check_agents(self, target):
+        registry = {}
         listing = self.r.run(['docker', 'exec', 'single-node-wazuh.manager-1',
                               '/var/ossec/bin/agent_control', '-l'], timeout=30).stdout
         identifiers = re.findall(r'^\s+ID: ([0-9]+),', listing, re.M)
@@ -1759,8 +2789,10 @@ class Central(Transaction):
             releases = re.findall(r'^\s*Client version:\s*Wazuh v(4\.14\.[0-9]+)\s*$', text, re.M)
             if ids != [identifier] or len(releases) != 1:
                 raise Refused('unknown retained agent version in manager registry')
+            registry[identifier] = releases[0]
             if version(releases[0]) > version(target):
                 raise Refused('selected central target is older than a retained registered agent')
+        return registry
 
     def compose_graph(self, directory, text):
         return self.r.json(['docker', 'compose', '--project-name', 'single-node',
@@ -1815,7 +2847,7 @@ class Central(Transaction):
             if (not actual and not allow_empty) or not actual.issubset(expected):
                 raise Refused('persistent volume acquired a foreign consumer')
 
-    def quiesce_for_restore(self, item):
+    def quiesce_for_restore(self, item, remove=True):
         """Replayable even when a previous restore removed live Compose files."""
         ids = self.r.run(['docker', 'ps', '-aq', '--no-trunc', '--filter',
                          'label=com.docker.compose.project=single-node'], timeout=30).stdout.split()
@@ -1853,6 +2885,8 @@ class Central(Transaction):
         states = self.r.json(['docker', 'inspect', *ids], timeout=30)
         if any(container['State']['Running'] for container in states):
             raise Refused('owned recovery container did not stop')
+        if not remove:
+            return
         self.r.run(['docker', 'rm', *ids], timeout=60, operation='remove quiesced owned recovery containers')
         # No recorded project volume may have any remaining consumer now.
         for name in item['volumes']:
@@ -2034,17 +3068,23 @@ class Central(Transaction):
 
     def recover_pre_switch(self, item):
         self.validate_project_scope(item)
+        if 'reader' in item:
+            self.reader.boundary(item)
         if digest(item['compose']) != item['compose_sha256']:
             raise Refused('pre-switch Compose configuration changed; refusing to guess recovery')
         self.validate_persisted_graph(item)
         for service, image in item['images'].items():
             self.r.run(['docker', 'image', 'tag', image['id'],
                         'wazuh/' + service.replace('.', '-') + ':' + item['version']], timeout=30)
+        if 'reader' in item:
+            value = self.reader.use(item)
+            self.reader.resume_unmodified(item)
         self.compose_run(item, 'up', '-d', '--pull', 'never')
         self.wait(item['version'], item['images'])
         self.check_data(item['data'])
         self.canary()
         ScopeLayout.inspect({path: 'directory' for path in item['paths']}, self.root)
+        self.final_reader(item, restored=True)
         self.finish(item, 'recovered-before-switch')
 
     def complete_finalized(self, item):
@@ -2060,13 +3100,30 @@ class Central(Transaction):
         self.validate_persisted_graph(item, target=item['phase'] == 'committed')
         ScopeLayout.inspect({path: 'directory' for path in item['paths']}, self.root)
         self.check_data(item['data'])
+        if 'reader' in item:
+            self.reader.final(item)
+        if item['phase'] != 'committed':
+            self.recovery_outcome(item)
+        else:
+            self.check_agents(item['target_version'])
         self.finish(item, item['phase'])
 
     def rollback(self, item):
         self.validate_restore_scope(item)
+        if 'reader' in item:
+            self.reader.boundary(item)
         self.write(item, 'recovering')
         self.r.run(['docker', 'image', 'load', '--input', item['image_archive']['path']], timeout=1800,
                    operation='load retained old image artifacts')
+        if 'reader' in item:
+            value = self.reader.use(item)
+            self.capacity([], extra_bytes=768 * 1024 ** 2)
+            self.quiesce_for_restore(item, remove=False)
+            self.reader.pause(item, restoring=True)
+            if not value.get('data_epoch') or (value.get('generation') or {}).get('exposed'):
+                value['data_epoch'] = uuid.uuid4().hex
+            self.write(item, 'recovering')
+            self.reader.unchanged_queue(item)
         self.quiesce_for_restore(item)
         ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root, missing=item['paths'], sealed=True)
         for entry in item['archives']:
@@ -2081,18 +3138,51 @@ class Central(Transaction):
         for service, image in item['images'].items():
             self.r.run(['docker', 'image', 'tag', image['id'],
                         'wazuh/' + service.replace('.', '-') + ':' + item['version']], timeout=30)
+        self.reader_before_producers(item, restored=True)
         self.compose_run(item, 'up', '-d', '--pull', 'never')
         self.wait(item['version'], item['images'])
         self.check_data(item['data'])
         self.canary()
         ScopeLayout.inspect(item['capture']['roots'], self.root)
+        self.final_reader(item, restored=True)
         self.finish(item, 'recovered')
 
-    def execute(self, target, upgrade=False, preview=False, recover=False, owner=''):
+    def recovery_outcome(self, item):
+        if 'registry' not in item:  # Pre-reader journals keep their original proof boundary.
+            return {}
+        current = self.check_agents(item['target_version'])
+        if current != item['registry']:
+            raise Refused('restored registry differs from the captured native version baseline')
+        compatible = all(version(value) <= version(item['version']) for value in current.values())
+        item['outcome'] = {
+            'outcome': 'restored_baseline' if compatible else 'restored_preexisting_incompatible_baseline',
+            'restored_native_available': True, 'fleet_compatible': compatible,
+            'overall_success': compatible, 'c12_pass': compatible}
+        self.write(item, item['phase'])
+        return item['outcome']
+
+    def reader_before_producers(self, item, restored=False):
+        if 'reader' in item:
+            if restored:
+                self.reader.retire_cursor(item)
+            self.reader.resume(item)
+            self.reader.write(item, 'producers-start-intent')
+
+    def final_reader(self, item, restored=False):
+        if 'reader' in item:
+            self.reader.final(item)
+        if restored:
+            return self.recovery_outcome(item)
+        self.check_agents(item['target_version'])
+        return {}
+
+    def execute(self, target, upgrade=False, preview=False, recover=False, owner='',
+                reader_request=None, reader_checker='', reader_ack=False):
         version(target)
         if preview and recover:
             raise Refused('check mode cannot execute central recovery')
         with self.lock(owner=owner):
+            self.reader = self.make_reader(reader_checker, reader_request, reader_ack)
             if recover:
                 item = self.active()
                 if not item:
@@ -2102,26 +3192,30 @@ class Central(Transaction):
                 action = CENTRAL_RECOVERY.get(item['phase'])
                 if action == 'resume-old':
                     self.recover_pre_switch(item)
-                    return {'changed': True, 'recovered': True}
+                    return dict({'changed': True, 'recovered': True}, **item.get('outcome', {}))
                 if action in ('complete-target', 'complete-old'):
                     self.complete_finalized(item)
-                    return {'changed': False, 'completed': True}
+                    return dict({'changed': False, 'completed': True}, **item.get('outcome', {}))
                 if action != 'restore-old':
                     raise Refused('no fully backed-up central transaction to recover')
                 self.rollback(item)
-                return {'changed': True, 'recovered': True}
+                return dict({'changed': True, 'recovered': True}, **item.get('outcome', {}))
             self.idle()
             state = self.discover()
             if not state:
                 return {'changed': False, 'fresh': True, 'version': target}
-            self.check_agents(target)
+            state['registry'] = self.check_agents(target)
             if state['version'] == target:
                 return {'changed': False, 'fresh': False, 'version': target,
                         'directory': state['directory']}
             if not upgrade or (state['version'], target) != ('4.14.1', '4.14.9'):
                 raise Refused('only explicit central 4.14.1 -> 4.14.9 upgrade is supported')
+            state['reader'] = self.reader.admit(state, preview)
+            state['previous_reader_receipt'] = ReplayReceipt(self).inspect()
             state['admission_capture'] = ScopeLayout.inspect({path: 'directory' for path in state['paths']}, self.root)
             image_bytes = sum(image['size'] for image in state['images'].values())
+            if state['reader']['mode'] != 'never':
+                image_bytes += 768 * 1024 ** 2  # bounded queue evidence + memory-save/cursor allowance
             self.capacity(state['paths'], extra_bytes=image_bytes)
             state['data'] = self.data()
             old_text = Path(state['compose']).read_bytes().decode('utf-8')
@@ -2157,12 +3251,15 @@ class Central(Transaction):
                 self.retain_images(item)
                 ScopeLayout.inspect({path: 'directory' for path in item['paths']}, self.root)
                 self.write(item, 'stopping')
+                self.reader.write(item, 'producer-stop-intent')
                 self.compose_run(item, 'stop', '--timeout', '60')
                 for image in item['images'].values():
                     stopped = self.r.json(['docker', 'inspect', image['container']], timeout=30)[0]
                     if stopped['State']['Running']:
                         raise Refused('central component did not quiesce')
                 self.assert_volume_consumers(item)
+                self.reader.write(item, 'producers-stopped')
+                self.reader.pause(item)
                 item['capture'] = ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root, sealed=True)
                 self.write(item, 'stopping')
                 item['archives'] = []
@@ -2182,12 +3279,15 @@ class Central(Transaction):
                 if digest(compose) != item['target_compose_sha256']:
                     raise Refused('target Compose configuration was not durably written')
                 self.validate_persisted_graph(item, target=True)
+                self.reader_before_producers(item)
                 self.compose_run(item, 'up', '-d', '--pull', 'never')
+                self.reader.write(item, 'active')
                 self.write(item, 'validating')
                 self.wait(target, target_images)
                 self.check_data(item['data'])
                 item['canary'] = self.canary()
                 ScopeLayout.inspect({path: 'directory' for path in item['paths']}, self.root)
+                self.final_reader(item)
                 self.finish(item, 'committed')
                 return {'changed': True, 'version': target, 'directory': item['directory'], 'backup': item['backup']}
             except Exception as failure:
@@ -3100,7 +4200,8 @@ def main():
                                          'central', 'central-verify', 'manager-version', 'verify-agent', 'agent-verify', 'agent-runtime', 'agent-check', 'agent-stage', 'agent-reserve', 'agent-backup',
                                          'agent-install', 'agent-recovery', 'agent-restore', 'agent-recovery-commit', 'agent-commit', 'agent-activate',
                                          'agent-policy-check', 'agent-protect', 'agent-apt-plan', 'agent-rpm-fresh',
-                                         'agent-hook-prepare', 'agent-hook-cleanup', 'agent-config-save', 'agent-config-restore'])
+                                         'agent-hook-prepare', 'agent-hook-cleanup', 'agent-config-save', 'agent-config-restore',
+                                         'reader-tools-check', 'reader-enable-admit', 'reader-enable-expose', 'reader-enable-verify', 'reader-enable-complete', 'reader-enable-failed'])
     parser.add_argument('--version', default='')
     parser.add_argument('--legacy', default='')
     parser.add_argument('--manager', default='')
@@ -3121,6 +4222,9 @@ def main():
     parser.add_argument('--resource', default='')
     parser.add_argument('--path', default='')
     parser.add_argument('--resources', default='[]')
+    parser.add_argument('--reader-desired-json', default='{}')
+    parser.add_argument('--reader-checker-sha256', default='')
+    parser.add_argument('--ack-rsyslog-downtime-and-replay', action='store_true')
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error('Wazuh transactions require root')
@@ -3148,7 +4252,16 @@ def main():
             else:
                 value = Central().verify(args.canary, args.owner or None)
         elif args.action == 'central':
-            value = Central().execute(desired(args.version, args.legacy), args.upgrade, args.preview, args.recover, args.owner)
+            value = Central().execute(desired(args.version, args.legacy), args.upgrade, args.preview, args.recover, args.owner,
+                                      json.loads(args.reader_desired_json), args.reader_checker_sha256,
+                                      args.ack_rsyslog_downtime_and_replay)
+        elif args.action == 'reader-tools-check':
+            with HostWriter().guard(args.owner, 'central'):
+                value = Reader.check_tool_destinations()
+        elif args.action.startswith('reader-enable-'):
+            value = ReplayReceipt(Central()).operation(args.owner, args.operation,
+                        args.action.removeprefix('reader-enable-'),
+                        args.ack_rsyslog_downtime_and_replay, args.preview)
         elif args.action in ('agent-config-save', 'agent-config-restore'):
             snapshot = ConfigSnapshots(args.owner, args.operation)
             value = snapshot.save(args.resource, args.path) if args.action == 'agent-config-save' else snapshot.restore(json.loads(args.resources))
@@ -3183,7 +4296,7 @@ def main():
                           'agent-recovery-commit': agent.finish_recovery}[args.action]
                 value = method(args.owner)
         print(json.dumps(value, sort_keys=True))
-        return 0
+        return 0 if value.get('overall_success', True) else 2
     except Refused as exc:
         print(json.dumps({'error': str(exc)}))
         return 1

@@ -95,7 +95,7 @@ RELP heartbeat module/thread；active 或磁碟設定正確本身不代表 runti
 transport 設定，**不證明 delivery**。啟用轉送必須同時通過
 [wazuh-alert-delivery.md](wazuh-alert-delivery.md) 的 fresh nonce cross-host row。
 該 fixture 使用 controller 原本的 inventory 連線，不建立 receiver→manager SSH trust。
-目前 actual-run 結果仍待驗證，見 [evidence](../evidence/wazuh-manager/LATEST.md)。
+目前 actual-run 結果見 [evidence](../evidence/wazuh-manager/LATEST.md)。
 
 ## 2. Checklist
 
@@ -356,3 +356,4 @@ The current procedure and evidence link are in [wazuh-manager](../runbooks/wazuh
 | 日期 | PR | 驗收語意變更 |
 |------|----|-------------|
 | 2026-11-03 | Issue #211 | Replace UDP syslog_output with host imfile over TCP/RELP; distinguish local C11 health from a fresh real-alert receiver delivery oracle. |
+| 2026-11-04 | Issue #244 | 原生中央版本一致與 retained-agent 上界；明示版本交易保留完整冷資料/images，回復區分原始 skew；host reader 採 CURRENT queue custody、cursor generation 及本機 replay ACK，實際 receiver delivery 另驗。 |

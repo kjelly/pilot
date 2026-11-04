@@ -27,9 +27,9 @@ W.MountTable = lambda: MOUNT_TABLE('1 0 8:1 / / rw - ext4 /dev/synthetic rw\n')
 WORKER = '''import argparse,importlib.util,json,sys,subprocess
 from pathlib import Path
 p=argparse.ArgumentParser(); p.add_argument('action')
-for field in ('owner','component','mode','family','manager','version','legacy','agent-id','agent-name','name','operation','resource','path','resources'):
+for field in ('owner','component','mode','family','manager','version','legacy','agent-id','agent-name','name','operation','resource','path','resources','reader-desired-json','reader-checker-sha256'):
  p.add_argument('--'+field,default='')
-for field in ('confirm-previous-stopped','upgrade','preview','recover','canary'):
+for field in ('confirm-previous-stopped','upgrade','preview','recover','canary','ack-rsyslog-downtime-and-replay'):
  p.add_argument('--'+field,action='store_true')
 a=p.parse_args(); settings=json.loads(Path(SETTINGS).read_text())
 s=importlib.util.spec_from_file_location('production',settings['library']); w=importlib.util.module_from_spec(s); s.loader.exec_module(w)
@@ -51,6 +51,10 @@ try:
   with host.reader('central'): result={'version':'4.14.9'}
  elif a.action=='central':
   with host.guard(a.owner,'central'): result={'changed':settings['central_change'],'fresh':False,'directory':settings['project'],'version':'4.14.9'}
+ elif a.action=='reader-tools-check':
+  with host.guard(a.owner,'central'): result={'control_code_scope':True,'create_directory':True}
+ elif a.action.startswith('reader-enable-'):
+  with host.guard(a.owner,'central'): result={'pending':False}
  elif a.action in ('central-verify','agent-verify'):
   with host.reader('central' if a.action=='central-verify' else 'agent',a.owner or None): result={'pass':True}
  elif a.action in ('agent-config-save','agent-config-restore','agent-policy-check'):
@@ -122,9 +126,11 @@ class WriterTaskGraphTests(unittest.TestCase):
                             replace_action(task, 'native-mutation')
                     elif 'ansible.builtin.command' in task:
                         command = task['ansible.builtin.command']
-                        if isinstance(command, dict) and command.get('argv', [''])[0] == '/usr/local/sbin/pilot-wazuh-transaction':
+                        if isinstance(command, dict) and isinstance(command.get('argv'),str) and '/usr/local/sbin/pilot-wazuh-transaction' in command['argv']:
+                            command['argv']=command['argv'].replace("'/usr/local/sbin/pilot-wazuh-transaction'", "'python3', "+repr(str(worker)))
+                        elif isinstance(command, dict) and command.get('argv', [''])[0] == '/usr/local/sbin/pilot-wazuh-transaction':
                             command['argv'] = ['python3', str(worker)] + command['argv'][1:]
-                        elif 'Allocate an independent owner' not in task['name']:
+                        elif 'Allocate an independent owner' not in task['name'] and 'Allocate this invocation' not in task['name']:
                             replace_action(task, 'native-mutation')
                     elif 'ansible.builtin.include_tasks' in task:
                         include = task['ansible.builtin.include_tasks']
@@ -140,7 +146,13 @@ class WriterTaskGraphTests(unittest.TestCase):
             rewrite(play.get('pre_tasks', []))
             rewrite(play['tasks'])
             filename = root / 'play.yml'
-            filename.write_text(yaml.safe_dump([play], sort_keys=False))
+            def relocate(value):
+                if isinstance(value,str):
+                    return value.replace("playbook_dir ~ '/../files/", repr(str(REPO / 'playbooks/files') + '/') + " ~ '")
+                if isinstance(value,list): return [relocate(item) for item in value]
+                if isinstance(value,dict): return {key:relocate(item) for key,item in value.items()}
+                return value
+            filename.write_text(yaml.safe_dump([relocate(play)], sort_keys=False))
             config = root / 'ansible.cfg'
             config.write_text('[defaults]\nfact_caching=memory\nretry_files_enabled=false\n')
             env = dict(os.environ, ANSIBLE_CONFIG=str(config), ANSIBLE_LOCAL_TEMP=str(root / 'local'),

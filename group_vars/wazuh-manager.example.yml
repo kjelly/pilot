@@ -57,3 +57,12 @@ siem_forward_host: ""
 # siem_relp_server_name: logs.example.test
 # Supply siem_relp_ca_pem / siem_relp_cert_pem / siem_relp_key_pem from private inputs.
 # Never put private-key PEM in this example or a committed inventory.
+
+
+# One admitted shared rsyslog/socket downtime + possible current-file replay.
+# Cooperatively exclude other rsyslog roles, package/policy maintenance and
+# external service/socket changes for the full operation and interrupted recovery.
+# Same-owner journal recovery reuses admission; a later ordinary re-enable of a
+# disabled restored reader needs a NEW explicit ACK. It certifies local custody,
+# not remote delivery. No queue is discarded.
+wazuh_ack_rsyslog_downtime_and_replay: false

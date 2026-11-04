@@ -847,6 +847,7 @@ class JournalTests(unittest.TestCase):
             published = {'reserved'}
             for call in ast.walk(node):
                 if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                        and isinstance(call.func.value, ast.Name) and call.func.value.id == 'self'
                         and call.func.attr in ('write', 'finish') and len(call.args) >= 2):
                     value = call.args[1]
                     candidates = [value] if not isinstance(value, ast.IfExp) else [value.body, value.orelse]
@@ -924,6 +925,14 @@ class FakeCentral(w.Central):
         self.fail = fail
         self.calls = []
 
+    def make_reader(self, checker_hash='', request=None, ack=False):
+        reader = super().make_reader(checker_hash, request, ack)
+        # All native Docker/proc inspection is an explicit command-model leaf.
+        # Real files/tar/layout/version policy remain production code.
+        reader.source = lambda state: str(self.volume)
+        reader.source_users = lambda *args, **kwargs: None
+        return reader
+
     def execute(self, target, upgrade=False, preview=False, recover=False, owner=''):
         # Existing transaction tests enter through the real common owner API.
         # An explicit recovery call in this fixture represents the operator's
@@ -994,7 +1003,7 @@ class FakeCentral(w.Central):
         item['image_archive'] = {'path': str(archive), 'sha256': w.digest(archive)}
         self.write(item, item['phase'])
 
-    def quiesce_for_restore(self, item):
+    def quiesce_for_restore(self, item, remove=True):
         self.calls.append((item['phase'], ('down',)))
 
     def wait(self, release, images):
@@ -1859,8 +1868,8 @@ class LiveLayoutTests(unittest.TestCase):
                         self.calls.append((item['phase'], args))
                         if args[0] == 'stop': self.running = False
                         if args[0] == 'up': self.running = True
-                    def quiesce_for_restore(self, item):
-                        self.running = False;super().quiesce_for_restore(item)
+                    def quiesce_for_restore(self, item, remove=True):
+                        self.running = False;super().quiesce_for_restore(item, remove)
                 central = ActiveCentral(Path(temporary), fail=recovery)
                 log = central.volume / '00-live.log';log.write_text('old log')
                 trigger = central.volume / '99-trigger';trigger.write_text('stable')

@@ -1,10 +1,11 @@
 # Disposable Issue #244 fresh-install topology. Root must claim the unique
 # names before provisioning. No fixed IPs: agents use the sole manager group.
-# The wrapper configures loopback SIEM forwarding solely for C10/C11 config
-# assertions, without claiming delivery to a SIEM receiver.
-services: local
+# The Ubuntu24 Debian agent cohosts the real log-server receiver. This fresh
+# descriptor explicitly uses direct upstream services:none, not inherited cache
+# consumers; native evidence must bind the actual inventory/proxy state.
+services: none
 nodes:
-  - name: wv244-manager
+  - name: wx244-manager
     base_image: ubuntu-24.04
     # Guest-visible RAM must exceed the central contract's 8192 MiB.
     memory: 9216
@@ -16,16 +17,16 @@ nodes:
     # Also exercises agent/central ownership on the same physical host, while
     # other agent forks observe its stable manager through shared readers.
     groups: [sandbox, docker, wazuh-manager, wazuh-fim]
-  - name: wv244-deb
+  - name: wx244-deb
     base_image: ubuntu-24.04
-    memory: 2048
+    memory: 4096
     vcpus: 2
     disk: 30
     ssh_user: root
     ssh_timeout: 5m
     boot_timeout: 8m
-    groups: [sandbox, wazuh-fim]
-  - name: wv244-el
+    groups: [sandbox, log-server, wazuh-fim]
+  - name: wx244-el
     base_image: almalinux-9
     memory: 2048
     vcpus: 2
@@ -34,7 +35,7 @@ nodes:
     ssh_timeout: 5m
     boot_timeout: 8m
     groups: [sandbox, wazuh-fim]
-  - name: wv244-deb22
+  - name: wx244-deb22
     base_image: ubuntu-22.04
     memory: 2048
     vcpus: 2

@@ -289,6 +289,9 @@ go run ./cmd/pilot vm-target run --name wazuh-fim \
 > playbook 的 `hosts:` 預設 `wazuh-fim` 與該 host key 同名，不需要
 > `-e target_group=` override（同 `log-server.md`/`audit-log-forwarding.md` 的設計）。
 
+目前 candidate-bound 多平台／跨主機 actual-run 結果見
+[evidence](../evidence/wazuh-manager/LATEST.md)；本機 C10 不代替 agent transport 或實際 who-data event 驗收。
+
 ## 8. 變更紀錄
 
 | 日期 | 版本 | 變更 | 變更者 |
@@ -296,3 +299,4 @@ go run ./cmd/pilot vm-target run --name wazuh-fim \
 | 2026-07-06 | v1.0 | 初版：Wazuh agent FIM（`/etc`、`/boot` whodata）+ auditd who-data provider + 向 `wazuh-manager.md` 註冊 | sre |
 | 2026-07-06 | v1.1 | `wazuh_fim_directories` 改為可依主機覆寫的變數清單（不同主機可監控不同路徑），預設仍是 `["/etc", "/boot"]`；對應把 C5/C6（原本各自綁死 `/etc`/`/boot` 字面值）合併成單一「至少一個 whodata 目錄」的通用檢查，原 C7-C10 遞補成 C6-C9（row 數 10 → 9），見 §1.5、§2 的重排說明 | sre |
 | 2026-07-22 | v1.2 | C1/C2 package probe 改為 Ubuntu dpkg 與 EL rpm 雙平台；相同候選指令已在 Ubuntu 24.04 與 AlmaLinux 9 的目標 inventory 實跑通過 | sre |
+| 2026-11-04 | Issue #244 | 原生 installed/candidate 必須相容於實際 manager；fresh exact signed package、穩態 APT hold／DNF versionlock，明示升級保留 cold data/config、enrollment、audit endpoint 與同 owner recovery；C10 驗本機版本與 protection，完整鏈路另以 target evidence 驗收。 | sre |

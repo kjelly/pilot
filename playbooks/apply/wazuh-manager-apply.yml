@@ -85,6 +85,7 @@
             or wazuh_version == wazuh_docker_version
           - wazuh_upgrade | default(false) | string | lower in ['true', 'false']
           - wazuh_recover | default(false) | string | lower in ['true', 'false']
+          - wazuh_ack_rsyslog_downtime_and_replay | default(false) | string | lower in ['true', 'false']
         fail_msg: "Wazuh version inputs conflict, or wazuh_upgrade is not a boolean"
       tags: [always]
 
@@ -166,6 +167,8 @@
         wazuh_writer_owner: "{{ wazuh_writer_resume_owner | default(wazuh_writer_uuid.stdout, true) }}"
         wazuh_writer_claimed: false
         wazuh_finish_host: false
+        wazuh_reader_enable_admitted: false
+        wazuh_reader_enable_committed: false
       tags: [always]
   tasks:
     - name: "Own all Wazuh mutations on this host through their final proofs"
@@ -248,6 +251,84 @@
             mode: "0700"
           tags: [always]
 
+        # Control-code dependency only: install under the host writer even
+        # when an incompatible old fleet prevents ordinary old-version apply.
+        # These copies do not migrate forwarding config/TLS/services.
+        - name: "Validate exact control-code destinations before any reader helper copy"
+          ansible.builtin.script:
+            cmd: "files/wazuh-transaction.py reader-tools-check --owner {{ wazuh_writer_owner | quote }}"
+            executable: python3
+          register: wazuh_reader_tool_scope
+          changed_when: false
+          check_mode: false
+          tags: [always]
+
+        - name: "Prepare the root-controlled reader proof helper directory"
+          ansible.builtin.file:
+            path: /usr/local/libexec
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+          when: (wazuh_reader_tool_scope.stdout | from_json).create_directory | bool
+          check_mode: false
+          tags: [always]
+
+        - name: "Install tracked reader inspection/proof code before version admission"
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../files/{{ item }}"
+            dest: "/usr/local/libexec/{{ item }}"
+            owner: root
+            group: root
+            mode: "0755"
+          loop: [pilot-wazuh-heartbeat, pilot-wazuh-delivery, pilot-siem-relp-check]
+          check_mode: false
+          tags: [always]
+
+        - name: "Allocate this invocation's local replay acknowledgement identity"
+          ansible.builtin.command:
+            argv: [python3, -c, "import uuid; print(uuid.uuid4().hex)"]
+          register: wazuh_reader_operation
+          changed_when: false
+          check_mode: false
+          tags: [always]
+
+        - name: "Reset this play's actual forwarding selection"
+          ansible.builtin.set_fact:
+            pilot_wazuh_reader_selected: false
+          tags: [always]
+
+        - name: "Mark selected forwarding intent without granting container authority"
+          ansible.builtin.set_fact:
+            pilot_wazuh_reader_selected: true
+          tags: [C10, C11]
+
+        - name: "Bind desired forwarding and tracked proof code to this version inspection"
+          ansible.builtin.set_fact:
+            wazuh_reader_tools:
+              pilot-wazuh-delivery: "{{ lookup('file', playbook_dir ~ '/../files/pilot-wazuh-delivery', rstrip=False) | hash('sha256') }}"
+              pilot-siem-relp-check: "{{ lookup('file', playbook_dir ~ '/../files/pilot-siem-relp-check', rstrip=False) | hash('sha256') }}"
+            wazuh_reader_checker_hash: "{{ lookup('file', playbook_dir ~ '/../files/pilot-wazuh-heartbeat', rstrip=False) | hash('sha256') }}"
+          no_log: true
+          tags: [always]
+
+        - name: "Build the secret-free selected reader request"
+          ansible.builtin.set_fact:
+            wazuh_reader_request:
+              selected: "{{ pilot_wazuh_reader_selected | bool }}"
+              enabled: "{{ siem_forwarding_enabled | bool }}"
+              host: "{{ siem_forward_host | default('') }}"
+              transport: "{{ siem_forward_transport }}"
+              port: "{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }}"
+              peer: "{{ siem_relp_server_name | default('') }}"
+              tls:
+                ca.pem: "{{ siem_relp_ca_pem | default('') | hash('sha256') }}"
+                cert.pem: "{{ siem_relp_cert_pem | default('') | hash('sha256') }}"
+                key.pem: "{{ siem_relp_key_pem | default('') | hash('sha256') }}"
+              tools: "{{ wazuh_reader_tools }}"
+          no_log: true
+          tags: [always]
+
         - name: "Reset this play's selected manager replacement plan"
           ansible.builtin.set_fact:
             pilot_wazuh_manager_install_planned: false
@@ -264,6 +345,9 @@
               files/wazuh-transaction.py central --version {{ wazuh_version | default('') | quote }}
               --legacy {{ wazuh_docker_version | quote }}
               --owner {{ wazuh_writer_owner | quote }}
+              --reader-desired-json {{ wazuh_reader_request | to_json | quote }}
+              --reader-checker-sha256 {{ wazuh_reader_checker_hash | quote }}
+              {{ '--ack-rsyslog-downtime-and-replay' if (wazuh_ack_rsyslog_downtime_and_replay | default(false) | bool) else '' }}
               {{ '--upgrade' if ((wazuh_upgrade | default(false) | bool) and pilot_wazuh_manager_install_planned is defined and pilot_wazuh_manager_install_planned) else '' }}
               {{ '--preview' if ansible_check_mode else '' }}
               {{ '--recover' if (wazuh_recover | default(false) | bool) else '' }}
@@ -317,6 +401,33 @@
         - name: "Apply the selected Wazuh tasks only after policy is recomputed under ownership"
           when: not wazuh_finish_host
           block:
+            - name: "Admit selected ordinary enable against any pending local replay receipt"
+              ansible.builtin.command:
+                argv: >-
+                  {{ ['/usr/local/sbin/pilot-wazuh-transaction', 'reader-enable-admit',
+                      '--owner', wazuh_writer_owner, '--operation', wazuh_reader_operation.stdout]
+                     + (['--ack-rsyslog-downtime-and-replay']
+                        if (wazuh_ack_rsyslog_downtime_and_replay | default(false) | bool) else [])
+                     + (['--preview'] if ansible_check_mode else []) }}
+              changed_when: false
+              check_mode: false
+              when:
+                - pilot_wazuh_reader_selected | bool
+                - siem_forwarding_enabled | bool
+                - not pilot_wazuh_manager_preview_fresh
+              no_log: true
+              tags: [always]
+
+            - name: "Remember this invocation's selected local enable admission"
+              ansible.builtin.set_fact:
+                wazuh_reader_enable_admitted: true
+              when:
+                - not ansible_check_mode
+                - pilot_wazuh_reader_selected | bool
+                - siem_forwarding_enabled | bool
+                - not pilot_wazuh_manager_preview_fresh
+              tags: [always]
+
             - name: "Gate: detect SELinux independently of optional Python bindings"
               ansible.builtin.stat:
                 path: /sys/fs/selinux/enforce
@@ -642,6 +753,22 @@
                   retries: 60
                   delay: 5
 
+                - name: "Verify selected local reader and replay before ordinary commit"
+                  ansible.builtin.command:
+                    argv:
+                      - /usr/local/sbin/pilot-wazuh-transaction
+                      - reader-enable-verify
+                      - --owner
+                      - "{{ wazuh_writer_owner }}"
+                      - --operation
+                      - "{{ wazuh_reader_operation.stdout }}"
+                  changed_when: false
+                  when:
+                    - wazuh_reader_enable_admitted | bool
+                    - siem_forwarding_enabled | bool
+                  no_log: true
+                  tags: [C10, C11]
+
                 - name: "Record that the ACL transaction completed successfully"
                   tags: [always]
                   ansible.builtin.set_fact:
@@ -766,6 +893,30 @@
                     - wazuh_acl_journal.path is defined
                     - wazuh_acl_journal_committed | default(false) | bool or (wazuh_acl_restore_result.rc | default(-1)) == 0
 
+            - name: "Commit local replay acknowledgement only after selected forwarding convergence"
+              ansible.builtin.command:
+                argv:
+                  - /usr/local/sbin/pilot-wazuh-transaction
+                  - reader-enable-complete
+                  - --owner
+                  - "{{ wazuh_writer_owner }}"
+                  - --operation
+                  - "{{ wazuh_reader_operation.stdout }}"
+              changed_when: false
+              when:
+                - not ansible_check_mode
+                - wazuh_reader_enable_admitted | bool
+              no_log: true
+              tags: [always]
+
+            - name: "Record local replay convergence independently of later verification"
+              ansible.builtin.set_fact:
+                wazuh_reader_enable_committed: true
+              when:
+                - not ansible_check_mode
+                - wazuh_reader_enable_admitted | bool
+              tags: [always]
+
             - name: "Verify native releases, retained-agent compatibility and readiness (spec C12)"
               ansible.builtin.command:
                 argv: [/usr/local/sbin/pilot-wazuh-transaction, central-verify, --owner, "{{ wazuh_writer_owner }}"]
@@ -773,6 +924,24 @@
               when: not ansible_check_mode
               tags: [C12]
       always:
+        - name: "Retain pending replay after this invocation's uncommitted local enable"
+          ansible.builtin.command:
+            argv:
+              - /usr/local/sbin/pilot-wazuh-transaction
+              - reader-enable-failed
+              - --owner
+              - "{{ wazuh_writer_owner }}"
+              - --operation
+              - "{{ wazuh_reader_operation.stdout }}"
+          changed_when: false
+          when:
+            - not ansible_check_mode
+            - wazuh_writer_claimed | default(false) | bool
+            - wazuh_reader_enable_admitted | default(false) | bool
+            - not (wazuh_reader_enable_committed | default(false) | bool)
+          no_log: true
+          tags: [always]
+
         - name: "Release only this exact writer after all mutators and recovery tasks have ended"
           ansible.builtin.script:
             cmd: >-
