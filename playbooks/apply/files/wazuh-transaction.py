@@ -1860,6 +1860,234 @@ class ReaderNamespace:
         return dict(observed, mode=mode)
 
 
+class ReaderPrestart:
+    """Qualified Ubuntu vendor hook; OS loader/runtime remains the trusted baseline.
+
+    Pins originate in official Ubuntu snapshot 20260610T120000Z signed indexes
+    (noble/noble-updates), not a hash learned from the running host. The full
+    policy tree is sealed conservatively; unrelated static edits also refuse.
+    Compiled cache bytes are outputs of -W/-T, never immutable input authority.
+    """
+    HOOK = '/usr/lib/rsyslog/reload-apparmor-profile'
+    PINS = {
+        '/usr/lib/systemd/system/rsyslog.service': '2728f43f3e86d6eb2480d6cbc38a977e185b369c3733351459f40a9fc7581b2c',
+        HOOK: 'eec0bf16836e34f166fb5da22836bd65676e5b670152a00c257f24d4176b2cac',
+        '/usr/bin/dash': '86d31f6fb799e91fa21bad341484564510ca287703a16e9e46c53338776f4f42',
+        '/usr/sbin/aa-status': 'af9f579ad039f0e669bfb15735c55efd17896f838d684e7f9be15b09fa1e2dd4',
+        '/usr/sbin/apparmor_parser': '6bc852b37807961c14976be9a227ae96bd817f73b5189cb0e0ff5eca4448c01c',
+        '/etc/apparmor/parser.conf': 'f8586f1c3bfd7abac6a182c1b45d22a8397c0db5a737b54bc8f9fc48da53d5bd',
+    }
+    CONTEXT = ('Environment', 'EnvironmentFiles', 'PassEnvironment', 'UnsetEnvironment',
+               'ExecSearchPath', 'RootDirectory', 'RootImage', 'WorkingDirectory',
+               'PAMName', 'User', 'Group', 'BindPaths', 'BindReadOnlyPaths',
+               'ReadWritePaths', 'InaccessiblePaths', 'TemporaryFileSystem')
+    POLICY = Path('/etc/apparmor.d')
+    CONFIG = Path('/etc/apparmor')
+    FEATURES = Path('/sys/kernel/security/apparmor/features')
+    CACHE = Path('/var/cache/apparmor')
+
+    def __init__(self, runner):
+        self.r = runner
+
+    @staticmethod
+    def node(path, contents=True):
+        path = canonical(path)
+        before = path.lstat()
+        if (before.st_uid != 0 or before.st_mode & 0o022
+                or not (stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode))
+                or (stat.S_ISREG(before.st_mode) and before.st_nlink != 1)):
+            raise Refused('unsafe prestart input/output namespace')
+        result = [before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode),
+                  before.st_uid, before.st_gid, stat.S_IMODE(before.st_mode)]
+        if stat.S_ISREG(before.st_mode) and contents:
+            result += [before.st_size, before.st_mtime_ns, before.st_ctime_ns, digest(path)]
+        after = path.lstat()
+        if (before.st_dev, before.st_ino, before.st_mode, before.st_nlink,
+                before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_dev, after.st_ino, after.st_mode, after.st_nlink,
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise Refused('prestart input changed during inspection')
+        return result
+
+    @classmethod
+    def tree(cls, root, contents=True):
+        result, pending = {}, [Path(root)]
+        while pending:
+            path = pending.pop()
+            if len(result) >= 4096:
+                raise Refused('prestart namespace exceeds qualified bounds')
+            result[str(path)] = cls.node(path, contents)
+            if path.is_dir():
+                names = sorted(os.listdir(path))
+                pending.extend(path / name for name in names)
+                result[str(path)].append(names)
+        # Recheck membership and object identities after the walk. This is a
+        # static closure, deliberately not the live producer ScopeLayout.
+        for name, expected in result.items():
+            current = cls.node(name, contents)
+            if Path(name).is_dir():
+                current.append(sorted(os.listdir(name)))
+            if current != expected:
+                raise Refused('prestart closure changed during inspection')
+        return result
+
+    @classmethod
+    def includes(cls):
+        pending, seen = [cls.POLICY / 'usr.sbin.rsyslogd'], set()
+        while pending:
+            path = pending.pop()
+            if path in seen:
+                continue
+            seen.add(path)
+            if not path.exists():
+                raise Refused('required prestart policy input absent')
+            if path.is_dir():
+                pending.extend(path / name for name in sorted(os.listdir(path))
+                               if not name.startswith('.'))
+                continue
+            for line in path.read_text().splitlines():
+                if re.match(r'^\s*#\s+include\b', line):
+                    raise Refused('unknown prestart policy include syntax')
+                if not re.match(r'^\s*(?:#?include|abi)\b', line):
+                    if (not line.lstrip().startswith('#')
+                            and re.search(r'\b(?:include|abi)\s', line.split('#', 1)[0])):
+                        raise Refused('unknown inline prestart policy include syntax')
+                    continue
+                match = re.fullmatch(r'\s*(#?include|abi)\s+(?:(if exists)\s+)?'
+                                     r'(?:<([^<>]+)>|"([^"\n]+)")\s*,?\s*(?:#.*)?', line)
+                if not match:
+                    raise Refused('unknown prestart policy include syntax')
+                name = match[3] or match[4]
+                if (not re.fullmatch(r'[A-Za-z0-9_./+-]+', name)
+                        or '..' in Path(name).parts):
+                    raise Refused('unknown prestart policy include target')
+                target = Path(name) if name.startswith('/') else cls.POLICY / name
+                if target != cls.POLICY and cls.POLICY not in target.parents:
+                    raise Refused('prestart policy include escapes sealed inputs')
+                if target.exists():
+                    pending.append(target)
+                elif not match[2]:
+                    raise Refused('required prestart policy include absent')
+
+    @staticmethod
+    def ancestry(path):
+        result = {}
+        for parent in reversed((Path(path), *Path(path).parents)):
+            if parent.exists() or parent.is_symlink():
+                result[str(parent)] = ReaderPrestart.node(parent, contents=False)
+            else:
+                result[str(parent)] = None
+        return result
+
+    def environment(self, pid):
+        text = self.r.run(['systemctl', 'show-environment'], timeout=20,
+                          operation='reader service execution environment').stdout
+        values = dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
+        if set(values) != {'LANG', 'PATH'} or values['LANG'] not in ('C.UTF-8', 'C', 'en_US.UTF-8'):
+            raise Refused('unqualified reader manager execution environment')
+        allowed = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin'
+        if values['PATH'] not in (allowed, allowed + ':/snap/bin'):
+            raise Refused('unqualified reader service PATH')
+        if pid:
+            raw = (Path('/proc') / str(pid) / 'environ').read_bytes().split(b'\0')
+            live = dict(value.decode().split('=', 1) for value in raw if b'=' in value)
+            runtime = {'NOTIFY_SOCKET', 'LISTEN_PID', 'LISTEN_FDS', 'LISTEN_FDNAMES', 'USER',
+                       'INVOCATION_ID', 'JOURNAL_STREAM', 'SYSTEMD_EXEC_PID',
+                       'MEMORY_PRESSURE_WATCH', 'MEMORY_PRESSURE_WRITE'}
+            if (set(live) - runtime != {'LANG', 'PATH'}
+                    or any(live.get(name) != value for name, value in values.items())):
+                raise Refused('reader live execution environment differs from qualified manager')
+        return values
+
+    def tools(self, env):
+        result = {}
+        for tool in ('aa-status', 'apparmor_parser'):
+            result.update(self.resolve_tool(tool, '/usr/sbin/' + tool, env['PATH'].split(':')))
+        return result
+
+    def resolve_tool(self, tool, expected, directories):
+        result = {}
+        for directory in directories:
+            name = Path(directory) / tool
+            result.update(self.ancestry(name.parent))
+            if name.exists() or name.is_symlink():
+                if str(name) != expected:
+                    raise Refused('reader prestart PATH shadowed before authenticated tool')
+                result[str(name)] = self.node(name)
+                return result
+            result[str(name)] = None
+        raise Refused('authenticated reader prestart tool absent from service PATH')
+
+    @staticmethod
+    def aliases():
+        result = {}
+        for name, target in (('/bin', 'usr/bin'), ('/sbin', 'usr/sbin'), ('/usr/bin/sh', 'dash')):
+            info = Path(name).lstat()
+            if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or os.readlink(name) != target:
+                raise Refused('unqualified prestart interpreter alias')
+            result[name] = [info.st_dev, info.st_ino, target]
+        return result
+
+    def inspect(self, service, protected):
+        if (any(service.get(name, '') for name in self.CONTEXT)
+                or service.get('DynamicUser') != 'no' or service.get('ProtectSystem') != 'no'
+                or service.get('FragmentPath') != '/usr/lib/systemd/system/rsyslog.service'):
+            raise Refused('unqualified prestart service execution context')
+        if not protected:
+            raise Refused('prestart namespace lacks actual protected transaction roots')
+        files = {}
+        for name, expected in self.PINS.items():
+            files[name] = self.node(name)
+            member_mode = 0o644 if name.endswith(('rsyslog.service', 'parser.conf')) else 0o755
+            if (files[name][-1] != expected or files[name][4:6] != [0, member_mode]):
+                raise Refused('reader prestart differs from authenticated Ubuntu member')
+        # Deliberately finite stock usrmerge/interpreter aliases, not arbitrary
+        # resolution followed by trusting whatever target happens to exist.
+        aliases = self.aliases()
+        env = self.environment(int(service.get('MainPID', '0')))
+        search = self.tools(env)
+        policy = {**self.tree(self.CONFIG), **self.tree(self.POLICY), **self.tree(self.FEATURES)}
+        self.includes()
+        cache = self.CACHE
+        output = self.r.run(['/usr/sbin/apparmor_parser', '--print-cache-dir'], timeout=20,
+                            operation='qualified AppArmor cache destination').stdout.strip()
+        if (not re.fullmatch(re.escape(str(cache)) + r'/[A-Za-z0-9_.-]+', output)
+                or Path(output).name in ('.', '..')):
+            raise Refused('unqualified prestart cache destination')
+        if not cache.is_dir() or not Path(output).is_dir():
+            raise Refused('prestart cache namespace is not a directory')
+        self.tree(cache, contents=False)
+        roots = [self.CONFIG, self.POLICY, self.FEATURES, cache]
+        table = MountTable()
+        for root in roots:
+            canonical(root)
+            if table.containing(root)['root'] != Path('/'):
+                raise Refused('prestart namespace uses a foreign bind/subtree mount')
+            if any(row['point'] != root and root in row['point'].parents for row in table.rows):
+                raise Refused('prestart namespace contains a foreign mount')
+        ancestry = {}
+        for root in [*roots, *(Path(name).parent for name in self.PINS)]:
+            ancestry.update(self.ancestry(root))
+        if not table.containing(cache)['writable']:
+            raise Refused('prestart cache output filesystem is read-only')
+        projections = [(str(root), table.project(root)) for root in roots]
+        for name, (device, location) in projections:
+            for other in [Path(value) for value in protected]:
+                other_device, other_location = table.project(canonical(other))
+                if device == other_device and (location == other_location or location in other_location.parents
+                                               or other_location in location.parents):
+                    raise Refused('prestart inputs/cache overlap protected transaction data')
+            for other_name, (other_device, other_location) in projections:
+                if name != other_name and device == other_device and (location == other_location
+                        or location in other_location.parents or other_location in location.parents):
+                    raise Refused('prestart policy input/output namespaces overlap')
+        return {'schema': 1, 'files': files, 'aliases': aliases, 'environment': env,
+                'search': search, 'ancestry': ancestry, 'policy': policy, 'cache': self.node(cache, False),
+                'cache_destination': output, 'cache_directory': self.node(output, False),
+                'mounts': {name: [device, str(location)] for name, (device, location) in projections},
+                'protected': sorted(set(str(value) for value in protected))}
+
+
 class ReaderUnits:
     """Narrow native unit protocol. A stop request is never a save proof."""
     SERVICE, SOCKET = 'rsyslog.service', 'syslog.socket'
@@ -1867,7 +2095,8 @@ class ReaderUnits:
               'TriggeredBy', 'UnitFileState', 'ExecStart', 'Listen', 'Accept',
               'RemoveOnStop', 'KillMode', 'SendSIGKILL', 'Restart', 'TimeoutStopUSec',
               'ExecStartPre', 'ExecStartPost', 'ExecStop', 'ExecStopPost', 'ExecStopPre',
-              'RefuseManualStart', 'RefuseManualStop')
+              'RefuseManualStart', 'RefuseManualStop', 'ExecCondition', 'ExecReload',
+              *ReaderPrestart.CONTEXT, 'DynamicUser', 'ProtectSystem')
     RUNTIME = ('LoadState', 'ActiveState', 'SubState', 'MainPID', 'InvocationID',
                'ControlGroup', 'Result', 'ExecMainCode', 'ExecMainStatus', 'ExecMainStartTimestampMonotonic', 'ExecMainExitTimestampMonotonic', 'ControlPID', 'Job')
     def __init__(self, runner):
@@ -1890,16 +2119,46 @@ class ReaderUnits:
     @staticmethod
     def control(value):
         result = {key: value.get(key, '') for key in ReaderUnits.STATIC}
-        # ExecStart includes runtime timestamps/PID. Compare the declared
-        # executable+argv, separately from the invocation being stopped.
-        if result['ExecStart']:
-            match = re.search(r'path=([^ ;]+) ; argv\[\]=([^;]+) ;', result['ExecStart'])
-            if not match:
-                raise Refused('unknown reader ExecStart declaration')
-            result['ExecStart'] = [match[1], match[2].strip()]
+        for key in ReaderUnits.STATIC:
+            if key.startswith('Exec') and key not in ('ExecSearchPath',):
+                result[key] = ReaderUnits.commands(result[key])
         for key in ('Names', 'Requires', 'After', 'Triggers', 'TriggeredBy'):
             result[key] = sorted(result[key].split())
         return result
+
+    @staticmethod
+    def commands(text):
+        """Consume every native declared-command record; discard only runtime fields.
+
+        Qualified systemctl serialization uses unquoted plain argv tokens here.
+        Unknown escapes/quoting are refused rather than interpreted differently
+        from systemd. A second command can never hide after a first regex match.
+        """
+        records = []
+        pattern = re.compile(r'\s*\{ path=([^ ;{}]+) ; argv\[\]=([^;{}]+) ; '
+                             r'ignore_errors=(yes|no) ; start_time=(\[[^]{}]*\]) ; '
+                             r'stop_time=(\[[^]{}]*\]) ; pid=([0-9]+) ; '
+                             r'code=([^ ;{}]+) ; status=([0-9]+(?:/[0-9]+)?) \}')
+        offset = 0
+        while offset < len(text):
+            if offset and text.startswith(' ; ', offset):
+                offset += 3
+            match = pattern.match(text, offset)
+            if not match:
+                raise Refused('unknown reader declared Exec command serialization')
+            argv = match[2].split()
+            if (not argv or any(not re.fullmatch(r'[A-Za-z0-9_./:=+-]+', value) for value in argv)
+                    or argv[0] != match[1]):
+                raise Refused('unknown reader declared Exec argv')
+            records.append({'path': match[1], 'argv': argv, 'ignore_errors': match[3] == 'yes'})
+            offset = match.end()
+        return records
+
+    @staticmethod
+    def static(proof):
+        if proof.get('schema') != 2 or 'prestart' not in proof:
+            raise Refused('reader native proof lacks qualified static authority')
+        return {name: proof[name] for name in ('schema', 'units', 'fragments', 'prestart', 'boot')}
 
     @staticmethod
     def process(pid):
@@ -1915,7 +2174,7 @@ class ReaderUnits:
                       gid=re.search(r'^Gid:\s+(.+)$', status, re.M)[1].split())
         return result
 
-    def admit(self):
+    def admit(self, protected=()):
         release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines()
                        if '=' in line)
         if release.get('ID', '').strip('"') != 'ubuntu' or release.get('VERSION_ID', '').strip('"') != '24.04':
@@ -1940,10 +2199,21 @@ class ReaderUnits:
                 or service['KillMode'] != 'control-group' or service['SendSIGKILL'] != 'yes'
                 or service['Restart'] != 'on-failure' or service['TimeoutStopUSec'] not in ('1min 30s', '90s')
                 or any(value.get(hook) for value in (service, socket)
-                       for hook in ('ExecStartPre', 'ExecStartPost', 'ExecStop', 'ExecStopPost', 'ExecStopPre'))
+                       for hook in ('ExecStartPost', 'ExecStop', 'ExecStopPost', 'ExecStopPre', 'ExecCondition', 'ExecReload'))
+                or bool(socket.get('ExecStartPre'))
                 or any(value.get(key) == 'yes' for value in (service, socket)
                        for key in ('RefuseManualStart', 'RefuseManualStop'))):
             raise Refused('unsupported reader unit/socket dependency graph')
+        controls = {self.SERVICE: self.control(service), self.SOCKET: self.control(socket)}
+        command = lambda path, argv: {'path': path, 'argv': argv, 'ignore_errors': False}
+        if (controls[self.SERVICE]['ExecStart'] != [command('/usr/sbin/rsyslogd', ['/usr/sbin/rsyslogd', '-n', '-iNONE'])]
+                or controls[self.SOCKET]['ExecStart']):
+            raise Refused('unsupported reader declared start commands')
+        prestart = None
+        if controls[self.SERVICE]['ExecStartPre']:
+            if controls[self.SERVICE]['ExecStartPre'] != [command(ReaderPrestart.HOOK, [ReaderPrestart.HOOK])]:
+                raise Refused('unsupported reader declared prestart commands')
+            prestart = ReaderPrestart(self.r).inspect(service, protected)
         if service['ControlGroup'] != '/system.slice/rsyslog.service':
             raise Refused('reader cgroup escaped qualified service scope')
         process = self.process(int(service['MainPID']))
@@ -1964,17 +2234,22 @@ class ReaderUnits:
                 if policy.stat().st_uid != 0 or policy.stat().st_mode & 0o022:
                     raise Refused('reader MAC policy has unknown ownership')
                 files[str(policy)] = digest(policy)
-        return {'units': {self.SERVICE: self.control(service), self.SOCKET: self.control(socket)},
+        return {'schema': 2, 'units': controls, 'prestart': prestart,
                 'process': process, 'invocation': service['InvocationID'],
                 'cgroup': service['ControlGroup'], 'start_monotonic': service['ExecMainStartTimestampMonotonic'], 'fragments': files,
                 'boot': AuditRuntime.boot()}
 
     def boundary(self, proof):
+        self.static(proof)
         if AuditRuntime.boot() != proof['boot']:
             raise Refused('reader lifecycle reboot is not qualified')
         for unit, expected in proof['units'].items():
             if self.control(self.show(unit)) != expected:
                 raise Refused('reader unit policy changed during transaction')
+        if proof['prestart'] is not None:
+            observed = ReaderPrestart(self.r).inspect(self.show(self.SERVICE), proof['prestart']['protected'])
+            if observed != proof['prestart']:
+                raise Refused('reader prestart execution/input authority changed')
         if any(digest(path) != value for path, value in proof['fragments'].items()):
             raise Refused('reader unit fragment changed during transaction')
 
@@ -2359,7 +2634,7 @@ class Reader:
         if not self.ack and not preview:
             raise Refused('configured version upgrade requires rsyslog downtime and replay acknowledgement')
         result['engine'] = self.qualify(observed)
-        result['units'] = self.units.admit()
+        result['units'] = self.units.admit(protected=[*state['paths'], str(ROOT), str(self.SPOOL)])
         self.verify_tools()
         self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
                    operation='current effective local C11 baseline')
@@ -2455,8 +2730,8 @@ class Reader:
                 # A crash immediately after a recorded start may precede the
                 # new PID proof. Re-admit its exact native policy/build/MAC;
                 # never accept an arbitrary executable/activation graph.
-                proof = self.units.admit()
-                if proof['units'] != value['units']['units'] or proof['fragments'] != value['units']['fragments']:
+                proof = self.units.admit(protected=[*item['paths'], str(ROOT), str(self.SPOOL)])
+                if ReaderUnits.static(proof) != ReaderUnits.static(value['units']):
                     raise Refused('recovery reader differs from the admitted native policy')
                 value['units'] = proof
                 source = Path(value['source']) / 'alerts/alerts.json'

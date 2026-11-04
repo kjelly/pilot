@@ -68,3 +68,12 @@ func TestWazuhRecoveryEntryAuthority(t *testing.T) {
 		t.Fatalf("Wazuh recovery entry authority controls failed: %v\\n%s", err, output)
 	}
 }
+
+// Real static filesystem closure and complete native Exec serialization; native
+// systemd/start/cache writes remain independently required target evidence.
+func TestWazuhReaderPrestartAuthority(t *testing.T) {
+	cmd := exec.Command("python3", "testdata/wazuh_reader_prestart_test.py")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Wazuh prestart authority controls failed: %v\n%s", err, output)
+	}
+}

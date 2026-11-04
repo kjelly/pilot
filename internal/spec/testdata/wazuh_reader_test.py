@@ -416,7 +416,7 @@ class SelectedReceiverIdentityTests(unittest.TestCase):
                 reader.source_users=lambda *args,**kwargs:None
                 reader.qualify=lambda _: {'engine':'native-leaf'}
                 reader.verify_tools=lambda:None
-                reader.units.admit=lambda: {'native':'unit-leaf'}
+                reader.units.admit=lambda **kwargs: {'native':'unit-leaf'}
                 original=Path.read_text
                 def text(path,*args,**kwargs):
                     if str(path)=='/etc/hosts':return pin+' siem-log-server\n'
@@ -501,9 +501,9 @@ class EnabledReaderIntegrationTests(unittest.TestCase):
                 def process(self,pid):return {'pid':self.pid,'executed':'declared-native-leaf'}
                 def show(self,unit):
                     return {'ActiveState':'active' if self.active else 'inactive','MainPID':str(self.pid) if self.active else '0','Job':''}
-                def admit(self):
+                def admit(self, **kwargs):
                     if not self.active:raise w.Refused('native substitute inactive')
-                    return {'process':self.process(self.pid),'units':{'fixed':'policy'},'fragments':{'fixed':'hash'}}
+                    return {'schema':2,'boot':'native-boot-leaf','prestart':None,'process':self.process(self.pid),'units':{'fixed':'policy'},'fragments':{'fixed':'hash'}}
                 def boundary(self,proof):pass
                 def stop(self,proof,requested=False):
                     if self.central.producing:raise AssertionError('reader stopped before producers')
@@ -767,7 +767,7 @@ class ReaderInspectionTests(unittest.TestCase):
         reader.fds=lambda *args,**kwargs:[]              # native FD leaf
         reader.qualify=lambda baseline:{'engine':'native-qualified-leaf'}
         reader.verify_tools=lambda:None
-        reader.units.admit=lambda:{'units':'native-policy-leaf'}
+        reader.units.admit=lambda **kwargs:{'units':'native-policy-leaf'}
         return reader,state,inspect,extra,profile,owner,source,argv,calls
 
     def test_actual_inspect_admit_accepts_native_closed_pairs_append_and_internal_links(self):

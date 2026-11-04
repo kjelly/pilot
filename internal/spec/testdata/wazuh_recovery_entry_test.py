@@ -200,8 +200,8 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
         units.show=lambda name:native.service if name==units.SERVICE else native.socket
         units.process=lambda pid:dict(native.unit_process)
         units.boundary=lambda proof:None  # immutable native policy/software leaf
-        def proof():
-            return {'process':dict(native.unit_process),'invocation':native.service['InvocationID'],
+        def proof(**kwargs):
+            return {'schema':2,'boot':'native-boot-leaf','prestart':None,'process':dict(native.unit_process),'invocation':native.service['InvocationID'],
                 'start_monotonic':native.service['ExecMainStartTimestampMonotonic'],
                 'cgroup':'/fixture','units':{'native-policy':'unchanged'},'fragments':{}}
         units.admit=proof

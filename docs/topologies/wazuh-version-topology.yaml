@@ -5,7 +5,7 @@
 # consumers; native evidence must bind the actual inventory/proxy state.
 services: none
 nodes:
-  - name: wx244-manager
+  - name: wf244-manager
     base_image: ubuntu-24.04
     # Guest-visible RAM must exceed the central contract's 8192 MiB.
     memory: 9216
@@ -17,7 +17,7 @@ nodes:
     # Also exercises agent/central ownership on the same physical host, while
     # other agent forks observe its stable manager through shared readers.
     groups: [sandbox, docker, wazuh-manager, wazuh-fim]
-  - name: wx244-deb
+  - name: wf244-deb
     base_image: ubuntu-24.04
     memory: 4096
     vcpus: 2
@@ -26,7 +26,7 @@ nodes:
     ssh_timeout: 5m
     boot_timeout: 8m
     groups: [sandbox, log-server, audit-log-forwarding, wazuh-fim]
-  - name: wx244-el
+  - name: wf244-el
     base_image: almalinux-9
     memory: 2048
     vcpus: 2
@@ -35,7 +35,7 @@ nodes:
     ssh_timeout: 5m
     boot_timeout: 8m
     groups: [sandbox, wazuh-fim]
-  - name: wx244-deb22
+  - name: wf244-deb22
     base_image: ubuntu-22.04
     memory: 2048
     vcpus: 2
