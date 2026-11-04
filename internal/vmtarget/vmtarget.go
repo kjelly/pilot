@@ -453,6 +453,11 @@ const DefaultVCPUs = 2
 const DefaultMemoryMB = 2048
 
 func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
+	if opt.Services != nil {
+		if err := opt.Services.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	if opt.Name == "" {
 		return nil, errors.New("vmtarget: name is required")
 	}

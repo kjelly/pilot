@@ -27,14 +27,15 @@ func healthyLifecycleFixture(t *testing.T) (*Manager, Profile, *sharedLifecycleR
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"username":"admin","sysadmin_flag":true}`))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(fixtureBody(r.URL.Path)))
 	}))
 	t.Cleanup(server.Close)
 	if err := manager.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		states[0].BindIP = "127.0.0.1"
 		states[0].Client.HostIP = "127.0.0.1"
 		states[0].Client.AptProxyURL, states[0].Client.RPMBaseURL, states[0].Client.RegistryMirrorURL = server.URL, server.URL, server.URL
+		states[0].Client.DataProbes = fixtureDescriptors()
 		states[0].ConsumerTracking = true
 		return states, nil
 	}); err != nil {

@@ -114,7 +114,15 @@ func TestServicesVMConsumersReuseAdoptedIdentityAcrossDataDirectories(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/acng-report.html" {
+			_, _ = w.Write([]byte("<html>Apt-Cacher NG</html>"))
+			return
+		}
+		if strings.Contains(r.URL.Path, "InRelease") {
+			_, _ = w.Write([]byte("-----BEGIN PGP SIGNED MESSAGE-----"))
+			return
+		}
 		_, _ = w.Write([]byte(`{"username":"admin","sysadmin_flag":true}`))
 	}))
 	defer server.Close()
@@ -144,12 +152,12 @@ func TestServicesVMConsumersReuseAdoptedIdentityAcrossDataDirectories(t *testing
 	}
 	t.Setenv("PILOT_VIRSH_BIN", virsh)
 	dataDir = filepath.Join(home, "vm-one")
-	first, err := resolveVMServiceBootstrap(context.Background(), "dev-lite", "default")
+	first, err := resolveVMServiceBootstrapFor(context.Background(), "dev-lite", "default", services.Requirements{services.APT})
 	if err != nil {
 		t.Fatal(err)
 	}
 	dataDir = filepath.Join(home, "vm-two")
-	second, err := resolveVMServiceBootstrap(context.Background(), "dev-lite", "default")
+	second, err := resolveVMServiceBootstrapFor(context.Background(), "dev-lite", "default", services.Requirements{services.APT})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -65,33 +65,35 @@ func (osCommandRunner) RunInput(ctx context.Context, dir, input, name string, ar
 
 // ServiceState is the persisted identity and health summary for one profile.
 type ServiceState struct {
-	InstanceID        string       `json:"instance_id,omitempty"`
-	Generation        uint64       `json:"generation,omitempty"`
-	AdoptedFrom       []string     `json:"adopted_from,omitempty"`
-	Profile           string       `json:"profile"`
-	Fingerprint       string       `json:"fingerprint"`
-	Root              string       `json:"root"`
-	ComposePath       string       `json:"compose_path"`
-	HarborComposePath string       `json:"harbor_compose_path,omitempty"`
-	Client            ClientConfig `json:"client"`
-	BindIP            string       `json:"bind_ip"`
-	Running           bool         `json:"running"`
-	UpdatedAt         time.Time    `json:"updated_at"`
-	ConsumerTracking  bool         `json:"consumer_tracking,omitempty"`
-	Consumers         []Consumer   `json:"consumers,omitempty"`
+	InstanceID        string                          `json:"instance_id,omitempty"`
+	Generation        uint64                          `json:"generation,omitempty"`
+	AdoptedFrom       []string                        `json:"adopted_from,omitempty"`
+	Profile           string                          `json:"profile"`
+	Fingerprint       string                          `json:"fingerprint"`
+	Root              string                          `json:"root"`
+	ComposePath       string                          `json:"compose_path"`
+	HarborComposePath string                          `json:"harbor_compose_path,omitempty"`
+	Client            ClientConfig                    `json:"client"`
+	BindIP            string                          `json:"bind_ip"`
+	Running           bool                            `json:"running"`
+	UpdatedAt         time.Time                       `json:"updated_at"`
+	ConsumerTracking  bool                            `json:"consumer_tracking,omitempty"`
+	Consumers         []Consumer                      `json:"consumers,omitempty"`
+	Capabilities      map[Capability]CapabilityStatus `json:"capabilities,omitempty"`
 }
 
 // Status is the user-facing service health summary.
 type Status struct {
-	InstanceID  string        `json:"instance_id,omitempty"`
-	Generation  uint64        `json:"generation,omitempty"`
-	Configured  bool          `json:"configured"`
-	Running     bool          `json:"running"`
-	Profile     string        `json:"profile,omitempty"`
-	Fingerprint string        `json:"fingerprint,omitempty"`
-	BindIP      string        `json:"bind_ip,omitempty"`
-	Root        string        `json:"root,omitempty"`
-	Services    []ServiceItem `json:"services,omitempty"`
+	InstanceID   string                          `json:"instance_id,omitempty"`
+	Generation   uint64                          `json:"generation,omitempty"`
+	Configured   bool                            `json:"configured"`
+	Running      bool                            `json:"running"`
+	Profile      string                          `json:"profile,omitempty"`
+	Fingerprint  string                          `json:"fingerprint,omitempty"`
+	BindIP       string                          `json:"bind_ip,omitempty"`
+	Root         string                          `json:"root,omitempty"`
+	Services     []ServiceItem                   `json:"services,omitempty"`
+	Capabilities map[Capability]CapabilityStatus `json:"capabilities,omitempty"`
 }
 
 // ServiceItem is one Compose service state line.
@@ -358,6 +360,7 @@ func (m *Manager) up(ctx context.Context, profile Profile, bindIP net.IP, repair
 	state.InstanceID, state.Generation = current.InstanceID, current.Generation
 	state.AdoptedFrom = current.AdoptedFrom
 	state.ConsumerTracking = current.ConsumerTracking || current.Fingerprint == ""
+	state.Capabilities = m.observeCapabilities(ctx, state)
 	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{state}, nil
 	})
@@ -519,12 +522,8 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 	}
 	result := Status{Configured: true, Running: state.Running, Profile: state.Profile, Fingerprint: state.Fingerprint, BindIP: state.BindIP, Root: state.Root}
 	result.InstanceID, result.Generation = state.InstanceID, state.Generation
-	if state.Running {
-		if err := m.validateHarborCredentials(ctx, state); err != nil {
-			result.Running = false
-			return result, err
-		}
-	}
+	result.Capabilities = m.observeCapabilities(ctx, state)
+	result.Running = requireCapabilities(result.Capabilities, nil) == nil
 	if state.ComposePath == "" {
 		return result, nil
 	}
@@ -647,25 +646,7 @@ func (m *Manager) PurgeWithOptions(ctx context.Context, confirmed bool, options 
 
 // ClientConfig returns the last successful non-secret client contract.
 func (m *Manager) ClientConfig(ctx context.Context) (ClientConfig, error) {
-	unlock, err := m.operationContext(ctx)
-	if err != nil {
-		return ClientConfig{}, err
-	}
-	defer unlock()
-	state, err := m.current()
-	if err != nil {
-		return ClientConfig{}, err
-	}
-	if !state.Running {
-		return ClientConfig{}, errors.New("services: service stack is not running")
-	}
-	if err := m.probeEndpoints(ctx, state); err != nil {
-		return ClientConfig{}, err
-	}
-	if state.Client.HostIP == "" {
-		state.Client.HostIP = state.BindIP
-	}
-	return state.Client, nil
+	return m.ClientConfigFor(ctx, nil)
 }
 
 func (m *Manager) probeEndpoints(ctx context.Context, state ServiceState) error {

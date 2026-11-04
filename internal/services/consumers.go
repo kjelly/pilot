@@ -24,6 +24,7 @@ func LockConsumerDomain(ctx context.Context, name string) (func(), error) {
 // Consumer is a durable claim for a VM that can outlive its provisioning process.
 // ID is the guest domain UUID, never a PID or an expiring process lease.
 type Consumer struct {
+	Capabilities       string `json:"capabilities,omitempty"`
 	ID                 string `json:"id"`
 	Name               string `json:"name"`
 	StateDirectory     string `json:"state_directory"`
@@ -53,6 +54,22 @@ func (m *Manager) Directory() string { return m.dataDir }
 
 // RegisterConsumer atomically verifies a successful client contract and blocks maintenance.
 func (m *Manager) RegisterConsumer(ctx context.Context, expected ClientConfig, consumer Consumer) error {
+	return m.RegisterConsumerFor(ctx, expected, consumer, nil)
+}
+
+func (m *Manager) RegisterConsumerFor(ctx context.Context, expected ClientConfig, consumer Consumer, required Requirements) error {
+	if _, err := NormalizeRequirements(required); err != nil {
+		return err
+	}
+	if consumer.Capabilities != "" {
+		declared, err := ParseRequirements(consumer.Capabilities)
+		if err != nil || !slices.Equal(declared, mustNormalizeRequirements(required)) {
+			return errors.New("services: consumer capability declaration differs from request")
+		}
+	} else if required != nil && !slices.Equal(mustNormalizeRequirements(required), Requirements{APT, RPM, OCI}) {
+		return errors.New("services: consumer capability declaration is required")
+	}
+
 	unlock, err := m.operationContext(ctx)
 	if err != nil {
 		return err
@@ -69,10 +86,14 @@ func (m *Manager) RegisterConsumer(ctx context.Context, expected ClientConfig, c
 	if actual.HostIP == "" {
 		actual.HostIP = state.BindIP
 	}
-	if !state.Running || !reflect.DeepEqual(expected, actual) {
+	if !reflect.DeepEqual(expected, actual) {
 		return errors.New("services: consumer client contract is stale or stack is stopped")
 	}
-	if err := m.probeEndpoints(ctx, state); err != nil {
+	observed := m.observeCapabilities(ctx, state)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err := requireCapabilities(observed, required); err != nil {
 		return err
 	}
 	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {

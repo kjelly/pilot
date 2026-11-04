@@ -2,6 +2,8 @@ package vmtarget
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +22,7 @@ import (
 type serviceConsumerProbes struct {
 	mu                        sync.Mutex
 	identity                  bool
+	dataDown                  bool
 	adminAllowed, adminDenied int
 	databaseLog               string
 	root                      string
@@ -70,7 +73,14 @@ func registeredServiceFixture(t *testing.T) (*services.Manager, *ServiceBootstra
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v2.0/users/current" {
-			w.WriteHeader(http.StatusOK)
+			probes.mu.Lock()
+			down := probes.dataDown
+			probes.mu.Unlock()
+			if down && strings.Contains(r.URL.Path, "/manifests/") {
+				w.WriteHeader(503)
+				return
+			}
+			_, _ = w.Write([]byte(vmServiceFixtureBody(r.URL.Path)))
 			return
 		}
 		user, password, ok := r.BasicAuth()
@@ -140,6 +150,7 @@ fi
 		}
 	})
 	client := bundle.Client
+	client.DataProbes = vmServiceDescriptors()
 	client.AptProxyURL, client.RPMBaseURL, client.RegistryMirrorURL = server.URL, server.URL, server.URL
 	store, err := statefile.New[services.ServiceState](legacy, "services.json", 1, "services")
 	if err != nil {
@@ -158,8 +169,8 @@ fi
 	if err != nil {
 		t.Fatal(err)
 	}
-	probes.assertCounts(t, 1, 0, 1, 1)
-	return manager, &ServiceBootstrap{DiscoveryDirectory: discovery, InstanceID: client.InstanceID, Generation: client.Generation, Profile: client.Profile, Fingerprint: client.Fingerprint, HostIP: client.HostIP, Hostname: client.Hostname, AptProxyURL: client.AptProxyURL, RPMBaseURL: client.RPMBaseURL, RPMRepositories: client.RPMRepositories, RegistryMirrorURL: client.RegistryMirrorURL, RegistryProjects: client.RegistryProjects, CAPEM: client.CAPEM}, probes
+	probes.assertCounts(t, 1, 0, 0, 0)
+	return manager, &ServiceBootstrap{DiscoveryDirectory: discovery, InstanceID: client.InstanceID, Generation: client.Generation, Profile: client.Profile, Fingerprint: client.Fingerprint, HostIP: client.HostIP, Hostname: client.Hostname, AptProxyURL: client.AptProxyURL, RPMBaseURL: client.RPMBaseURL, RPMRepositories: client.RPMRepositories, RegistryMirrorURL: client.RegistryMirrorURL, RegistryProjects: client.RegistryProjects, CAPEM: client.CAPEM, DataProbes: client.DataProbes}, probes
 }
 
 // The shim reads pilot's generated XML, and models the UUID/name lists used by
@@ -188,7 +199,7 @@ func TestVMServiceConsumerPersistsAcrossManagerAndReleasesAfterVerifiedTeardown(
 	if target.ServiceConsumer == nil {
 		t.Fatal("central Up did not register guest")
 	}
-	probes.assertCounts(t, 2, 0, 2, 2)
+	probes.assertCounts(t, 2, 0, 0, 0)
 	if _, err := uuid.Parse(target.ServiceConsumer.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +229,7 @@ func TestVMServiceConsumerPersistsAcrossManagerAndReleasesAfterVerifiedTeardown(
 	if err != nil || client.InstanceID != bootstrap.InstanceID {
 		t.Fatalf("VM teardown interrupted cache: %+v %v", client, err)
 	}
-	probes.assertCounts(t, 3, 0, 3, 3)
+	probes.assertCounts(t, 3, 0, 0, 0)
 	if err := reopened.Down(context.Background(), target.Name); err != nil {
 		t.Fatalf("repeated teardown: %v", err)
 	}
@@ -273,52 +284,83 @@ func TestVMServiceConsumerMissingIdentityRefusesBeforeDomainCreation(t *testing.
 	}
 }
 
-func TestVMServiceConsumerCredentialFailureRefusesRegistrationAndDomainCreation(t *testing.T) {
-	for _, fault := range []string{"wrong-admin", "wrong-database", "missing-current-identity", "trust-all-database"} {
+func TestVMServiceConsumerManagementFailureRequiresIndependentDataProof(t *testing.T) {
+	for _, fault := range []string{"wrong-admin", "wrong-database", "missing-current-identity", "trust-all-database", "data-failure"} {
 		t.Run(fault, func(t *testing.T) {
-			serviceManager, bootstrap, probes := registeredServiceFixture(t)
+			manager, bootstrap, probes := registeredServiceFixture(t)
 			m, base := newTestManager(t, serviceConsumerVirsh+happyVirsh)
-			want := "authentication failed"
-			adminAllowed, adminDenied, dbAllowed, dbDenied := 2, 0, 1, 3
 			switch fault {
 			case "wrong-admin", "wrong-database":
-				rel := "harbor/secrets/database-password"
-				if fault == "wrong-admin" {
-					rel = "harbor/secrets/admin-password"
-					adminAllowed, adminDenied, dbDenied = 1, 1, 1
+				rel := "harbor/secrets/admin-password"
+				if fault == "wrong-database" {
+					rel = "harbor/secrets/database-password"
 				}
-				if err := os.WriteFile(filepath.Join(probes.root, rel), []byte("SENTINEL-wrong-association\n"), 0600); err != nil {
-					t.Fatal(err)
+				if e := os.WriteFile(filepath.Join(probes.root, rel), []byte("SENTINEL-wrong\n"), 0600); e != nil {
+					t.Fatal(e)
 				}
 			case "missing-current-identity":
 				probes.mu.Lock()
 				probes.identity = false
 				probes.mu.Unlock()
-				want = "invalid current-user identity"
-				dbDenied = 1
 			case "trust-all-database":
 				t.Setenv("PILOT_TEST_SERVICE_DB_TRUST_ALL", "1")
-				want = "negative control"
-				dbAllowed, dbDenied = 2, 1
+			case "data-failure":
+				probes.mu.Lock()
+				probes.dataDown = true
+				probes.mu.Unlock()
 			}
-			_, err := m.Up(context.Background(), Options{Name: "credential-rejected-vm", BaseImage: base, Services: bootstrap})
-			if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "SENTINEL") {
-				t.Fatalf("credential fault did not reject central registration safely: %v", err)
+			target, e := m.Up(context.Background(), Options{Name: "independent-service-vm", BaseImage: base, Services: bootstrap})
+			consumers, ce := manager.Consumers(context.Background())
+			if ce != nil {
+				t.Fatal(ce)
 			}
-			consumers, err := serviceManager.Consumers(context.Background())
-			if err != nil || len(consumers) != 0 {
-				t.Fatalf("credential failure registered a consumer: %+v %v", consumers, err)
-			}
-			targets, err := m.store.Load()
-			if err != nil || len(targets) != 0 {
-				t.Fatalf("credential failure persisted VM state: %+v %v", targets, err)
-			}
-			for _, path := range []string{os.Getenv("PILOT_VIRSH_BIN") + ".domain", filepath.Join(m.vmDir, "credential-rejected-vm")} {
-				if _, err := os.Stat(path); !os.IsNotExist(err) {
-					t.Fatal("credential failure created domain or target artifacts")
+			if fault == "data-failure" {
+				if e == nil || !strings.Contains(e.Error(), "required oci") || len(consumers) != 0 {
+					t.Fatalf("failed data proof accepted: %v %+v", e, consumers)
 				}
+				targets, _ := m.store.Load()
+				if len(targets) != 0 {
+					t.Fatal("failed readiness created VM state")
+				}
+				return
 			}
-			probes.assertCounts(t, adminAllowed, adminDenied, dbAllowed, dbDenied)
+			if e != nil || target.ServiceConsumer == nil || len(consumers) != 1 {
+				t.Fatalf("proven data rejected by management association: %v %+v", e, consumers)
+			}
+			data, _ := os.ReadFile(probes.databaseLog)
+			if len(data) != 0 {
+				t.Fatal("consuming readiness ran a management database probe")
+			}
 		})
 	}
+}
+
+const vmFixtureManifest = `{"schemaVersion":2,"layers":[]}`
+
+func vmServiceDescriptors() map[services.Capability]services.DataProbe {
+	sum := sha256.Sum256([]byte(vmFixtureManifest))
+	digest := hex.EncodeToString(sum[:])
+	return map[services.Capability]services.DataProbe{services.APT: {Resource: "http://upstream.invalid/dists/noble/InRelease", Contains: "PGP SIGNED MESSAGE"}, services.RPM: {Resource: "/pulp/content/test/repodata/repomd.xml", Contains: "<repomd"}, services.OCI: {Resource: "/v2/test/manifests/sha256:" + digest, SHA256: digest}}
+}
+func vmServiceFixtureBody(path string) string {
+	switch path {
+	case "/acng-report.html":
+		return "<html>Apt-Cacher-NG</html>"
+	case "/pulp/api/v3/status/":
+		return `{"database_connection":{"connected":true},"online_workers":[{"name":"test-worker"}],"online_content_apps":[{"name":"test-content"}]}`
+	case "/api/v2.0/health":
+		return `{"status":"healthy","components":[{"status":"healthy"}]}`
+	case "/pulp/api/v3/users/":
+		return `{"results":[]}`
+	}
+	if strings.Contains(path, "InRelease") {
+		return "PGP SIGNED MESSAGE"
+	}
+	if strings.Contains(path, "repomd.xml") {
+		return "<repomd/>"
+	}
+	if strings.Contains(path, "/manifests/") {
+		return vmFixtureManifest
+	}
+	return ""
 }

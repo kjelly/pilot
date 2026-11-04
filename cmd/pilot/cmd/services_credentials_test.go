@@ -75,9 +75,16 @@ func TestServicesCredentialImportThroughCobra(t *testing.T) {
 		rootCmd.SetArgs(args)
 		return rootCmd.ExecuteContext(context.Background())
 	}
-	if err := execute("services", "status", "--json"); err == nil {
-		t.Fatal("normal status accepted missing secret")
+	if err := execute("services", "status", "--json"); err != nil {
+		t.Fatal(err)
 	}
+	if !strings.Contains(stdout.String(), "credential-unavailable") {
+		t.Fatal("status did not report unavailable management credential")
+	}
+	if err := execute("services", "up"); err == nil {
+		t.Fatal("management up accepted missing secret")
+	}
+
 	if err := execute("services", "credentials", "import", "--secret-file", source); err != nil {
 		t.Fatal(err)
 	}

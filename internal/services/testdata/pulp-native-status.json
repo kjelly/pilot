@@ -1,0 +1,18 @@
+{
+  "database_connection": {
+    "connected": true
+  },
+  "redis_connection": {
+    "connected": false
+  },
+  "online_workers": [
+    {
+      "name": "synthetic-worker"
+    }
+  ],
+  "online_content_apps": [
+    {
+      "name": "synthetic-content"
+    }
+  ]
+}

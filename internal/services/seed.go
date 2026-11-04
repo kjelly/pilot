@@ -92,6 +92,7 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 	}
 	return ClientConfig{
 		Profile:           profile.Name,
+		DataProbes:        profile.ClientDataProbes(),
 		Fingerprint:       fingerprint,
 		HostIP:            host,
 		Hostname:          serviceHostname,

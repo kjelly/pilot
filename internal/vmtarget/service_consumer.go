@@ -20,7 +20,7 @@ func (m *Manager) registerServiceConsumer(ctx context.Context, target *Target, b
 	if bootstrap.DiscoveryDirectory == "" || bootstrap.InstanceID == "" || bootstrap.Generation == 0 {
 		return errors.New("vmtarget: services require shared discovery identity for durable guest protection")
 	}
-	manager, err := services.NewSharedManagerContext(ctx, services.DiscoveryOptions{Directory: bootstrap.DiscoveryDirectory}, nil)
+	manager, err := services.NewSharedManagerContext(ctx, services.DiscoveryOptions{Directory: bootstrap.DiscoveryDirectory, ConsumptionOnly: true}, nil)
 	if err != nil {
 		return err
 	}
@@ -28,9 +28,9 @@ func (m *Manager) registerServiceConsumer(ctx context.Context, target *Target, b
 	if err != nil {
 		return err
 	}
-	consumer := services.Consumer{ID: uuid.NewString(), Name: target.Name, StateDirectory: stateDir, DiscoveryDirectory: manager.Directory(), InstanceID: bootstrap.InstanceID, Generation: bootstrap.Generation}
-	expected := services.ClientConfig{InstanceID: bootstrap.InstanceID, Generation: bootstrap.Generation, Profile: bootstrap.Profile, Fingerprint: bootstrap.Fingerprint, HostIP: bootstrap.HostIP, Hostname: bootstrap.Hostname, AptProxyURL: bootstrap.AptProxyURL, RPMBaseURL: bootstrap.RPMBaseURL, RPMRepositories: bootstrap.RPMRepositories, RegistryMirrorURL: bootstrap.RegistryMirrorURL, RegistryProjects: bootstrap.RegistryProjects, CAPEM: bootstrap.CAPEM}
-	if err := manager.RegisterConsumer(ctx, expected, consumer); err != nil {
+	consumer := services.Consumer{Capabilities: services.RequirementKey(bootstrap.Requirements), ID: uuid.NewString(), Name: target.Name, StateDirectory: stateDir, DiscoveryDirectory: manager.Directory(), InstanceID: bootstrap.InstanceID, Generation: bootstrap.Generation}
+	expected := services.ClientConfig{InstanceID: bootstrap.InstanceID, Generation: bootstrap.Generation, Profile: bootstrap.Profile, Fingerprint: bootstrap.Fingerprint, HostIP: bootstrap.HostIP, Hostname: bootstrap.Hostname, AptProxyURL: bootstrap.AptProxyURL, RPMBaseURL: bootstrap.RPMBaseURL, RPMRepositories: bootstrap.RPMRepositories, RegistryMirrorURL: bootstrap.RegistryMirrorURL, RegistryProjects: bootstrap.RegistryProjects, CAPEM: bootstrap.CAPEM, DataProbes: bootstrap.DataProbes}
+	if err := manager.RegisterConsumerFor(ctx, expected, consumer, bootstrap.Requirements); err != nil {
 		return err
 	}
 	target.ServiceConsumer = &consumer

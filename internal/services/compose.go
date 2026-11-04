@@ -145,6 +145,7 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 		CAKeyPath:        caKeyPath,
 		Client: ClientConfig{
 			Profile:           profile.Name,
+			DataProbes:        profile.ClientDataProbes(),
 			Fingerprint:       fingerprint,
 			HostIP:            host,
 			Hostname:          serviceHostname,
