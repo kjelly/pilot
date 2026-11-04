@@ -84,6 +84,8 @@ type Retention struct {
 
 // ClientConfig is the non-secret contract injected into an opted-in VM.
 type ClientConfig struct {
+	InstanceID        string            `yaml:"instance_id,omitempty"`
+	Generation        uint64            `yaml:"generation,omitempty"`
 	Profile           string            `yaml:"profile"`
 	Fingerprint       string            `yaml:"fingerprint"`
 	HostIP            string            `yaml:"host_ip,omitempty"`

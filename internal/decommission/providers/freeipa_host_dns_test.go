@@ -68,7 +68,7 @@ func TestFreeIPAProvider_HostObjectAndDNSAbsent_OnlyProvenAbsencePasses(t *testi
 					return &ansible.Result{Stdout: hostShowNotFound}, nil
 				}
 			})
-			results, err := p.Verify(context.Background(), VerifyInput{FQDN: tc.fqdn})
+			results, err := p.Verify(context.Background(), VerifyInput{FQDN: tc.fqdn, InventoryAlias: tc.fqdn})
 			if tc.wantStatus == "" {
 				if err == nil {
 					t.Fatalf("Verify() = %+v, want an error for an unrecognized DNS query result", findVerification(t, results, "host_dns"))

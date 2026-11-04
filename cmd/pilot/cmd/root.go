@@ -12,9 +12,11 @@ import (
 )
 
 var (
-	cfgFile  string
-	dataDir  string
-	logLevel string // --log-level (persistent); default from $PILOT_LOG_LEVEL or "warn"
+	cfgFile           string
+	dataDir           string
+	servicesDir       string
+	servicesAdoptFrom string
+	logLevel          string // --log-level (persistent); default from $PILOT_LOG_LEVEL or "warn"
 )
 
 var rootCmd = &cobra.Command{
@@ -75,6 +77,8 @@ type ExitCoder interface {
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default ~/.config/pilot/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "data directory for the history db and target state")
+	rootCmd.PersistentFlags().StringVar(&servicesDir, "services-dir", "", "shared host-services discovery directory (also $PILOT_SERVICES_DIR)")
+	rootCmd.PersistentFlags().StringVar(&servicesAdoptFrom, "services-adopt-from", "", "adopt host services in place from a legacy pilot data directory")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "", "diagnostic log level: debug|info|warn|error (default warn; also $PILOT_LOG_LEVEL)")
 
 	rootCmd.AddCommand(versionCmd)

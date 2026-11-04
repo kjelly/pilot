@@ -49,8 +49,15 @@ pilot services down
 pilot services purge --confirm
 ```
 
-`services up` creates a Compose project below
-`~/.local/share/pilot/cache/`, starts the selected profile, and waits for all
+`services up` uses the shared OS-user discovery directory
+`~/.local/share/pilot-services/` independently of VM `data_dir`. Fresh bundles
+live below its `cache/`; compatible existing bundles are registered at their
+original cache paths without moving data or credentials. Override precedence is
+`--services-dir`, `PILOT_SERVICES_DIR`, config `services_dir`, then the default.
+An explicit override only adopts legacy data when `--services-adopt-from` names
+the old pilot data directory. The full discovery, migration and conflict contract
+is in [shared services discovery](2026-11-03-shared-services-discovery-spec.md).
+The manager starts the selected profile and waits for all
 health checks. `down` stops containers but retains data. `purge` is the only
 explicit destructive operation and requires confirmation.
 

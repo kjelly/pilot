@@ -199,7 +199,7 @@ func runVtTopologyUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	serviceBootstrap, err := resolveTopologyServiceBootstrap(context.Background(), spec)
+	serviceBootstrap, err := resolveTopologyServiceBootstrap(cmd.Context(), spec)
 	if err != nil {
 		return err
 	}
@@ -207,7 +207,7 @@ func runVtTopologyUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
+	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 	if vtTopoUpFresh {
 		return runFreshTopologyUp(ctx, cmd, m, spec, serviceBootstrap)
@@ -356,7 +356,7 @@ func runVtTopologyDown(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
+	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
 	var firstErr error
@@ -963,7 +963,7 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	serviceBootstrap, err := resolveTopologyServiceBootstrap(context.Background(), spec)
+	serviceBootstrap, err := resolveTopologyServiceBootstrap(cmd.Context(), spec)
 	if err != nil {
 		return err
 	}
@@ -993,7 +993,7 @@ func runVtTopologyTest(cmd *cobra.Command, args []string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
+	ctx := cmd.Context()
 	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
 
 	// Syntax is intentionally first so --ephemeral does not allocate VMs for

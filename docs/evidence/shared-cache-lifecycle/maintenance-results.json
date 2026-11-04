@@ -1,0 +1,8 @@
+{
+  "pause-pulp": 0,
+  "unhealthy-attach": 1,
+  "unpause-pulp": 0,
+  "maintenance-down": 0,
+  "maintenance-repair": 0,
+  "status": "pass"
+}

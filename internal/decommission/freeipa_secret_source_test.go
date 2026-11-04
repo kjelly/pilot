@@ -3,6 +3,8 @@ package decommission
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,7 +20,16 @@ import (
 // and both planning and execution use the production provider implementations.
 type decommissionRosterFixtureRunner struct{ stdout string }
 
-func (r decommissionRosterFixtureRunner) Run(context.Context, ...string) (*ansible.Result, error) {
+func (r decommissionRosterFixtureRunner) Run(_ context.Context, args ...string) (*ansible.Result, error) {
+	for _, arg := range args {
+		var controls map[string]string
+		if json.Unmarshal([]byte(arg), &controls) == nil && controls["pilot_decommission_query"] == "ssh_retirement" {
+			raw, _ := json.Marshal(map[string]any{"schema_version": 1, "kind": "ssh_retirement",
+				"fqdn": controls["pilot_decommission_target_fqdn"], "alias": controls["pilot_decommission_target_alias"],
+				"stage": controls["pilot_decommission_retirement_stage"], "status": "settled"})
+			return &ansible.Result{Stdout: "PILOT_SSH_RETIREMENT_V1:" + base64.StdEncoding.EncodeToString(raw)}, nil
+		}
+	}
 	return &ansible.Result{Stdout: r.stdout}, nil
 }
 

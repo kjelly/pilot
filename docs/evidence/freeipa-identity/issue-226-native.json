@@ -1,0 +1,448 @@
+{
+  "schema": "pilot-native-retirement/v2",
+  "candidate": {
+    "commit": "56df65389a24ac6310be6b4d776e5ff8ae0511cb",
+    "tree": "cc753bd7e88d892ae5fdaa9f43de6b18a7fc3a8f"
+  },
+  "status": "PASS",
+  "native_versions": {
+    "p245a-ipa": {
+      "os": {
+        "ID": "almalinux",
+        "VERSION_ID": "9.8",
+        "PRETTY_NAME": "AlmaLinux 9.8 (Olive Jaguar)"
+      },
+      "tools": [
+        {
+          "argv": [
+            "sssd",
+            "--version"
+          ],
+          "rc": 0,
+          "stdout": "2.9.8",
+          "stderr": ""
+        },
+        {
+          "argv": [
+            "ipa",
+            "--version"
+          ],
+          "rc": 0,
+          "stdout": "VERSION: 4.13.4, API_VERSION: 2.257",
+          "stderr": ""
+        }
+      ]
+    },
+    "p245a-live": {
+      "os": {
+        "PRETTY_NAME": "Ubuntu 24.04.4 LTS",
+        "VERSION_ID": "24.04",
+        "ID": "ubuntu"
+      },
+      "tools": [
+        {
+          "argv": [
+            "sssd",
+            "--version"
+          ],
+          "rc": 0,
+          "stdout": "2.9.4",
+          "stderr": ""
+        }
+      ]
+    },
+    "p245a-retired": {
+      "os": {
+        "PRETTY_NAME": "Ubuntu 24.04.4 LTS",
+        "VERSION_ID": "24.04",
+        "ID": "ubuntu"
+      },
+      "tools": [
+        {
+          "argv": [
+            "sssd",
+            "--version"
+          ],
+          "rc": 0,
+          "stdout": "2.9.4",
+          "stderr": ""
+        }
+      ]
+    }
+  },
+  "targets": [
+    {
+      "name": "p245a-ipa",
+      "groups": [
+        "freeipa-server"
+      ],
+      "ip": "192.168.122.5",
+      "base_image": "/var/lib/libvirt/images/pilot/images/almalinux-9-golden.qcow2",
+      "base_image_sha256": "b780998adca7c69ff6dbd41a05b51769ef6ab6708a7defbd286195186fbcc8ac"
+    },
+    {
+      "name": "p245a-live",
+      "groups": [
+        "freeipa-client"
+      ],
+      "ip": "192.168.122.8",
+      "base_image": "/var/lib/libvirt/images/pilot/images/ubuntu-24.04-golden.qcow2",
+      "base_image_sha256": "bfab799e2c50a83f77c607e50290646c07628a67ed73fe90c28658a28b0a5394"
+    },
+    {
+      "name": "p245a-retired",
+      "groups": [
+        "freeipa-client"
+      ],
+      "ip": "192.168.122.6",
+      "base_image": "/var/lib/libvirt/images/pilot/images/ubuntu-24.04-golden.qcow2",
+      "base_image_sha256": "bfab799e2c50a83f77c607e50290646c07628a67ed73fe90c28658a28b0a5394"
+    }
+  ],
+  "inventory": {
+    "hosts": [
+      "p245a-ipa",
+      "p245a-live",
+      "p245a-retired"
+    ],
+    "groups": {
+      "freeipa-client": [
+        "p245a-live",
+        "p245a-retired"
+      ],
+      "freeipa-server": [
+        "p245a-ipa"
+      ]
+    },
+    "source": "rendered by pilot for this run"
+  },
+  "machine_chain": {
+    "steps": [
+      {
+        "name": "L1 syntax check",
+        "status": "pass",
+        "started_at": "2026-11-03T12:16:25.568235778Z",
+        "duration_seconds": 1.6796083579999999
+      },
+      {
+        "name": "L3 check-mode dry-run",
+        "status": "pass",
+        "started_at": "2026-11-03T12:16:27.48688878Z",
+        "duration_seconds": 124.893317938,
+        "recap": {
+          "p245a-ipa": {
+            "ok": 252,
+            "changed": 0,
+            "unreachable": 0,
+            "failed": 0,
+            "skipped": 712,
+            "rescued": 0,
+            "ignored": 0
+          }
+        }
+      },
+      {
+        "name": "L4 apply",
+        "status": "pass",
+        "started_at": "2026-11-03T12:18:37.821182497Z",
+        "duration_seconds": 330.666547582,
+        "recap": {
+          "p245a-ipa": {
+            "ok": 440,
+            "changed": 58,
+            "unreachable": 0,
+            "failed": 0,
+            "skipped": 524,
+            "rescued": 0,
+            "ignored": 0
+          }
+        }
+      },
+      {
+        "name": "L5 verify",
+        "status": "pass",
+        "started_at": "2026-11-03T12:24:08.490846764Z",
+        "duration_seconds": 27.956331024
+      },
+      {
+        "name": "L6 idempotency",
+        "status": "pass",
+        "started_at": "2026-11-03T12:24:36.447194973Z",
+        "duration_seconds": 510.428285179,
+        "recap": {
+          "p245a-ipa": {
+            "ok": 386,
+            "changed": 0,
+            "unreachable": 0,
+            "failed": 0,
+            "skipped": 578,
+            "rescued": 0,
+            "ignored": 0
+          }
+        }
+      }
+    ],
+    "verify": [
+      {
+        "spec": "docs/verification/freeipa-identity.md",
+        "limit": "freeipa-server",
+        "verdict": "PASS",
+        "pass": 24,
+        "fail": 0,
+        "skip": 0
+      }
+    ],
+    "record": "docs/evidence/freeipa-identity/issue-226.md"
+  },
+  "partial_tag_arms": {
+    "candidate": "56df65389a24ac6310be6b4d776e5ff8ae0511cb",
+    "negative_arms": [
+      {
+        "selector": "users",
+        "rc": 2,
+        "journal_unchanged": true,
+        "ldap_unchanged": true,
+        "host_and_dns_unchanged": true,
+        "client_a_unchanged": true
+      },
+      {
+        "selector": "identity-skip-hosts",
+        "rc": 2,
+        "journal_unchanged": true,
+        "ldap_unchanged": true,
+        "host_and_dns_unchanged": true,
+        "client_a_unchanged": true
+      }
+    ],
+    "full_retirement": "PASS",
+    "settled_partial_replay": [
+      "users",
+      "client-cache"
+    ],
+    "no_op": "changed=0",
+    "omitted_preserved": true,
+    "live_b_allow_a_deny": true
+  },
+  "lifecycle_checkpoints": {
+    "1": "Converged A effective keys and native SSH on both clients",
+    "2": "Offline optional retired client retains exact pending work; live B allow A deny",
+    "3": "Missing inventory/cross-stage preflight refuses before identity mutation; journal and LDAP unchanged",
+    "4": "Direct absent cleanup and exact receipt; omitted state preserved; live B allow A deny; repeated changed=0",
+    "5": "Omitted inventory requires exact explicit mapping; authorized retirement succeeds",
+    "6": "Journal replacement EPERM after authoritative cleanup preserves pending and inventory; original persisted plan resumes, inventory removed last; post-retirement C allow B deny"
+  },
+  "limits": [
+    "Synthetic disposable sandbox only; no production target mutation.",
+    "Provider/client prerequisites use unchanged c6fe65b8 revision; candidate identity chain starts from enrolled pristine targets before identity fixtures, not a fresh full-site deployment.",
+    "Native interruption is atomic replacement EPERM; persistent fsync EIO is actual helper/Ansible/provider harness evidence, not an arbitrary native crash or hardware failure claim.",
+    "Secret-bearing roster/vault/private SSH keys are recorded only by reference/mode/key names; no secret values or value hashes are published."
+  ],
+  "native_sequence": [
+    {
+      "name": "candidate-build",
+      "rc": 0,
+      "seconds": 5.34
+    },
+    {
+      "name": "setup-server",
+      "rc": 0,
+      "seconds": 577.71
+    },
+    {
+      "name": "setup-clients",
+      "rc": 0,
+      "seconds": 562.44
+    },
+    {
+      "name": "candidate-inventory",
+      "rc": 0,
+      "seconds": 0.11
+    },
+    {
+      "name": "identity-chain",
+      "rc": 0,
+      "seconds": 1019.34
+    },
+    {
+      "name": "checkpoint1",
+      "rc": 0,
+      "seconds": 13.51
+    },
+    {
+      "name": "converged-partial-tags",
+      "rc": 0,
+      "seconds": 192.83
+    },
+    {
+      "name": "checkpoint2",
+      "rc": 0,
+      "seconds": 119.3
+    },
+    {
+      "name": "checkpoint3",
+      "rc": 0,
+      "seconds": 14.09
+    },
+    {
+      "name": "checkpoint4",
+      "rc": 0,
+      "seconds": 94.58
+    },
+    {
+      "name": "checkpoint5",
+      "rc": 0,
+      "seconds": 79.55
+    },
+    {
+      "name": "checkpoint6",
+      "rc": 0,
+      "seconds": 371.19
+    }
+  ],
+  "prerequisites": {
+    "revision": "c6fe65b8f16d813ec43ac1cdb688d8762b9d6372",
+    "tree": "6492c3634ae8f3279f901da1f3477ecfa9958aee",
+    "binary_sha256": "2f013aee1483fa72cd6f98798c23649c8de72123dc7428657b92a1ab2befa175"
+  },
+  "controller": {
+    "temporary_storage": "Disk-backed private temporary directories because shared tmpfs inodes were exhausted",
+    "transport": "Actual /usr/bin/ssh; Ansible multiplex disabled across snapshot restoration; pilot lifecycle uses a private short control directory"
+  },
+  "secret_inputs": [
+    {
+      "kind": "Synthetic identity roster",
+      "mode": "0600",
+      "secret_field_names": [
+        "users[].password"
+      ],
+      "values_and_value_hashes": "not published"
+    },
+    {
+      "kind": "Synthetic IPA vault",
+      "mode": "0600",
+      "key_names": [
+        "ipa_admin_password",
+        "ipa_ds_password"
+      ],
+      "values_and_value_hashes": "not published"
+    }
+  ],
+  "observed_operation_results": [
+    {
+      "name": "users-converged-refusal",
+      "rc": 2,
+      "seconds": 4.821
+    },
+    {
+      "name": "identity-skip-hosts-converged-refusal",
+      "rc": 2,
+      "seconds": 5.403
+    },
+    {
+      "name": "converged-full-retirement",
+      "rc": 0,
+      "seconds": 51.027
+    },
+    {
+      "name": "converged-full-noop",
+      "rc": 0,
+      "seconds": 36.734
+    },
+    {
+      "name": "settled-users",
+      "rc": 0,
+      "seconds": 11.328
+    },
+    {
+      "name": "settled-client-cache",
+      "rc": 0,
+      "seconds": 8.677
+    },
+    {
+      "name": "offline-b-reconcile",
+      "rc": 1,
+      "seconds": 102.525
+    },
+    {
+      "name": "omitted-inventory-apply",
+      "rc": 2,
+      "seconds": 4.558
+    },
+    {
+      "name": "wrong-stage-apply",
+      "rc": 2,
+      "seconds": 4.956
+    },
+    {
+      "name": "direct-absent-apply",
+      "rc": 0,
+      "seconds": 52.794
+    },
+    {
+      "name": "direct-absent-noop",
+      "rc": 0,
+      "seconds": 38.392
+    },
+    {
+      "name": "removed-inventory-without-mapping",
+      "rc": 2,
+      "seconds": 5.518
+    },
+    {
+      "name": "removed-inventory-authorized-mapping",
+      "rc": 0,
+      "seconds": 51.748
+    },
+    {
+      "name": "formal-interrupted-apply",
+      "rc": 1,
+      "seconds": 60.416
+    },
+    {
+      "name": "formal-resume",
+      "rc": 0,
+      "seconds": 136.648
+    },
+    {
+      "name": "formal-repeat-resume",
+      "rc": 0,
+      "seconds": 0.259
+    },
+    {
+      "name": "formal-post-retirement-c",
+      "rc": 0,
+      "seconds": 142.923
+    }
+  ],
+  "pilot_binary_sha256": "249157ec9f2525ab333e94e63a04b2f7e658f65247a42bc176b5df66e51e964a",
+  "source_file_hashes": [
+    {
+      "path": "playbooks/apply/files/freeipa-ssh-key-cache.py",
+      "sha256": "a5436768248812392aad0dc549edc00cf7b0c34f1fad7fcd2381c31879c2392f"
+    },
+    {
+      "path": "playbooks/apply/freeipa-identity-apply.yml",
+      "sha256": "7a112ad169b593a37f0a06f34f72d01c19b6fe8d07f2ff433e741459bcfca06d"
+    },
+    {
+      "path": "playbooks/apply/tasks/freeipa-ssh-cache-preflight.yml",
+      "sha256": "2e079ab907564fd465177098c1ff6949c1646e12179c4a8f97bb03dde92ac0e3"
+    }
+  ],
+  "cleanup": {
+    "rc": 0,
+    "topology_down_rc": 0,
+    "initial_cleanup_guard_rc": 1,
+    "initial_guard_reason": "A transient unrelated domain-set change was detected between before/after snapshots; the initial five unrelated domains are all present on independent verification. Teardown output lists only the three owned targets.",
+    "owned_targets_removed": [
+      "p245a-ipa",
+      "p245a-live",
+      "p245a-retired"
+    ],
+    "initial_unrelated_domain_count": 5,
+    "initial_unrelated_domains_retained": true,
+    "image_directories_absent": true,
+    "private_runtime_control_removed": true,
+    "operation_scope": "Only the three task-owned targets in the dedicated topology"
+  }
+}

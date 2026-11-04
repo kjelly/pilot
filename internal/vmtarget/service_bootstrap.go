@@ -19,16 +19,19 @@ var safeServiceHostname = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
 // ServiceBootstrap is the non-secret host-service client contract rendered
 // into a VM's cloud-init seed.
 type ServiceBootstrap struct {
-	Profile           string
-	Fingerprint       string
-	HostIP            string
-	Hostname          string
-	AptProxyURL       string
-	RPMBaseURL        string
-	RPMRepositories   map[string]string
-	RegistryMirrorURL string
-	RegistryProjects  map[string]string
-	CAPEM             string
+	DiscoveryDirectory string
+	InstanceID         string
+	Generation         uint64
+	Profile            string
+	Fingerprint        string
+	HostIP             string
+	Hostname           string
+	AptProxyURL        string
+	RPMBaseURL         string
+	RPMRepositories    map[string]string
+	RegistryMirrorURL  string
+	RegistryProjects   map[string]string
+	CAPEM              string
 }
 
 // Validate checks values before they become cloud-init content.
@@ -86,6 +89,11 @@ func (s ServiceBootstrap) RenderCloudInit() (string, error) {
 	}
 	var b strings.Builder
 	b.WriteString("write_files:\n")
+	if s.InstanceID != "" {
+		identity, _ := json.Marshal(map[string]any{"instance_id": s.InstanceID, "generation": s.Generation})
+		b.WriteString("  - path: /etc/pilot/service-instance.json\n    permissions: '0644'\n    content: |\n")
+		fmt.Fprintf(&b, "      %s\n", identity)
+	}
 	b.WriteString("  - path: /usr/local/share/ca-certificates/pilot-services.crt\n")
 	b.WriteString("    permissions: '0644'\n    content: |\n")
 	for _, line := range strings.Split(strings.TrimSpace(s.CAPEM), "\n") {

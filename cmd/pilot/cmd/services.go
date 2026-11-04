@@ -8,7 +8,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,10 +20,13 @@ import (
 )
 
 var (
-	svcProfile string
-	svcNetwork string
-	svcJSON    bool
-	svcConfirm bool
+	svcProfile             string
+	svcNetwork             string
+	svcJSON                bool
+	svcConfirm             bool
+	svcAcknowledgeLegacy   bool
+	svcConsumerID          string
+	svcConfirmInterruption bool
 )
 
 var servicesCmd = &cobra.Command{
@@ -52,9 +58,110 @@ var servicesPurgeCmd = &cobra.Command{
 	RunE:  runServicesPurge,
 }
 
+var servicesRepairCmd = &cobra.Command{
+	Use:   "repair",
+	Short: "Explicitly repair a compatible cache stack when no registered VMs use it",
+	RunE:  runServicesRepair,
+}
+
+var servicesCredentialsCmd = &cobra.Command{
+	Use:   "credentials",
+	Short: "Reassociate existing Harbor credentials without changing services",
+}
+
+var servicesCredentialsImportCmd = &cobra.Command{
+	Use:   "import",
+	Short: "Validate and import an authorized existing Harbor secret file",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		kindValue, _ := cmd.Flags().GetString("kind")
+		source, _ := cmd.Flags().GetString("secret-file")
+		if source == "" {
+			return fmt.Errorf("services: --secret-file is required")
+		}
+		if source == "~" || strings.HasPrefix(source, "~/") {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("services: cannot resolve secret source home directory")
+			}
+			if source == "~" {
+				source = home
+			} else {
+				source = filepath.Join(home, source[2:])
+			}
+		}
+		source, err := filepath.Abs(source)
+		if err != nil {
+			return fmt.Errorf("services: cannot resolve secret source path")
+		}
+		parent, err := filepath.EvalSymlinks(filepath.Dir(source))
+		if err != nil {
+			return fmt.Errorf("services: cannot resolve secret source directory")
+		}
+		source = filepath.Join(parent, filepath.Base(source))
+		kind := services.CredentialKind(kindValue)
+		m, err := newServiceManagerForCredential(cmd.Context(), kind)
+		if err != nil {
+			return err
+		}
+		if err := m.ImportCredential(cmd.Context(), kind, source); err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "Harbor credential association validated and published; services retained")
+		return nil
+	},
+}
+
+var servicesConsumersCmd = &cobra.Command{
+	Use:   "consumers",
+	Short: "List durable VM consumer registrations, including pending provisioning",
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		m, err := newServiceManagerContext(cmd.Context())
+		if err != nil {
+			return err
+		}
+		consumers, err := m.Consumers(cmd.Context())
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(consumers)
+	},
+}
+
+var servicesReleaseConsumerCmd = &cobra.Command{
+	Use:   "release-consumer",
+	Short: "Release one exact registration, accepting interruption risk for its VM",
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		m, err := newServiceManagerContext(cmd.Context())
+		if err != nil {
+			return err
+		}
+		return m.ForgetConsumer(cmd.Context(), svcConsumerID, svcConfirmInterruption)
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(servicesCmd)
+	servicesCmd.AddCommand(servicesCredentialsCmd)
+	servicesCredentialsCmd.AddCommand(servicesCredentialsImportCmd)
+	servicesCredentialsImportCmd.Flags().String("kind", "harbor-admin", "existing credential identity: harbor-admin or harbor-database")
+	servicesCredentialsImportCmd.Flags().String("secret-file", "", "owned mode-0600 regular file containing the existing secret")
+	servicesCredentialsImportCmd.RunE = withServiceCommandSignals(servicesCredentialsImportCmd.RunE)
 	servicesCmd.AddCommand(servicesUpCmd, servicesStatusCmd, servicesDownCmd, servicesPurgeCmd)
+	servicesCmd.AddCommand(servicesRepairCmd, servicesConsumersCmd, servicesReleaseConsumerCmd)
+	for _, command := range servicesCmd.Commands() {
+		if command.RunE != nil {
+			command.RunE = withServiceCommandSignals(command.RunE)
+		}
+	}
+	servicesRepairCmd.Flags().StringVar(&svcProfile, "profile", "dev-lite", "service profile name or YAML path")
+	servicesRepairCmd.Flags().StringVar(&svcNetwork, "network", "default", "libvirt network whose gateway receives service traffic")
+	servicesRepairCmd.Flags().BoolVar(&svcJSON, "json", false, "print machine-readable status")
+	for _, command := range []*cobra.Command{servicesDownCmd, servicesPurgeCmd, servicesRepairCmd} {
+		command.Flags().BoolVar(&svcAcknowledgeLegacy, "acknowledge-legacy-clients", false, "accept interruption risk for unregistered guests created before consumer tracking")
+	}
+	servicesReleaseConsumerCmd.Flags().StringVar(&svcConsumerID, "id", "", "exact durable consumer ID to release")
+	servicesReleaseConsumerCmd.Flags().BoolVar(&svcConfirmInterruption, "confirm-interruption", false, "accept that the named consumer VM may lose cache access during later maintenance")
 	servicesUpCmd.Flags().StringVar(&svcProfile, "profile", "dev-lite", "service profile name or YAML path")
 	servicesUpCmd.Flags().StringVar(&svcNetwork, "network", "default", "libvirt network whose gateway receives service traffic")
 	servicesUpCmd.Flags().BoolVar(&svcJSON, "json", false, "print machine-readable status")
@@ -62,23 +169,50 @@ func init() {
 	servicesPurgeCmd.Flags().BoolVar(&svcConfirm, "confirm", false, "confirm removal of persistent service data")
 }
 
+// Only service handlers consistently observe command cancellation. Intercepting
+// signals at the root would suppress OS termination for unrelated handlers that
+// still use background contexts (for example, an interactive remote exec).
+func withServiceCommandSignals(run func(*cobra.Command, []string) error) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		previous := cmd.Context()
+		ctx, stop := signal.NotifyContext(previous, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		cmd.SetContext(ctx)
+		defer cmd.SetContext(previous)
+		return run(cmd, args)
+	}
+}
+
 func runServicesUp(cmd *cobra.Command, _ []string) error {
+	return runServiceStart(cmd, false)
+}
+
+func runServicesRepair(cmd *cobra.Command, _ []string) error {
+	return runServiceStart(cmd, true)
+}
+
+func runServiceStart(cmd *cobra.Command, repair bool) error {
 	profile, err := services.LoadProfile(svcProfile)
 	if err != nil {
 		return err
 	}
-	ip, err := discoverLibvirtNetworkAddress(context.Background(), svcNetwork)
+	ip, err := discoverLibvirtNetworkAddress(cmd.Context(), svcNetwork)
 	if err != nil {
 		return err
 	}
-	m, err := services.NewManager(resolveStateDir(servicesStateFiles...), nil)
+	m, err := newServiceManagerContext(cmd.Context())
 	if err != nil {
 		return err
 	}
-	if err := m.Up(context.Background(), profile, ip); err != nil {
+	if repair {
+		err = m.Repair(cmd.Context(), profile, ip, services.MaintenanceOptions{AcknowledgeLegacyClients: svcAcknowledgeLegacy})
+	} else {
+		err = m.Up(cmd.Context(), profile, ip)
+	}
+	if err != nil {
 		return err
 	}
-	status, err := m.Status(context.Background())
+	status, err := m.Status(cmd.Context())
 	if err != nil {
 		return err
 	}
@@ -86,11 +220,11 @@ func runServicesUp(cmd *cobra.Command, _ []string) error {
 }
 
 func runServicesStatus(cmd *cobra.Command, _ []string) error {
-	m, err := services.NewManager(resolveStateDir(servicesStateFiles...), nil)
+	m, err := newServiceManagerContext(cmd.Context())
 	if err != nil {
 		return err
 	}
-	status, err := m.Status(context.Background())
+	status, err := m.Status(cmd.Context())
 	if err != nil {
 		return err
 	}
@@ -98,11 +232,11 @@ func runServicesStatus(cmd *cobra.Command, _ []string) error {
 }
 
 func runServicesDown(cmd *cobra.Command, _ []string) error {
-	m, err := services.NewManager(resolveStateDir(servicesStateFiles...), nil)
+	m, err := newServiceManagerContext(cmd.Context())
 	if err != nil {
 		return err
 	}
-	if err := m.Down(context.Background()); err != nil {
+	if err := m.DownWithOptions(cmd.Context(), services.MaintenanceOptions{AcknowledgeLegacyClients: svcAcknowledgeLegacy}); err != nil {
 		return err
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "✓ host services stopped; persistent data retained")
@@ -110,11 +244,11 @@ func runServicesDown(cmd *cobra.Command, _ []string) error {
 }
 
 func runServicesPurge(cmd *cobra.Command, _ []string) error {
-	m, err := services.NewManager(resolveStateDir(servicesStateFiles...), nil)
+	m, err := newServiceManagerContext(cmd.Context())
 	if err != nil {
 		return err
 	}
-	if err := m.Purge(context.Background(), svcConfirm); err != nil {
+	if err := m.PurgeWithOptions(cmd.Context(), svcConfirm, services.MaintenanceOptions{AcknowledgeLegacyClients: svcAcknowledgeLegacy}); err != nil {
 		return err
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "✓ host services stopped and persistent data removed")

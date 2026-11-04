@@ -3,12 +3,63 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
+
+func TestServicesCLIConstructorHonorsCommandCancellation(t *testing.T) {
+	t.Setenv("PILOT_SERVICES_DIR", t.TempDir())
+	file, err := os.OpenFile(fmt.Sprintf("/tmp/pilot-services-compose-%d.lock", os.Getuid()), os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	oldContext := rootCmd.Context()
+	oldOut, oldErr := rootCmd.OutOrStdout(), rootCmd.ErrOrStderr()
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	rootCmd.SetArgs([]string{"services", "consumers"})
+	t.Cleanup(func() {
+		rootCmd.SetArgs(nil)
+		rootCmd.SetContext(oldContext)
+		rootCmd.SetOut(oldOut)
+		rootCmd.SetErr(oldErr)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	if err := rootCmd.ExecuteContext(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CLI ignored canceled constructor: %v", err)
+	}
+}
+
+func TestServicesCLIExactReleaseRequiresInterruptionConfirmation(t *testing.T) {
+	t.Setenv("PILOT_SERVICES_DIR", t.TempDir())
+	oldID, oldConfirm := svcConsumerID, svcConfirmInterruption
+	oldOut, oldErr := rootCmd.OutOrStdout(), rootCmd.ErrOrStderr()
+	rootCmd.SetOut(&bytes.Buffer{})
+	rootCmd.SetErr(&bytes.Buffer{})
+	t.Cleanup(func() {
+		svcConsumerID, svcConfirmInterruption = oldID, oldConfirm
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(oldOut)
+		rootCmd.SetErr(oldErr)
+	})
+	rootCmd.SetArgs([]string{"services", "release-consumer", "--id", "one-exact-synthetic-domain"})
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "confirm-interruption") {
+		t.Fatalf("CLI released consumer without interruption confirmation: %v", err)
+	}
+}
 
 func TestServicesCommandRegistered(t *testing.T) {
 	for _, c := range rootCmd.Commands() {
@@ -20,7 +71,7 @@ func TestServicesCommandRegistered(t *testing.T) {
 }
 
 func TestServicesSubcommandsRegistered(t *testing.T) {
-	want := map[string]bool{"up": true, "status": true, "down": true, "purge": true}
+	want := map[string]bool{"up": true, "status": true, "down": true, "purge": true, "repair": true, "consumers": true, "release-consumer": true}
 	for _, c := range servicesCmd.Commands() {
 		delete(want, c.Name())
 	}
@@ -30,6 +81,7 @@ func TestServicesSubcommandsRegistered(t *testing.T) {
 }
 
 func TestServicesPurgeRequiresConfirmFlag(t *testing.T) {
+	t.Setenv("PILOT_SERVICES_DIR", t.TempDir())
 	rootCmd.SetArgs([]string{"services", "purge", "--data-dir", t.TempDir()})
 	rootCmd.SetOut(&bytes.Buffer{})
 	rootCmd.SetErr(&bytes.Buffer{})

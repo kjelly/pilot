@@ -53,11 +53,11 @@ func TestFreeIPAQuery_Live(t *testing.T) {
 		converged  bool
 	}{
 		{"present", cfg.Present, map[string]string{"host_object": "active_residue", "service_principal": "unknown_ownership", "hbac_direct": "active_residue", "sudo_direct": "active_residue"}, true, false},
-		{"deleted with DNS and external sudo residue", cfg.Deleted, map[string]string{"host_object": "pass", "host_dns": "active_residue", "sudo_direct": "active_residue"}, false, true},
-		{"absent tombstone", cfg.Absent, map[string]string{"host_object": "pass", "host_dns": "pass", "hbac_direct": "pass", "sudo_direct": "pass"}, false, true},
+		{"deleted with DNS and external sudo residue", cfg.Deleted, map[string]string{"host_object": "pass", "host_dns": "active_residue", "sudo_direct": "active_residue", "ssh_cache_retirement": "active_residue"}, false, false},
+		{"absent tombstone", cfg.Absent, map[string]string{"host_object": "pass", "host_dns": "pass", "hbac_direct": "pass", "sudo_direct": "pass", "ssh_cache_retirement": "active_residue"}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			vs, err := p.Verify(ctx, VerifyInput{FQDN: tc.fqdn})
+			vs, err := p.Verify(ctx, VerifyInput{FQDN: tc.fqdn, InventoryAlias: tc.fqdn})
 			if err != nil {
 				t.Fatal(err)
 			}
