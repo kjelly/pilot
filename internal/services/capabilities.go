@@ -404,6 +404,9 @@ func (m *Manager) ClientConfigFor(ctx context.Context, required Requirements) (C
 	if s.Client.HostIP == "" {
 		s.Client.HostIP = s.BindIP
 	}
+	if err := ctx.Err(); err != nil {
+		return ClientConfig{}, err
+	}
 	return s.Client, nil
 }
 

@@ -361,7 +361,13 @@ func (m *Manager) up(ctx context.Context, profile Profile, bindIP net.IP, repair
 	state.AdoptedFrom = current.AdoptedFrom
 	state.ConsumerTracking = current.ConsumerTracking || current.Fingerprint == ""
 	state.Capabilities = m.observeCapabilities(ctx, state)
-	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return m.store.MutateContext(ctx, func(states []ServiceState) ([]ServiceState, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return []ServiceState{state}, nil
 	})
 }
@@ -523,6 +529,10 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 	result := Status{Configured: true, Running: state.Running, Profile: state.Profile, Fingerprint: state.Fingerprint, BindIP: state.BindIP, Root: state.Root}
 	result.InstanceID, result.Generation = state.InstanceID, state.Generation
 	result.Capabilities = m.observeCapabilities(ctx, state)
+	if err := ctx.Err(); err != nil {
+		result.Running = false
+		return result, err
+	}
 	result.Running = requireCapabilities(result.Capabilities, nil) == nil
 	if state.ComposePath == "" {
 		return result, nil
@@ -530,6 +540,10 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 	project := "pilot-services-" + state.Profile
 	if out, runErr := m.runner.Run(ctx, m.root, "docker", "compose", "-f", state.ComposePath, "-p", project, "ps", "--format", "json"); runErr == nil && out.ExitCode == 0 && strings.TrimSpace(out.Stdout) != "" {
 		_ = json.Unmarshal([]byte(out.Stdout), &result.Services)
+	}
+	if err := ctx.Err(); err != nil {
+		result.Running = false
+		return result, err
 	}
 	return result, nil
 }

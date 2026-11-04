@@ -96,7 +96,10 @@ func (m *Manager) RegisterConsumerFor(ctx context.Context, expected ClientConfig
 	if err := requireCapabilities(observed, required); err != nil {
 		return err
 	}
-	return m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
+	return m.store.MutateContext(ctx, func(states []ServiceState) ([]ServiceState, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(states) != 1 {
 			return nil, errors.New("services: missing consumer discovery state")
 		}

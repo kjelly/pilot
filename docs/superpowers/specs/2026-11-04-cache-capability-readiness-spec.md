@@ -60,3 +60,13 @@ No apply playbook or services lifecycle mutation is introduced. Fresh/check,
 apply/verify/idempotency and failure recovery of the authorized native fixture
 belong to the target evidence. Operational stacks and other VMs are outside the
 mutation boundary. Cross-OS-user sharing remains unsupported.
+
+Cancellation publication contract: the original caller context is checked after
+observations and immediately before successful return/publication. Running-state
+and consumer publication use cancellable store lock waits, check again after
+callbacks/serialization, and check immediately before atomic rename after temp
+file persistence. Already-entered rename is the atomic commit boundary and is
+not promised to be interruptible. Canceled status returns partial observations
+with `running=false` and the context error, skipping Compose inspection when
+already canceled. An internal probe deadline remains a capability failure and
+does not cancel unrelated successful requirements.
