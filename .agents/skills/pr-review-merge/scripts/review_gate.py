@@ -240,6 +240,35 @@ def _test_assessment(tests: Any, expected_head: str) -> tuple[list[str], list[st
     return defects, gaps, has_pass
 
 
+def check_base_alignment(client: Any, repo: Repo, number: int, view: dict[str, Any]) -> dict[str, Any]:
+    """Require the live base tip in HEAD; confirm an operational Draft reason with fresh reads."""
+    base_name = view.get("baseRefName")
+    if not isinstance(base_name, str) or not base_name:
+        raise GitHubError("Live base branch name unavailable")
+    head, base = view.get("headRefOid"), view.get("baseRefOid")
+    if not _sha(head) or not _sha(base):
+        raise GitHubError("Invalid PR HEAD/Base SHA")
+    live_base = client.branch_head(repo, base_name)
+    if not _sha(live_base):
+        raise GitHubError("Invalid live base branch SHA")
+    mismatch = live_base != base
+    behind = False
+    if not mismatch:
+        ancestor = client.is_ancestor(repo, live_base, head)
+        if type(ancestor) is not bool:
+            raise GitHubError("Base ancestry unavailable")
+        behind = not ancestor
+    if mismatch or behind:
+        confirm = client.pr_view(repo, number)
+        if any(confirm.get(k) != view.get(k) for k in
+               ("state", "isDraft", "headRefOid", "baseRefOid", "baseRefName")) or \
+                client.branch_head(repo, base_name) != live_base:
+            raise GitHubError("PR/base branch changed while confirming base alignment; retry live gate")
+    elif client.branch_head(repo, base_name) != live_base:
+        raise GitHubError("Live base branch changed during ancestry verification; retry live gate")
+    return {"live_base_sha": live_base, "base_mismatch": mismatch, "base_behind": behind}
+
+
 def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any = None) -> dict[str, Any]:
     # Importing from the module allows replacing a client during tests.
     if client is None:
@@ -264,30 +293,17 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
         reasons.append("Invalid PR state or missing HEAD/Base SHA")
         return result
 
-    # Operational hand-off, independent of semantic review: pr-ready must reconcile
-    # inconsistent base metadata before a complete review can authorize a merge.
+    # Operational hand-off: metadata equality alone does not prove HEAD includes main.
     try:
-        base_name = view.get("baseRefName")
-        if not isinstance(base_name, str) or not base_name:
-            raise GitHubError("Live base branch name unavailable")
-        live_base = client.branch_head(repo, base_name)
-        if not _sha(live_base):
-            raise GitHubError("Invalid live base branch SHA")
-        result["live_base_sha"] = live_base
-        if live_base != result["base_sha"]:
-            # Confirm both identities before drafting; concurrent PR/ref movement
-            # must not turn a transient observation into a repair request.
-            confirm = client.pr_view(repo, number)
-            if any(confirm.get(k) != view.get(k) for k in
-                   ("state", "isDraft", "headRefOid", "baseRefOid", "baseRefName")) or \
-                    client.branch_head(repo, base_name) != live_base:
-                reasons.append("PR/base branch changed while confirming base SHA mismatch; retry live gate")
-                return result
+        result.update(check_base_alignment(client, repo, number, view))
+        base_name, live_base = view["baseRefName"], result["live_base_sha"]
+        if result["base_mismatch"] or result["base_behind"]:
             result["decision"] = "DRAFT"
-            result["base_mismatch"] = True
+            detail = (f"PR Base SHA {result['base_sha']} differs from live {base_name} SHA {live_base}. "
+                      if result["base_mismatch"] else
+                      f"PR HEAD {result['head_sha']} does not include live {base_name} SHA {live_base}. ")
             reasons.append(
-                f"PR Base SHA {result['base_sha']} differs from live {base_name} SHA {live_base}. "
-                "Use pr-ready to reconcile the base state, integrate the verified latest base if needed, "
+                detail + "Use pr-ready to reconcile the base state and integrate the verified latest base, "
                 "then rerun affected validation/CI and independent review on the updated HEAD/Base before Ready.")
             return result
     except (GitHubError, ValueError, KeyError) as exc:

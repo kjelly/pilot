@@ -43,6 +43,11 @@ class Fake:
         self.compares = {}
         self.calls = []
         self.live_base = B
+        self.ancestor = True
+
+    def is_ancestor(self, repo, base, head):
+        self.calls.append(('is_ancestor', base, head))
+        return self.ancestor
 
     def branch_head(self, repo, branch):
         return self.live_base
@@ -95,6 +100,43 @@ class GateTests(unittest.TestCase):
             raise GitHubError('permission denied')
         f.branch_head = unavailable
         self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
+
+    def test_head_missing_latest_base_drafts_without_review(self):
+        f = Fake(); f.ancestor = False
+        result = self.gate(data={}, gh=f)
+        self.assertEqual(result['decision'], 'DRAFT')
+        self.assertTrue(result['base_behind'])
+        self.assertIn(H, result['reasons'][0])
+        self.assertIn(B, result['reasons'][0])
+        self.assertIn(('is_ancestor', B, H), f.calls)
+
+    def test_unknown_ancestry_waits(self):
+        f = Fake(); f.ancestor = None
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
+
+    def test_ancestry_api_failure_waits(self):
+        f = Fake()
+        def unavailable(*args):
+            raise GitHubError('comparison unavailable')
+        f.is_ancestor = unavailable
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
+
+    def test_base_moves_while_confirming_behind_waits(self):
+        f = Fake(); f.ancestor = False
+        refs = iter([B, 'c' * 40])
+        f.branch_head = lambda repo, branch: next(refs)
+        self.assertEqual(self.gate(data={}, gh=f)['decision'], 'WAITING')
+
+    def test_head_moves_while_confirming_behind_waits(self):
+        f = Fake(); f.ancestor = False
+        original = f.pr_view
+        def moving(repo, number):
+            v = original(repo, number)
+            if f.counter > 1:
+                v['headRefOid'] = 'c' * 40
+            return v
+        f.pr_view = moving
+        self.assertEqual(self.gate(data={}, gh=f)['decision'], 'WAITING')
 
     def test_base_ref_mismatch_changes_during_confirmation_waits(self):
         f = Fake(); refs = iter(['c' * 40, B])

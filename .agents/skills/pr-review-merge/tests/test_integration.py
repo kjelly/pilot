@@ -50,6 +50,13 @@ if a[0] == 'api' and '/git/ref/heads/' in a[-1]:
     emit({'object': {'type': 'commit', 'sha': d.get('live_base', d['view']['baseRefOid'])}})
 if a[0] == 'api' and '/pulls?' in a[-1]:
     emit(d.get('pages', []))
+if a[0] == 'api' and '/compare/' in a[-1] and a[-1] not in d.get('api', {}):
+    if d.get('ancestry_error'):
+        persist(); print('comparison unavailable', file=sys.stderr); sys.exit(1)
+    base, head = a[-1].split('/compare/')[1].split('...')
+    aligned = d.get('ancestor', True)
+    emit({'status': 'ahead' if aligned else 'diverged', 'behind_by': 0 if aligned else 1,
+          'merge_base_commit': {'sha': base if aligned else 'e'*40}})
 if a[0] == 'api' and ('/contents/' in a[-1] or '/compare/' in a[-1]):
     # Answers recorded from real `gh api` calls (fixtures/github_api.json); anything else is
     # GitHub's real 404 for a path or commit it does not have.
@@ -202,6 +209,48 @@ class Integration(unittest.TestCase):
         self.assertEqual(out['outcome'], 'ERROR')
         self.assertFalse(self.state()['view']['isDraft'])
 
+    def test_behind_head_comments_then_drafts_without_review(self):
+        self.patch(ancestor=False)
+        self.evidence_file.write_text('{}')
+        proc, out = self.actor(execute=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(out['outcome'], 'DRAFT-BLOCKED')
+        d = self.state()
+        self.assertTrue(d['view']['isDraft'])
+        self.assertIn(HEAD, d['comments'][0])
+        self.assertIn(BASE, d['comments'][0])
+        self.assertIn('pr-ready', d['comments'][0])
+        writes = [a[1] for a in d['calls'] if a[:2] in
+                  (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])]
+        self.assertEqual(writes, ['comment', 'ready'])
+
+    def test_behind_head_comment_failure_preserves_ready(self):
+        self.patch(ancestor=False, fail_comment=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_ancestry_unavailable_never_mutates(self):
+        self.patch(ancestry_error=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'WAITING')
+        self.assertFalse(self.state().get('comments'))
+
+    def test_base_moves_after_ancestry_gate_never_mutates(self):
+        self.patch(ancestor=False, race_on_ref=3)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state().get('comments'))
+        self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_head_repaired_during_comment_prevents_draft(self):
+        self.patch(ancestor=False, race_on_view=4)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertTrue(self.state().get('comments'))
+        self.assertFalse(self.state()['view']['isDraft'])
+        self.assertFalse(any(a[:2] == ['pr', 'ready'] for a in self.state()['calls']))
+
     def test_base_ref_unavailable_never_mutates(self):
         self.patch(ref_error=True)
         _, out = self.actor(execute=True)
@@ -266,6 +315,13 @@ class Integration(unittest.TestCase):
         proc,out=self.actor(execute=True)
         self.assertEqual(out['outcome'],'ERROR')
         self.assertFalse(any(a[:2]==['pr','merge'] for a in self.state()['calls']))
+
+    def test_base_moves_during_successful_ancestry_check_never_mutates(self):
+        self.patch(race_on_ref=2)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'WAITING')
+        self.assertFalse(self.state().get('comments'))
+        self.assertFalse(any(a[:2] == ['pr', 'merge'] for a in self.state()['calls']))
 
     def test_draft_comment_failure_prevents_downgrade(self):
         self.patch(fail_comment=True, checks=[{'name':'unit','state':'FAILURE','bucket':'fail'}])

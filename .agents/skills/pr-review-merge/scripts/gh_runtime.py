@@ -153,6 +153,26 @@ def branch_head(repo: Repo, name: str) -> str:
     return sha
 
 
+def is_ancestor(repo: Repo, base: str, head: str) -> bool:
+    """Check commit ancestry from compare metadata, independent of its file-list limit."""
+    if not (COMMIT_SHA.fullmatch(base) and COMMIT_SHA.fullmatch(head)):
+        raise ValueError("is_ancestor needs two full lowercase commit SHAs")
+    data = gh_json(["api", *host_args(repo), f"repos/{repo.owner}/{repo.name}/compare/{base}...{head}"])
+    try:
+        status, behind = data["status"], data["behind_by"]
+        merge_base = data["merge_base_commit"]["sha"]
+        if status not in ("ahead", "behind", "identical", "diverged") or type(behind) is not int or behind < 0 \
+                or not isinstance(merge_base, str) or not COMMIT_SHA.fullmatch(merge_base):
+            raise ValueError("compare metadata")
+        if status in ("ahead", "identical") and behind == 0 and merge_base == base:
+            return True
+        if status in ("behind", "diverged") and behind > 0 and merge_base != base:
+            return False
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GitHubError("Invalid ancestry comparison response") from exc
+    raise GitHubError("Inconsistent ancestry comparison response")
+
+
 def _not_found(cp: subprocess.CompletedProcess[str]) -> bool:
     """True only for gh's exact answer to a path or commit GitHub does not have.
 

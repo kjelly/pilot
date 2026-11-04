@@ -4,6 +4,7 @@
 |---|---|---|
 | Independent reviewer finds P0/P1/P2 (a repeated disputed claim only with new evidence), failing unit/regression tests, GH checks `fail` or `cancel` not confirmed unrelated, unresolved review threads, merge conflict | DRAFT | Confirmed defect or blocker; comment with proof and next fix |
 | PR `baseRefOid` differs from the independently read live `baseRefName` tip, confirmed with fresh PR/ref reads | DRAFT | Record both SHAs and branch, comment before converting, and direct `pr-ready` to reconcile/integrate and revalidate; no completed semantic review is required for this operational hand-off |
+| Live base tip is not an ancestor of PR HEAD, confirmed with fresh PR/ref reads (even if metadata matches and there are no conflicts) | DRAFT | Record HEAD/Base/live-base SHAs, comment then convert; `pr-ready` must merge the latest base, rerun affected checks/CI and obtain fresh independent review |
 | GH checks `pending`, review `REVIEW_REQUIRED`, PR mergeability `UNKNOWN`, unavailable GraphQL threads, stale review head/base without confirmed live-base mismatch, incomplete reviewer coverage, PR dependency not satisfied | WAITING | Transient or unverified conditions; keep Ready |
 | `CHANGES_REQUESTED`; a `fail`/`cancel` check listed in `unrelated_failing_checks`; a disputed finding repeated without `new_evidence` | WAITING | The PR has nothing left to change: a reviewer has to re-review, a check has to be rerun after its cause is fixed, or a person decides between two reviews. A Draft would be undone by `pr-ready` |
 | Active rules include `merge_queue` | WAITING | `gh pr merge` may enqueue or enable auto-merge without a final merge; do not trigger automatically |
@@ -16,7 +17,7 @@
 Additional rules:
 - Any unexpected CLI/API response or inability to inspect **active branch rules** makes the result WAITING. If branch rules cannot be read, do not auto-merge.
 - Both required checks and other displayed checks must pass; skipped checks are permitted only if GitHub treats them as non-failing and reviewer has verified all relevant test areas. An unexpected bucket is WAITING.
-- Unavailable or malformed live base refs remain WAITING. PR/ref movement during confirmation requires a fresh gate, and the actor rechecks the live ref immediately before writing. Feature HEAD differing from main is normal and never triggers this rule.
+- Unavailable or malformed live base refs or ancestry comparisons remain WAITING. PR/ref movement during confirmation requires a fresh gate, and the actor rechecks the live ref immediately before writing. Feature HEAD differing from main is normal: require main as an ancestor of HEAD, not identical commits.
 - No `--admin`, `--auto`, `--delete-branch`, rebase, force push, or bypass. Respect repo's allowed merge methods; no fallback to a different method without authorization. In this repository the method is `merge` (the project default of `apply_decision.py`); GitHub deletes the head branch itself.
 - Only the actor mutates PR state. Before mutation it recomputes the gate live. `MERGE` only authorizes an **attempt**; GitHub still enforces its own rules.
 - Never interpret a merge queue enqueue operation as merged. Only PR remote `state == MERGED` constitutes success.

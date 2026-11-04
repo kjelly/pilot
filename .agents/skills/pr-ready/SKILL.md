@@ -113,14 +113,16 @@ to answer. These rules remove that cost without weakening a gate:
 4. **One reviewer per round over the whole diff**; a delta review only for a delta. Two
    reviewers split by layer doubled the cost and still missed the defects the merge review
    found afterwards.
-5. **Integrate the base branch only when forced**: when GitHub reports the PR
-   `CONFLICTING` (no `pull_request` CI runs then), when `pr-review-merge` returned it
-   to Draft for a confirmed PR Base/live-base SHA mismatch, or when the user asks,
-   never proactively. For that hand-off, independently read the current base ref,
-   reconcile PR metadata and integrate the verified latest base if needed using
-   the checkout contract; do not merge an unverified name just to refresh metadata.
-   Before Ready, require PR Base SHA to equal the live base tip, rerun affected
-   validation/CI and obtain fresh independent review on the updated HEAD/Base.
+5. **Align with the latest base before Ready.** Independently read the current
+   base ref (`main` here) and require that exact commit to be an ancestor of PR
+   HEAD, even when GitHub reports no conflicts and PR Base SHA equals the live tip.
+   When behind, integrate the verified base into the original head branch using
+   a merge commit under the checkout contract; no force-push. A feature HEAD
+   normally differs from main: SHA equality of HEAD and main is not required.
+   Reconcile any PR Base/live-base metadata mismatch as well. Before Ready,
+   `pr_gate.py` verifies both metadata and ancestry against the live remote;
+   rerun affected validation/CI and obtain fresh independent review after base
+   integration. Repeat alignment if main advances before the final gate.
    If access or metadata still prevents reconciliation, keep Draft with the exact
    observed SHAs and blocker. A conflict confined to Markdown (changelog rows, runbook wording) is a
    non-execution edit: keep the target evidence through `target_reuse`

@@ -2,7 +2,7 @@
 
 Put reviewer evidence outside the repository checkout, e.g. `~/.cache/pr-review-merge/OWNER/REPO/123/review.json`. **Generate from a real independent review, not from the template without verification.** Replace the example SHAs with current full 40-character hex commit IDs and use real tests/evidence URLs.
 
-Exception: the operational PR Base/live-base mismatch gate runs before semantic evidence checks. It confirms fresh PR/ref identities and can require Draft without a completed independent review. Save observed SHAs and explicit review limitations in the evidence JSON (an object is still required by the CLI); do not fabricate reviewer findings or PASS fields. The actor records both SHAs in its comment and rechecks them before writing. This exception never authorizes a merge or stale semantic findings.
+Exception: the operational base-alignment gate runs before semantic evidence checks. It requires the live base tip to be an ancestor of HEAD and PR Base SHA to match that tip. It confirms failures with fresh PR/ref identities and can require Draft without a completed independent review. Save observed SHAs and explicit review limitations in the evidence JSON (an object is still required by the CLI); do not fabricate reviewer findings or PASS fields. The actor records HEAD/Base/live-base SHAs in its comment and rechecks them before writing. This exception never authorizes a merge or stale semantic findings.
 
 ```json
 {

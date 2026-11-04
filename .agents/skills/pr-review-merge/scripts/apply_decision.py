@@ -25,13 +25,16 @@ def comment_text(result: dict[str, Any]) -> str:
     excerpt = "\n".join(f"- {reason[:1200]}" for reason in reasons[:40])
     if len(reasons) > 40:
         excerpt += f"\n- ... {len(reasons)-40} more items in local evidence"
-    identity_label = "Observed" if result.get("base_mismatch") else "Reviewed"
-    base_next = (" For this base SHA mismatch, use `pr-ready` to reconcile PR metadata with the live "
-                 "base branch and integrate the verified latest base if needed."
-                 if result.get("base_mismatch") else "")
+    base_blocked = result.get("base_mismatch") or result.get("base_behind")
+    identity_label = "Observed" if base_blocked else "Reviewed"
+    base_next = (" Use `pr-ready` to reconcile PR metadata and integrate the verified latest base "
+                 "so the live base tip is an ancestor of HEAD."
+                 if base_blocked else "")
+    live_base = f"Live base tip: `{result['live_base_sha']}`\n\n" if base_blocked else ""
     return ("## Automated PR review: Draft required\n\n"
             f"{identity_label} HEAD: `{result['head_sha']}`  \n"
             f"{identity_label} Base: `{result['base_sha']}`\n\n"
+            + live_base +
             "### Blocking issues / verification notes\n\n" + excerpt + "\n\n"
             "**Next steps:** Address blocking findings, rerun affected tests and CI, "
             "and request independent review on the updated HEAD/Base before marking Ready."
@@ -101,6 +104,12 @@ def _perform_locked(repo: Repo, number: int, evidence: dict[str, Any], method: s
             # Ensure explanation is available before modifying the PR status.
             _write_comment(repo, number, gate)
             out["comment_posted"] = True
+            # A repair or base advance while the comment was posted invalidates this Draft action.
+            current = pr_view(repo, number)
+            if any(current.get(k) != view.get(k) for k in
+                   ("state", "isDraft", "headRefOid", "baseRefOid", "baseRefName")) or \
+                    branch_head(repo, current["baseRefName"]) != gate["live_base_sha"]:
+                raise GitHubError("PR state/HEAD/Base changed after comment; retry live gate")
             run_gh(["pr", "ready", str(number), "-R", repo.raw, "--undo"])
             after = pr_view(repo, number)
             out["verified_remote_state"] = after.get("state")
