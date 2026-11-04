@@ -52,6 +52,9 @@ func TestRegression_GatewayRetirementFixtureHasOneTimeImmutableSetup(t *testing.
 	if setup["when"] != "issue227_fixture_prepare | bool" || setup["always"] == nil {
 		t.Fatal("scoped authorization setup must use the frozen decision and always close its private ticket")
 	}
+	if plays[3]["environment"] != nil || setup["environment"] == nil {
+		t.Fatal("fixture credential environment belongs to its private-cache block, never the play")
+	}
 	block := setup["block"].([]any)
 	marker := block[len(block)-1].(map[string]any)
 	copyTask := marker["ansible.builtin.copy"].(map[string]any)
@@ -64,6 +67,29 @@ func TestRegression_GatewayRetirementFixtureHasOneTimeImmutableSetup(t *testing.
 	}
 	if strings.Contains(string(program), "user_add") || !strings.Contains(string(program), "('sshd', 'sudo')") || !strings.Contains(string(program), "!authenticate") {
 		t.Fatal("setup must retain canonical-only user creation and scoped sshd/sudo authorization")
+	}
+	guard := plays[0]["tasks"].([]any)[0]
+	for _, selection := range []string{"full", "tags", "skip-tags"} {
+		t.Run(selection, func(t *testing.T) {
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "fixture-mutation")
+			tasks := []any{guard, map[string]any{"name": "fixture mutation sentinel", "tags": []string{"always"}, "ansible.builtin.command": map[string]any{"argv": []string{"touch", marker}}}}
+			var args []string
+			if selection == "tags" {
+				args = []string{"--tags", "identity"}
+			} else if selection == "skip-tags" {
+				args = []string{"--skip-tags", "fixtures"}
+			}
+			result := runGatewayTasks(t, dir, tasks, nil, nil, args...)
+			_, markerErr := os.Stat(marker)
+			allowed := selection == "full"
+			if (markerErr == nil) != allowed || (result.rc == 0) != allowed {
+				t.Fatalf("fixture selector guard allowed=%v mutation=%v rc=%d failures=%v stderr=%s", allowed, markerErr == nil, result.rc, result.failures, result.stderr)
+			}
+			if !allowed && !strings.Contains(fmt.Sprint(result.failures), "standalone full run") {
+				t.Fatalf("fixture refused for wrong reason: %v", result.failures)
+			}
+		})
 	}
 }
 

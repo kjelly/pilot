@@ -8,6 +8,14 @@
   gather_facts: false
   become: true
   tasks:
+    - name: Require a complete standalone gateway retirement fixture invocation
+      ansible.builtin.assert:
+        that:
+          - (ansible_run_tags | list) == ['all']
+          - ansible_skip_tags | length == 0
+        fail_msg: "Gateway retirement fixtures require a standalone full run without tags or skip-tags"
+      tags: [always]
+
     - name: Read the explicit fixture readiness marker
       ansible.builtin.stat:
         path: /var/lib/pilot-identity/issue227-fixture-ready
@@ -49,14 +57,18 @@
   hosts: freeipa-server
   gather_facts: false
   become: false
-  environment:
-    KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
   tasks:
     - name: Prepare shared fixture authorization
       when: issue227_fixture_prepare | bool
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
       block:
         - name: Open a private fixture ticket cache
-          ansible.builtin.include_tasks: ../../apply/tasks/freeipa-private-ccache-open.yml
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
         - name: Authenticate fixture admin
           ansible.builtin.command:
@@ -87,7 +99,11 @@
           when: not ansible_check_mode
       always:
         - name: Close the private fixture ticket cache
-          ansible.builtin.include_tasks: ../../apply/tasks/freeipa-private-ccache-close.yml
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]
 
 - name: Retire the externally authorized absent host through production identity apply
   ansible.builtin.import_playbook: ../../apply/freeipa-identity-apply.yml
