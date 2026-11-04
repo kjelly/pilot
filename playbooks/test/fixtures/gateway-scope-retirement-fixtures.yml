@@ -1,0 +1,93 @@
+# Disposable Issue 227 fresh-check/apply/verify/idempotency fixture.
+# External inputs contain secrets, the fixture public key and a canonical
+# absent roster with an exact authorized retiring alias/FQDN/stage mapping.
+# Scope membership deliberately remains outside that canonical roster.
+---
+- name: Inspect the one-time gateway retirement fixture marker
+  hosts: freeipa-server
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Read the explicit fixture readiness marker
+      ansible.builtin.stat:
+        path: /var/lib/pilot-identity/issue227-fixture-ready
+      register: issue227_fixture_marker
+      tags: [always]
+
+    - name: Freeze the setup decision for all imported setup plays
+      ansible.builtin.set_fact:
+        issue227_fixture_prepare: "{{ not issue227_fixture_marker.stat.exists }}"
+      tags: [always]
+
+    - name: Validate the dedicated fixture scope and creation-time public key
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - freeipa_domain == 'ipa227.test'
+          - ipa_fixture_user_ssh_public_key | default('') | length > 0
+          - not issue227_fixture_marker.stat.exists or (issue227_fixture_marker.stat.isreg and issue227_fixture_marker.stat.uid == 0 and issue227_fixture_marker.stat.mode == '0600')
+        fail_msg: "Use the dedicated ipa227.test authority and private fixture key; existing readiness markers must be root-owned regular mode-0600 files."
+      tags: [always]
+
+- name: Create pilotuser through the canonical user fixture
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_domain: "{{ freeipa_domain }}"
+    ipa_fixture_user: pilotuser
+    ipa_fixture_manage_sudorule: false
+  when: issue227_fixture_prepare | bool
+
+- name: Establish the independent gateway scope and automembership
+  ansible.builtin.import_playbook: ../../apply/gateway-scope-apply.yml
+  vars:
+    gateway_scope: i227-owned
+    gateway_scope_hosts: [retire.ipa227.test, keep.ipa227.test]
+    gateway_scope_automember_action: enable
+  when: issue227_fixture_prepare | bool
+
+- name: Establish scoped shared authorization before retirement
+  hosts: freeipa-server
+  gather_facts: false
+  become: false
+  environment:
+    KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+  tasks:
+    - name: Prepare shared fixture authorization
+      when: issue227_fixture_prepare | bool
+      block:
+        - name: Open a private fixture ticket cache
+          ansible.builtin.include_tasks: ../../apply/tasks/freeipa-private-ccache-open.yml
+
+        - name: Authenticate fixture admin
+          ansible.builtin.command:
+            argv: [kinit, admin]
+            stdin: "{{ ipa_admin_password }}"
+          changed_when: false
+          no_log: true
+          check_mode: false
+
+        - name: Reconcile the exact scoped HBAC and sudo fixture
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - "{{ lookup('file', playbook_dir ~ '/files/gateway-scope-retirement-setup.py') }}"
+          register: issue227_fixture_authorization
+          changed_when: (issue227_fixture_authorization.stdout | from_json).changed | bool
+          when: not ansible_check_mode
+
+        - name: Publish readiness only after successful fixture setup
+          ansible.builtin.copy:
+            dest: /var/lib/pilot-identity/issue227-fixture-ready
+            content: "issue227 scoped pilotuser, gateway group, sshd+sudo HBAC and passwordless sudo ready\n"
+            owner: root
+            group: root
+            mode: "0600"
+          become: true
+          when: not ansible_check_mode
+      always:
+        - name: Close the private fixture ticket cache
+          ansible.builtin.include_tasks: ../../apply/tasks/freeipa-private-ccache-close.yml
+
+- name: Retire the externally authorized absent host through production identity apply
+  ansible.builtin.import_playbook: ../../apply/freeipa-identity-apply.yml

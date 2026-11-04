@@ -903,6 +903,25 @@
           when: ansible_run_tags | intersect(['all', 'tagged', 'sshkeys'] + ipa_identity_cache_recovery_tags) | length > 0
           tags: [always]
 
+        - name: "Validate absent host gateway ownership before managed identity mutations"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-gateway-scope-lifecycle.yml
+            apply:
+              tags: [always]
+          vars:
+            ipa_gateway_lifecycle_operation: inspect
+            ipa_gateway_lifecycle_authority: "{{ ipa_gateway_lifecycle_designated_authority }}"
+            ipa_gateway_lifecycle_readonly: true
+            ipa_gateway_lifecycle_request:
+              retirements: "{{ ipa_ssh_cache_retirements | default([]) }}"
+              absent_hosts: "{{ freeipa_roster.hosts | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | map(attribute='name') | list }}"
+              require_mappings: true
+              managed_hostgroups: "{{ freeipa_roster.hostgroups | default([]) | map(attribute='name') | list }}"
+          when:
+            - pilot_decommission_query | default('') | length == 0
+            - freeipa_roster.hosts | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list | length > 0
+          tags: [always]
+
         - name: "Prepare legacy authorization cache recovery"
           ansible.builtin.command:
             argv:
@@ -941,23 +960,6 @@
             msg: "HOST_INSPECT[{{ pilot_decommission_target_fqdn }}]: GATEWAY_SCOPE_READY=true"
           when: pilot_decommission_query | default('') == 'gateway_scope'
           tags: [freeipa_host_absent_inspect]
-
-        - name: "Validate absent host gateway ownership before managed identity mutations"
-          ansible.builtin.include_tasks:
-            file: tasks/freeipa-gateway-scope-lifecycle.yml
-            apply:
-              tags: [always]
-          vars:
-            ipa_gateway_lifecycle_operation: inspect
-            ipa_gateway_lifecycle_authority: "{{ ipa_gateway_lifecycle_designated_authority }}"
-            ipa_gateway_lifecycle_readonly: true
-            ipa_gateway_lifecycle_request:
-              retirements: "{{ ipa_ssh_cache_retirements }}"
-              managed_hostgroups: "{{ freeipa_roster.hostgroups | default([]) | map(attribute='name') | list }}"
-          when:
-            - pilot_decommission_query | default('') | length == 0
-            - ipa_ssh_cache_retirements | default([]) | length > 0
-          tags: [always]
 
         # ── Groups ─────────────────────────────────────────────────────────
         # One listing replaces a `group-add` per group on reruns, the same way

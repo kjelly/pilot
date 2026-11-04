@@ -83,6 +83,11 @@ pilot gateway-scope reconcile --scope gpu --hosts all --dir <workspace>
 - 正式 host decommission 在 client uninstall 前執行唯讀 ownership preflight，
   執行 uninstall 時重新檢查；直接 canonical `state: absent` reconcile 也走同一條
   server-side retirement cleanup。所有 direct memberships 在首次 removal 前完整分類。
+  所有 canonical absent FQDN 都先獨立唯讀探測；若有 scope membership、automember
+  再加入風險或 pending gateway work，卻沒有 inventory identity、明確 retirement
+  mapping 或既有 receipt 產生的精確授權，必須在任何 managed mutation 前拒絕並
+  指出 alias/FQDN/stage mapping 的補法。不得自動猜 alias；無 gateway work 的既有
+  absent 流程維持原有行為。
 - 退役只移除該 FQDN 在 proven-owned scopes 的 membership；scope group、其他成員、
   共用 HBAC/sudo rule 與其他主機的有效登入/sudo 存取保留。既有 service、其他
   hostgroup/netgroup、DNS ownership 和 host deletion gates 繼續執行。

@@ -239,6 +239,41 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual([], self.model.mutations)
         self.assertEqual(before, Path(self.path).read_bytes())
 
+    def test_unmapped_absent_requires_mapping_before_scope_cleanup(self):
+        request = dict(retirements=[], absent_hosts=[self.model.a], require_mappings=True)
+        before = Path(self.path).read_bytes()
+        with self.assertRaisesRegex(ValueError, 'exact authorized alias/FQDN/stage mapping'):
+            self.helper().retire(self.state, request, True)
+        self.assertEqual([], self.model.mutations)
+        self.assertEqual(before, Path(self.path).read_bytes())
+
+    def test_unmapped_absent_auto_potential_and_pending_work_need_mapping(self):
+        self.model.hosts.remove(self.model.a)
+        request = dict(retirements=[], absent_hosts=[self.model.a], require_mappings=True)
+        self.model.rules[self.model.name]['automemberinclusiveregex'] = ['fqdn=.*']
+        with self.assertRaisesRegex(ValueError, 'exact authorized alias/FQDN/stage mapping'):
+            self.helper().retire(self.state, request, True)
+        # The exact exclusion discharges this rule's re-add potential.
+        self.model.rules[self.model.name]['automemberexclusiveregex'] = ['fqdn=^' + re.escape(self.model.a) + '$']
+        self.helper().retire(self.state, request, True)
+        self.state['retired'][self.model.a] = {'status': 'pending'}
+        with self.assertRaisesRegex(ValueError, 'exact authorized alias/FQDN/stage mapping'):
+            self.helper().retire(self.state, request, True)
+        self.assertEqual([], self.model.mutations)
+
+    def test_legacy_absent_without_gateway_work_keeps_existing_behavior(self):
+        self.model.hosts.remove(self.model.a)
+        del self.model.rules[self.model.name]
+        request = dict(retirements=[], absent_hosts=[self.model.a], require_mappings=True)
+        self.assertTrue(self.helper().retire(self.state, request, True)['ready'])
+        self.assertEqual([], self.model.mutations)
+
+    def test_absent_probe_cannot_implicitly_authorize_mutation(self):
+        request = dict(retirements=[], absent_hosts=[self.model.a])
+        with self.assertRaisesRegex(ValueError, 'exact authorized retirement mapping'):
+            self.helper().retire(self.state, request, False)
+        self.assertEqual([], self.model.mutations)
+
 
 def hold_lock(path, ready, release):
     store = gateway.Store(path, 'ipa.test', 'ipa.ipa.test', False)

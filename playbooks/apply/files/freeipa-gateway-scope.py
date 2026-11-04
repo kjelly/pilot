@@ -179,20 +179,36 @@ class Lifecycle:
         return result
 
     def retire(self, state, data, readonly):
-        hosts = sorted({fqdn(item['fqdn']) for item in data['retirements']})
+        authorized = {fqdn(item['fqdn']) for item in data['retirements']}
+        absent = {fqdn(host) for host in data.get('absent_hosts', [])}
+        hosts = sorted(authorized | absent)
+        if not readonly and absent - authorized:
+            raise ValueError('gateway mutation requires an exact authorized retirement mapping for every host')
         managed = {name.lower() for name in data.get('managed_hostgroups', [])}
         classified = self.classify(state, hosts, managed)
         # Retirement must also cover scopes where this host is not currently
         # a member. Otherwise an automember rebuild can add it after detach.
-        scopes = []
+        scopes, auto_rules = [], []
         for name in state['scopes']:
             group = self.show('hostgroup', name, raw=True)
             if group is None:
                 continue
             if not self.owned(state, name, group):
                 raise ValueError('gateway scope immutable ID changed: ' + name)
-            self.auto_rule(state, name)
+            rule = self.auto_rule(state, name)
+            if rule is not None:
+                auto_rules.append(rule)
             scopes.append(name)
+        if data.get('require_mappings'):
+            for host in sorted(absent - authorized):
+                condition = 'fqdn=^' + re.escape(host) + '$'
+                auto_pending = any(rule.get('automemberinclusiveregex')
+                                   and condition not in rule.get('automemberexclusiveregex', [])
+                                   for rule in auto_rules)
+                if (classified[host] or auto_pending
+                        or state['retired'].get(host, {}).get('status') == 'pending'):
+                    raise ValueError('gateway retirement for ' + host +
+                                     ' requires an exact authorized alias/FQDN/stage mapping; restore the intended inventory ipa_client_fqdn or supply ipa_identity_ssh_cache_retirements with alias, fqdn, stage, reason and origin before retrying')
         if readonly:
             return dict(ready=True, hosts=hosts, owned=classified, changed=False)
         for item in data['retirements']:
