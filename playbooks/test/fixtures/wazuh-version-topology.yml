@@ -9,6 +9,12 @@
   ansible.builtin.import_playbook: ../../apply/log-server-apply.yml
   tags: [log-server]
 
+# log-server C7/C8 require its own canonical local audit/auth sender.
+# Keep this receiver-only baseline before the cohosted FIM/audit configuration.
+- name: Deploy the receiver self-test forwarding prerequisite
+  ansible.builtin.import_playbook: ../../apply/audit-log-forwarding-apply.yml
+  tags: [log-server, audit-log-forwarding]
+
 - name: Deploy the central Wazuh stack first
   ansible.builtin.import_playbook: ../../apply/wazuh-manager-apply.yml
   tags: [wazuh-manager]
