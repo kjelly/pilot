@@ -229,9 +229,8 @@ func TestOCIAnonymousBearerDataProofAndUnsafeChallenge(t *testing.T) {
 		t.Run(fault, func(t *testing.T) {
 			m, _, _ := healthyLifecycleFixture(t)
 			descriptor := fixtureDescriptors()[OCI]
-			var server *httptest.Server
 			tokenReads := 0
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/service/token" {
 					tokenReads++
 					if r.Header.Get("Authorization") != "" {
@@ -246,7 +245,7 @@ func TestOCIAnonymousBearerDataProofAndUnsafeChallenge(t *testing.T) {
 				}
 				if r.URL.Path == descriptor.Resource {
 					if fault == "denied" || r.Header.Get("Authorization") != "Bearer synthetic-public-pull-token" {
-						realm := server.URL + "/service/token"
+						realm := "http://" + r.Host + "/service/token"
 						scope := "repository:test:pull"
 						if fault == "cross-origin" {
 							realm = "http://other.invalid/service/token"

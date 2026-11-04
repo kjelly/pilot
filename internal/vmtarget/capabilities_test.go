@@ -63,14 +63,13 @@ func TestGuestNativeDataProbeMatchesContentAndDigest(t *testing.T) {
 	for _, fault := range []string{"none", "corrupt", "auth-denied"} {
 		t.Run(fault, func(t *testing.T) {
 			descriptor := vmServiceDescriptors()[services.OCI]
-			var server *httptest.Server
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/service/token" {
 					_, _ = w.Write([]byte(`{"token":"public-token"}`))
 					return
 				}
 				if fault == "auth-denied" || r.Header.Get("Authorization") != "Bearer public-token" {
-					w.Header().Set("WWW-Authenticate", `Bearer realm="`+server.URL+`/service/token",service="harbor-registry",scope="repository:test:pull"`)
+					w.Header().Set("WWW-Authenticate", `Bearer realm="`+"http://"+r.Host+`/service/token",service="harbor-registry",scope="repository:test:pull"`)
 					w.WriteHeader(401)
 					return
 				}
@@ -142,8 +141,7 @@ func TestGuestRegistryTokenCriticalSchemaParity(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			descriptor := vmServiceDescriptors()[services.OCI]
-			var server *httptest.Server
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/service/token" {
 					_, _ = w.Write([]byte(test.body))
 					return
@@ -152,7 +150,7 @@ func TestGuestRegistryTokenCriticalSchemaParity(t *testing.T) {
 					_, _ = w.Write([]byte(vmFixtureManifest))
 					return
 				}
-				w.Header().Set("WWW-Authenticate", `Bearer realm="`+server.URL+`/service/token",service="harbor-registry",scope="repository:test:pull"`)
+				w.Header().Set("WWW-Authenticate", `Bearer realm="`+"http://"+r.Host+`/service/token",service="harbor-registry",scope="repository:test:pull"`)
 				w.WriteHeader(401)
 			}))
 			defer server.Close()

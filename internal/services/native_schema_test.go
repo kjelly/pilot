@@ -70,8 +70,7 @@ func TestRegistryTokenCriticalSchemaMatrix(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m, _, _ := healthyLifecycleFixture(t)
-			var server *httptest.Server
-			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/service/token" {
 					_, _ = io.WriteString(w, test.body)
 					return
@@ -81,7 +80,7 @@ func TestRegistryTokenCriticalSchemaMatrix(t *testing.T) {
 						_, _ = io.WriteString(w, fixtureManifest)
 						return
 					}
-					w.Header().Set("WWW-Authenticate", `Bearer realm="`+server.URL+`/service/token",service="harbor-registry",scope="repository:test:pull"`)
+					w.Header().Set("WWW-Authenticate", `Bearer realm="`+"http://"+r.Host+`/service/token",service="harbor-registry",scope="repository:test:pull"`)
 					w.WriteHeader(401)
 					return
 				}
