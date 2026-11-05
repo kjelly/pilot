@@ -19,12 +19,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
 	"go.yaml.in/yaml/v3"
 
 	"github.com/kjelly/pilot/internal/inventory"
@@ -132,20 +132,92 @@ func TestSSHTargetFromHostVars(t *testing.T) {
 	if got, err := sshTargetFromHostVars("ipa-1.example.test", map[string]any{}); err != nil || got.Host != "ipa-1.example.test" {
 		t.Fatalf("no ansible_host: %+v, %v", got, err)
 	}
-	for name, vars := range map[string]map[string]any{
-		"docker connection":    {"ansible_connection": "docker"},
-		"password":             {"ansible_ssh_pass": "x"},
-		"legacy host alias":    {"ansible_ssh_host": "10.0.0.1"},
-		"unsupported option":   {"ansible_ssh_common_args": "-o ProxyCommand=nc"},
-		"short jump flag":      {"ansible_ssh_common_args": "-J bastion"},
-		"ssh_args beyond mux":  {"ansible_ssh_args": "-o ControlMaster=auto -o ForwardAgent=yes"},
-		"unbalanced quote":     {"ansible_ssh_common_args": `-o "UserKnownHostsFile=/x`},
-		"non-integer port":     {"ansible_port": "ssh"},
-		"option value with sp": {"ansible_ssh_common_args": `-o "ProxyJump=a b"`},
+	// Each refusal, with the message of its own gate: a refusal that came
+	// from another check would prove nothing about this one.
+	for _, tc := range []struct {
+		name string
+		vars map[string]any
+		gate string // the gates the case makes fire, comma separated
+		want string // in the error
+	}{
+		{name: "docker connection", vars: map[string]any{"ansible_connection": "docker"}, gate: "ssh-connection", want: "ansible_connection 是 docker"},
+		{name: "password", vars: map[string]any{"ansible_ssh_pass": "x"}, gate: "ssh-unsupported-var", want: "設定了 ansible_ssh_pass"},
+		{name: "legacy host alias", vars: map[string]any{"ansible_ssh_host": "10.0.0.1"}, gate: "ssh-unsupported-var", want: "設定了 ansible_ssh_host"},
+		{name: "an option sshdial does not allow", vars: map[string]any{"ansible_ssh_common_args": "-o ProxyCommand=nc"}, gate: "ssh-validate", want: "ProxyCommand"},
+		{name: "option value with a space", vars: map[string]any{"ansible_ssh_common_args": `-o "ProxyJump=a b"`}, gate: "ssh-validate", want: "ipa-1："},
+		{name: "short jump flag", vars: map[string]any{"ansible_ssh_common_args": "-J bastion"}, gate: "ssh-extra-args,opts-not-dash-o", want: "只接受 -o Key=Value"},
+		{name: "an option without a value", vars: map[string]any{"ansible_ssh_extra_args": "-o StrictHostKeyChecking"}, gate: "ssh-extra-args,opts-not-key-value", want: "不是 Key=Value"},
+		{name: "unbalanced quote", vars: map[string]any{"ansible_ssh_common_args": `-o "UserKnownHostsFile=/x`}, gate: "ssh-extra-args,opts-split,split-quote", want: "引號沒有成對"},
+		{name: "a backslash", vars: map[string]any{"ansible_ssh_extra_args": `-o UserKnownHostsFile=C:\x`}, gate: "ssh-extra-args,opts-split,split-backslash", want: "不支援反斜線跳脫"},
+		{name: "extra args that are not a string", vars: map[string]any{"ansible_ssh_common_args": 5}, gate: "ssh-extra-args,opts-not-string", want: "不是字串"},
+		{name: "ssh_args that do not split", vars: map[string]any{"ansible_ssh_args": `-o "ControlPath=/x`}, gate: "ssh-args-parse,opts-split,split-quote", want: "ansible_ssh_args："},
+		{name: "ssh_args beyond mux", vars: map[string]any{"ansible_ssh_args": "-o ControlMaster=auto -o ForwardAgent=yes"}, gate: "ssh-args-mux", want: "ansible_ssh_args 含 ForwardAgent"},
+		{name: "non-integer port", vars: map[string]any{"ansible_port": "ssh"}, gate: "ssh-port", want: "ansible_port ssh 不是整數"},
+		// A value of another type is refused, not ignored: ignoring
+		// ansible_user 1000 connects as the local user (spec §4).
+		{name: "a numeric ansible_user", vars: map[string]any{"ansible_user": 1000}, gate: "ssh-var-type", want: "ansible_user 是 int，不是字串"},
+		{name: "a list ansible_user", vars: map[string]any{"ansible_user": []any{"root"}}, gate: "ssh-var-type", want: "ansible_user 是 []interface {}，不是字串"},
+		{name: "a boolean ansible_host", vars: map[string]any{"ansible_host": true}, gate: "ssh-var-type", want: "ansible_host 是 bool，不是字串"},
+		{name: "a numeric key file", vars: map[string]any{"ansible_ssh_private_key_file": 7}, gate: "ssh-var-type", want: "ansible_ssh_private_key_file 是 int，不是字串"},
 	} {
-		if _, err := sshTargetFromHostVars("ipa-1", vars); err == nil {
-			t.Errorf("%s: accepted", name)
+		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("gate: %s", tc.gate)
+			_, err := sshTargetFromHostVars("ipa-1", tc.vars)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	// What is not a refusal: an unset or null value keeps the default.
+	for name, vars := range map[string]map[string]any{
+		"null ansible_user":      {"ansible_user": nil},
+		"null ansible_host":      {"ansible_host": nil},
+		"empty ansible_host":     {"ansible_host": ""},
+		"null key file":          {"ansible_ssh_private_key_file": nil},
+		"numeric string port":    {"ansible_port": "2222"},
+		"float port from a JSON": {"ansible_port": float64(2222)},
+	} {
+		if got, err := sshTargetFromHostVars("ipa-1", vars); err != nil || got.Host != "ipa-1" {
+			t.Errorf("%s: %+v, %v", name, got, err)
 		}
+	}
+}
+
+// The three checks of the playbook's stage gate and the attestation each
+// refuse with their own message; the acceptance matrix above compares the
+// sets, this names the gate that fired (AGENTS.md §5.12).
+func TestGolangPreviewStageRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		groups       map[string][]string
+		stage, hours string
+		gate         string
+		want         string // "" when the stage is accepted
+	}{
+		{name: "prod host without --stage prod", groups: map[string][]string{"prod": {"ipa-1"}}, stage: "sandbox", gate: "stage-prod-group", want: "ipa-1 在 prod group，但 stage 是 sandbox"},
+		{name: "staging host with the default stage", groups: map[string][]string{"staging": {"ipa-1"}}, gate: "stage-staging-group", want: "ipa-1 在 staging group，但 stage 是 sandbox"},
+		{name: "--stage staging for a host that is not in staging", stage: "staging", gate: "stage-needs-group", want: "stage staging 需要 ipa-1 在 staging group"},
+		{name: "--stage prod for a host that is not in prod", stage: "prod", hours: "24", gate: "stage-needs-group", want: "stage prod 需要 ipa-1 在 prod group"},
+		{name: "prod without an attestation", groups: map[string][]string{"prod": {"ipa-1"}}, stage: "prod", gate: "stage-attestation", want: "--staging-attested-within-hours 0–168"},
+		{name: "an attestation older than a week", groups: map[string][]string{"prod": {"ipa-1"}}, stage: "prod", hours: "169", gate: "stage-attestation", want: "0–168"},
+		{name: "a negative attestation", groups: map[string][]string{"prod": {"ipa-1"}}, stage: "prod", hours: "-1", gate: "stage-attestation", want: "0–168"},
+		{name: "an attestation that is not a number", groups: map[string][]string{"prod": {"ipa-1"}}, stage: "prod", hours: "soon", gate: "stage-attestation", want: "0–168"},
+		{name: "prod with a week-old attestation", groups: map[string][]string{"prod": {"ipa-1"}}, stage: "prod", hours: "168"},
+		{name: "prod with a fresh attestation", groups: map[string][]string{"prod": {"ipa-1"}}, stage: "prod", hours: "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("gate: %s", tc.gate)
+			stage, err := golangPreviewStage("ipa-1", tc.groups, tc.stage, tc.hours)
+			if tc.want == "" {
+				if err != nil || stage != "prod" {
+					t.Fatalf("stage = %q, err = %v, want it accepted", stage, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -167,15 +239,45 @@ const golangTestPassword = "Sample-Admin-Password-9"
 // fakeIPA answers login and JSON-RPC from the captured FreeIPA fixtures and
 // records every method it is sent.
 type fakeIPA struct {
-	t       *testing.T
-	srv     *httptest.Server
-	ca      *x509.CertPool
-	mu      sync.Mutex
-	methods []string
-	bodies  []string
-	dials   int    // tunnel connections the preview opened
-	reader  string // the captured user given admins
-	dir     string // the captured fixtures, absolute: tests chdir
+	t        *testing.T
+	srv      *httptest.Server
+	ca       *x509.CertPool
+	mu       sync.Mutex
+	methods  []string
+	bodies   []string
+	dials    int               // tunnel connections the preview opened
+	reader   string            // the captured user given admins
+	dir      string            // the captured fixtures, absolute: tests chdir
+	paths    []string          // every request path, in order
+	login    string            // a captured login answer (status, headers, body) to replay instead of a session
+	answers  map[string]string // method (user_find/preserved for the preserved read) -> a captured fixture name, or an inline JSON body
+	noAdmins bool              // leave the reader out of admins
+	hang     map[string]bool   // JSON-RPC methods the server never answers (until the test ends)
+	stop     chan struct{}     // closed when the test ends, to release hung requests
+}
+
+// replay answers with a captured status, headers and body (the .status,
+// .headers and .json or .body files of internal/freeiparpc/testdata).
+func (f *fakeIPA) replay(w http.ResponseWriter, name string) {
+	base := filepath.Join(f.dir, name)
+	status, err := os.ReadFile(base + ".status")
+	if err != nil {
+		f.t.Error(err)
+	}
+	if headers, err := os.ReadFile(base + ".headers"); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(headers)), "\n") {
+			if k, v, ok := strings.Cut(line, ":"); ok && !strings.EqualFold(k, "Set-Cookie") {
+				w.Header().Set(strings.TrimSpace(k), strings.TrimSpace(v))
+			}
+		}
+	}
+	body, err := os.ReadFile(base + ".json")
+	if err != nil {
+		body, _ = os.ReadFile(base + ".body")
+	}
+	code, _ := strconv.Atoi(strings.TrimSpace(string(status)))
+	w.WriteHeader(code)
+	_, _ = w.Write(body)
 }
 
 func newFakeIPA(t *testing.T, reader string) *fakeIPA {
@@ -193,12 +295,14 @@ func newFakeIPA(t *testing.T, reader string) *fakeIPA {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeIPA{t: t, ca: x509.NewCertPool(), reader: reader, dir: dir}
+	f := &fakeIPA{t: t, ca: x509.NewCertPool(), reader: reader, dir: dir, stop: make(chan struct{})}
 	f.ca.AddCert(caCert)
 	f.srv = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
 	f.srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
 	f.srv.StartTLS()
 	t.Cleanup(f.srv.Close)
+	// Registered after Close, so it runs first: Close waits for hung requests.
+	t.Cleanup(func() { close(f.stop) })
 	return f
 }
 
@@ -215,10 +319,22 @@ func (f *fakeIPA) serve(w http.ResponseWriter, r *http.Request) {
 	_, _ = body.ReadFrom(r.Body)
 	f.mu.Lock()
 	f.bodies = append(f.bodies, body.String())
+	f.paths = append(f.paths, r.URL.Path)
 	f.mu.Unlock()
 	if r.URL.Path == "/ipa/session/login_password" {
+		if f.login != "" {
+			f.replay(w, f.login)
+			return
+		}
 		http.SetCookie(w, &http.Cookie{Name: "ipa_session", Value: "fake-session-cookie-value", Path: "/ipa"})
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+	// A JSON-RPC request without the session the login set is answered as
+	// the real server answers it (captured), so a preview that skipped or
+	// ignored the login cannot read anything.
+	if _, err := r.Cookie("ipa_session"); err != nil {
+		f.replay(w, "json-without-session")
 		return
 	}
 	var req struct {
@@ -230,12 +346,33 @@ func (f *fakeIPA) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.methods = append(f.methods, req.Method)
 	f.mu.Unlock()
+	if f.hang[req.Method] {
+		select {
+		case <-r.Context().Done():
+		case <-f.stop:
+		}
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
+	key := req.Method
+	if req.Method == "user_find" && opts["preserved"] == true {
+		key = "user_find/preserved"
+	}
+	if name, ok := f.answers[key]; ok {
+		if strings.HasPrefix(name, "{") {
+			_, _ = w.Write([]byte(name))
+		} else {
+			_, _ = w.Write(f.fixture(name))
+		}
+		return
+	}
 	switch {
 	case req.Method == "ping":
 		_, _ = w.Write(f.fixture("ping"))
 	case req.Method == "user_find" && opts["preserved"] == true:
 		_, _ = w.Write(f.fixture("user-find-no-match"))
+	case req.Method == "user_find" && f.noAdmins:
+		_, _ = w.Write(f.fixture("user-find-states"))
 	case req.Method == "user_find":
 		_, _ = w.Write(f.withAdmins(f.fixture("user-find-states")))
 	case req.Method == "group_find":
@@ -268,6 +405,13 @@ type fakeGolangDialer struct {
 	target sshdial.Target
 }
 
+// golangDialerFaults makes the fake dialer's FQDN or CA read fail, or its
+// FQDN another name. withFakeDialer clears it for every test.
+var golangDialerFaults struct {
+	fqdn           string
+	fqdnErr, caErr error
+}
+
 func (d *fakeGolangDialer) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
 	d.f.mu.Lock()
 	d.f.dials++
@@ -275,8 +419,22 @@ func (d *fakeGolangDialer) DialContext(ctx context.Context, _, _ string) (net.Co
 	var nd net.Dialer
 	return nd.DialContext(ctx, "tcp", d.f.srv.Listener.Addr().String())
 }
-func (d *fakeGolangDialer) FQDN(context.Context) (string, error)       { return golangTestFQDN, nil }
-func (d *fakeGolangDialer) CA(context.Context) (*x509.CertPool, error) { return d.f.ca, nil }
+func (d *fakeGolangDialer) FQDN(context.Context) (string, error) {
+	if golangDialerFaults.fqdnErr != nil {
+		return "", golangDialerFaults.fqdnErr
+	}
+	if golangDialerFaults.fqdn != "" {
+		return golangDialerFaults.fqdn, nil
+	}
+	return golangTestFQDN, nil
+}
+
+func (d *fakeGolangDialer) CA(context.Context) (*x509.CertPool, error) {
+	if golangDialerFaults.caErr != nil {
+		return nil, golangDialerFaults.caErr
+	}
+	return d.f.ca, nil
+}
 
 // golangWorkspace writes an inventory with one freeipa-server host, a
 // plaintext vault vars file and the roster, and fakes ansible-inventory
@@ -334,52 +492,28 @@ users:
   - {name: p1-self, first: P1, last: Self, display_name: P1 Self, login_shell: %s}
 `
 
+// runGolangPreview runs `pilot reconcile --engine golang --preview-only
+// --component freeipa-identity --timeout 2m <args>` through the real cobra
+// tree (runReconcileCLI): the flags are parsed, not assigned, so the
+// preview is reached the way an operator reaches it.
 func runGolangPreview(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	prev := []any{reconcileEngineFlag, reconcilePlanOutFlag, reconcilePreviewOnlyFlag, reconcileForceFlag, reconcileComponentFlags, reconcileDirFlag, reconcileInventoryFlag, reconcileTimeoutFlag, stageFlag, stagingAttestedHoursFlag, limitFlag, reconcileActionsPath}
-	t.Cleanup(func() {
-		reconcileEngineFlag, reconcilePlanOutFlag = prev[0].(string), prev[1].(string)
-		reconcilePreviewOnlyFlag, reconcileForceFlag = prev[2].(bool), prev[3].(bool)
-		reconcileComponentFlags, _ = prev[4].([]string)
-		reconcileDirFlag, reconcileInventoryFlag, reconcileTimeoutFlag = prev[5].(string), prev[6].(string), prev[7].(string)
-		stageFlag, stagingAttestedHoursFlag, limitFlag, reconcileActionsPath = prev[8].(string), prev[9].(string), prev[10].(string), prev[11].(string)
-	})
-	reconcileEngineFlag, reconcilePreviewOnlyFlag, reconcileForceFlag = "golang", true, false
-	reconcileComponentFlags = []string{"freeipa-identity"}
-	reconcileDirFlag, reconcileInventoryFlag, reconcileTimeoutFlag = ".", "inventory.yml", "2m"
-	stageFlag, stagingAttestedHoursFlag, limitFlag, reconcileActionsPath, reconcilePlanOutFlag = "", "", "", "", ""
-	for i := 0; i+1 < len(args); i += 2 {
-		switch args[i] {
-		case "--plan-out":
-			reconcilePlanOutFlag = args[i+1]
-		case "--stage":
-			stageFlag = args[i+1]
-		case "--limit":
-			limitFlag = args[i+1]
-		case "--timeout":
-			reconcileTimeoutFlag = args[i+1]
-		default:
-			t.Fatalf("runGolangPreview: unknown argument %s", args[i])
-		}
-	}
-	var out bytes.Buffer
-	command := &cobra.Command{}
-	command.SetOut(&out)
-	command.SetErr(&out)
-	command.SetContext(context.Background())
-	err := runReconcile(command, nil)
-	return out.String(), err
+	return runReconcileCLI(t, append([]string{"--engine", "golang", "--preview-only", "--component", "freeipa-identity", "--timeout", "2m"}, args...)...)
 }
 
 func withFakeDialer(t *testing.T, f *fakeIPA) *[]sshdial.Target {
 	t.Helper()
 	var targets []sshdial.Target
 	prev := newGolangDialer
+	golangDialerFaults.fqdn, golangDialerFaults.fqdnErr, golangDialerFaults.caErr = "", nil, nil
 	newGolangDialer = func(target sshdial.Target) golangDialer {
 		targets = append(targets, target)
 		return &fakeGolangDialer{f: f, target: target}
 	}
-	t.Cleanup(func() { newGolangDialer = prev })
+	t.Cleanup(func() {
+		newGolangDialer = prev
+		golangDialerFaults.fqdn, golangDialerFaults.fqdnErr, golangDialerFaults.caErr = "", nil, nil
+	})
 	return &targets
 }
 
@@ -474,13 +608,15 @@ func TestReconcileGolangPreviewFailsBeforeConnecting(t *testing.T) {
 		roster string
 		groups map[string][]string
 		args   []string
+		gate   string
 		want   string
 	}{
-		{name: "prod host without --stage prod", roster: strings.Replace(captureRoster, "%s", "/bin/sh", 1), groups: map[string][]string{"prod": {"ipa-1"}}, want: "prod group"},
-		{name: "legacy roster", roster: "users: []\n", want: "no schema_version"},
-		{name: "templated admin password", roster: strings.Replace(captureRoster, "%s", "/bin/sh", 1), want: "Jinja template"},
+		{name: "prod host without --stage prod", roster: strings.Replace(captureRoster, "%s", "/bin/sh", 1), groups: map[string][]string{"prod": {"ipa-1"}}, gate: "stage-gate", want: "prod group"},
+		{name: "legacy roster", roster: "users: []\n", gate: "roster-adapter", want: "no schema_version"},
+		{name: "templated admin password", roster: strings.Replace(captureRoster, "%s", "/bin/sh", 1), gate: "admin-password", want: "Jinja template"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("gate: %s", tc.gate)
 			f := newFakeIPA(t, "p1-self")
 			targets := withFakeDialer(t, f)
 			golangWorkspace(t, tc.roster, tc.groups)

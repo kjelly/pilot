@@ -9,12 +9,14 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -63,23 +65,28 @@ func validateReconcileEngineFlags(engine string, previewOnly, force bool, compon
 	switch engine {
 	case reconcileEngineAnsible:
 		if planOut != "" {
-			return fmt.Errorf("--plan-out 只能與 --engine %s 一起使用", reconcileEngineGolang)
+			return fmt.Errorf("--plan-out 只能與 --engine %s 一起使用", reconcileEngineGolang) // gate: engine-plan-out
 		}
 		return nil
 	case reconcileEngineGolang:
 	default:
-		return fmt.Errorf("--engine 只能是 %s 或 %s", reconcileEngineAnsible, reconcileEngineGolang)
+		return fmt.Errorf("--engine 只能是 %s 或 %s", reconcileEngineAnsible, reconcileEngineGolang) // gate: engine-unknown
 	}
 	switch {
 	case actions != "":
-		return fmt.Errorf("--engine %s 不能與 --actions 同時使用", reconcileEngineGolang)
+		return fmt.Errorf("--engine %s 不能與 --actions 同時使用", reconcileEngineGolang) // gate: engine-actions
 	case force || !previewOnly:
-		return fmt.Errorf("--engine %s 目前只提供預覽：請加 --preview-only，不要加 --force", reconcileEngineGolang)
+		return fmt.Errorf("--engine %s 目前只提供預覽：請加 --preview-only，不要加 --force", reconcileEngineGolang) // gate: engine-preview-only
 	case len(components) != 1 || components[0] != "freeipa-identity":
-		return fmt.Errorf("--engine %s 只處理 --component freeipa-identity 的使用者與群組", reconcileEngineGolang)
+		return fmt.Errorf("--engine %s 只處理 --component freeipa-identity 的使用者與群組", reconcileEngineGolang) // gate: engine-component
 	}
 	return nil
 }
+
+// golangLogoutTimeout bounds the session_logout the preview sends on the way
+// out, which must run after Ctrl-C and after --timeout ended the preview. A
+// variable so a test can shorten it.
+var golangLogoutTimeout = 10 * time.Second
 
 // golangPreviewError carries the preview's exit code.
 type golangPreviewError struct {
@@ -93,125 +100,162 @@ func (e *golangPreviewError) Unwrap() error { return e.err }
 
 // runReconcileGolangPreview plans the users and groups of the identity
 // roster with the Go engine and writes nothing to FreeIPA (spec §2.2).
+// Every failure exits 1 and only a produced plan with blocked objects exits
+// 3 (spec §2.3): an error wrapping a child process's *exec.ExitError is an
+// ExitCoder too, so returned as it is it would end pilot with that child's
+// status, and a 3 from ansible would read as "blocked". errors.Is still
+// reaches the inner sentinels through Unwrap.
 func runReconcileGolangPreview(cmd *cobra.Command) error {
+	err := golangPreview(cmd)
+	var coded *golangPreviewError
+	if err == nil || errors.As(err, &coded) {
+		return err // gate: exit-code-passthrough
+	}
+	return &golangPreviewError{err: err, code: 1} // gate: exit-code-1
+}
+
+func golangPreview(cmd *cobra.Command) error {
 	out := cmd.OutOrStdout()
 	planOut := ""
 	if reconcilePlanOutFlag != "" {
 		abs, err := filepath.Abs(expandHomeDir(reconcilePlanOutFlag))
 		if err != nil {
-			return err
+			return err // gate: plan-out-abs
 		}
 		if _, err := os.Lstat(abs); err == nil {
-			return fmt.Errorf("--plan-out %s 已存在；不覆寫", abs)
+			return fmt.Errorf("--plan-out %s 已存在；不覆寫", abs) // gate: plan-out-exists
+		}
+		// Fail now, not after the whole read: the file is written last.
+		if info, err := os.Stat(filepath.Dir(abs)); err != nil || !info.IsDir() {
+			return fmt.Errorf("--plan-out %s 的上層目錄 %s 不存在或不是目錄", abs, filepath.Dir(abs)) // gate: plan-out-dir
 		}
 		planOut = abs
 	}
 	timeout, err := parseDeployTimeout(reconcileTimeoutFlag)
 	if err != nil {
-		return err
+		return err // gate: timeout-parse
 	}
 	runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
 	if err != nil {
-		return err
+		return err // gate: runtime-prepare
 	}
-	ctx, cancel := context.WithTimeout(withDeployAnsibleRuntime(cmd.Context(), runtime), timeout)
+	// Ctrl-C and SIGTERM end the preview like --timeout does: the vault read
+	// is killed and the session logged out. The first signal cancels; the
+	// second, with the default action restored, ends pilot at once. Only the
+	// Go preview: the Ansible engine's handlers do not all observe their
+	// context (see withServiceCommandSignals).
+	sigCtx, stop := signal.NotifyContext(withDeployAnsibleRuntime(cmd.Context(), runtime), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	context.AfterFunc(sigCtx, stop)
+	ctx, cancel := context.WithTimeout(sigCtx, timeout)
 	defer cancel()
 
 	inv := workspacePath(reconcileDirFlag, reconcileInventoryFlag)
 	if err := validateFileExists(inv); err != nil {
-		return err
+		return err // gate: inventory-missing
 	}
 	if err := inventoryCurrentWithHosts(inv); err != nil {
-		return err
+		return err // gate: inventory-vs-hosts
 	}
 	snapshot, err := loadDeployInventorySnapshot(ctx, inv)
 	if err != nil {
-		return err
+		return err // gate: ansible-inventory
 	}
 	violations, err := validateDeploymentCompletenessSnapshot(inv, snapshot)
 	if err != nil {
-		return err
+		return err // gate: completeness-error
 	}
 	if len(violations) > 0 {
-		return formatCompletenessViolations(violations)
+		return formatCompletenessViolations(violations) // gate: completeness
 	}
 	hosts, err := resolvePatternHosts(ctx, inv, "freeipa-server", limitFlag)
 	if err != nil {
-		return err
+		return err // gate: list-hosts
 	}
 	if len(hosts) != 1 {
-		return fmt.Errorf("freeipa-identity 需要剛好一台 freeipa-server 主機(contract hostCardinality: exactly-one)，--limit %q 之後有 %d 台：%v", limitFlag, len(hosts), hosts)
+		return fmt.Errorf("freeipa-identity 需要剛好一台 freeipa-server 主機(contract hostCardinality: exactly-one)，--limit %q 之後有 %d 台：%v", limitFlag, len(hosts), hosts) // gate: exactly-one-server
 	}
 	host := hosts[0]
 	stage, err := golangPreviewStage(host, snapshot.Groups, stageFlag, stagingAttestedHoursFlag)
 	if err != nil {
-		return err
+		return err // gate: stage-gate
 	}
 	hostVars := snapshot.HostVars[host]
 
 	rosterPath, _ := hostVars["freeipa_roster_file"].(string)
 	if strings.TrimSpace(rosterPath) == "" {
-		return fmt.Errorf("%s 沒有設定 freeipa_roster_file", host)
+		return fmt.Errorf("%s 沒有設定 freeipa_roster_file", host) // gate: roster-file-unset
 	}
 	rosterPath = resolveRosterPath(filepath.Dir(inv), rosterPath)
 	rosterData, err := readSecretVarsFile(ctx, rosterPath, runtime.Env)
 	if err != nil {
-		return fmt.Errorf("讀取 roster: %w", err)
+		return fmt.Errorf("讀取 roster: %w", err) // gate: roster-read
 	}
 	var root map[string]any
 	if err := yaml.Unmarshal(rosterData, &root); err != nil {
-		return fmt.Errorf("解析 roster %s: %w", rosterPath, err)
+		return fmt.Errorf("解析 roster %s: %w", rosterPath, err) // gate: roster-yaml
 	}
 	desired, err := identityreconcile.FromRoster(root)
 	if err != nil {
-		return fmt.Errorf("roster %s: %w", rosterPath, err)
+		return fmt.Errorf("roster %s: %w", rosterPath, err) // gate: roster-adapter
 	}
 	var vaultData []byte
 	if varsFile := defaultVaultFile(inv); varsFile != "" {
 		if vaultData, err = readSecretVarsFile(ctx, varsFile, runtime.Env); err != nil {
-			return fmt.Errorf("讀取 vault vars 檔: %w", err)
+			return fmt.Errorf("讀取 vault vars 檔: %w", err) // gate: vault-vars-read
 		}
 	}
 	password, err := inventory.ResolveIPAAdminPassword(vaultData, rosterData)
 	if err != nil {
-		return err
+		return err // gate: admin-password
 	}
 	target, err := sshTargetFromHostVars(host, hostVars)
 	if err != nil {
-		return err
+		return err // gate: ssh-target
 	}
 
 	dialer := newGolangDialer(target)
 	fqdn, err := dialer.FQDN(ctx)
 	if err != nil {
-		return fmt.Errorf("讀取 %s 的 FQDN: %w", host, err)
+		return fmt.Errorf("讀取 %s 的 FQDN: %w", host, err) // gate: fqdn-read
 	}
 	if declared := rosterServer(root); declared != "" && !strings.EqualFold(declared, fqdn) {
-		return fmt.Errorf("roster freeipa.server 是 %s，但 %s 的 hostname -f 是 %s", declared, host, fqdn)
+		return fmt.Errorf("roster freeipa.server 是 %s，但 %s 的 hostname -f 是 %s", declared, host, fqdn) // gate: roster-server
 	}
 	ca, err := dialer.CA(ctx)
 	if err != nil {
-		return fmt.Errorf("讀取 %s 的 IPA CA: %w", host, err)
+		return fmt.Errorf("讀取 %s 的 IPA CA: %w", host, err) // gate: ca-read
 	}
 	client, err := newGolangIPAClient(freeiparpc.Config{FQDN: fqdn, CA: ca, DialContext: dialer.DialContext, ReadOnly: true})
 	if err != nil {
-		return err
+		return err // gate: client-new
 	}
 	if err := client.Login(ctx, desired.Principal, password); err != nil {
-		return fmt.Errorf("登入 FreeIPA: %w", err)
+		return fmt.Errorf("登入 FreeIPA: %w", err) // gate: login
 	}
-	defer func() { _ = client.Logout(context.Background()) }()
+	defer func() {
+		// Not ctx: the session must end after Ctrl-C and after --timeout too;
+		// bounded, since the server may be what is not answering.
+		lctx, done := context.WithTimeout(context.WithoutCancel(ctx), golangLogoutTimeout)
+		defer done()
+		_ = client.Logout(lctx)
+	}()
 	server, err := client.CheckServer(ctx)
 	if err != nil {
-		return err
+		return err // gate: check-server
 	}
 	observedAt := time.Now()
 	obs, err := identityreconcile.Observe(ctx, client, desired.Principal)
 	if err != nil {
-		return err
+		return err // gate: observe
 	}
 	plan := identityreconcile.Build(desired, obs.Users, obs.Groups)
 	stats := client.Stats()
+	if stats.Writes != 0 {
+		// Before anything is printed or written: a preview that sent a write
+		// has no plan to show.
+		return fmt.Errorf("內部錯誤：預覽送出了 %d 個寫入", stats.Writes) // gate: writes-guard
+	}
 	doc := identityreconcile.NewDocument(desired, obs, plan,
 		identityreconcile.Target{
 			InventoryHost: host, FQDN: fqdn, Destination: sshdial.DefaultDestination,
@@ -224,15 +268,12 @@ func runReconcileGolangPreview(cmd *cobra.Command) error {
 	printGolangPreview(out, doc, stage)
 	if planOut != "" {
 		if err := writeGolangPlan(planOut, doc); err != nil {
-			return err
+			return err // gate: plan-write
 		}
 		fmt.Fprintf(out, "plan JSON：%s\n", planOut)
 	}
-	if doc.Stats.Writes != 0 {
-		return fmt.Errorf("內部錯誤：預覽送出了 %d 個寫入", doc.Stats.Writes)
-	}
 	if doc.Result == identityreconcile.ResultBlocked {
-		return &golangPreviewError{err: fmt.Errorf("--engine %s 預覽：%d 個物件被阻擋，見上方清單", reconcileEngineGolang, len(doc.Blocked)), code: golangPreviewBlockedExitCode}
+		return &golangPreviewError{err: fmt.Errorf("--engine %s 預覽：%d 個物件被阻擋，見上方清單", reconcileEngineGolang, len(doc.Blocked)), code: golangPreviewBlockedExitCode} // gate: blocked-plan
 	}
 	return nil
 }
@@ -243,34 +284,34 @@ func runReconcileGolangPreview(cmd *cobra.Command) error {
 func inventoryCurrentWithHosts(inv string) error {
 	dir, err := filepath.Abs(filepath.Dir(inv))
 	if err != nil {
-		return err
+		return err // gate: hosts-abs-dir
 	}
 	hostsPath := filepath.Join(dir, "hosts.yml")
 	absInv, err := filepath.Abs(inv)
 	if err != nil {
-		return err
+		return err // gate: hosts-abs-inventory
 	}
 	data, err := os.ReadFile(hostsPath)
 	if hostsPath == absInv || errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return err
+		return err // gate: hosts-read
 	}
 	hf, err := inventory.Parse(data)
 	if err != nil {
-		return err
+		return err // gate: hosts-parse
 	}
 	rendered, err := generateInventoryFromHosts(hf)
 	if err != nil {
-		return err
+		return err // gate: hosts-render
 	}
 	current, err := os.ReadFile(absInv)
 	if err != nil {
-		return err
+		return err // gate: hosts-read-inventory
 	}
 	if string(current) != rendered {
-		return fmt.Errorf("%s 與 hosts.yml 不一致；--engine %s 是唯讀預覽，不會重新產生 inventory：請先執行 pilot inventory generate", inv, reconcileEngineGolang)
+		return fmt.Errorf("%s 與 hosts.yml 不一致；--engine %s 是唯讀預覽，不會重新產生 inventory：請先執行 pilot inventory generate", inv, reconcileEngineGolang) // gate: hosts-stale
 	}
 	return nil
 }
@@ -286,16 +327,16 @@ func golangPreviewStage(host string, groups map[string][]string, stage, attested
 	in := func(group string) bool { return slices.Contains(groups[group], host) }
 	switch {
 	case in("prod") && stage != "prod":
-		return "", fmt.Errorf("%s 在 prod group，但 stage 是 %s：請加 --stage prod", host, stage)
+		return "", fmt.Errorf("%s 在 prod group，但 stage 是 %s：請加 --stage prod", host, stage) // gate: stage-prod-group
 	case in("staging") && stage != "staging":
-		return "", fmt.Errorf("%s 在 staging group，但 stage 是 %s：請加 --stage staging", host, stage)
+		return "", fmt.Errorf("%s 在 staging group，但 stage 是 %s：請加 --stage staging", host, stage) // gate: stage-staging-group
 	case (stage == "staging" || stage == "prod") && !in(stage):
-		return "", fmt.Errorf("stage %s 需要 %s 在 %s group", stage, host, stage)
+		return "", fmt.Errorf("stage %s 需要 %s 在 %s group", stage, host, stage) // gate: stage-needs-group
 	}
 	if stage == "prod" {
 		hours, err := strconv.Atoi(attestedHours)
 		if err != nil || hours < 0 || hours > 168 {
-			return "", fmt.Errorf("--stage prod 需要 --staging-attested-within-hours 0–168")
+			return "", fmt.Errorf("--stage prod 需要 --staging-attested-within-hours 0–168") // gate: stage-attestation
 		}
 	}
 	return stage, nil
@@ -336,26 +377,40 @@ func sshTargetFromHostVars(host string, vars map[string]any) (sshdial.Target, er
 	var t sshdial.Target
 	for _, key := range unsupportedSSHHostVars {
 		if v, ok := vars[key]; ok && v != nil && v != "" {
-			return t, fmt.Errorf("%s 設定了 %s；--engine %s 不支援", host, key, reconcileEngineGolang)
+			return t, fmt.Errorf("%s 設定了 %s；--engine %s 不支援", host, key, reconcileEngineGolang) // gate: ssh-unsupported-var
 		}
 	}
 	if c, ok := vars["ansible_connection"]; ok && c != nil && c != "ssh" {
-		return t, fmt.Errorf("%s 的 ansible_connection 是 %v；--engine %s 只支援 ssh", host, c, reconcileEngineGolang)
+		return t, fmt.Errorf("%s 的 ansible_connection 是 %v；--engine %s 只支援 ssh", host, c, reconcileEngineGolang) // gate: ssh-connection
 	}
 	t.Host = host
-	if h, ok := vars["ansible_host"].(string); ok && h != "" {
-		t.Host = h
-	}
-	if u, ok := vars["ansible_user"].(string); ok {
-		t.User = u
-	}
-	if k, ok := vars["ansible_ssh_private_key_file"].(string); ok {
-		t.IdentityFile = expandHomeDir(k)
+	// A value of another type is refused, not ignored: ignoring ansible_user
+	// 1000 would connect as the local user (spec §4).
+	for _, field := range []struct {
+		key  string
+		into *string
+	}{{"ansible_host", &t.Host}, {"ansible_user", &t.User}, {"ansible_ssh_private_key_file", &t.IdentityFile}} {
+		v, ok := vars[field.key]
+		if !ok || v == nil {
+			continue
+		}
+		s, isString := v.(string)
+		if !isString {
+			return t, fmt.Errorf("%s 的 %s 是 %T，不是字串；--engine %s 不猜測它的意思", host, field.key, v, reconcileEngineGolang) // gate: ssh-var-type
+		}
+		switch {
+		case field.key == "ansible_host" && s == "":
+			// An empty address keeps the inventory name.
+		case field.key == "ansible_ssh_private_key_file":
+			*field.into = expandHomeDir(s)
+		default:
+			*field.into = s
+		}
 	}
 	if p, ok := vars["ansible_port"]; ok && p != nil {
 		port, err := strconv.Atoi(fmt.Sprint(p))
 		if err != nil {
-			return t, fmt.Errorf("%s 的 ansible_port %v 不是整數", host, p)
+			return t, fmt.Errorf("%s 的 ansible_port %v 不是整數", host, p) // gate: ssh-port
 		}
 		t.Port = port
 	}
@@ -363,7 +418,7 @@ func sshTargetFromHostVars(host string, vars map[string]any) (sshdial.Target, er
 	for _, key := range []string{"ansible_ssh_common_args", "ansible_ssh_extra_args"} {
 		opts, err := sshOptionArgs(vars[key])
 		if err != nil {
-			return t, fmt.Errorf("%s 的 %s：%w", host, key, err)
+			return t, fmt.Errorf("%s 的 %s：%w", host, key, err) // gate: ssh-extra-args
 		}
 		for k, v := range opts {
 			t.Options[k] = v
@@ -371,15 +426,15 @@ func sshTargetFromHostVars(host string, vars map[string]any) (sshdial.Target, er
 	}
 	opts, err := sshOptionArgs(vars["ansible_ssh_args"])
 	if err != nil {
-		return t, fmt.Errorf("%s 的 ansible_ssh_args：%w", host, err)
+		return t, fmt.Errorf("%s 的 ansible_ssh_args：%w", host, err) // gate: ssh-args-parse
 	}
 	for k := range opts {
 		if !multiplexOptions[k] {
-			return t, fmt.Errorf("%s 的 ansible_ssh_args 含 %s；只接受 ControlMaster、ControlPath、ControlPersist", host, k)
+			return t, fmt.Errorf("%s 的 ansible_ssh_args 含 %s；只接受 ControlMaster、ControlPath、ControlPersist", host, k) // gate: ssh-args-mux
 		}
 	}
 	if err := t.Validate(); err != nil {
-		return t, fmt.Errorf("%s：%w", host, err)
+		return t, fmt.Errorf("%s：%w", host, err) // gate: ssh-validate
 	}
 	return t, nil
 }
@@ -392,11 +447,11 @@ func sshOptionArgs(v any) (map[string]string, error) {
 	}
 	s, ok := v.(string)
 	if !ok {
-		return nil, fmt.Errorf("不是字串")
+		return nil, fmt.Errorf("不是字串") // gate: opts-not-string
 	}
 	words, err := splitShellWords(s)
 	if err != nil {
-		return nil, err
+		return nil, err // gate: opts-split
 	}
 	for i := 0; i < len(words); i++ {
 		w := words[i]
@@ -408,11 +463,11 @@ func sshOptionArgs(v any) (map[string]string, error) {
 		case strings.HasPrefix(w, "-o") && len(w) > 2:
 			opt = w[2:]
 		default:
-			return nil, fmt.Errorf("只接受 -o Key=Value，不接受 %q", w)
+			return nil, fmt.Errorf("只接受 -o Key=Value，不接受 %q", w) // gate: opts-not-dash-o
 		}
 		key, value, ok := strings.Cut(opt, "=")
 		if !ok || key == "" {
-			return nil, fmt.Errorf("-o %q 不是 Key=Value", opt)
+			return nil, fmt.Errorf("-o %q 不是 Key=Value", opt) // gate: opts-not-key-value
 		}
 		out[key] = value
 	}
@@ -441,14 +496,14 @@ func splitShellWords(s string) ([]string, error) {
 				cur.Reset()
 			}
 		case r == '\\':
-			return nil, fmt.Errorf("不支援反斜線跳脫")
+			return nil, fmt.Errorf("不支援反斜線跳脫") // gate: split-backslash
 		default:
 			cur.WriteRune(r)
 			inWord = true
 		}
 	}
 	if quote != 0 {
-		return nil, fmt.Errorf("引號沒有成對")
+		return nil, fmt.Errorf("引號沒有成對") // gate: split-quote
 	}
 	if inWord {
 		words = append(words, cur.String())
@@ -523,15 +578,15 @@ func printGolangPreview(out io.Writer, doc identityreconcile.Document, stage str
 func writeGolangPlan(path string, doc identityreconcile.Document) error {
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		return err
+		return err // gate: plan-marshal
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return fmt.Errorf("--plan-out: %w", err)
+		return fmt.Errorf("--plan-out: %w", err) // gate: plan-open
 	}
 	if _, err := f.Write(append(data, '\n')); err != nil {
 		_ = f.Close()
-		return err
+		return err // gate: plan-write-bytes
 	}
-	return f.Close()
+	return f.Close() // gate: plan-close
 }

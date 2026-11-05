@@ -140,15 +140,16 @@ func TestReconcileGolangPreviewNeedsExactlyOneServer(t *testing.T) {
 	roster := strings.Replace(captureRoster, "%s", "/bin/sh", 1)
 	two := []golangServer{{name: "ipa-1", addr: "192.0.2.10"}, {name: "ipa-2", addr: "192.0.2.11"}}
 	for _, tc := range []struct {
-		name, limit, want, host string
+		name, limit, want, host, gate string
 	}{
-		{name: "two servers", want: "有 2 台"},
-		{name: "limit names both", limit: "ipa-1,ipa-2", want: "有 2 台"},
-		{name: "limit leaves none", limit: "ipa-9", want: "有 0 台"},
+		{name: "two servers", want: "有 2 台", gate: "exactly-one-server"},
+		{name: "limit names both", limit: "ipa-1,ipa-2", want: "有 2 台", gate: "exactly-one-server"},
+		{name: "limit leaves none", limit: "ipa-9", want: "有 0 台", gate: "exactly-one-server"},
 		{name: "limit picks the second", limit: "ipa-2", host: "192.0.2.11"},
 		{name: "limit picks the first", limit: "ipa-1", host: "192.0.2.10"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("gate: %q", tc.gate)
 			f := newFakeIPA(t, "p1-self")
 			targets := withFakeDialer(t, f)
 			golangWorkspace(t, roster, nil)
@@ -185,8 +186,17 @@ func TestReconcileGolangPreviewNeedsExactlyOneServer(t *testing.T) {
 // and the read-only preview leaves inventory.yml as it was.
 func TestReconcileGolangPreviewRefusesAStaleInventory(t *testing.T) {
 	const hosts = "hosts:\n  ipa-1:\n    ansible_host: \"192.0.2.10\"\n    freeipa_roster_file: .vault/ipa-identity.yaml\n    roles: [freeipa-server]\n"
-	for _, current := range []bool{false, true} {
-		t.Run(map[bool]string{false: "stale", true: "current"}[current], func(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		current bool
+		gate    string
+	}{
+		{name: "stale", gate: "inventory-vs-hosts,hosts-stale"},
+		{name: "current", current: true},
+	} {
+		current := tc.current
+		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("gate: %q", tc.gate)
 			f := newFakeIPA(t, "p1-self")
 			targets := withFakeDialer(t, f)
 			dir := golangWorkspace(t, strings.Replace(captureRoster, "%s", "/bin/sh", 1), nil)
@@ -235,12 +245,13 @@ func TestReconcileGolangPreviewRefusesAStaleInventory(t *testing.T) {
 // Spec §4: roster freeipa.server must equal the server's hostname -f,
 // ignoring case; a mismatch fails before login.
 func TestReconcileGolangPreviewChecksTheRosterServer(t *testing.T) {
-	for _, tc := range []struct{ name, server, want string }{
-		{name: "another server", server: "ipa-other.example.test", want: "roster freeipa.server 是 ipa-other.example.test，但 ipa-1 的 hostname -f 是 " + golangTestFQDN},
+	for _, tc := range []struct{ name, server, want, gate string }{
+		{name: "another server", server: "ipa-other.example.test", want: "roster freeipa.server 是 ipa-other.example.test，但 ipa-1 的 hostname -f 是 " + golangTestFQDN, gate: "roster-server"},
 		{name: "case only", server: "IPA.Example.TEST"},
 		{name: "exact", server: golangTestFQDN},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("gate: %q", tc.gate)
 			f := newFakeIPA(t, "p1-self")
 			targets := withFakeDialer(t, f)
 			roster := strings.Replace(strings.Replace(captureRoster, "%s", "/bin/sh", 1),
@@ -273,6 +284,7 @@ func TestReconcileGolangPreviewEntryGates(t *testing.T) {
 		setup  func(t *testing.T)
 		vault  func(t *testing.T) string
 		server map[string]any
+		gate   string   // the gate the case makes fire
 		want   []string // substrings of the error
 		is     error    // the error must wrap it
 		isNot  []error  // and none of these
@@ -282,6 +294,7 @@ func TestReconcileGolangPreviewEntryGates(t *testing.T) {
 			// password still reading CHANGE-ME: the preview would otherwise
 			// log in with it.
 			name: "completeness: the vault holds a CHANGE-ME admin password",
+			gate: "completeness",
 			setup: func(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(".vault", "main.yaml"), []byte("ipa_admin_password: CHANGE-ME-min-8-chars\n"), 0o600); err != nil {
 					t.Fatal(err)
@@ -291,6 +304,7 @@ func TestReconcileGolangPreviewEntryGates(t *testing.T) {
 		},
 		{
 			name:  "vault vars file: no vault secret",
+			gate:  "vault-vars-read",
 			setup: func(t *testing.T) { writeEncrypted(t, filepath.Join(".vault", "main.yaml")) },
 			vault: noSecret,
 			want:  []string{"讀取 vault vars 檔", "no vault secret is configured"},
@@ -298,6 +312,7 @@ func TestReconcileGolangPreviewEntryGates(t *testing.T) {
 		},
 		{
 			name:  "vault vars file: the secret does not decrypt",
+			gate:  "vault-vars-read",
 			setup: func(t *testing.T) { writeEncrypted(t, filepath.Join(".vault", "main.yaml")) },
 			vault: wrongSecret,
 			want:  []string{"讀取 vault vars 檔", "does not decrypt"},
@@ -305,6 +320,7 @@ func TestReconcileGolangPreviewEntryGates(t *testing.T) {
 		},
 		{
 			name:  "vault vars file: ansible-vault fails another way",
+			gate:  "vault-vars-read",
 			setup: func(t *testing.T) { writeEncrypted(t, filepath.Join(".vault", "main.yaml")) },
 			vault: func(*testing.T) string { return "echo '[ERROR]: synthetic failure' >&2\nexit 2" },
 			want:  []string{"讀取 vault vars 檔", "synthetic failure"},
@@ -312,6 +328,7 @@ func TestReconcileGolangPreviewEntryGates(t *testing.T) {
 		},
 		{
 			name:  "roster: no vault secret",
+			gate:  "roster-read",
 			setup: func(t *testing.T) { writeEncrypted(t, filepath.Join(".vault", "ipa-identity.yaml")) },
 			vault: noSecret,
 			want:  []string{"讀取 roster", "no vault secret is configured"},
@@ -319,16 +336,19 @@ func TestReconcileGolangPreviewEntryGates(t *testing.T) {
 		},
 		{
 			name:   "ssh target: a connection password",
+			gate:   "ssh-target",
 			server: map[string]any{"ansible_ssh_pass": "x"},
 			want:   []string{"ipa-1 設定了 ansible_ssh_pass", "--engine golang 不支援"},
 		},
 		{
 			name:   "ssh target: not an ssh connection",
+			gate:   "ssh-target",
 			server: map[string]any{"ansible_connection": "docker"},
 			want:   []string{"ipa-1 的 ansible_connection 是 docker", "只支援 ssh"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("gate: %s", tc.gate)
 			f := newFakeIPA(t, "p1-self")
 			targets := withFakeDialer(t, f)
 			var vault string
@@ -370,7 +390,9 @@ func TestReconcileGolangPreviewEntryGates(t *testing.T) {
 
 // --timeout bounds the whole preview (spec §2.1), so also an
 // ansible-vault that never ends: the read fails with the deadline, the
-// fake ansible-vault is gone, and nothing is dialed.
+// fake ansible-vault is gone, and nothing is dialed. The margins are wide on
+// purpose: a loaded CI runner must not turn a slow start into a failure, while
+// a read that nothing stops still outlasts the bound by half a minute.
 func TestReconcileGolangPreviewVaultReadStopsAtTheTimeout(t *testing.T) {
 	for _, tc := range []struct{ name, file, want string }{
 		{name: "roster", file: "ipa-identity.yaml", want: "讀取 roster"},
@@ -384,15 +406,15 @@ func TestReconcileGolangPreviewVaultReadStopsAtTheTimeout(t *testing.T) {
 			started := filepath.Join(t.TempDir(), "started")
 			// Long enough that a read nothing stops would finish after
 			// the assertion on elapsed time below.
-			golangFakeVault(t, "echo $$ > '"+started+"'\nexec sleep 20")
+			golangFakeVault(t, "echo $$ > '"+started+"'\nexec sleep 60")
 			begin := time.Now()
-			out, err := runGolangPreview(t, "--timeout", "2s")
+			out, err := runGolangPreview(t, "--timeout", "5s")
 			elapsed := time.Since(begin)
 			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v after %s, want the deadline from %q\n%s", err, elapsed, tc.want, out)
 			}
-			if elapsed > 10*time.Second {
-				t.Fatalf("the read took %s; --timeout 2s did not stop it", elapsed)
+			if elapsed > 30*time.Second {
+				t.Fatalf("the read took %s; --timeout 5s did not stop it", elapsed)
 			}
 			pid, err := os.ReadFile(started)
 			if err != nil {

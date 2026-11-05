@@ -43,7 +43,7 @@ var reconcileCmd = &cobra.Command{
 func init() {
 	reconcileCmd.Flags().StringVar(&reconcileDirFlag, "dir", ".", "workspace directory containing inventory.yml and hosts.yml (default: current directory)")
 	reconcileCmd.Flags().StringVarP(&reconcileInventoryFlag, "inventory", "i", "inventory.yml", "預先填入的 inventory 路徑(精靈仍會再問一次，可直接按 Enter 採用)")
-	reconcileCmd.Flags().StringVar(&reconcileTimeoutFlag, "timeout", "30m", "每次 ansible-playbook 呼叫(preflight/預覽/套用，各自獨立計時)的逾時上限")
+	reconcileCmd.Flags().StringVar(&reconcileTimeoutFlag, "timeout", "30m", "每次 ansible-playbook 呼叫(preflight/預覽/套用，各自獨立計時)的逾時上限；--engine golang 時是整個預覽(ansible-inventory、ansible-vault、SSH、FreeIPA 讀取)的期限")
 	reconcileCmd.Flags().StringVar(&reconcileActionsPath, "actions", "", "以 JSON scenario 自動回答 reconcile TUI prompts")
 	reconcileCmd.Flags().BoolVar(&reconcilePresentation, "presentation", false, "自動操作時顯示教學步驟與 prompt 畫面")
 	reconcileCmd.Flags().StringVar(&reconcileTracePath, "trace-out", "", "將 automation prompt 以 JSONL 寫入指定檔案")
@@ -60,34 +60,34 @@ func init() {
 
 func runReconcile(cmd *cobra.Command, _ []string) error {
 	if err := validateReconcileEngineFlags(reconcileEngineFlag, reconcilePreviewOnlyFlag, reconcileForceFlag, reconcileComponentFlags, reconcileActionsPath, reconcilePlanOutFlag); err != nil {
-		return err
+		return err // gate: entry-engine-flags
 	}
 	if reconcileForceFlag && reconcilePreviewOnlyFlag {
-		return fmt.Errorf("--force 不能與 --preview-only 同時使用")
+		return fmt.Errorf("--force 不能與 --preview-only 同時使用") // gate: ansible-force-and-preview-only
 	}
 	if err := validateStageFlags(stageFlag, stagingAttestedHoursFlag); err != nil {
-		return err
+		return err // gate: entry-stage-flags
 	}
 	if err := validateLimitFlag(limitFlag); err != nil {
-		return err
+		return err // gate: entry-limit-flag
 	}
 	if reconcileActionsPath != "" {
 		if limitFlag != "" {
-			return fmt.Errorf("--limit 不能與 --actions 同時使用(scenario 自己回答 limit)")
+			return fmt.Errorf("--limit 不能與 --actions 同時使用(scenario 自己回答 limit)") // gate: ansible-actions-with-limit
 		}
 		if reconcileForceFlag || reconcilePreviewOnlyFlag || stageFlag != "" || len(reconcileComponentFlags) > 0 {
-			return fmt.Errorf("--actions 不能與 --force、--preview-only、--stage 或 --component 同時使用(scenario 自己回答這些問題)")
+			return fmt.Errorf("--actions 不能與 --force、--preview-only、--stage 或 --component 同時使用(scenario 自己回答這些問題)") // gate: ansible-actions-with-flags
 		}
-		return runStandalonePromptWorkflow(cmd, "reconcile", reconcileActionsPath, reconcilePresentation, reconcileTracePath)
+		return runStandalonePromptWorkflow(cmd, "reconcile", reconcileActionsPath, reconcilePresentation, reconcileTracePath) // gate: ansible-actions-dispatch
 	}
 	if reconcileEngineFlag == reconcileEngineGolang {
-		return runReconcileGolangPreview(cmd)
+		return runReconcileGolangPreview(cmd) // gate: entry-golang-dispatch
 	}
 	if (reconcileForceFlag || reconcilePreviewOnlyFlag) && len(reconcileComponentFlags) == 0 {
 		// The defaults driver would otherwise tick only the checklist's first entry.
-		return fmt.Errorf("--force/--preview-only 需要用 --component 指定要調和的元件")
+		return fmt.Errorf("--force/--preview-only 需要用 --component 指定要調和的元件") // gate: ansible-needs-component
 	}
-	return runReconcileInteractive(cmd)
+	return runReconcileInteractive(cmd) // gate: ansible-interactive-dispatch
 }
 
 func runReconcileInteractive(cmd *cobra.Command) error {
