@@ -168,9 +168,10 @@ class Commands:
         elif argv[:2] == ['rpm', '-q']:
             text, rc = (self.installed + '\tx86_64', 0) if self.installed else ('package wazuh-agent is not installed\n', 1)
         elif '-l' in argv:
+            # Shape captured from the real chain run recorded in docs/runbooks/wazuh-fim.md (agent_control -l).
             text, rc = ('Wazuh agent_control. List of available agents:\n'
-                        '   ID: 000, Name: wazuh.manager (server), IP: 127.0.0.1, Active/Local\n'
-                        '   ID: 001, Name: synthetic, IP: any, Active\n', 0)
+                        '   ID: 000, Name: wazuh-manager (server), IP: 127.0.0.1, Active/Local\n'
+                        '   ID: 001, Name: wazuh-fim, IP: any, Active\n', 0)
         elif '-i' in argv:
             text, rc = ('Wazuh agent_control. Agent information:\n   Agent ID:   001\n   Agent Name: synthetic\n'
                         '   Status:     Active\n   Client version:      ' + ('unknown' if self.unknown else 'Wazuh v' + self.agent_release) + '\n', 0)

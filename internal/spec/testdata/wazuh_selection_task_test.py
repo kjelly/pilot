@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -233,7 +234,9 @@ class SelectionGraphTests(unittest.TestCase):
 
     def test_a_fresh_exact_agent_is_installed_after_its_checks_and_protected_for_both_backends(self):
         grid = [(family, tags) for family in ('Debian', 'RedHat') for tags in (None, 'C1', 'C2')]
-        runs = self.graphs([((family, ''), {'flags': ('--tags', tags) if tags else ()}) for family, tags in grid])
+        # prepared=False: the play itself must establish the official repository and key for every selection
+        # that installs (the model refuses an install from a repository the play did not set up).
+        runs = self.graphs([((family, ''), {'flags': ('--tags', tags) if tags else (), 'prepared': False}) for family, tags in grid])
         for (family, tags), (result, events, state) in zip(grid, runs):
             with self.subTest(family=family, tags=tags):
                 self.assert_ok(result)
@@ -290,6 +293,17 @@ class SelectionGraphTests(unittest.TestCase):
         self.assertIn('agent-protect', self.actions(events))
         self.assertNotIn('protected', self.actions(events), 'the native hold already exists; nothing to change')
         self.assertIn('failed=0', result.stdout)
+
+    def test_protection_reports_a_change_exactly_when_it_changed_the_native_guard(self):
+        # The production changed_when expression runs over the real coordinator's output.
+        grid = [(family, protected) for family in ('Debian', 'RedHat') for protected in (False, True)]
+        runs = self.graphs([((family, '4.14.1-1'), {'protected': protected, 'flags': ('--tags', 'C1')}) for family, protected in grid])
+        for (family, protected), (result, events, state) in zip(grid, runs):
+            with self.subTest(family=family, already_protected=protected):
+                self.assert_ok(result)
+                status = re.search(r'TASK \[Protect the installed version[^\]]*\] \*+\n(\w+):', result.stdout)
+                self.assertIsNotNone(status, result.stdout)
+                self.assertEqual(status.group(1), 'ok' if protected else 'changed')
 
     def test_every_refusal_is_typed_visible_and_precedes_any_mutation(self):
         cases = {

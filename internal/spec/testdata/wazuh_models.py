@@ -59,10 +59,12 @@ class Docker:
             text += '\nwazuh-clusterd not running...\n'
             rc = 1
         elif '-l' in argv:
+            # Shape captured from the real chain run recorded in docs/runbooks/wazuh-fim.md (agent_control -l).
             text = ('Wazuh agent_control. List of available agents:\n'
-                    '   ID: 000, Name: wazuh.manager (server), IP: 127.0.0.1, Active/Local\n'
+                    '   ID: 000, Name: wazuh-manager (server), IP: 127.0.0.1, Active/Local\n'
                     + ''.join('   ID: %s, Name: agent-%s, IP: any, Active\n' % (key, key) for key in self.agents) + '\n')
         elif '-i' in argv:
+            # The -i block is modeled on the documented field layout; only the lines the parser reads matter.
             identifier = argv[argv.index('-i') + 1]
             release = self.agents[identifier]
             text = ('Wazuh agent_control. Agent information:\n   Agent ID:   %s\n   Agent Name: agent-%s\n   IP address: any\n'
