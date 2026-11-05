@@ -187,24 +187,31 @@ class EndpointTests(unittest.TestCase):
                 self.assertRegex(result.stdout, r'TASK \[' + task + r'[^\n]*\n(?:skipping: \[observer\])', task)
 
     def test_a_helper_that_cannot_run_still_reports_a_bounded_generic_reason(self):
-        with tempfile.TemporaryDirectory(prefix='wazuh-endpoint-broken-') as temporary:
-            root = Path(temporary); (root / 'tasks').mkdir(); (root / 'files').mkdir()
-            for name in ('wazuh-endpoint-resolve.yml', 'resolve-hosts-alias-target.yml'):
-                shutil.copy2(REPO / 'playbooks/apply/tasks' / name, root / 'tasks' / name)
-            # A helper that dies with a traceback-like text on stdout and no typed error.
-            (root / 'files/wazuh-endpoint.py').write_text('import sys\nprint("Traceback SECRET_ARGUMENT_TEXT")\nsys.exit(1)\n')
-            inv = root / 'inventory.yml'
-            inv.write_text(yaml.safe_dump({'all': {'hosts': {'observer': {'ansible_connection': 'local'}}}}))
-            play = root / 'play.yml'
-            play.write_text(yaml.safe_dump([{'hosts': 'observer', 'gather_facts': False,
-                'vars': {'wazuh_endpoint_value': '192.0.2.15', 'wazuh_endpoint_manager': '', 'wazuh_endpoint_inventory': []},
-                'tasks': [{'ansible.builtin.include_tasks': {'file': 'tasks/wazuh-endpoint-resolve.yml', 'apply': {'tags': ['always']}}}]}]))
-            result = subprocess.run(['ansible-playbook', '-i', str(inv), str(play)], cwd=REPO, capture_output=True, text=True, timeout=150,
-                env=dict(os.environ, ANSIBLE_CONFIG=str(REPO / 'ansible.cfg'), ANSIBLE_CACHE_PLUGIN='memory',
-                         ANSIBLE_LOCAL_TEMP=str(root / 'local'), ANSIBLE_REMOTE_TEMP=str(root / 'remote'), ANSIBLE_NOCOLOR='1'))
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('Wazuh endpoint association failed', result.stdout)
-            self.assertNotIn('SECRET_ARGUMENT_TEXT', result.stdout + result.stderr)
+        # A helper that dies with traceback-like text on stdout and no typed error, in each of its two runs.
+        # The first stub breaks `select`; the second answers `select` correctly and breaks `bind`.
+        stubs = {
+            'select': ('#!/usr/bin/env python3\nimport sys\nprint("Traceback SECRET_ARGUMENT_TEXT")\nsys.exit(1)\n', 'Wazuh endpoint association failed'),
+            'bind': ('#!/usr/bin/env python3\nimport json, sys\nif sys.argv[1] == "select":\n    print(json.dumps({"transport": "192.0.2.15"}))\n'
+                     '    sys.exit(0)\nprint("Traceback SECRET_ARGUMENT_TEXT")\nsys.exit(1)\n', 'Wazuh endpoint binding failed'),
+        }
+        for phase, (helper, expected) in stubs.items():
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory(prefix='wazuh-endpoint-broken-') as temporary:
+                root = Path(temporary); (root / 'tasks').mkdir(); (root / 'files').mkdir()
+                for name in ('wazuh-endpoint-resolve.yml', 'resolve-hosts-alias-target.yml'):
+                    shutil.copy2(REPO / 'playbooks/apply/tasks' / name, root / 'tasks' / name)
+                (root / 'files/wazuh-endpoint.py').write_text(helper)
+                inv = root / 'inventory.yml'
+                inv.write_text(yaml.safe_dump({'all': {'hosts': {'observer': {'ansible_connection': 'local'}}}}))
+                play = root / 'play.yml'
+                play.write_text(yaml.safe_dump([{'hosts': 'observer', 'gather_facts': False,
+                    'vars': {'wazuh_endpoint_value': '192.0.2.15', 'wazuh_endpoint_manager': '', 'wazuh_endpoint_inventory': []},
+                    'tasks': [{'ansible.builtin.include_tasks': {'file': 'tasks/wazuh-endpoint-resolve.yml', 'apply': {'tags': ['always']}}}]}]))
+                result = subprocess.run(['ansible-playbook', '-i', str(inv), str(play)], cwd=REPO, capture_output=True, text=True, timeout=150,
+                    env=dict(os.environ, ANSIBLE_CONFIG=str(REPO / 'ansible.cfg'), ANSIBLE_CACHE_PLUGIN='memory',
+                             ANSIBLE_LOCAL_TEMP=str(root / 'local'), ANSIBLE_REMOTE_TEMP=str(root / 'remote'), ANSIBLE_NOCOLOR='1'))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stdout)
+                self.assertNotIn('SECRET_ARGUMENT_TEXT', result.stdout + result.stderr)
 
 
 if __name__ == '__main__':
