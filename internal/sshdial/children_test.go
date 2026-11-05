@@ -534,19 +534,34 @@ func TestDialerCloseRacingDials(t *testing.T) {
 			t.Fatal("the dialers never got a tunnel")
 		}
 	}
-	bounded(t, "Close", func() { d.Close() })
-	bounded(t, "the dialers", wg.Wait)
-	all, _ := filepath.Glob(filepath.Join(pids, "ssh.*"))
-	var files []string
-	for _, f := range all {
-		// record writes name.tmp and renames it: a process killed in between
-		// leaves the .tmp behind, and has not recorded itself.
-		if !strings.HasSuffix(f, ".tmp") {
-			files = append(files, f)
+	// recorded lists the ssh that wrote their pid: record writes name.tmp and
+	// renames it, so a process killed in between leaves the .tmp behind and has
+	// not recorded itself.
+	recorded := func() []string {
+		all, _ := filepath.Glob(filepath.Join(pids, "ssh.*"))
+		var files []string
+		for _, f := range all {
+			if !strings.HasSuffix(f, ".tmp") {
+				files = append(files, f)
+			}
+		}
+		return files
+	}
+	// A dial returns when ssh is started, not when the script got to record
+	// itself: Close comes once every dialer has a running ssh that did.
+	for deadline := time.Now().Add(30 * time.Second); len(recorded()) < dialers; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("recorded %d ssh, want %d before Close", len(recorded()), dialers)
 		}
 	}
-	if len(files) < dialers {
-		t.Fatalf("recorded %d ssh, want at least %d", len(files), dialers)
+	bounded(t, "Close", func() { d.Close() })
+	bounded(t, "the dialers", wg.Wait)
+	files := recorded()
+	d.mu.Lock()
+	registered := len(d.live)
+	d.mu.Unlock()
+	if registered != 0 {
+		t.Errorf("%d ssh still registered after Close returned: started, but never signalled or waited for", registered)
 	}
 	for _, f := range files {
 		pid := pidFrom(t, f)
