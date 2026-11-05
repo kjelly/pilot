@@ -68,6 +68,12 @@ groupVars:
   # freeipa-client.md's changelog for the explicit scope note.
   - {name: freeipa_client_sssd_cache_credentials, type: boolean, required: false, secret: false}
   - {name: freeipa_client_sssd_offline_credentials_expiration, type: integer, required: false, secret: false}
+  # docs/verification/freeipa-client.md C13-C18 (v1.14): SSSD ipa_access_order
+  # policy for an expired FreeIPA password at a non-password (SSH key, GSSAPI)
+  # login. Unset leaves sssd.conf untouched; off writes `expire` back. Ubuntu
+  # 24.04 only. warn/renew deny accounts that never had a password (C17).
+  - {name: freeipa_client_sssd_password_expiry_policy, type: string, required: false, secret: false, validation: "^(warn|renew|off)$"}
+  - {name: freeipa_client_sssd_password_expiry_warning_days, type: integer, required: false, secret: false}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 traceability:
@@ -78,5 +84,9 @@ traceability:
     "docs/verification/freeipa-client.md#C5": {kind: derived, tags: [C1], reason: SSSD account resolution is configured by ipa-client-install}
     "docs/verification/freeipa-client.md#C6": {kind: derived, tags: [C1], reason: SSSD access provider is configured by ipa-client-install}
     "docs/verification/freeipa-client.md#C10": {kind: verifyOnly, reason: kernel auditing functional probe}
+    "docs/verification/freeipa-client.md#C15": {kind: verifyOnly, reason: PAM account probe of a fixture account; the mutation is C13/C14}
+    "docs/verification/freeipa-client.md#C16": {kind: verifyOnly, reason: PAM account probe of a fixture account; the mutation is C13/C14}
+    "docs/verification/freeipa-client.md#C17": {kind: verifyOnly, reason: PAM account probe of a fixture account; the mutation is C13/C14}
+    "docs/verification/freeipa-client.md#C18": {kind: verifyOnly, reason: sshd UsePAM is the OS default and not written by this playbook}
 verification: {autoDeploy: false}
 site: {include: true, order: 50, vars: {}, tags: [freeipa, freeipa-client], optIn: false}

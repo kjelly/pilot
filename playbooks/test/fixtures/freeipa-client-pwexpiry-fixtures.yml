@@ -1,0 +1,130 @@
+# Fixtures for docs/verification/freeipa-client.md C15-C17 (v1.14): FreeIPA
+# accounts in four password states, so the SSSD ipa_access_order policy
+# (C13/C14) can be probed with `sssctl user-checks` and with a real SSH login.
+#
+#   pilot-pwexpired  password set by an admin reset  -> expired at once (what a
+#                    roster default password looks like)
+#   pilot-pwvalid    password valid, expiry 2099-12-31 -> the login-probe canary shape
+#   pilot-pwnear     password valid, expiry in 3 days  -> pwd_expiration_warning
+#   pilot-nopw       never had a password (key-only)   -> denied under warn/renew
+#
+# The states are made with `ipa user-mod --random` / `--password-expiration`
+# straight on FreeIPA; freeipa-identity and the roster are not involved
+# (docs/superpowers/plans/2026-11-05-freeipa-ssh-key-password-renewal.md P3.1).
+# The random password is thrown away (output to /dev/null): these accounts are
+# probed through SSSD, not logged into with a password. A test that needs to
+# know the password (A04) resets it itself.
+#
+# Users are created only by the canonical user fixture (AGENTS.md §4.1), which
+# this file imports once per account. Idempotent: a state is written only to an
+# account that has no password yet (no krbLastPwdChange), so a second run is
+# changed=0 and never resets a password an account already holds.
+#
+# Runs on the FreeIPA SERVER (target `freeipa-server`, or `all` on a single-VM
+# vm-target with -e fixtures_target_group=all). Secrets from a vault:
+#   -e @~/.vault/main.yaml
+---
+- name: Ensure pilot-pwexpired exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: pilot-pwexpired
+    ipa_fixture_user_first: Pw
+    ipa_fixture_user_last: Expired
+    ipa_fixture_manage_sudorule: false
+
+- name: Ensure pilot-pwvalid exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: pilot-pwvalid
+    ipa_fixture_user_first: Pw
+    ipa_fixture_user_last: Valid
+    ipa_fixture_manage_sudorule: false
+
+- name: Ensure pilot-pwnear exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: pilot-pwnear
+    ipa_fixture_user_first: Pw
+    ipa_fixture_user_last: Near
+    ipa_fixture_manage_sudorule: false
+
+- name: Ensure pilot-nopw exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: pilot-nopw
+    ipa_fixture_user_first: No
+    ipa_fixture_user_last: Password
+    ipa_fixture_manage_sudorule: false
+
+- name: Put the password-expiry fixture accounts into their states (run on the FreeIPA server)
+  hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+  vars:
+    ipa_domain: ipa.pilot.internal
+    ipa_realm: "{{ ipa_domain | upper }}"
+    pwexpiry_fixture_far_future: "20991231000000Z"
+    pwexpiry_fixture_users:
+      - {name: pilot-pwexpired, state: expired}
+      - {name: pilot-pwvalid, state: valid}
+      - {name: pilot-pwnear, state: near}
+      - {name: pilot-nopw, state: nopw}
+
+  pre_tasks:
+    - name: "Gate: admin password present (fail before touching the directory)"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+        fail_msg: >-
+          Missing ipa_admin_password. Pass a vault file, e.g.
+          -e @~/.vault/main.yaml
+      tags: [always]
+
+  tasks:
+    - name: "Password-expiry fixtures with a private Kerberos cache for the admin ticket"
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
+
+        - name: "Password-expiry fixtures — kinit admin"
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ ipa_realm }}"]
+            stdin: "{{ ipa_admin_password }}"
+          changed_when: false
+          no_log: true
+          tags: [fixtures]
+
+        - name: "Password-expiry fixtures — put each account in its state"
+          ansible.builtin.shell:
+            cmd: |
+              set -e
+              u={{ item.name }}
+              if [ {{ item.state }} = nopw ]; then echo UNCHANGED; exit 0; fi
+              out=$(ipa user-show "$u" --all --raw)
+              if printf '%s\n' "$out" | grep -qi '^ *krblastpwdchange:'; then echo UNCHANGED; exit 0; fi
+              ipa user-mod "$u" --random >/dev/null
+              case {{ item.state }} in
+                valid) ipa user-mod "$u" --password-expiration={{ pwexpiry_fixture_far_future }} >/dev/null ;;
+                near) ipa user-mod "$u" --password-expiration="$(date -u -d '+3 days' +%Y%m%d%H%M%SZ)" >/dev/null ;;
+              esac
+              echo CHANGED
+          loop: "{{ pwexpiry_fixture_users }}"
+          loop_control:
+            label: "{{ item.name }}"
+          register: pwexpiry_fixture_state
+          changed_when: "(pwexpiry_fixture_state.stdout | default('') | trim) == 'CHANGED'"
+          no_log: true
+          tags: [fixtures]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]

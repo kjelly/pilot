@@ -269,6 +269,54 @@
         freeipa_client_dns_addresses: "{{ freeipa_client_dns_addresses | default([]) }}"
       tags: [always]
 
+    # docs/verification/freeipa-client.md C13/C14 (v1.14): SSSD
+    # ipa_access_order policy for an expired FreeIPA password at an SSH-key
+    # (non-password) login. Unset -> this playbook never touches the two
+    # SSSD lines below. All checks that can fail the run happen HERE, before
+    # any mutation (docs/superpowers/plans/2026-11-05-freeipa-ssh-key-
+    # password-renewal.md P0): unknown value, non-24.04 OS (Ubuntu 22.04's
+    # SSSD has no ipa_access_order), renew on a host that also runs a pilot
+    # access gateway/directory/target-policy (ForceCommand + chauthtok is not
+    # validated, plan stage 3b / A10).
+    - name: "FreeIPA client — resolve the SSSD password-expiry policy inputs"
+      ansible.builtin.set_fact:
+        freeipa_client_pwexpiry_policy: "{{ freeipa_client_sssd_password_expiry_policy | default('', true) | string | trim }}"
+        freeipa_client_pwexpiry_warning_days_raw: "{{ freeipa_client_sssd_password_expiry_warning_days | default(14, true) | string | trim }}"
+      tags: [always]
+
+    - name: "Gate: SSSD password-expiry policy inputs are valid on this host"
+      ansible.builtin.assert:
+        that:
+          - freeipa_client_pwexpiry_policy in ['', 'warn', 'renew', 'off']
+          - freeipa_client_pwexpiry_warning_days_raw is match('^[0-9]+$')
+          - (freeipa_client_pwexpiry_warning_days_raw | int) >= 1
+          - (freeipa_client_pwexpiry_warning_days_raw | int) <= 30
+          - >-
+            freeipa_client_pwexpiry_policy == '' or
+            (ansible_distribution == 'Ubuntu' and ansible_distribution_version == '24.04')
+          - >-
+            freeipa_client_pwexpiry_policy != 'renew' or
+            (group_names | intersect(['pilot-access-gateway', 'pilot-access-directory', 'pilot-access-target-policy']) | length == 0)
+        fail_msg: >-
+          freeipa_client_sssd_password_expiry_policy must be unset, warn, renew or off
+          (got '{{ freeipa_client_pwexpiry_policy }}'); freeipa_client_sssd_password_expiry_warning_days
+          must be an integer 1-30 (got '{{ freeipa_client_pwexpiry_warning_days_raw }}'). A non-empty
+          policy is supported only on Ubuntu 24.04 (this host: {{ ansible_distribution }}
+          {{ ansible_distribution_version }}), and `renew` is refused on hosts in the
+          pilot-access-gateway / pilot-access-directory / pilot-access-target-policy
+          groups until their ForceCommand flow is validated (spec A10).
+      tags: [always]
+
+    - name: "FreeIPA client — compute the SSSD ipa_access_order value for the policy"
+      ansible.builtin.set_fact:
+        freeipa_client_pwexpiry_access_order: >-
+          {{ {'warn': 'expire, pwd_expire_policy_warn',
+              'renew': 'expire, pwd_expire_policy_renew',
+              'off': 'expire'}[freeipa_client_pwexpiry_policy] | default('', true) }}
+        freeipa_client_pwexpiry_warning_days: "{{ freeipa_client_pwexpiry_warning_days_raw | int }}"
+      when: freeipa_client_pwexpiry_policy != ''
+      tags: [always]
+
     - name: "Pre-condition: chrony/NTP active (Kerberos needs clock skew < 5min)"
       ansible.builtin.command: systemctl is-active chronyd ntpd systemd-timesyncd
       register: ipa_ntp_check
@@ -845,6 +893,103 @@
         - freeipa_client_sssd_offline_credentials_expiration is defined
       tags: [freeipa-client, sssd_hardening]
 
+    # SSSD password-expiry policy (spec C13/C14, plan P1). snapshot ->
+    # preflight the file shape -> write whole lines -> sssctl config-check;
+    # any failure puts the snapshot back (rescue is `always` so a --tags run
+    # still rolls back) and nothing has been restarted yet. The line is
+    # replaced whole (lineinfile regexp), never appended, so a second apply
+    # is changed=0. Not run in --check: a fresh host has no sssd.conf yet.
+    - name: "FreeIPA client — SSSD password-expiry policy: snapshot, preflight, write, config-check"
+      when:
+        - not ansible_check_mode
+        - freeipa_client_pwexpiry_policy != ''
+      tags: [freeipa-client, C13, sssd_hardening]
+      block:
+        - name: "FreeIPA client — snapshot sssd.conf before the password-expiry policy"
+          ansible.builtin.slurp:
+            src: /etc/sssd/sssd.conf
+          register: ipa_pwexpiry_conf_before
+
+        - name: "FreeIPA client — preflight sssd.conf shape for the password-expiry policy (fail before editing)"
+          vars:
+            pwexpiry_conf: "{{ ipa_pwexpiry_conf_before.content | b64decode }}"
+            pwexpiry_orders: "{{ pwexpiry_conf | regex_findall('(?m)^ipa_access_order\\s*=\\s*(.*?)\\s*$') }}"
+          ansible.builtin.assert:
+            that:
+              - pwexpiry_conf | regex_findall('(?m)^\[domain/') | length == 1
+              - pwexpiry_conf is search('(?m)^access_provider\s*=\s*ipa\s*$')
+              - pwexpiry_orders | length <= 1
+              - pwexpiry_orders | difference(['expire', 'expire, pwd_expire_policy_warn', 'expire, pwd_expire_policy_renew', 'expire, pwd_expire_policy_reject']) | length == 0
+              - pwexpiry_conf | regex_findall('(?m)^pwd_expiration_warning\s*=') | length <= 1
+            fail_msg: >-
+              /etc/sssd/sssd.conf is not in a shape this playbook edits safely: it needs exactly one
+              [domain/...] section, access_provider = ipa, at most one ipa_access_order line (one of
+              expire / expire, pwd_expire_policy_{warn,renew,reject}) and at most one
+              pwd_expiration_warning line. Nothing was changed.
+
+        - name: "FreeIPA client — set SSSD ipa_access_order ({{ freeipa_client_pwexpiry_policy }})"
+          ansible.builtin.lineinfile:
+            path: /etc/sssd/sssd.conf
+            regexp: '^ipa_access_order\s*='
+            line: "ipa_access_order = {{ freeipa_client_pwexpiry_access_order }}"
+            insertafter: '^ipa_domain\s*='
+            state: present
+            create: false
+          register: ipa_pwexpiry_access_order
+
+        - name: "FreeIPA client — set SSSD pwd_expiration_warning (warn/renew only)"
+          ansible.builtin.lineinfile:
+            path: /etc/sssd/sssd.conf
+            regexp: '^pwd_expiration_warning\s*='
+            line: "pwd_expiration_warning = {{ freeipa_client_pwexpiry_warning_days }}"
+            insertafter: '^ipa_domain\s*='
+            state: present
+            create: false
+          register: ipa_pwexpiry_warning
+          when: freeipa_client_pwexpiry_policy in ['warn', 'renew']
+
+        - name: "FreeIPA client — sssctl config-check after the password-expiry policy"
+          ansible.builtin.command:
+            argv: [sssctl, config-check]
+          changed_when: false
+      rescue:
+        - name: "FreeIPA client — put back the sssd.conf snapshot taken before the password-expiry policy"
+          ansible.builtin.copy:
+            dest: /etc/sssd/sssd.conf
+            content: "{{ ipa_pwexpiry_conf_before.content | b64decode }}"
+            owner: root
+            group: root
+            mode: "0600"
+          when: ipa_pwexpiry_conf_before is defined
+          tags: [always]
+
+        - name: "FreeIPA client — fail: password-expiry policy was not applied"
+          ansible.builtin.fail:
+            msg: >-
+              SSSD password-expiry policy '{{ freeipa_client_pwexpiry_policy }}' was not applied;
+              sssd.conf was {{ 'restored from the snapshot taken before this run' if ipa_pwexpiry_conf_before is defined else 'not snapshotted yet, so it was not touched' }}.
+              SSSD was not restarted.
+          tags: [always]
+
+    # Compare what SSSD has loaded (confdb) with what the file says. confdb
+    # is filled from sssd.conf only when SSSD starts, so a file changed by a
+    # previous run that died before the restart (or by hand) shows up here
+    # and triggers the restart below - this is also what makes
+    # `--tags C13`/`--tags C14`/`--tags sssd_hardening` converge on their own.
+    - name: "FreeIPA client — does the running SSSD hold the file's ipa_access_order?"
+      ansible.builtin.shell: |
+        f=$(sed -n 's/^ipa_access_order *= *//p' /etc/sssd/sssd.conf)
+        c=$(ldbsearch -H /var/lib/sss/db/config.ldb -b cn=domain,cn=config -s one ipa_access_order 2>/dev/null | sed -n 's/^ipa_access_order: //p')
+        [ "$f" = "$c" ]
+      register: ipa_pwexpiry_confdb
+      changed_when: false
+      failed_when: ipa_pwexpiry_confdb.rc not in [0, 1]
+      check_mode: false
+      when:
+        - not ansible_check_mode
+        - freeipa_client_pwexpiry_policy != ''
+      tags: [freeipa-client, C13, C14, sssd_hardening]
+
     - name: "FreeIPA client — restart SSSD after wiring responders"
       ansible.builtin.systemd:
         name: sssd
@@ -852,13 +997,20 @@
       when:
         - not ansible_check_mode
         - >-
-          ipa_sssd_services is changed or
-          ipa_sssd_sudo_provider is changed or
+          (ipa_sssd_services | default({})) is changed or
+          (ipa_sssd_sudo_provider | default({})) is changed or
           (ipa_sssd_cache_credentials | default({})) is changed or
           (ipa_sssd_offline_credentials_expiration | default({})) is changed or
+          (ipa_pwexpiry_access_order | default({})) is changed or
+          (ipa_pwexpiry_warning | default({})) is changed or
+          ((ipa_pwexpiry_confdb | default({})).rc | default(0)) == 1 or
           (ipa_sssd_explicit_responder_sockets.results | default([]) |
            selectattr('changed', 'defined') | selectattr('changed') | list | length > 0)
-      tags: [freeipa-client, C8]
+      # sssd_hardening / C13 / C14 are on this task because their lineinfile
+      # tasks edit sssd.conf but SSSD only reads it at start: with the tag
+      # missing here, `--tags sssd_hardening` wrote the file and never
+      # restarted (docs/verification/freeipa-client.md C14).
+      tags: [freeipa-client, C8, C13, C14, sssd_hardening]
 
     - name: "FreeIPA client — enable + start SSSD (survives reboot)"
       ansible.builtin.systemd:
@@ -867,6 +1019,59 @@
         enabled: true
       when: not ansible_check_mode
       tags: [freeipa-client, C2]
+
+    # After the restart: SSSD must be up, hold the file's value (spec C14) and
+    # accept the config. If not, put the pre-policy file back and restart so
+    # the host keeps its previous login behaviour, then fail the run.
+    - name: "FreeIPA client — SSSD runs the password-expiry policy it was given"
+      when:
+        - not ansible_check_mode
+        - freeipa_client_pwexpiry_policy != ''
+      tags: [freeipa-client, C13, C14, sssd_hardening]
+      block:
+        - name: "FreeIPA client — SSSD is active after the password-expiry policy"
+          ansible.builtin.command:
+            argv: [systemctl, is-active, --quiet, sssd]
+          changed_when: false
+
+        - name: "FreeIPA client — sssctl config-check once SSSD runs the policy"
+          ansible.builtin.command:
+            argv: [sssctl, config-check]
+          changed_when: false
+
+        - name: "FreeIPA client — running SSSD now holds the file's ipa_access_order"
+          ansible.builtin.shell: |
+            f=$(sed -n 's/^ipa_access_order *= *//p' /etc/sssd/sssd.conf)
+            c=$(ldbsearch -H /var/lib/sss/db/config.ldb -b cn=domain,cn=config -s one ipa_access_order 2>/dev/null | sed -n 's/^ipa_access_order: //p')
+            [ "$f" = "$c" ]
+          changed_when: false
+      rescue:
+        - name: "FreeIPA client — put back the pre-policy sssd.conf after the running SSSD rejected the policy"
+          ansible.builtin.copy:
+            dest: /etc/sssd/sssd.conf
+            content: "{{ ipa_pwexpiry_conf_before.content | b64decode }}"
+            owner: root
+            group: root
+            mode: "0600"
+          register: ipa_pwexpiry_restored
+          when: ipa_pwexpiry_conf_before is defined
+          tags: [always]
+
+        - name: "FreeIPA client — restart SSSD on the restored sssd.conf"
+          ansible.builtin.systemd:
+            name: sssd
+            state: restarted
+          when: ipa_pwexpiry_conf_before is defined
+          tags: [always]
+
+        - name: "FreeIPA client — fail: SSSD did not take the password-expiry policy"
+          ansible.builtin.fail:
+            msg: >-
+              SSSD did not come up holding password-expiry policy '{{ freeipa_client_pwexpiry_policy }}'.
+              {{ 'sssd.conf was restored from the snapshot taken before this run and SSSD restarted on it.'
+                 if ipa_pwexpiry_conf_before is defined else
+                 'No snapshot exists in this run (a --tags run that skipped C13), so nothing was restored; check sssd.conf and journalctl -u sssd by hand.' }}
+          tags: [always]
 
     - name: "FreeIPA client — enable socket-activated sudo responder"
       ansible.builtin.systemd:

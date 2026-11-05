@@ -12,7 +12,9 @@
 > v1.7 修正 C1/C8 的 apt install 不再對「無關第三方 APT repository 壞掉」fatal（改走共用
 > `playbooks/apply/tasks/apt-package-install.yml`，見 `docs/verification/apt-repository-tolerance.md`
 > 與 §9 v1.7 說明）；v1.8 新增 C12：SSH client 端預設對本 realm 網域開啟 GSSAPI ticket
-> delegation，確保未來停用密碼登入後 pilot-access-gateway 跳板機仍可 relay 登入，見 §9 v1.8 說明
+> delegation，確保未來停用密碼登入後 pilot-access-gateway 跳板機仍可 relay 登入，見 §9 v1.8 說明；
+> v1.14 新增 C13–C18：SSH key 等非密碼登入時對已過期 FreeIPA 密碼的政策（opt-in，
+> `freeipa_client_sssd_password_expiry_policy`），row 指令與 apply／fixture playbook 已實跑，正式 evidence 尚未完成，見 §0 / §9 v1.14／v1.15
 > 對齊規範：pilot 通用基礎設施**使用端**規範；本 host 是**被 enroll 的 client**，
 > 把「帳號認證（Authentication）+ 存取授權（Authorization / HBAC + sudo）+ 稽核（Audit）」
 > 交給 FreeIPA server 統一提供。
@@ -68,6 +70,29 @@ freeipa-client=<client>` 讓 `groups['freeipa-server']` hostvars 偵測吃到真
    `no modifications to be performed`，不是猜測的 `already contains`。兩處都已修正並補冪等
    實測。
 
+**v1.14／v1.15（C13–C18：SSH key 登入時對已過期密碼的政策）— apply 與 fixture playbook 已實作，正式 evidence 尚未完成，2026-11-05**：
+新變數 `freeipa_client_sssd_password_expiry_policy`（`warn`／`renew`／`off`，未設定就不動）把 SSSD
+domain 的 `ipa_access_order` 設成 `expire, pwd_expire_policy_<warn|renew>` 或 `expire`。`renew` 讓用
+SSH key（或 GSSAPI）登入、但 FreeIPA 密碼已過期的人在拿到 shell 前先改密碼。roster 給的預設密碼是
+管理員 reset，FreeIPA 一律標成立即過期，所以這也包含還沒改過預設密碼的人。
+
+- C13–C18 依主機 sssd.conf **當下**的 `ipa_access_order` 判斷預期結果，未啟用的主機也會 PASS。
+- 2026-11-05 在拋棄式 topology（AlmaLinux 9 FreeIPA server + Ubuntu 24.04 client，SSSD 2.9.4、
+  OpenSSH 9.6p1）用 `pilot verify --probe`（與 `pilot verify` 相同的管線）實跑 C13–C18：未設定、
+  `warn`、`renew`、`off` 四種狀態全部 PASS；另外製造每一列要擋的狀態，每一列都會 FAIL（§3 v1.14）。
+  這一輪政策是手動改 sssd.conf + 重啟 SSSD 模擬的，所以是 row 指令的實測，**不是** evidence chain。
+- v1.15：`playbooks/apply/freeipa-client-apply.yml` 實作 C13／C14（見 §6），
+  `playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml` 建立 C15–C17 的 fixture 帳號
+  （`pilot-pwexpired`／`pilot-pwvalid`／`pilot-pwnear`／`pilot-nopw`，直接用 `ipa user-mod --random`／
+  `--password-expiration` 造出狀態，不經 roster）。2026-11-05 在同一組拋棄式 topology 用
+  `ansible-playbook` 直接實跑（開發期探測，不是 `topology test`）：`renew`／`warn`／`off`／未設定四種狀態
+  C13–C18 全部 PASS、重跑 `changed=0`；負向控制（非法值、非 24.04、`renew` 在 gateway 主機、
+  `ipa_access_order` 重複或未知形式、`sssctl config-check` 失敗、SSSD 沒載入政策、`--check`）都在
+  修改前拒絕或由 rescue 還原，sssd.conf 位元組不變；hand-edit 後不重啟再跑 `--tags C14` /
+  `--tags sssd_hardening` 會重啟 SSSD。
+- 尚未完成：`vm-target topology test` 的正式 evidence（candidate commit、L3 `--check --diff`、L6 冪等、
+  A04／A05 的真實 SSH key + 過期密碼互動），以及 gateway／directory／target-policy 主機（階段 3b）。
+
 **這台 client 從 FreeIPA 拿到什麼（AAA）**：
 - **Authentication（認證）**：帳號與 Kerberos 身分來自 FreeIPA，經 SSSD 提供給 NSS/PAM
   （`id <ipa-user>` 解析得到、`/etc/krb5.keytab` 有本機 `host/…` principal）。
@@ -90,7 +115,7 @@ sssd + krb5）；EL client 走 `dnf install ipa-client`，只有裝套件那一�
 | 項目 | 值 |
 |------|----|
 | Inventory group | `freeipa-client`（vm-target 測試時 host 在 `all`，用 `-e target_group=all`）|
-| OS / version | **Ubuntu 24.04**（primary）；apt `freeipa-client`。EL9 client 亦支援（`dnf ipa-client`）|
+| OS / version | **Ubuntu 24.04**（primary）；apt `freeipa-client`。EL9 client 亦支援（`dnf ipa-client`）。C13–C18 的 `warn`／`renew` 只支援 Ubuntu 24.04：其他主機設定 `freeipa_client_sssd_password_expiry_policy` 時，apply 在修改前拒絕 |
 | 角色 | FreeIPA **使用端**：帳號/Kerberos 認證、HBAC 授權、中央 sudo 規則、本機稽核 |
 | FreeIPA server | `ipa1.ipa.pilot.internal`（realm `IPA.PILOT.INTERNAL`, domain `ipa.pilot.internal`）|
 | DNS | 無 SRV-based KDC 探索：server FQDN 由 `/etc/hosts` pin 到 `ipa_server_ip`；client 自身 FQDN 亦 pin 到自身 IP（`ipa-client-install` 硬性要求 FQDN 可解析到非 loopback）。若 selected server `freeipa_setup_dns=true`（預設），enrollment 另會在 FreeIPA authoritative DNS 建立本 client 的 A/AAAA record（C11）|
@@ -115,6 +140,8 @@ sssd + krb5）；EL client 走 `dnf install ipa-client`，只有裝套件那一�
 | `freeipa_client_register_dns` | 是否在 enrollment 時建立本 client 的 authoritative DNS A/AAAA record（C11）；未設時 effective 值繼承 selected FreeIPA server 的 `freeipa_setup_dns` | 否（有 effective default）|
 | `freeipa_client_dns_addresses` | 明確指定要寫入 DNS 的 address list（IPv4/IPv6 皆可）；未設時 fallback 為 `ansible_default_ipv4.address` | 否（有 fallback）|
 | `freeipa_client_dns_replace_from_address` | Day-2 IP 遷移的 expected-old CAS token（單次授權，非永久 allow-flag）；未設時任何 authoritative extra 依然 fail-closed（見 §0 v1.5 / §9）| 否（不設 = 無 replacement 授權）|
+| `freeipa_client_sssd_password_expiry_policy` | 非密碼登入（SSH key、GSSAPI）時對已過期 FreeIPA 密碼的處理，寫進 SSSD domain 的 `ipa_access_order`：`warn`（照常登入）、`renew`（登入前要求改密碼）、`off`（寫回 `expire`）；**未設定就不動** sssd.conf。`warn`／`renew` 下從沒設過密碼的帳號會被拒絕（C17）。只支援 Ubuntu 24.04（C13–C17）| 否（未設 = 不動）|
+| `freeipa_client_sssd_password_expiry_warning_days` | `warn`／`renew` 時寫入 SSSD domain 的 `pwd_expiration_warning`（天，1–30）；未設時 14 | 否（有預設）|
 
 > Realm 後綴 DN：`ipa.pilot.internal` → `dc=ipa,dc=pilot,dc=internal`。
 > `ipa_domain` / `ipa_realm` / `ipa_server_fqdn` **必須**與 `freeipa-server.md` §1.5 完全一致，否則 enroll 失敗。
@@ -149,6 +176,12 @@ Inventory 輸入由各元件 contract 的 `groupVars` 檢查。FreeIPA 的 `ipa_
 | C10 | audit    | kernel auditing 已啟用（稽核事件實際被捕捉）                          | ~enabled 1                                  | sudo auditctl -s |
 | C11 | dns      | FreeIPA authoritative DNS 有本 client 的 A record（非 `/etc/hosts`）  | 0                                            | dig +short @ipa1.ipa.pilot.internal "$(hostname -f)" A | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' |
 | C12 | authn    | SSH client 對本 realm 網域已開啟 GSSAPI ticket delegation（供跳板機停用密碼登入後仍可 relay） | 0 | sh -c 'ssh -G dummy.ipa.pilot.internal 2>&1 | grep -qi "^gssapidelegatecredentials yes$"' |
+| C13 | pwexpiry | `ipa_access_order` 是 Pilot 寫的形式（沒有這行、`expire`、`expire, pwd_expire_policy_warn`、`expire, pwd_expire_policy_renew`），sssd.conf 恰好一個 domain section、這行最多一行 | 0 | sudo awk 'BEGIN{d=0;n=0} /^\[domain\//{d++} /^ipa_access_order[ \t]*=/{n++; v=$0; sub(/^[^=]*=[ \t]*/, "", v)} END{exit !(d == 1 && n <= 1 && (n == 0 || v ~ /^expire(, pwd_expire_policy_(warn|renew))?$/))}' /etc/sssd/sssd.conf |
+| C14 | pwexpiry | 執行中的 SSSD 已載入檔案裡的 `ipa_access_order`（confdb 與 sssd.conf 一致；改了檔沒重啟會 FAIL） | 0 | sudo sh -c 'f=$(sed -n "s/^ipa_access_order *= *//p" /etc/sssd/sssd.conf); c=$(ldbsearch -H /var/lib/sss/db/config.ldb -b cn=domain,cn=config -s one ipa_access_order 2>/dev/null | sed -n "s/^ipa_access_order: //p"); [ "$f" = "$c" ]' |
+| C15 | pwexpiry | 密碼已過期的 fixture 帳號 `pilot-pwexpired`：`renew` 時 PAM account 要求新密碼，其他設定照常通過 | 0 | sudo sh -c 'v=$(sed -n "s/^ipa_access_order *= *//p" /etc/sssd/sssd.conf); case "$v" in *pwd_expire_policy_renew*) w="new one required";; *) w="pam_acct_mgmt: Success";; esac; sssctl user-checks -a acct -s sshd pilot-pwexpired 2>&1 | grep -qF "$w"' |
+| C16 | pwexpiry | 密碼有效（到期日在未來）的 fixture 帳號 `pilot-pwvalid`：任何設定下 PAM account 都通過 | 0 | sudo sh -c 'sssctl user-checks -a acct -s sshd pilot-pwvalid 2>&1 | grep -qF "pam_acct_mgmt: Success"' |
+| C17 | pwexpiry | 從沒設過密碼的 fixture 帳號 `pilot-nopw`：設了 `pwd_expire_policy_*` 時被拒絕（System error），否則通過 | 0 | sudo sh -c 'v=$(sed -n "s/^ipa_access_order *= *//p" /etc/sssd/sssd.conf); case "$v" in *pwd_expire_policy_*) w="pam_acct_mgmt: System error";; *) w="pam_acct_mgmt: Success";; esac; sssctl user-checks -a acct -s sshd pilot-nopw 2>&1 | grep -qF "$w"' |
+| C18 | pwexpiry | sshd 有效設定 `UsePAM yes`（密碼過期的處理靠 sshd 的 PAM account） | 0 | sh -c 'sudo sshd -T 2>/dev/null | grep -qi "^usepam yes$"' |
 
 > **rc 型 expected（C1/C2/C3/C5/C6/C7/C9 = `0`）比對 process 退出碼**：
 > - `systemctl is-active <svc>`（C2/C9）服務 active 時自身 rc 0，否則非 0 —— 刻意用 rc 而非
@@ -174,15 +207,72 @@ Inventory 輸入由各元件 contract 的 `groupVars` 檢查。FreeIPA 的 `ipa_
 > 只驗證「回傳了一個格式合法的 IPv4」（存在性 + 格式），不比對精確 IP：VM 的位址可能因
 > DHCP/重建而變動，C1–C10 已經證明身分正確，C11 的職責純粹是「authoritative DNS 沒有
 > NXDOMAIN/空答案」。
+>
+> **C13–C18（v1.14，密碼過期政策）**：
+> - **跟著主機當下的設定判斷**：`freeipa_client_sssd_password_expiry_policy` 未設定時 Pilot 不動
+>   sssd.conf，所以 C15／C17 先讀 `ipa_access_order` 再決定要比對哪個結果。未啟用的主機（`ipa_access_order`
+>   不存在或是 `expire`）全部 PASS。C13 只接受 Pilot 會寫的形式；手動寫了 `pwd_expire_policy_reject`
+>   或其他值的主機會 FAIL（2026-11-05 實測），因為 Pilot 不知道那台主機的政策是誰定的。
+> - **C14 讀的是執行中的設定**：SSSD 啟動時把 sssd.conf 載入 `/var/lib/sss/db/config.ldb`。實測改了
+>   sssd.conf 但沒重啟時，confdb 仍是舊值（C14、C15、C17 FAIL）；重啟後才變成
+>   `ipa_access_order: expire, pwd_expire_policy_renew`。只讀檔案的檢查抓不到「寫了但沒生效」。
+> - **`sssctl user-checks` 的結果在 stderr，結束碼永遠是 0**：`pam_acct_mgmt: …` 那一行印在 stderr，
+>   被拒絕時 rc 也是 0（2026-11-05 實測），所以 C15–C17 一律 `2>&1 | grep -qF`，用 grep 的 rc 判斷。
+>   實測的三種結果字串：`pam_acct_mgmt: Success`、`pam_acct_mgmt: Authentication token is no longer valid; new one required`、
+>   `pam_acct_mgmt: System error`。`sssctl user-checks -s sshd` 走 `/etc/pam.d/sshd` 的 account stack
+>   （Ubuntu 的 `common-account` 裡的 `pam_sss`），跟 sshd 走的是同一段。
+> - **C17 鎖的是限制，不是功能**：SSSD 對 IPA 帳號固定用 MIT Kerberos 密碼政策，SSSD 快取裡沒有
+>   `krbLastPwdChange`（帳號從沒設過密碼）時直接拒絕（SSSD 2.9.4 `ldap_auth.c` 的
+>   `find_password_expiration_attributes()`；log：`No Kerberos password expiration attributes found, but
+>   MIT Kerberos password policy was requested. Access will be denied.`）。實測 `warn` 與 `renew` 都一樣，
+>   sshd 記 `Access denied for user pilot-nopw: 4 (System error)`。所以啟用前，主機上能登入的 FreeIPA
+>   帳號都必須設過密碼（含 login canary）。`pilot spec --lint` 對 C17 的「reverse-logic grep」warning
+>   是誤判：`System error` 在 `warn`／`renew` 下是**預期**結果，grep 命中回 0；健康路徑一律 rc 0
+>   （§3 v1.14 四種狀態都 PASS），不是「健康時 grep 找不到」的反邏輯。
+> - **C15–C17 依賴 fixture 帳號**：`pilot-pwexpired`（管理員 reset 過、還沒自己改：
+>   `krbPasswordExpiration` = `krbLastPwdChange`）、`pilot-pwvalid`（有密碼，`--password-expiration`
+>   設在遠未來）、`pilot-nopw`（沒有密碼），三者都要被 HBAC 允許登入本機。fixture playbook 待新增
+>   （§5、§7）。實測 client 的 SSSD 快取讀得到 `krbLastPwdChange`／`krbPasswordExpiration`，這是整個
+>   功能的前提。
+> - **C18**：`renew` 要靠 sshd 呼叫 PAM account 才會觸發；`UsePAM no` 時 sshd 不走 PAM，政策完全
+>   無效。用 `sshd -T` 讀合併 `sshd_config.d` 後的有效值，不讀單一檔案。
 
 ## 3. 證據收集
 
 - 工具：`pilot vm-target verify --name <ubuntu-vm> docs/verification/freeipa-client.md`
   （真實主機：`pilot verify docs/verification/freeipa-client.md -i inventory-freeipa.yaml`）
 - 格式：`.verification/freeipa-client-<UTC>.{ndjson,md}`
-- 預期 row 數：11
+- 預期 row 數：18
 
 > **C11 evidence 狀態：已於 2026-08-21 live 驗證**（下方 v1.3 區塊）。
+> **C13–C18 狀態：row 指令與 apply／fixture playbook 已實跑（下方 v1.14 區塊、§0），正式 evidence 尚未完成。**
+
+**v1.14 row 指令實測（2026-11-05，不是 evidence chain）**：拋棄式 topology `pwx-ipa`（AlmaLinux 9，
+`freeipa-server-apply.yml`）+ `pwx-cli`（Ubuntu 24.04.4，SSSD 2.9.4，OpenSSH 9.6p1，
+`freeipa-client-apply.yml` enroll，`PLAY RECAP … failed=0`）。fixture 帳號手動建立（`ipa user-add`、
+`ipa user-mod --random`、`--password-expiration=20991231000000Z`），政策以手動修改 sssd.conf + 重啟
+SSSD 模擬。每一列以 `pilot verify --probe '<command>' --probe-expected 0 -i <inventory> -l pwx-cli`
+執行：
+
+| 狀態 | C13 | C14 | C15 | C16 | C17 | C18 |
+|---|---|---|---|---|---|---|
+| 未設定（enroll 後的原樣） | PASS | PASS | PASS | PASS | PASS | PASS |
+| `expire, pwd_expire_policy_warn` | PASS | PASS | PASS | PASS | PASS | PASS |
+| `expire, pwd_expire_policy_renew` | PASS | PASS | PASS | PASS | PASS | PASS |
+| `expire`（`off`） | PASS | PASS | PASS | PASS | PASS | PASS |
+| 檔案改成 `renew`、SSSD 沒重啟 | PASS | **FAIL** | **FAIL** | — | **FAIL** | — |
+| `expire, pwd_expire_policy_reject`（不是 Pilot 寫的值） | **FAIL** | — | **FAIL** | — | — | — |
+| `ipa_access_order` 出現兩行 | **FAIL** | — | — | — | — | — |
+| `pilot-pwvalid` 的到期日改到過去（`renew`） | — | — | — | **FAIL** | — | — |
+| `sshd_config.d` 加上 `UsePAM no`（只讀 `sshd -T`，sshd 未 reload） | — | — | — | — | — | **FAIL** |
+
+FAIL 都是 `rc=2, expected 0`（ad-hoc runner 對非 0 結束碼回報 rc=2）。同一次也確認了 sshd 的實際行為
+（不是 checklist row，供 apply／runbook 使用）：`renew` 下密碼已過期的帳號用 key 登入時，
+`BatchMode`／沒有 TTY 印 `WARNING: Your password has expired.` + `Password change required but no TTY
+available.` 並以 rc=1 結束，遠端命令沒有執行；`ssh -tt` 時 sshd 改跑 `passwd`（`You must change your
+password now and login again!` → `Current Password:` → `New password:` → `Retype new password:` →
+`passwd: password updated successfully`），結束後斷線，FreeIPA 的 `krbPasswordExpiration` 變成 90 天後；
+`sftp` rc=255；`warn` 下照常登入。
 
 **v1.0/v1.1 真實輸出**（Ubuntu 24.04 VM `freeipa-client`，playbook 從乾淨狀態 `pilot vm-target run`
 `ipa-client-install` enroll 進 `alma-vm` FreeIPA 後，`pilot vm-target verify` 於
@@ -266,6 +356,17 @@ NOOP`——因為 server 上仍留著同一 IP 的舊記錄，這是預期行為
   - C7 fail → nsswitch 沒把 sudoers 導到 sss；補 `sudoers: files sss`（apply playbook C7 task）。
   - C8 fail → 先確認 probe 確實以 root 執行；再查 server 端沒建 `pilot-all` 規則 / 沒授權 pilotuser（見 §7.2），或 SSSD 未載 sudo service（`services=` 要含 sudo）、cache 未刷新（`sudo rm -f /var/lib/sss/db/*.ldb && sudo systemctl restart sssd`；Ubuntu 上 `sss_cache` 工具可能未裝，直接刪 cache 檔觸發重建）。
   - C9/C10 fail → `sudo systemctl enable --now auditd`；C10 若 `enabled 0`，`sudo auditctl -e 1`。
+  - C13 fail → `ipa_access_order` 不是 Pilot 寫的值、出現多行，或 sssd.conf 有不只一個 domain section：
+    查 `sudo grep -n "^\[domain/\|^ipa_access_order" /etc/sssd/sssd.conf`。不是 Pilot 寫的值要先決定
+    這台主機的政策：設 `freeipa_client_sssd_password_expiry_policy` 讓 apply 接手，或手動移除那一行。
+  - C14 fail → sssd.conf 改了但 SSSD 沒重啟：重跑 apply（帶 C13／C14 的 tag 時也會重啟），不要只靠手動
+    `systemctl restart sssd` 收尾，那代表 apply 的重啟條件有 bug。
+  - C15 fail → 先看 C14；C14 PASS 時，確認 `pilot-pwexpired` 仍是過期狀態（有人用它登入並改過密碼後
+    就不再過期：重跑 fixture）與 HBAC 允許它登入本機。
+  - C16 fail → `pilot-pwvalid` 的到期日過了或 HBAC 擋下：重跑 fixture。
+  - C17 fail → 先看 C14；設了 `pwd_expire_policy_*` 卻回 `Success` 代表 `pilot-nopw` 其實有密碼（fixture
+    被改過），沒設卻被拒絕代表 HBAC 擋下或帳號停用。
+  - C18 fail → `sudo sshd -T | grep -i usepam`，找出設成 `no` 的 `sshd_config.d` 檔案。
 
 ## 5. 例外與已知偏差
 
@@ -276,6 +377,8 @@ NOOP`——因為 server 上仍留著同一 IP 的舊記錄，這是預期行為
 | C9/C10 | auditd 屬「本機稽核」補強，非 FreeIPA 元件；若站台以其他集中式稽核（如轉送 KDC/系統日誌到 SIEM）取代，可標 `skip` 並在文件註明替代來源 | 有替代稽核方案的站台 | 依站台 |
 | C11 | 若 `freeipa_client_register_dns` effective 值為 `false`（selected FreeIPA server 未啟用 native DNS），本 row 預期 fail（authoritative DNS 本來就不會有這筆 record）；應改標 `skip`，佐證改用 apply 輸出的 `FreeIPA client DNS plan: registration: DISABLED`（spec.md §13.2）debug 訊息 | selected server `freeipa_setup_dns=false` 的站台 | 永久 |
 | —   | 本 spec 的 NTP 部分不含獨立 row：`--no-ntp`，時間同步交給既有 `ntp` role（見 §1）| 全部 | 永久 |
+| C15–C17 | 依賴三個 fixture 帳號（`pilot-pwexpired`／`pilot-pwvalid`／`pilot-nopw`，§2 C13–C18 備註）。沒有跑過 fixture 的站台這三列會 FAIL（帳號不存在），可標 `skip`；正式環境不要建立這三個帳號以外的測試帳號來代替。| 沒有跑 fixture 的站台 | 依站台 |
+| C15 | `renew` 下改完密碼後**馬上**（實測 2 秒內）重新登入，仍會被要求改密碼；約 10 秒後（實測）才正常：SSSD PAM responder 短時間內沿用舊的快取資料。這不影響 C15（fixture 帳號不會被拿來改密碼），但使用者說明要寫「改完後等幾秒再登入」，不要用清快取當修法（AGENTS.md §5.9）| `renew` 的主機 | 永久（SSSD 行為）|
 
 ## 6. Playbook 對應
 
@@ -295,6 +398,10 @@ NOOP`——因為 server 上仍留著同一 IP 的舊記錄，這是預期行為
 | C9/C10  | 裝 + 啟 `auditd`（`package` + `systemd`）| 本機稽核 |
 | C11     | `tasks/freeipa-client-host-dns.yml`（phase `plan`，pre_tasks，在 `/etc/hosts` pin **之前**：resolve + validate + dig 查 authoritative DNS + CAS/identity 狀態機；phase `apply`，enrollment/health 之後：`ADD` 走 kinit+`dnsrecord-add`，`REPLACE` 走 apply-time re-read + kinit + `dnsrecord-mod`/value-scoped `dnsrecord-del`；兩邊都收尾於 dig-based exact post-apply verify）| effective `freeipa_client_register_dns` 未設時繼承 selected FreeIPA server 的 `freeipa_setup_dns`；`extra` 非空且無 `freeipa_client_dns_replace_from_address` 授權時 fail-closed（spec.md §8），不 silent takeover；有授權時見 §9 Day-2 replacement 狀態機。**不使用 `ipa-client-install --ip-address=`**——2026-08-21 live vm-target 實測發現該旗標並非透過 server 端 host-add 靜態註冊，而是觸發 client 端一次性 `nsupdate` GSS-TSIG 動態更新，前提是 OS resolver 已指向 FreeIPA DNS（`freeipa-dns-client` 的職責，spec.md §18 明確要求兩者獨立），在未指向時會逾時失敗且不建立任何 record（`ipa host-show`/`ipa dnsrecord-find` 均確認無 IP）。因此新 enroll 與既有 client 統一改用 admin-kinit + `dnsrecord-add`，不依賴 installer 本身的 DNS 更新 |
 | C12     | `/etc/ssh/ssh_config.d/05-freeipa-client-gssapi-delegate.conf`（`copy`，`Host *.{{ ipa_domain }}` 區塊開 `GSSAPIAuthentication`/`GSSAPIDelegateCredentials yes`）| 純 client-side 設定檔，無對應 service 需重啟；`ipa-client-install` 自己的 `04-ipa.conf` 從不動這兩個選項 |
+| C13     | `freeipa-client-apply.yml` 的 block：快照 sssd.conf → preflight（恰好一個 `[domain/`、`access_provider = ipa`、`ipa_access_order` 最多一行且是已知形式、`pwd_expiration_warning` 最多一行）→ `lineinfile` 整行寫入 `ipa_access_order`（`warn`／`renew` 另寫 `pwd_expiration_warning`，`insertafter: '^ipa_domain\s*='`）→ `sssctl config-check`；失敗由 rescue（`always`）還原快照。輸入檢查（值、Ubuntu 24.04、`renew` 不在 gateway／directory／target-policy 主機、天數 1–30）是 `always` 的 pre_tasks，在任何修改之前 | 未設定時完全不碰 sssd.conf |
+| C14     | 既有的「restart SSSD after wiring responders」task 加上 `C13`／`C14`／`sssd_hardening` 的 tag，`when:` 改讀 `(x \| default({})) is changed`，並在 confdb 與檔案不一致（drift 檢查 rc=1）時也重啟；重啟後的 block 再確認 SSSD active、`sssctl config-check`、confdb 與檔案一致，不一致就還原快照、重啟 SSSD 並讓 run 失敗 | 既有 bug 的修正：`sssd_hardening` 的 task 改了 sssd.conf，但 restart 原本只標 `C8`，`--tags sssd_hardening` 從不重啟 |
+| C15–C17 | verify-only：fixture 帳號的 PAM account 結果，對應的 mutation 是 C13／C14 | `playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml`（經 `freeipa-client-fixtures.yml` 建帳號，再用 `ipa user-mod --random`／`--password-expiration` 造出狀態；只對還沒有密碼的帳號寫入，重跑 `changed=0`）|
+| C18     | verify-only：`UsePAM yes` 是 Ubuntu 的 sshd 預設，本 playbook 不寫 | 只確認沒有被其他 drop-in 關掉 |
 > Apply playbook 用 `block/rescue`：enroll/health 失敗時 rescue 收 `sssctl domain-status` +
 > `ipaclient-install.log` 便於除錯；`pre_tasks: assert` 對 `ipa_admin_password` / `ipa_server_ip`
 > 做 mandatory gate、對 OS（Debian/RedHat）與 staging/prod 做 gate。
@@ -613,3 +720,5 @@ subprocess timeout——均與 freeipa-client DNS 無關，非本次改動造成
 | 2026-10-12 | v1.11 | Checklist 不變。password-auth drop-in（`/etc/ssh/sshd_config.d/05-freeipa-client-password-auth.conf`）原本不驗證就寫入並 restart sshd：`sshd_config.d` 裡有其他壞掉的檔案時，restart 失敗、sshd 停在 down，下一次 run 看到 drop-in 沒變也不會再試。現在寫入時先用 `sshd -t -f` 單獨驗證，再對整份設定跑 `sshd -t`，通過才 **reload**（不再 restart；reload 失敗時正在執行的 sshd 不受影響）。任何一步失敗，rescue 把 drop-in 放回這次 run 開始時的樣子並讓 run 失敗，下一次 run 會重試。`playbooks/decommission/freeipa-client-decommission.yml` 移除這個 drop-in 時也一樣（失敗時放回 drop-in，decommission 可 resume）。由 `internal/spec/sshd_config_write_regression_test.go::TestRegression_SshdConfigWritesAreValidatedAndReverted`（allowlist 清空）與 `sshd_config_write_behavior_test.go` 鎖住。另外，`ipa-client-install`（enroll）與 `ipa-client-install --uninstall`（decommission）自己會 restart sshd：設定壞掉時 restart 失敗、sshd 停在 down，uninstall 還會做到一半就停（SSSD 設定已移除、`/etc/ipa/default.conf` 還在；2026-10-12 在 AlmaLinux 9 實測）。兩者之前現在都先跑 `sshd -t`，失敗就不執行 installer、什麼都不改；`TestRegression_IpaInstallersRunAfterAnSshdCheck` 對全 repo 鎖住（freeipa-server、replica、realm-replacement 的 installer 列在 allowlist，各需自己的實跑）；實跑（含對照組）見 [`docs/evidence/sshd-config-writes/2026-10-12-aca4915.md`](../evidence/sshd-config-writes/2026-10-12-aca4915.md) | pilot |
 | 2026-10-12 | v1.12 | Checklist 不變。enrollment 之前的 `sshd -t` 移到 pre_tasks、任何變更與套件安裝之前（`always`，唯讀，`--check` 也會執行；仍沿用 enrollment 的 `creates:`）：`dnf install` FreeIPA 套件本身也會讓 sshd 被 restart（2026-10-12 在全新 AlmaLinux 9 主機實測：systemd「Queuing reload/restart jobs for marked units」），v1.11 放在 `ipa-client-install` 正前方的檢查在全新主機上來不及；`internal/spec/sshd_config_write_regression_test.go::TestRegression_IpaInstallersRunAfterAnSshdCheck`（allowlist 清空）與 `sshd_config_write_behavior_test.go::TestRegression_IpaInstallersCheckSshdFirst` 鎖住，並檢查會跑 installer 的 play 不得在 `sshd -t` 之前安裝套件；實跑（含對照組）見 [`docs/evidence/sshd-config-writes/2026-10-12-2fe32c6.md`](../evidence/sshd-config-writes/2026-10-12-2fe32c6.md) | pilot |
 | 2026-10-29 | v1.13 | Checklist 不變。issue #168：已 enroll 主機的 resolver 被改過、解析不到 `krb5.conf` 的 KDC 名稱時，`--check` preview 在 host annotations 的 admin `kinit` 失敗且被 `no_log` 遮蔽；修復它的 `/etc/hosts` server-pool pin 是 mutation，preview 不會寫入。新增 `tasks/freeipa-client-kdc-preflight.yml`（kinit 之前以主機自己的 resolver 解析 KDC 與 FreeIPA 名稱，`--check` 且 pin 待變更時 deferred、其餘解析不到一律不遮蔽地失敗並列出 host/FQDN/resolver）與 `tasks/freeipa-client-kinit-result.yml`（kinit 失敗分類，不輸出原始 stderr），接到 annotations 與 access policy 兩個 task 檔；annotations 的 kinit 由 shell `printf` pipe 改為 `command` + `stdin`。pool pin 加 `register: freeipa_client_hosts_pool_pin`。PR #180 review 後就地修正：preflight 的必要名稱改為 OR（任一 KDC 名稱可解析即可，pin 只需涵蓋其中一個＋每個解析不到的 admin endpoint；retired-only 在 preview 仍失敗、不預測 failover reconciliation），KDC 值依 libkrb5 解碼（引號、空白、`host:port`／`[v6]`／https），`master_kdc` 不計入，kinit 分類只在必要名稱解析不到時才歸 `cannot_resolve`。resolver 偏離偵測不在此次範圍（另開 issue）。見 §6；vm-target 實跑見 [`docs/evidence/freeipa-client/2026-10-29-9e9f2b3e.md`](../evidence/freeipa-client/2026-10-29-9e9f2b3e.md) | pilot |
+| 2026-11-05 | v1.14 | 新增 C13–C18：SSH key 等非密碼登入時對已過期 FreeIPA 密碼的政策（`freeipa_client_sssd_password_expiry_policy`：`warn`／`renew`／`off`，未設定不動；`freeipa_client_sssd_password_expiry_warning_days`）。row 依主機當下的 `ipa_access_order` 判斷，未啟用的主機也會 PASS。2026-11-05 在拋棄式 AlmaLinux 9 server + Ubuntu 24.04 client 以 `pilot verify --probe` 實跑：四種政策狀態全部 PASS，每一列要擋的狀態都 FAIL（§3 v1.14）。實測發現：`sssctl user-checks` 的結果在 stderr 且 rc 永遠 0；confdb 只在 SSSD 重啟時更新；從沒設過密碼的帳號在 `warn`／`renew` 下被拒絕（SSSD 2.9.4 原始碼與實測一致，C17）；改完密碼後數秒內重新登入仍被要求修改（§5）。apply playbook、fixture playbook、正式 evidence 尚未完成，`tag_coverage_test` 對 C13／C14 會失敗直到 apply 實作 | pilot |
+| 2026-11-05 | v1.15 | Checklist 不變（C1–C18）。實作 C13／C14 的 apply：`freeipa-client-apply.yml` 新增 `always` 的輸入 gate（值、Ubuntu 24.04、`renew` 不在 gateway／directory／target-policy 主機）、快照→preflight→整行寫入→`sssctl config-check` 的 block（rescue 還原）、confdb drift 檢查，並修正既有 bug：SSSD restart task 只標 `C8`，`--tags sssd_hardening` 改了 sssd.conf 卻不重啟（現在帶 `C13`／`C14`／`sssd_hardening`，讀其他 register 一律 `default({})`）。新增 `playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml`。在拋棄式 AlmaLinux 9 server + Ubuntu 24.04 client 以 `ansible-playbook` 實跑（開發期，不是 `topology test`）：四種政策狀態 C13–C18 全 PASS、重跑 `changed=0`；負向控制與 rescue（含 confdb 讀不到時還原快照並重啟 SSSD）都實際觸發。正式 evidence 尚未產生 | pilot |
