@@ -2,7 +2,7 @@
 
 日期：2026-10-30。對應計畫：`docs/superpowers/plans/2026-10-15-freeipa-go-ssh-reconcile.md` Phase 1。前一階段：`docs/superpowers/specs/2026-10-16-freeipa-go-reconcile-phase0-contract.md`（下稱 P0）。
 
-狀態：已實作並實跑（2026-11-05）。入口與旗標、vault 與憑證、SSH 目標推導、stage gate、adapter、observer、planner、plan JSON、spec row 對應檢查都已實作；§9 的 K1–K5 已擷取並以 fixture 鎖住（K1–K4 於 2026-11-05 擷取，沒有推翻本文件的決定）；§10.3 driver 從合併 `main` 後的 candidate `60798a7` 對拋棄式 `pwfix-ipa` 實跑 8/8 PASS，每次預覽 0 寫入，證據：`docs/evidence/freeipa-go-reconcile/2026-11-05-60798a7.md`（K1–K4 擷取與環境變更見同目錄的 `2026-11-05-fc4b2bd.md`）。§10.4 剩 CI 的 `go test -race ./...`。
+狀態：已實作並實跑。入口與旗標、vault 與憑證、SSH 目標推導、stage gate、adapter、observer、planner、plan JSON、spec row 對應檢查都已實作；§9 的 K1–K5 已擷取並以 fixture 鎖住，沒有推翻本文件的決定；§10.3 driver 已對拋棄式 vm-target 實跑，目前有效的 candidate、tree、目標與各步驟結果見 [目前驗收紀錄](../../evidence/freeipa-go-reconcile/LATEST.md)。§10.4 剩 CI 的 `go test -race ./...`。
 
 本文件不提供操作 SOP。文中的指令與旗標是要實作的介面，不是已實跑的步驟。
 
@@ -95,7 +95,7 @@ vars 檔沿用 `promptVault` 在預設值模式下的選擇：`<inventory 目錄
 |---|---|---|
 | 明文 vars 檔 | `.vault/main.yaml` 未加密 | 直接解析 YAML |
 | 指定密碼檔 | Phase 1 不可達（預設值模式不會填密碼檔路徑），保留給 Phase 4 | `inventory.ViewEncryptedRoster`，只在記憶體 |
-| 環境密碼來源 | `.vault/main.yaml` 已加密；預設值模式選「密碼檔」但路徑為空，現有入口因此不傳 `--vault-password-file` | 執行 `ansible-vault view` 且**不帶** `--vault-password-file`，讓 Ansible 自己讀 `ANSIBLE_VAULT_PASSWORD_FILE` 或 ansible.cfg；env 與工作目錄要和同一次 reconcile 執行 ansible-playbook 時相同（`prepareDeployAnsibleRuntime` 的 env），密碼來源的解析才一致。新增明確的 ambient 模式函式 `inventory.ViewVaultFileAmbient`，不改 `ViewEncryptedRoster` 對既有呼叫者的語意。沒有任何密碼來源時 `ansible-vault view` 會**提示輸入密碼**（K5 擷取），與 ansible-playbook 直接失敗不同；所以 stdin 一律關閉，提示以 EOFError 結束，分類為「沒有設定 vault 密碼來源」 |
+| 環境密碼來源 | `.vault/main.yaml` 已加密；預設值模式選「密碼檔」但路徑為空，現有入口因此不傳 `--vault-password-file` | 執行 `ansible-vault view` 且**不帶** `--vault-password-file`，讓 Ansible 自己讀 `ANSIBLE_VAULT_PASSWORD_FILE` 或 ansible.cfg；env 與工作目錄要和同一次 reconcile 執行 ansible-playbook 時相同（`prepareDeployAnsibleRuntime` 的 env），密碼來源的解析才一致。新增明確的 ambient 模式函式 `inventory.ViewVaultFileAmbient`，不改 `ViewEncryptedRoster` 對既有呼叫者的語意。沒有任何密碼來源時 `ansible-vault view` 會**提示輸入密碼**（K5 擷取），與 ansible-playbook 直接失敗不同。提示走 Python getpass：有 controlling terminal 時它直接開 `/dev/tty` 提示並等人輸入，沒有 terminal 才讀 stdin，所以只關閉 stdin 不夠（在終端機上執行會卡在提示）。`ViewVaultFileAmbient` 因此在**新的 session**（`Setsid`，沒有 controlling terminal）執行 `ansible-vault`，stdin 是 `/dev/null`：提示讀到 EOF，以 EOFError 結束，分類為「沒有設定 vault 密碼來源」。整段讀取受 preview 的 `--timeout` context 約束：逾時時殺掉 `ansible-vault` 的整個 process group（含它啟動的 helper），等待輸出管線最多 2 秒，錯誤包著 `context.DeadlineExceeded`。需要 terminal 才能取得密碼的 vault password client script 在 Go preview 不支援，同樣 fail closed。pilot 的 root context 沒有接 SIGINT／SIGTERM（`rootCmd.Execute()` 用 `context.Background()`），取消只來自 `--timeout`；Ctrl-C 直接結束 pilot，`ansible-vault` 在自己的 session 收不到終端機的訊號，靠 `/dev/null` 的 stdin 自行結束 |
 | `--ask-vault-pass` | Phase 1 不可達 | Phase 4 加互動入口時再定；要求不變：在建立 tunnel 前完成，vault 密碼不進 argv、環境或暫存檔 |
 
 加密的 roster 用同一個模式解密。
@@ -362,7 +362,7 @@ Phase 2 開始寫入前要決定：撤銷、刪除與密碼是否要新增 check
 
 apply 與第二輪零 mutation 在 Phase 2 接上。
 
-目前有效的實跑摘要：2026-11-05，candidate `60798a7`（tree `61e37a4b`，已合併 `main` `60a1f618`），`pwfix-ipa`（FreeIPA 4.13.4／API 2.257），8/8 步驟 PASS；三次預覽各 5 個 HTTP 請求、0 寫入，drift 後的預覽剛好是 `user.update`、`group.member_user.remove`、`user.enable`。完整紀錄：`docs/evidence/freeipa-go-reconcile/2026-11-05-60798a7.md`。
+目前有效的實跑摘要：見 [LATEST](../../evidence/freeipa-go-reconcile/LATEST.md)（candidate、tree、目標、各步驟的結果與每次預覽的寫入數）；重新驗證只改 evidence 目錄，不改這份規格。
 
 ### 10.4 退出條件
 
