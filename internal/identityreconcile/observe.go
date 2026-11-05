@@ -28,26 +28,26 @@ func Observe(ctx context.Context, f Finder, principal string) (Observation, erro
 	var obs Observation
 	raw, err := f.Find(ctx, "user_find", nil, map[string]any{"all": true})
 	if err != nil {
-		return obs, fmt.Errorf("read users: %w", err)
+		return obs, fmt.Errorf("read users: %w", err) // gate: observe-users-read
 	}
 	if obs.Users, err = ParseUsers(raw); err != nil {
-		return obs, err
+		return obs, err // gate: observe-users-parse
 	}
 	reader := strings.ToLower(principal)
 	i := slices.IndexFunc(obs.Users, func(u LiveUser) bool { return u.Name == reader })
 	if i < 0 {
-		return obs, fmt.Errorf("the login %q is not among the users FreeIPA returned; the Go engine needs an admins member to read the whole directory", principal)
+		return obs, fmt.Errorf("the login %q is not among the users FreeIPA returned; the Go engine needs an admins member to read the whole directory", principal) // gate: observe-reader-absent
 	}
 	if !slices.Contains(obs.Users[i].MemberOf, "admins") {
-		return obs, fmt.Errorf("the login %q is not a member of admins; the Go engine reads with an admins member only, since what other readers see has not been verified", principal)
+		return obs, fmt.Errorf("the login %q is not a member of admins; the Go engine reads with an admins member only, since what other readers see has not been verified", principal) // gate: observe-reader-not-admin
 	}
 	raw, err = f.Find(ctx, "user_find", nil, map[string]any{"all": true, "preserved": true})
 	if err != nil {
-		return obs, fmt.Errorf("read preserved users: %w", err)
+		return obs, fmt.Errorf("read preserved users: %w", err) // gate: observe-preserved-read
 	}
 	preserved, err := ParseUsers(raw)
 	if err != nil {
-		return obs, err
+		return obs, err // gate: observe-preserved-parse
 	}
 	for _, p := range preserved {
 		if !p.Preserved {
@@ -61,10 +61,10 @@ func Observe(ctx context.Context, f Finder, principal string) (Observation, erro
 	}
 	raw, err = f.Find(ctx, "group_find", nil, map[string]any{"all": true})
 	if err != nil {
-		return obs, fmt.Errorf("read groups: %w", err)
+		return obs, fmt.Errorf("read groups: %w", err) // gate: observe-groups-read
 	}
 	if obs.Groups, err = ParseGroups(raw); err != nil {
-		return obs, err
+		return obs, err // gate: observe-groups-parse
 	}
 	return obs, nil
 }
