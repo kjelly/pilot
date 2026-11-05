@@ -29,11 +29,14 @@ const (
 // wazuhHarnessProbe is the exact interpreter check; it prints one JSON object.
 const wazuhHarnessProbe = `import json, sys
 import yaml
-print(json.dumps({"python": list(sys.version_info[:2]), "yaml": yaml.__version__}))`
+print(json.dumps({"python": list(sys.version_info[:2]), "yaml": yaml.__version__,
+                  "executable": sys.executable, "venv": sys.prefix != sys.base_prefix}))`
 
 type wazuhHarnessTools struct {
 	PythonMajor, PythonMinor int
 	PyYAML, AnsibleCore      string
+	Executable               string
+	Venv                     bool // sys.prefix != sys.base_prefix
 }
 
 // probeWazuhHarnessTools checks the interpreter, PyYAML and ansible-core found
@@ -61,13 +64,16 @@ func probeWazuhHarnessTools(env []string) (wazuhHarnessTools, error) {
 		return tools, fmt.Errorf("python3 is unusable for the Wazuh harnesses: %v: %s", err, out)
 	}
 	var probe struct {
-		Python []int  `json:"python"`
-		YAML   string `json:"yaml"`
+		Python     []int  `json:"python"`
+		YAML       string `json:"yaml"`
+		Executable string `json:"executable"`
+		Venv       bool   `json:"venv"`
 	}
 	if err := json.Unmarshal([]byte(out), &probe); err != nil || len(probe.Python) != 2 {
 		return tools, fmt.Errorf("unreadable python3 probe output %q", out)
 	}
 	tools.PythonMajor, tools.PythonMinor, tools.PyYAML = probe.Python[0], probe.Python[1], probe.YAML
+	tools.Executable, tools.Venv = probe.Executable, probe.Venv
 	if tools.PythonMajor != 3 || tools.PythonMinor < wazuhHarnessMinPythonMinor {
 		return tools, fmt.Errorf("python3 is %d.%d; the Wazuh harnesses need Python 3.%d or newer (unittest enterContext)",
 			tools.PythonMajor, tools.PythonMinor, wazuhHarnessMinPythonMinor)
@@ -121,15 +127,39 @@ func wazuhHarnessEnv() []string {
 
 var wazuhRan = regexp.MustCompile(`(?m)^Ran (\d+) tests? in `)
 
-// runWazuhHarness runs one Python harness and fails the test on any problem:
-// a missing prerequisite, a non-zero exit, a skipped test, or a run that
-// executed no test at all.
-func runWazuhHarness(t *testing.T, script, what string, extra ...string) {
+// wazuhSystemPythonError reports why the interpreter cannot run the preview
+// harness. That harness drives the production preview-tools policy
+// (playbooks/files/pilot-wazuh-delivery), which refuses a virtual environment
+// (sys.prefix != sys.base_prefix); every other harness runs fine in one. Without this
+// check a venv shows up as a dozen unrelated-looking preview failures.
+func wazuhSystemPythonError(tools wazuhHarnessTools) error {
+	if tools.Venv {
+		return fmt.Errorf("python3 (%s) is a virtual environment (sys.prefix != sys.base_prefix); the preview harness exercises the production interpreter policy, which refuses one: put a non-venv Python %d.%d+ first on PATH (PyYAML via PYTHONPATH or `pip install --user`)",
+			tools.Executable, tools.PythonMajor, wazuhHarnessMinPythonMinor)
+	}
+	if !filepath.IsAbs(tools.Executable) {
+		return fmt.Errorf("python3 reports a non-absolute sys.executable %q; the preview harness needs the running absolute interpreter", tools.Executable)
+	}
+	return nil
+}
+
+// wazuhHarnessReady probes the toolchain once per process and fails the test
+// when a prerequisite is missing.
+func wazuhHarnessReady(t *testing.T, what string) wazuhHarnessTools {
 	t.Helper()
 	wazuhToolsOnce.Do(func() { wazuhTools, wazuhToolsErr = probeWazuhHarnessTools(wazuhHarnessEnv()) })
 	if wazuhToolsErr != nil {
 		t.Fatalf("%s cannot run: %v", what, wazuhToolsErr)
 	}
+	return wazuhTools
+}
+
+// runWazuhHarness runs one Python harness and fails the test on any problem:
+// a missing prerequisite, a non-zero exit, a skipped test, or a run that
+// executed no test at all.
+func runWazuhHarness(t *testing.T, script, what string, extra ...string) {
+	t.Helper()
+	wazuhHarnessReady(t, what)
 	for _, tool := range extra {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatalf("%s cannot run: %s is required: %v", what, tool, err)
@@ -213,6 +243,9 @@ func TestWazuhReaderLogicalHandoff(t *testing.T) {
 // Actual private Ansible copy/file/temp operations and typed preview asset
 // validation, with native account/path facts explicitly modeled by the fixture.
 func TestWazuhPreviewToolsBehavior(t *testing.T) {
+	if err := wazuhSystemPythonError(wazuhHarnessReady(t, "Wazuh preview asset controls")); err != nil {
+		t.Fatalf("Wazuh preview asset controls cannot run: %v", err)
+	}
 	runWazuhHarness(t, "testdata/wazuh_preview_tools_test.py", "Wazuh preview asset controls")
 }
 
@@ -268,6 +301,42 @@ exec ` + realPython + ` "$@"`, "need Python 3.11 or newer"},
 	}
 	if _, err := probeWazuhHarnessTools(wazuhHarnessEnv()); err != nil {
 		t.Fatalf("the actual environment must satisfy the harness prerequisites: %v", err)
+	}
+}
+
+// The preview harness refuses a virtual-environment interpreter up front. The
+// shim answers the probe like a venv python (and like a system one for the
+// control), so the verdict comes from the probe's reported sys.prefix, not from
+// whichever interpreter happens to run this test.
+func TestWazuhPreviewHarnessNeedsASystemPython(t *testing.T) {
+	realAnsible, err := exec.LookPath("ansible-playbook")
+	if err != nil {
+		t.Fatalf("ansible-playbook is required on PATH: %v", err)
+	}
+	probeWith := func(t *testing.T, reply string) wazuhHarnessTools {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(dir+"/python3", []byte("#!/bin/sh\necho '"+reply+"'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		tools, err := probeWazuhHarnessTools(append(os.Environ(), "PATH="+dir+":"+filepath.Dir(realAnsible)+":"+os.Getenv("PATH")))
+		if err != nil {
+			t.Fatalf("probe failed: %v", err)
+		}
+		return tools
+	}
+	venv := probeWith(t, `{"python":[3,11],"yaml":"6.0","executable":"/work/.venv/bin/python3","venv":true}`)
+	err = wazuhSystemPythonError(venv)
+	if err == nil || !strings.Contains(err.Error(), "virtual environment") || !strings.Contains(err.Error(), "/work/.venv/bin/python3") {
+		t.Fatalf("a venv python passed or the error does not name it: %v", err)
+	}
+	relative := probeWith(t, `{"python":[3,11],"yaml":"6.0","executable":"python3","venv":false}`)
+	if err := wazuhSystemPythonError(relative); err == nil || !strings.Contains(err.Error(), "non-absolute") {
+		t.Fatalf("a relative sys.executable passed or is misreported: %v", err)
+	}
+	system := probeWith(t, `{"python":[3,11],"yaml":"6.0","executable":"/usr/bin/python3","venv":false}`)
+	if err := wazuhSystemPythonError(system); err != nil {
+		t.Fatalf("a system python was refused: %v", err)
 	}
 }
 
