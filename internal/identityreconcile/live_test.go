@@ -71,7 +71,7 @@ func TestLiveGoPreviewDriver(t *testing.T) {
 		if err != nil {
 			return Document{}, err
 		}
-		out, err := pilotRun(pilot, workspace, "reconcile", "--dir", workspace, "--component", "freeipa-identity", "--preview-only", "--engine", "golang", "--plan-out", plan)
+		out, err := pilotRun(pilot, repo, "reconcile", "--dir", workspace, "--component", "freeipa-identity", "--preview-only", "--engine", "golang", "--plan-out", plan)
 		if err != nil {
 			return Document{}, fmt.Errorf("preview: %w\n%s", err, out)
 		}
@@ -98,7 +98,7 @@ func TestLiveGoPreviewDriver(t *testing.T) {
 
 	snapshot := func(tag string) func() error {
 		return func() error {
-			out, err := pilotRun(pilot, workspace, "vm-target", "snapshot", "--name", vm, "--tag", tag)
+			out, err := pilotRun(pilot, repo, "vm-target", "snapshot", "--name", vm, "--tag", tag)
 			if err != nil {
 				return fmt.Errorf("%w\n%s", err, out)
 			}
@@ -106,9 +106,9 @@ func TestLiveGoPreviewDriver(t *testing.T) {
 		}
 	}
 	step("snapshot before the test", snapshot(pre))
-	t.Cleanup(func() { _, _ = pilotRun(pilot, workspace, "vm-target", "rollback", "--name", vm, "--tag", pre) })
+	t.Cleanup(func() { _, _ = pilotRun(pilot, repo, "vm-target", "rollback", "--name", vm, "--tag", pre) })
 	step("ansible engine apply", func() error {
-		out, err := pilotRun(pilot, workspace, "reconcile", "--dir", workspace, "--component", "freeipa-identity", "--force")
+		out, err := pilotRun(pilot, repo, "reconcile", "--dir", workspace, "--component", "freeipa-identity", "--force")
 		if err != nil {
 			return fmt.Errorf("%w\n%s", err, out)
 		}
@@ -135,7 +135,7 @@ func TestLiveGoPreviewDriver(t *testing.T) {
 		return nil
 	})
 	step("rollback to the baseline", func() error {
-		out, err := pilotRun(pilot, workspace, "vm-target", "rollback", "--name", vm, "--tag", baseline)
+		out, err := pilotRun(pilot, repo, "vm-target", "rollback", "--name", vm, "--tag", baseline)
 		if err != nil {
 			return fmt.Errorf("%w\n%s", err, out)
 		}
@@ -294,6 +294,9 @@ func liveSSHTarget(t *testing.T) sshdial.Target {
 	return tgt
 }
 
+// pilotRun runs pilot from the repository root, as an operator does: the
+// Ansible engine reads contracts/ and playbooks/ relative to the working
+// directory, and the workspace is named by --dir.
 func pilotRun(pilot, dir string, args ...string) (string, error) {
 	cmd := exec.Command(pilot, args...)
 	cmd.Dir = dir
