@@ -268,8 +268,8 @@ type childRow struct {
 	// long before ssh is killed: the end of a connection that net/http leaves
 	// to a goroutine of its own then comes after the preview returned, which
 	// is what pilot's os.Exit does to it. Without the delay that goroutine and
-	// the return race, and a row about it passes on code that has the defect
-	// about one run in four.
+	// the return race, and a row about it sometimes passes on code that has
+	// the defect (C13 2 runs in 8, C14 1 in 8, when measured).
 	lateClose time.Duration
 	setup     func(t *testing.T, w *childWorld)
 	// signal, when set, is sent to the process once pid.<signalAt> exists, and
