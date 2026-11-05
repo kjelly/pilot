@@ -6,11 +6,11 @@
 4. Collect the earlier findings disputed on the selected PR and the replies disputing them (SKILL.md, "Disputed findings"); they go to its reviewer.
 5. After checking out the selected PR head branch, allocate one independent reviewer. It reviews the actual diff at captured Head/Base SHAs and may run sandboxed, trusted tests in that checkout without touching source, branches or PR state. Use capped log artifacts and include only summary/paths in Root context.
 6. Save each reviewed PR evidence JSON according to `evidence-contract.md`. If reviewer returned findings without exact location/evidence, ask reviewer for targeted verification before classification.
-7. Run read-only gate; a WAITING PR is left unchanged. For confirmed blockers, guarded actor posts findings + converts to Draft. For a clean PR, Root runs the actor with `--execute`.
+7. Run read-only gate; a WAITING PR is left unchanged. Before Draft conversion or merge, complete the shared safe restore and verify the starting branch/SHA. Restore failure leaves the PR unchanged (WAITING). After restoration, rerun the live gate using saved PR HEAD/Base and external evidence, then run the guarded actor with `--execute`. It posts findings before Draft conversion, or merges a clean PR, and verifies remote state. No checkout switch follows the state change.
 8. Before acting, **invalidate/review evidence if the selected PR Base SHA has changed**. Do not reuse a passing review against a prior base. Confirmed base ancestry or metadata failures go to Draft for `pr-ready`; stale evidence alone still waits for fresh review. After handling this PR, stop; no next-item scheduling.
 9. Re-check the selected PR's WAITING reason only if it can progress within this session; do not loop forever waiting for CI or approval. Otherwise report WAITING and stop.
 10. Final report includes exact state and evidence for the selected PR, including error cases and partial GitHub operations. If the contract's role check reported DRIFT for a role, record the role, both hashes and `header_changes` in the evidence `summary` too.
-11. Finish with the contract's restore step; this skill never writes locally, so `--safe-sha` is the reviewed HEAD (which also covers a merged PR whose remote branch GitHub deleted).
+11. Report the restore already completed before the actor; `--safe-sha` is the reviewed HEAD. For outcomes without an actor call, restore before reporting. Do not defer restoration until after changing GitHub PR state.
 
 # Expected reviewer return (compact)
 
