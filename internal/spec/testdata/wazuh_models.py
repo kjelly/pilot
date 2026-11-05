@@ -83,7 +83,10 @@ class Docker:
             identifier = argv[-1]
             service = next(row['service'] for row in self.containers if row['Image'] == identifier)
             repo = 'wazuh/' + service.replace('.', '-')
-            return [{'Id': identifier, 'RepoDigests': [repo + '@' + identifier] if self.repo_digests else []}]
+            digests = {True: [repo + '@' + identifier], False: [],
+                       'foreign': ['attacker/' + repo.split('/')[1] + '@' + identifier],
+                       'malformed': [repo + '@sha256:not-a-digest', repo + ':4.14.1']}[self.repo_digests]
+            return [{'Id': identifier, 'RepoDigests': digests}]
         if 'curl' in argv:
             return {'status': self.indexer_status}
         if argv[-1] in ('/usr/share/wazuh-dashboard/plugins/wazuh/package.json', '/usr/share/wazuh-indexer/VERSION.json'):

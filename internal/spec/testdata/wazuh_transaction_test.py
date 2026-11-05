@@ -829,6 +829,21 @@ class FreshRpmTests(RpmFixture, unittest.TestCase):
                     agent.fresh_rpm(owner, self.plan())
             self.assertFalse(any(path.name.startswith(('agent-policy-', 'rpm-fresh-')) for path in root.iterdir()))
 
+    def test_the_fresh_stage_is_exclusive_per_component(self):
+        with self.fixture() as (root, native, _):
+            agent, _ = self.agent(root, native)
+            locks = []
+            real = w.bounded_flock
+
+            @contextlib.contextmanager
+            def recording(filename, **kwargs):
+                locks.append(Path(filename).name)
+                with real(filename, **kwargs):
+                    yield
+            with mock.patch.object(w, 'bounded_flock', recording):
+                agent.fresh_rpm(self.OWNER, self.plan())
+            self.assertEqual(locks, ['agent.lock'])
+
     def test_a_stale_or_aliased_artifact_in_the_stage_directory_is_refused(self):
         with self.fixture() as (root, native, _):
             agent, _ = self.agent(root, native)
@@ -907,6 +922,12 @@ class ProtectionFlowTests(unittest.TestCase):
                 self.assertEqual(agent.policy_ownership(), {'checked': True, 'prerequisite_plugin_present': False})
             self.assertFalse((Path(temporary) / 'private').exists())
 
+    def test_the_cli_privilege_check_follows_the_effective_uid(self):
+        with mock.patch.object(w.os, 'geteuid', return_value=1000):
+            self.assertFalse(w.is_root())
+        with mock.patch.object(w.os, 'geteuid', return_value=0):
+            self.assertTrue(w.is_root())
+
     def test_a_second_concurrent_mutator_is_refused_instead_of_interleaving(self):
         with tempfile.TemporaryDirectory() as temporary:
             agent = self.agent(Commands('Debian', '4.14.1-1'), Path(temporary))
@@ -963,6 +984,8 @@ class CentralTests(unittest.TestCase):
             'mixed releases': (lambda d: d.tags.update({'wazuh.dashboard': '4.14.9'}), 'mixed Wazuh releases'),
             'unknown release tag': (lambda d: d.tags.update({s: 'latest' for s in w.SERVICES}), 'official immutable release provenance'),
             'no official digest': (lambda d: setattr(d, 'repo_digests', False), 'official immutable release provenance'),
+            'digest of another repository': (lambda d: setattr(d, 'repo_digests', 'foreign'), 'official immutable release provenance'),
+            'malformed digest or a mutable tag': (lambda d: setattr(d, 'repo_digests', 'malformed'), 'official immutable release provenance'),
             'indexer unhealthy': (lambda d: setattr(d, 'indexer_status', 'red'), 'indexer health failed'),
             'manager daemon down': (lambda d: d.stopped_daemons.add('remoted'), 'daemons are not healthy'),
         }
