@@ -16,12 +16,9 @@ import (
 
 const identityPlaybook = "playbooks/apply/freeipa-identity-apply.yml"
 
-// The playbook tasks whose result FromRoster must reproduce.
-const (
-	normalizeUsersTask  = "Normalize canonical users for the compatibility reconciler"
-	normalizeGroupsTask = "Normalize canonical groups for the compatibility reconciler"
-	staleMembershipTask = "Compute stale canonical group membership"
-)
+// staleMembershipTask holds the expressions that decide which direct
+// members an authoritative group keeps.
+const staleMembershipTask = "Compute stale canonical group membership"
 
 // adapterRosters are rosters the validator accepts, each exercising other
 // defaults. Every one must give the same desired state in Go and Ansible.
@@ -54,13 +51,14 @@ groups:
 // TestAdapterDefaultsMatchThePlaybook runs the playbook's own normalize
 // tasks, and its authoritative-membership expressions, in a localhost play
 // on the roster FromRoster reads, and compares the two (spec §10.1). The
-// tasks are taken from the playbook, not copied, so a change there is
-// compared here without editing this test.
+// tasks are taken from the task file the playbook includes to build
+// ipa_users and ipa_groups (shared with the drift probe since #178), not
+// copied, so a change there is compared here without editing this test.
 func TestAdapterDefaultsMatchThePlaybook(t *testing.T) {
 	if _, err := exec.LookPath("ansible-playbook"); err != nil {
 		t.Skipf("ansible-playbook not installed: %v", err)
 	}
-	tasks := playbookTasks(t, normalizeUsersTask, normalizeGroupsTask)
+	tasks := normalizeTasks(t)
 	members := membershipExpressions(t)
 	for name, doc := range adapterRosters {
 		t.Run(name, func(t *testing.T) {
@@ -159,6 +157,83 @@ func playbookTasks(t *testing.T, names ...string) []any {
 		out = append(out, task)
 	}
 	return out
+}
+
+// normalizeTasks returns the tasks of the one file the identity playbook
+// includes to build ipa_users and ipa_groups, without no_log and tags.
+func normalizeTasks(t *testing.T) []any {
+	t.Helper()
+	apply := filepath.Join("..", "..", filepath.Dir(identityPlaybook))
+	data, err := os.ReadFile(filepath.Join("..", "..", identityPlaybook))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc any
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	var walk func(any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		case map[string]any:
+			for _, key := range []string{"ansible.builtin.include_tasks", "include_tasks", "ansible.builtin.import_tasks", "import_tasks"} {
+				switch inc := x[key].(type) {
+				case string:
+					files = append(files, inc)
+				case map[string]any:
+					if f, ok := inc["file"].(string); ok {
+						files = append(files, f)
+					}
+				}
+			}
+			for _, e := range x {
+				walk(e)
+			}
+		}
+	}
+	walk(doc)
+	var found []any
+	var foundIn []string
+	for _, f := range files {
+		raw, err := os.ReadFile(filepath.Join(apply, f))
+		if err != nil {
+			continue
+		}
+		var tasks []any
+		if yaml.Unmarshal(raw, &tasks) != nil {
+			continue
+		}
+		users, groups := false, false
+		for _, task := range tasks {
+			m, _ := task.(map[string]any)
+			sf, _ := m["ansible.builtin.set_fact"].(map[string]any)
+			_, loops := m["loop"]
+			if _, ok := sf["ipa_users"]; ok && loops {
+				users = true
+			}
+			if _, ok := sf["ipa_groups"]; ok && loops {
+				groups = true
+			}
+		}
+		if users && groups && !slices.Contains(foundIn, f) {
+			foundIn = append(foundIn, f)
+			for _, task := range tasks {
+				m := clone(task.(map[string]any))
+				delete(m, "no_log")
+				delete(m, "tags")
+				found = append(found, m)
+			}
+		}
+	}
+	if len(foundIn) != 1 {
+		t.Fatalf("%s includes %d task files that build ipa_users and ipa_groups (%v), want exactly one: update this test with the playbook", identityPlaybook, len(foundIn), foundIn)
+	}
+	return found
 }
 
 func clone(m map[string]any) map[string]any {
