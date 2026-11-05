@@ -60,7 +60,11 @@ func TestLiveGoPreviewDriver(t *testing.T) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
-	tag := fmt.Sprintf("go-preview-%d", time.Now().Unix())
+	stamp := time.Now().Unix()
+	// pre is the state before the test, restored at the end; baseline is
+	// the state after the Ansible engine applied the roster, the one the
+	// drift is rolled back to (spec §10.3 steps 1, 3 and 7).
+	pre, baseline := fmt.Sprintf("go-preview-pre-%d", stamp), fmt.Sprintf("go-preview-base-%d", stamp)
 	preview := func(name string) (Document, error) {
 		plan := filepath.Join(t.TempDir(), name+".json")
 		before, err := serverLogSize(target)
@@ -92,11 +96,17 @@ func TestLiveGoPreviewDriver(t *testing.T) {
 		return doc, nil
 	}
 
-	step("snapshot", func() error {
-		_, err := pilotRun(pilot, workspace, "vm-target", "snapshot", "--name", vm, "--tag", tag)
-		return err
-	})
-	t.Cleanup(func() { _, _ = pilotRun(pilot, workspace, "vm-target", "rollback", "--name", vm, "--tag", tag) })
+	snapshot := func(tag string) func() error {
+		return func() error {
+			out, err := pilotRun(pilot, workspace, "vm-target", "snapshot", "--name", vm, "--tag", tag)
+			if err != nil {
+				return fmt.Errorf("%w\n%s", err, out)
+			}
+			return nil
+		}
+	}
+	step("snapshot before the test", snapshot(pre))
+	t.Cleanup(func() { _, _ = pilotRun(pilot, workspace, "vm-target", "rollback", "--name", vm, "--tag", pre) })
 	step("ansible engine apply", func() error {
 		out, err := pilotRun(pilot, workspace, "reconcile", "--dir", workspace, "--component", "freeipa-identity", "--force")
 		if err != nil {
@@ -104,6 +114,7 @@ func TestLiveGoPreviewDriver(t *testing.T) {
 		}
 		return nil
 	})
+	step("snapshot the baseline", snapshot(baseline))
 	step("go preview after the ansible engine: no write", func() error {
 		doc, err := preview("after-apply")
 		if err == nil && (len(doc.Operations) != 0 || doc.Result != ResultOK) {
@@ -123,14 +134,17 @@ func TestLiveGoPreviewDriver(t *testing.T) {
 		}
 		return nil
 	})
-	step("rollback", func() error {
-		_, err := pilotRun(pilot, workspace, "vm-target", "rollback", "--name", vm, "--tag", tag)
-		return err
+	step("rollback to the baseline", func() error {
+		out, err := pilotRun(pilot, workspace, "vm-target", "rollback", "--name", vm, "--tag", baseline)
+		if err != nil {
+			return fmt.Errorf("%w\n%s", err, out)
+		}
+		return nil
 	})
 	step("go preview after rollback: no write", func() error {
 		doc, err := preview("after-rollback")
-		if err == nil && len(doc.Operations) != 0 {
-			err = fmt.Errorf("operations %v", opKinds(doc.Operations))
+		if err == nil && (len(doc.Operations) != 0 || doc.Result != ResultOK) {
+			err = fmt.Errorf("result %s, operations %v", doc.Result, opKinds(doc.Operations))
 		}
 		return err
 	})

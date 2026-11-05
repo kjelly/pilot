@@ -351,13 +351,13 @@ Phase 2 開始寫入前要決定：撤銷、刪除與密碼是否要新增 check
 
 `internal/identityreconcile/live_test.go` 的 `TestLiveGoPreviewDriver`，設定 `PILOT_IDENTITY_ENGINE_LIVE_VM` 才執行（其他環境變數見該測試的註解；SSH 與 admin 密碼沿用 `internal/freeiparpc/live_test.go` 的變數，只用於 drift 的前置寫入與讀 server log），輸入為 vm-target 名稱與一個以 sanctioned pilot 流程建立的 workspace。driver 執行建置出的 `pilot` binary，不呼叫 engine 內部函式：
 
-1. `pilot vm-target snapshot`。
-2. 以舊 engine 套用（`pilot reconcile --component freeipa-identity --force`），建立基準。
+1. `pilot vm-target snapshot`（測試前狀態，測試結束時 rollback 回這裡）。
+2. 以舊 engine 套用（`pilot reconcile --component freeipa-identity --force`），建立基準，再 snapshot 一次（基準）。
 3. Go 預覽：結果 `ok`，寫入操作 0（D12）。測試 roster 不含會觸發 `blocked` 的內容。
 4. 以 fixture 寫入製造外部 drift（一個屬性、一個多出的直接成員、一個停用狀態）。這些寫入用 Phase 0 的 `freeiparpc` 客戶端，屬於測試前置，不是受測 engine。
 5. Go 預覽：操作剛好是預期的三筆，種類與物件正確。
 6. 讀取無 mutation 的證明（每次預覽都做）：預覽期間 server `error_log` 新增的部分沒有任何寫入方法；plan 的 `stats.writes` 為 0。原本列的「`pilot verify` 前後相同」不採用：server log 直接記錄每個 API 呼叫，是更強的證明，且不依賴 verify 輸出格式。
-7. `pilot vm-target rollback` 到步驟 1，再預覽一次，結果與步驟 3 相同。
+7. `pilot vm-target rollback` 到步驟 2 的基準 snapshot，再預覽一次，結果與步驟 3 相同（2026-11-05 修正：原本寫 rollback 到步驟 1，那是套用前的狀態，預覽不可能與步驟 3 相同）。
 8. 輸出 evidence 摘要：tested revision／tree、vm、FreeIPA 版本、每一步 PASS／FAIL、`stats`、耗時。
 
 apply 與第二輪零 mutation 在 Phase 2 接上。
