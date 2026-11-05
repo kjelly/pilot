@@ -203,6 +203,16 @@ func TestAptExactVersionTaskBehavior(t *testing.T) {
 	runWazuhHarness(t, "testdata/apt_exact_task_test.py", "real Ansible exact APT task controls")
 }
 
+func TestWazuhSelectionTaskGraph(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_selection_task_test.py", "real Ansible Wazuh agent selection/refusal graph")
+}
+
+// Endpoint identity is exercised through the actual shared resolver and
+// ScriptModule, with only inventory/transport data supplied by the fixture.
+func TestWazuhEndpointBinding(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_endpoint_test.py", "Wazuh endpoint binding controls")
+}
+
 // A prerequisite that is missing must stop the harness loudly. Each case puts a
 // shim first on PATH that behaves like the broken environment and checks the
 // probe's message names the fix, so a CI job without PyYAML or the pinned

@@ -43,3 +43,12 @@ wazuh_manager_host: ""
 
 # 以下通常不用填,會沿用 playbook 內建預設:
 # wazuh_repo_channel: "4.x"
+# Exact common release, optional. A fresh install is exactly this release (default:
+# the observed manager's release). An installed compatible agent is kept; a release
+# change of it, or an agent newer than its manager, is refused before anything changes.
+# wazuh_version: "4.14.1"
+# Exact inventory host used to observe the manager's native version over SSH.
+# Auto-derived only when the wazuh-manager group contains exactly one host.
+# The endpoint must uniquely match its inventory name, ansible_host, gathered FQDN,
+# or canonical numeric connection address; arbitrary DNS coincidence is insufficient.
+# wazuh_manager_inventory_host: "wazuh-manager-1"
