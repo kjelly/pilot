@@ -113,12 +113,17 @@ SSH key（或 GSSAPI）登入、但 FreeIPA 密碼已過期的人在拿到 shell
 - A10 的未解決觀察：在 gateway／directory 主機上，改完密碼後若重試是「只用 TTY」的登入，key 登入曾持續被拒
   （PAM 12）：2/2 次超過 66 秒，一次約 6 分鐘後仍未恢復，一次 18 分 35 秒，一次 181 秒；非互動式重試約 4 秒就恢復
   （#262）。管理員 reset 後 gateway 主機要約 52–59 秒才發現密碼過期，directory／target 約 0.2–4 秒（#263）。
-  原因都還不明，沒有試過任何 SSSD 設定。
+  兩者的原因已查出，見下一點。
 - 尚未實跑：A12（HA／offline）、A16（sudo cache 交叉，#267）。`krbPrincipalExpiration` 已過期的帳號是否該在提示前
   被拒絕尚待決定（#266）。密碼改完後重新登入的等待時間不是固定的，取決於重試方式（#262）：非互動式重試（無 TTY）在一般 client 上約 3–4 秒就恢復；
   「只用 TTY 重試」（每次登入都停在 `Current Password` 提示再中斷）在一般 client 上 3 輪全都超過 240 秒沒有恢復，
-  gateway／directory 主機上曾持續到 18 分鐘以上；原因未明。在 gateway／directory 主機的 SSSD debug log 看到 PAM 帳號檢查只讀快取（`bypass the data provider`）；
-  一般 client 沒有在卡住時檢查快取。不要把「約 3 秒」當成保證；在這個問題查清楚之前，這是啟用 `renew` 的已知限制
+  gateway／directory 主機上曾持續到 18 分鐘以上。原因（SSSD 2.9.4，已用 debug log 與 A/B 實驗確認）：預設
+  `pam_initgroups_scheme = no_session` 下，PAM responder 只有在「沒有 5 秒的 initgr 快取項目、且使用者沒有 session」時
+  才會向後端重讀使用者；每次 TTY 嘗試結束時的 `CLOSE_SESSION` 又會重新啟動 5 秒的窗口，下一次嘗試落在窗口內，
+  一直讀到快取裡過期的到期時間。同一原因也使得使用者有任何開著的 session 時，管理員 reset 要等到 session 結束才被發現
+  （實測 100.5 秒 vs 無 session 的 5.0 秒；gateway 的 52–59 秒，#263）。在 `[pam]` 設 `pam_initgroups_scheme = always`
+  後，同樣的 TTY-only 重試 3 輪都在約 10 秒內恢復，有開著 session 時 reset 在 1.4 秒內被發現；但 playbook 目前沒有設定它，
+  成本（每個 PAM 請求多一次後端查詢）與 FreeIPA 不可達時的行為都還沒測。在採用之前，這是啟用 `renew` 的已知限制
 
 **這台 client 從 FreeIPA 拿到什麼（AAA）**：
 - **Authentication（認證）**：帳號與 Kerberos 身分來自 FreeIPA，經 SSSD 提供給 NSS/PAM
