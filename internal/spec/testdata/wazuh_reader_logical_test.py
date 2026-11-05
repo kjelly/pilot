@@ -219,7 +219,7 @@ class PhysicalDescriptorTests(unittest.TestCase):
                 if failure=='reuse':
                     foreign=root/'foreign';foreign.write_bytes(b'outside')
                     original=cap.descriptor
-                    def changed(pid,fd,reader):
+                    def changed(pid,fd,reader,producer=False):
                         original_stat=w.os.readlink;seen=[]
                         def link(path,*args,**kwargs):
                             result=original_stat(path,*args,**kwargs)
@@ -227,7 +227,7 @@ class PhysicalDescriptorTests(unittest.TestCase):
                                 seen.append(True);child.stdin.write('reuse '+str(foreign)+'\n');child.stdin.flush()
                                 self.assertEqual(child.stdout.readline().strip(),number)
                             return result
-                        with mock.patch.object(w.os,'readlink',side_effect=link):return original(pid,fd,reader)
+                        with mock.patch.object(w.os,'readlink',side_effect=link):return original(pid,fd,reader,producer)
                     with mock.patch.object(cap,'descriptor',side_effect=changed),self.assertRaises(w.Refused):cap.fds(child.pid)
                 else:
                     actual=cap.process;calls=[]
@@ -236,6 +236,150 @@ class PhysicalDescriptorTests(unittest.TestCase):
                         if len(calls)>1:value[1]='different-start'
                         return value
                     with mock.patch.object(cap,'process',side_effect=identity),self.assertRaisesRegex(w.Refused,'process changed'):cap.fds(child.pid)
+
+
+class ProducerOrphanTests(unittest.TestCase):
+    """Wazuh's daily rotation leaves api.log.<date> (deleted), nlink 0, held by the
+    selected stack's API container in the logs volume (D1 of PR #258).
+
+    Real unlinked inodes and real /proc FD/fdinfo/mountinfo of a live child are
+    used; only the process identity (cgroup, exe name) is modeled with a private
+    proc directory whose entries link to the real child. These controls do not
+    certify Docker, cgroup layout or native Wazuh behavior.
+    """
+    CONTAINER = 'a' * 64
+    DOCKER = '0::/system.slice/docker-' + CONTAINER + '.scope\n'
+    HOST = '0::/system.slice/cron.service\n'
+
+    def hold(self, path):
+        program = ('import os,sys\nf=os.open(sys.argv[1],os.O_RDONLY)\nprint(f,flush=True)\n'
+                   'sys.stdin.readline()\n')
+        child = subprocess.Popen([sys.executable, '-u', '-c', program, str(path)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        number = child.stdout.readline().strip()
+        self.addCleanup(PhysicalDescriptorTests.reap, child)
+        return child, number
+
+    def source(self, root):
+        source = root / 'source'
+        (source / 'alerts/2026/Nov').mkdir(parents=True)
+        (source / 'alerts/alerts.json').write_bytes(b'live\n')
+        return source
+
+    def orphan(self, root, relative, link=None):
+        """A real nlink==0 inode (labelled '<relative> (deleted)') held by a live child."""
+        source = root / 'source'
+        victim = source / relative
+        victim.parent.mkdir(parents=True, exist_ok=True)
+        victim.write_bytes(b'rotated\n')
+        if link: os.link(victim, link)
+        child, number = self.hold(victim)
+        victim.unlink()
+        if link: Path(link).unlink()
+        real = Path('/proc') / str(child.pid) / 'fd' / number
+        self.assertTrue(os.readlink(real).endswith(' (deleted)'))
+        self.assertEqual(real.stat().st_nlink, 0)
+        return child
+
+    def view(self, root, child, pid, cgroup, exe):
+        proc = root / 'proc'
+        proc.mkdir(exist_ok=True)
+        for name, target in (('self', '/proc/self'), ('sys', '/proc/sys')):
+            if not os.path.lexists(proc / name): (proc / name).symlink_to(target)
+        folder = proc / str(pid)
+        folder.mkdir()
+        for name in ('stat', 'fd', 'fdinfo', 'mountinfo', 'ns', 'root'):
+            (folder / name).symlink_to(Path('/proc') / str(child.pid) / name)
+        (folder / 'cgroup').write_text(cgroup)
+        (folder / 'exe').symlink_to(exe)
+        return proc
+
+    def reader(self, root, proc):
+        reader = w.Reader(w.Central(root=root / 'private'))
+        reader.PROC = proc
+        return reader, {'images': {'wazuh.manager': {'container': self.CONTAINER}}}
+
+    API = '/var/ossec/framework/python/bin/python3'
+
+    def test_producer_container_unlinked_non_alert_log_does_not_refuse_admission(self):
+        for relative in ('api.log.2026-11-04', 'ossec/ossec-04.log'):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); source = self.source(root)
+                child = self.orphan(root, relative)
+                proc = self.view(root, child, 4242, self.DOCKER, self.API)
+                reader, state = self.reader(root, proc)
+                reader.source_users(state, source)
+                # The alerts reader is held to its own closed-group rules in the same pass.
+                live, number = self.hold(source / 'alerts/alerts.json')
+                self.view(root, live, 4243, self.HOST, '/usr/sbin/rsyslogd')
+                reader.source_users(state, source, 4243)
+                reader.source_users(state, source, 4243, reader_fds=True)
+
+    def test_same_orphan_is_refused_for_every_non_producer(self):
+        for who, cgroup, exe, arguments in (
+                ('host process', self.HOST, '/usr/bin/tail', {}),
+                ('foreign container', '0::/system.slice/docker-' + 'b' * 64 + '.scope\n', self.API, {}),
+                ('lookalike scope', '0::/system.slice/docker-' + self.CONTAINER + '.scope-foreign\n', self.API, {}),
+                ('producers excluded (cold/reader-owned call)', self.DOCKER, self.API, {'producers': False}),
+                ('the reader itself (host)', self.HOST, '/usr/sbin/rsyslogd', {'reader_pid': 4242}),
+                ('the reader pid even inside a container cgroup', self.DOCKER, '/usr/sbin/rsyslogd',
+                 {'reader_pid': 4242})):
+            with self.subTest(who=who), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); source = self.source(root)
+                child = self.orphan(root, 'api.log.2026-11-04')
+                proc = self.view(root, child, 4242, cgroup, exe)
+                reader, state = self.reader(root, proc)
+                with self.assertRaisesRegex(w.Refused, 'orphan or unknown protected source FD'):
+                    reader.source_users(state, source, **arguments)
+
+    def test_producer_orphan_inside_the_alerts_custody_tree_still_refuses(self):
+        for relative in ('alerts/2026/Nov/ossec-alerts-04.json', 'alerts/alerts.json.gone'):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); source = self.source(root)
+                child = self.orphan(root, relative)
+                proc = self.view(root, child, 4242, self.DOCKER, self.API)
+                reader, state = self.reader(root, proc)
+                with self.assertRaisesRegex(w.Refused, 'orphan or unknown protected source FD'):
+                    reader.source_users(state, source)
+
+    def test_group_and_unknown_inode_classification_for_a_producer_descriptor(self):
+        # Direct capability controls: the layout is closed BEFORE the namespace changes.
+        for label, kind, expect in (
+                ('closed non-alert group unlinked after inspection', 'group-gone', 'ignored'),
+                ('closed group with an alerts alias unlinked, label outside alerts', 'alias-gone', 'refused'),
+                ('new non-alert file after inspection (nlink>0)', 'new-outside', 'ignored'),
+                ('new file under alerts after inspection (nlink>0)', 'new-alerts', 'refused')):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); source = self.source(root)
+                if kind == 'group-gone': (source / 'ossec.log').write_bytes(b'x\n')
+                if kind == 'alias-gone':
+                    (source / 'other.log').write_bytes(b'x\n')
+                    os.link(source / 'other.log', source / 'alerts/x.json')
+                proc = root / 'proc'; proc.mkdir()
+                (proc / 'self').symlink_to('/proc/self'); (proc / 'sys').symlink_to('/proc/sys')
+                # The inspection is captured with a placeholder holder so the layout
+                # closure exists first; then the child opens/unlinks to model rotation.
+                cap = w.ReaderSource(source, root / 'private', proc)
+                if kind == 'group-gone': target, drop = source / 'ossec.log', [source / 'ossec.log']
+                elif kind == 'alias-gone': target, drop = source / 'other.log', [source / 'other.log', source / 'alerts/x.json']
+                elif kind == 'new-outside': target, drop = source / 'api.log', []
+                else: target, drop = source / 'alerts/new.json', []
+                if not target.exists(): target.write_bytes(b'x\n')
+                child, number = self.hold(target)
+                for path in drop: path.unlink()
+                folder = proc / '4242'; folder.mkdir()
+                for name in ('stat', 'fd', 'fdinfo', 'mountinfo', 'ns', 'root'):
+                    (folder / name).symlink_to(Path('/proc') / str(child.pid) / name)
+                (folder / 'cgroup').write_text(self.DOCKER); (folder / 'exe').symlink_to(self.API)
+                if expect == 'ignored':
+                    self.assertEqual(cap.fds(4242, reader=False, producer=True), [])
+                else:
+                    with self.assertRaisesRegex(w.Refused, 'orphan or unknown protected source FD'):
+                        cap.fds(4242, reader=False, producer=True)
+                with self.assertRaisesRegex(w.Refused, 'orphan or unknown protected source FD'):
+                    cap.fds(4242, reader=False, producer=False)
+                with self.assertRaisesRegex(w.Refused, 'never classified as a producer'):
+                    cap.fds(4242, reader=True, producer=True)
 
 
 class HandoffCallerTests(recovery.RecoveryEntryTests):

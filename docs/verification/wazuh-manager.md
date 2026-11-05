@@ -235,9 +235,19 @@ RemoveOnStop=no；每次 admission 重讀 unit fragments、依賴／aliases、en
 
 source admission、外部 FD exclusion、pause、rollback 與 post-start watch 共用實際 Docker
 volume、封閉 inode/hardlink 集合及 mount projection。proc FD 的 `(deleted)` 是舊 dentry
-標籤，不等於資料 inode 已消失；仍由全部內部 alias 覆蓋的同一 inode 可接受。真正
-nlink=0 orphan、外部 alias／mount、未知 reader/writer、PID 或 FD-slot reuse 必須拒絕，
-不能用去掉 suffix、特定 FD 編號或 512 offset 豁免。watch 證明不是 drain 證明。
+標籤，不等於資料 inode 已消失；仍由全部內部 alias 覆蓋的同一 inode 可接受。下列情形必須
+拒絕：外部 alias／mount、未知 reader/writer、PID 或 FD-slot reuse；位於 `alerts/` 之下
+（最後 dentry 標籤或任一封閉 alias 在 alerts）的 nlink=0 orphan 或未知 inode——這是 reader
+custody，不論由誰持有（含所選 stack 的 container）；以及 reader（rsyslog）、主機 process、
+非所選 stack container 持有的**任何** nlink=0 orphan 或未知 inode。唯一不拒絕的是所選 stack
+自己的 producer container（cgroup 與 Docker inspect 的 container id 精確相符、且不是 reader）
+持有、位於同一 volume 但 `alerts/` 之外的 nlink=0 orphan 或 layout 之後新建的 inode：例如
+Wazuh 每日 00:00 UTC 輪替後 Wazuh API process 仍持有 `logs/api.log.<date> (deleted)`
+（nlink=0）。它們不是 rsyslog imfile 輸入集合，不承載 reader 要接手的 alert 資料；若一併
+拒絕，每次輪替後 admission 都會被 container 內部自己的行為擋下，且操作者只能重啟 Wazuh
+container 才能放掉 FD。這只忽略該 FD，不授權它：非 orphan 的 container FD 仍要完整通過封閉
+group／mount／flags 檢查，其餘路徑（含 reader 自己的 FD）不變。不能用去掉 suffix、特定 FD
+編號或 512 offset 豁免。watch 證明不是 drain 證明。
 
 資格化精確 native build 與完整 canonical single-line input/module attrs；額外 multiline、
 regex、trim、rate、delay 等 record-processing 選項不得繼承此證明。先停止三個 producer
@@ -392,4 +402,5 @@ The current procedure and evidence link are in [wazuh-manager](../runbooks/wazuh
 | 2026-11-03 | Issue #211 | Replace UDP syslog_output with host imfile over TCP/RELP; distinguish local C11 health from a fresh real-alert receiver delivery oracle. |
 | 2026-11-05 | Issue #244 | Preview 不部署控制工具；單次 root-private desired-code closure 保持 installed assets／reader data 不變，retained provenance 不遷移。 |
 | 2026-11-05 | Issue #244 | 封閉 inode FD 身分區分 deleted dentry 與 orphan；精確 native logical cursor barrier 加 StopProof 後 CURRENT handoff，取消時 resume-only custody 不授予冷回復。 |
+| 2026-11-05 | Issue #244 | Source admission 只忽略所選 stack producer container 持有、`alerts/` 之外的 nlink=0／新建 inode（Wazuh 每日輪替留下的 `api.log.<date> (deleted)`）；reader、主機 process、非所選 container 持有的 orphan，以及任何 `alerts/` 內的 orphan／未知 inode 仍拒絕。原因：舊規則在每次 00:00 UTC 輪替後把 Wazuh 自己的 API process 當成未授權 source user 拒絕 admission；未放寬任何 custody 相關 Expected。 |
 | 2026-11-04 | Issue #244 | 原生中央版本一致與 retained-agent 上界；明示版本交易保留完整冷資料/images，回復區分原始 skew；host reader 採 CURRENT queue custody、cursor generation 及本機 replay ACK，實際 receiver delivery 另驗。 |

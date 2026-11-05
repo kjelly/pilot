@@ -1656,16 +1656,32 @@ class ReaderSource:
         return [pid, fields[19], os.stat(self.proc / str(pid) / 'ns/mnt').st_ino,
                 (self.proc / 'sys/kernel/random/boot_id').read_text().strip()]
 
+    def alert_name(self, name):
+        path = Path(name)
+        return path == self.source / 'alerts/alerts.json' or self.source / 'alerts' in path.parents
+
     def group(self, key):
         aliases = self.groups.get(key)
         if not aliases:
             raise Refused('source descriptor has no closed inode group')
-        if any(not (Path(name) == self.source / 'alerts/alerts.json'
-                        or self.source / 'alerts' in Path(name).parents) for name in aliases):
+        if any(not self.alert_name(name) for name in aliases):
             raise Refused('unknown non-alert native reader source group')
         return aliases
 
-    def descriptor(self, pid, number, protected_reader=False):
+    def custody(self, key, physical, location):
+        """Can this unlinked/unknown source inode hold alert data the reader owns?
+
+        Only the alerts tree is reader custody. Wazuh's own rotation leaves
+        other logs (api.log.<date>, ossec.log rotations) unlinked in the same
+        volume while the producer container's API/analysis daemons still hold
+        them; those are not alert data. An inode that any closed alias places
+        in alerts, or whose last dentry label is under alerts, stays refused.
+        """
+        alerts = location / 'alerts'
+        return (physical is not None and alerts in physical.parents) or any(
+            self.alert_name(name) for name in self.groups.get(key, ()))
+
+    def descriptor(self, pid, number, protected_reader=False, producer=False):
         folder = self.proc / str(pid)
         link = folder / 'fd' / number
         info = link.stat()
@@ -1703,6 +1719,13 @@ class ReaderSource:
                    and (physical == source_location or source_location in physical.parents)))
         if not related: return None
         if key not in self.groups or info.st_nlink == 0:
+            # A selected-stack producer container may legitimately hold an
+            # unlinked/new non-alert log (Wazuh's 00:00 UTC rotation leaves
+            # api.log.<date> (deleted) with nlink 0). That is classified
+            # BEFORE this gate; the reader, host processes and anything in
+            # the alerts custody tree are still refused.
+            if producer and not self.custody(key, physical, source_location):
+                return None
             raise Refused('orphan or unknown protected source FD')
         aliases = self.group(key) if protected_reader else self.groups[key]
         if info.st_nlink != len(aliases):
@@ -1735,8 +1758,10 @@ class ReaderSource:
                 'links': info.st_nlink, 'size': info.st_size, 'position': position,
                 'flags': flags, 'mount': int(fields['mnt_id']), 'aliases': sorted(aliases)}
 
-    def fds(self, pid, reader=True):
+    def fds(self, pid, reader=True, producer=False):
         if not pid: return []
+        if producer and reader:
+            raise Refused('a native reader is never classified as a producer container')
         before = self.process(pid)
         folder = self.proc / str(pid) / 'fd'
         for attempt in range(3):
@@ -1746,7 +1771,7 @@ class ReaderSource:
             try:
                 for number in names:
                     if not number.isdecimal(): raise Refused('unknown source FD entry')
-                    value = self.descriptor(pid, number, reader)
+                    value = self.descriptor(pid, number, reader, producer)
                     if value: result.append(value)
             except FileNotFoundError:
                 # A closed slot may vanish in a live FD table. A reused or
@@ -2841,7 +2866,10 @@ class Reader:
                 cgroups = (process / 'cgroup').read_text()
                 container = any(re.search(r'(?:/docker/' + re.escape(identity) + r'(?:/|$)|/docker-' + re.escape(identity) + r'\.scope(?:/|$))', cgroups)
                                 for identity in containers if re.fullmatch('[a-f0-9]{64}', identity))
-                records = capability.fds(pid, reader=pid == reader_pid)
+                # Classify container ownership BEFORE FD admission: the orphan
+                # gate must know whether this is a selected-stack producer.
+                records = capability.fds(pid, reader=pid == reader_pid,
+                                         producer=container and pid != reader_pid)
                 if records and not (reader_fds and pid == reader_pid) and not container:
                     raise Refused('unowned process retains a Wazuh producer source FD')
             except (FileNotFoundError, ProcessLookupError):
