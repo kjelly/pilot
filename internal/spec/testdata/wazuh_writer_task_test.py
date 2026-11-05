@@ -95,6 +95,7 @@ class WriterTaskGraphTests(unittest.TestCase):
             for helper in ('wazuh-endpoint-resolve.yml','resolve-hosts-alias-target.yml'):
                 shutil.copy2(REPO/'playbooks/apply/tasks'/helper,root/'tasks'/helper)
             shutil.copy2(REPO/'playbooks/apply/files/wazuh-endpoint.py',root/'files/wazuh-endpoint.py')
+            shutil.copy2(REPO/'playbooks/apply/files/wazuh-transaction.py',root/'files/wazuh-transaction.py')
 
             play = yaml.safe_load((REPO / 'playbooks/apply' / (role + '-apply.yml')).read_text())[0]
             play.update(connection='local', become=False, gather_facts=False)

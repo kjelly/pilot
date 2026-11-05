@@ -155,6 +155,7 @@ class EndpointTests(unittest.TestCase):
                     'unused.invalid.test' if tag=='C12' or recover else 'receiver.example.test',
                     'siem_forward_transport':'tcp','siem_forward_port':514,
                     'wazuh_reader_tools':{},'wazuh_reader_checker_hash':'b'*64,
+                    'wazuh_reader_operation':{'stdout':'d'*32},'wazuh_preview_assets':{'transport_fixture':True},
                     'wazuh_writer_owner':OWNER,'wazuh_docker_version':'4.14.9','wazuh_recover':recover,'docker_pre':{'rc':0}}
                 play=root/(tag+str(recover)+'.yml');play.write_text(yaml.safe_dump([{
                     'hosts':'observer','gather_facts':False,'vars':values,
@@ -170,6 +171,10 @@ class EndpointTests(unittest.TestCase):
                 self.assertEqual(request['selected'],tag!='C12')
                 self.assertEqual(request['address'],'192.0.2.15' if tag!='C12' and not recover else '')
                 self.assertEqual('--preview' in argv,check)
+                self.assertEqual('--operation' in argv,check)
+                if check:self.assertEqual(argv[argv.index('--operation')+1],'d'*32)
+                self.assertEqual('--preview-tools-json' in argv,check)
+                if check:self.assertEqual(json.loads(argv[argv.index('--preview-tools-json')+1]),{'transport_fixture':True})
                 self.assertNotIn('--upgrade',argv,'C10/C11 cannot grant component upgrade authority')
 
 

@@ -99,8 +99,26 @@ class PreviewCapabilityTests(unittest.TestCase):
                         instance=object.__new__(cls);instance.value=value;instance.owner=OWNER;instance.operation=OP
                         with self.assertRaisesRegex(ValueError,'member set'):cls(value,OWNER,OP)
                     else:instance=cls(value,OWNER,OP)
-                    self.assertTrue(instance.remove()['removed'])
+                    self.assertTrue(instance.remove()['scope_absent'])
                 self.assertFalse(scope.exists());self.assertTrue((ledger/'writer-active.json').exists())
+
+    def test_exact_absence_retry_requires_same_binding_and_settled_observer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            cls,value,scope,ledger,proc=setup(Path(temporary))
+            env=cls.remove.__globals__;outcomes={'coordinator_sha256':'c'*64,'calls':[{'dispatched':False},{'dispatched':False}]}
+            with native_metadata():
+                for retry in range(2):
+                    output=io.StringIO()
+                    with mock.patch.object(sys,'argv',[env['__file__'],'preview-cleanup',json.dumps(value),json.dumps(outcomes)]),contextlib.redirect_stdout(output):env['main']()
+                    certificate=json.loads(output.getvalue())
+                    self.assertEqual(certificate,{'schema':1,'kind':'WAZUH_PREVIEW_CLEANUP','owner':OWNER,'operation':OP,'path':str(scope),'identity':value['identity'],'source_sha256':value['tools']['pilot-wazuh-delivery'],'observers_settled':True,'scope_absent':True})
+                    self.assertFalse(scope.exists())
+                outcomes['calls'][0]={'dispatched':True,'response':''}
+                with mock.patch.object(sys,'argv',[env['__file__'],'preview-cleanup',json.dumps(value),json.dumps(outcomes)]):
+                    with self.assertRaisesRegex(ValueError,'foreground outcome'):env['main']()
+                foreign=copy.deepcopy(value);foreign['operation']='e'*32
+                with mock.patch.object(sys,'argv',[env['__file__'],'preview-cleanup',json.dumps(foreign),json.dumps({'coordinator_sha256':'c'*64,'calls':[{'dispatched':False},{'dispatched':False}]})]):
+                    with self.assertRaises(ValueError):env['main']()
 
     def test_hash_members_alias_ancestry_context_and_mount_controls(self):
         failures=('hash','missing','extra','symlink','hardlink','mode','writable-parent','foreign-owner',
@@ -336,7 +354,7 @@ import wazuh_preview_tools_test as fixture
 loaded=runpy.run_path(SETTINGS['delivery']);env=loaded['main'].__globals__;cls=env['PreviewTools']
 cls.RUN=Path(SETTINGS['run']);cls.WRITER=Path(SETTINGS['ledger'])/'writer-active.json';cls.PROC=Path(SETTINGS['proc'])
 value=json.loads(sys.argv[2]);value['identity'][2:4]=[0,0]
-with fixture.native_metadata(),fixture.mock.patch.object(sys,'argv',[SETTINGS['delivery'],'preview-cleanup',json.dumps(value),*sys.argv[3:]]):env['main']()
+with fixture.native_metadata(),fixture.mock.patch.object(sys,'argv',[SETTINGS['delivery'],sys.argv[1],json.dumps(value),*sys.argv[3:]]):env['main']()
 """
 
 
@@ -370,9 +388,15 @@ class PreviewModuleTests(unittest.TestCase):
             'Prepare the root-controlled reader proof helper directory',
             'Install tracked reader inspection/proof code before version admission',
             'Bind desired forwarding and tracked proof code to this version inspection',
+            'Record allocation intent before dispatching any transient effect',
             'Allocate an exclusive transient desired-tool preview scope',
+            'Require an explicit successful allocation response',
             "Pin this invocation's transient directory before any staged copy",
+            'Require complete native allocation identity before creating a capability',
             'Bind preview scope identity and exact desired member fingerprints',
+            'Authenticate the empty transient scope header before any staged copy',
+            'Accept only the exact authenticated allocation binding',
+            'Record the positively pinned allocation before member copies',
             'Stage the exact desired preview tools without deploying installed assets',
             "Reset this play's actual forwarding selection",'Mark selected forwarding intent without granting container authority',
             'Build the secret-free selected reader request',
@@ -384,7 +408,7 @@ class PreviewModuleTests(unittest.TestCase):
         next(task for task in selected if task['name'].startswith('Preview selected ordinary'))['register']='wazuh_reader_preview_admit'
         for task in selected:
             if 'ansible.builtin.script' in task:
-                task['ansible.builtin.script']['cmd']=task['ansible.builtin.script']['cmd'].replace('files/wazuh-transaction.py',shlex.quote(str(worker)),1)
+                task['ansible.builtin.script']['cmd']=task['ansible.builtin.script']['cmd'].replace('files/wazuh-transaction.py',shlex.quote(str(worker)),1).replace('../files/pilot-wazuh-delivery',shlex.quote(str(cleanup)),1)
             if task['name']=='Install the root-owned Wazuh transaction coordinator':
                 task['ansible.builtin.copy']['src']=str(REPO/'playbooks/apply/files/wazuh-transaction.py');task['ansible.builtin.copy']['dest']=str(sbin/'coordinator')
             if task['name']=='Prepare the root-controlled reader proof helper directory':task['ansible.builtin.file']['path']=str(installed)
@@ -395,6 +419,8 @@ class PreviewModuleTests(unittest.TestCase):
             if 'ansible.builtin.file' in task:
                 task['ansible.builtin.file'].update(owner=str(os.getuid()),group=str(os.getgid()))
             if 'ansible.builtin.tempfile' in task:task['ansible.builtin.tempfile']['path']=str(run)
+            if task['name']=='Record allocation intent before dispatching any transient effect':
+                task['ansible.builtin.set_fact']['wazuh_preview_prefix']=str(run)+'/pilot-wazuh-preview-{{ wazuh_writer_owner }}-{{ wazuh_reader_operation.stdout }}-'
         # Controller lookup strings in the real hash-binding task resolve from
         # this private wrapper; replace ONLY their source-root prefix.
         binding=next(t for t in selected if t['name'].startswith('Bind desired forwarding'))
@@ -402,6 +428,45 @@ class PreviewModuleTests(unittest.TestCase):
             'wazuh_reader_tools':{name:hashlib.sha256((REPO/'playbooks/files'/name).read_bytes()).hexdigest() for name in ('pilot-wazuh-delivery','pilot-siem-relp-check')},
             'wazuh_reader_checker_hash':hashlib.sha256((REPO/'playbooks/files/pilot-wazuh-heartbeat').read_bytes()).hexdigest(),
             'wazuh_preview_coordinator_hash':hashlib.sha256((REPO/'playbooks/apply/files/wazuh-transaction.py').read_bytes()).hexdigest()}
+        index=next(i for i,t in enumerate(selected) if t['name']=="Pin this invocation's transient directory before any staged copy")
+        selected.insert(index+1,{'name':'Model native root account in the actual stat observation only',
+            'ansible.builtin.set_fact':{'wazuh_preview_stat':"{{ wazuh_preview_stat | combine({'stat':wazuh_preview_stat.stat | combine({'uid':0,'gid':0})}) }}"},
+            'when':'ansible_check_mode','tags':['always']})
+        if failure=='allocation-lost':
+            index=next(i for i,t in enumerate(selected) if t['name']=='Allocate an exclusive transient desired-tool preview scope')
+            # Real tempfile dispatch completes first, then transport reply loss
+            # is modeled before any consumer can pin its returned identity.
+            selected[index+1:index+1]=[
+                {'ansible.builtin.set_fact':{'wazuh_preview_directory':{'failed':True,'msg':'MODELED_ALLOCATION_REPLY_LOST'}},'tags':['always']},
+                {'ansible.builtin.fail':{'msg':'ORIGINAL_ALLOCATION_REPLY_LOST'},'tags':['always']}]
+        if failure=='before-allocation':
+            index=next(i for i,t in enumerate(selected) if t['name']=='Record allocation intent before dispatching any transient effect')
+            selected.insert(index,{'ansible.builtin.fail':{'msg':'ORIGINAL_BEFORE_ALLOCATION'},'tags':['always']})
+        shape_stage,_,shape=(failure or '').partition(':')
+        if shape:
+            task_name={'allocation':'Allocate an exclusive transient desired-tool preview scope',
+                       'stat':'Model native root account in the actual stat observation only',
+                       'pin':'Authenticate the empty transient scope header before any staged copy',
+                       'cleanup':"Remove only this invocation's validated transient preview tools",
+                       'observer':'Inspect compatibility or execute the explicitly authorized central upgrade'}[shape_stage]
+            register={'allocation':'wazuh_preview_directory','stat':'wazuh_preview_stat','pin':'wazuh_preview_pin',
+                      'cleanup':'wazuh_preview_cleanup','observer':'wazuh_central_transaction'}[shape_stage]
+            # Native module actually completes; only its transport result shape
+            # is then substituted. Product validators/always consumers stay real.
+            shapes={'empty':{},'failed':{'failed':True},'skipped':{'skipped':True},'unreachable':{'unreachable':True},
+                    'missing-rc':{'stdout':'{}'},'bool-rc':{'rc':False,'stdout':'{}'},
+                    'string-rc':{'rc':'0','stdout':'{}'},'malformed':{'rc':0,'stdout':'not JSON'},
+                    'foreign':{'rc':0,'stdout':'{"owner":"foreign"}'},'typed-identity':{}}
+            mutations={'wrong-owner':{'owner':'c'*32},'wrong-operation':{'operation':'c'*32},'wrong-path':{'path':'/run/foreign'},
+                       'wrong-identity':{'identity':[0,0,0,0,448]},'wrong-source':{'source_sha256':'0'*64},
+                       'false-absence':{'scope_absent':False},'numeric-settled':{'observers_settled':1},'bool-schema':{'schema':True}}
+            replacement=({'rc':0,'stdout':"{{ (("+register+".stdout | from_json) | combine("+repr(mutations[shape])+")) | to_json }}"}
+                         if shape in mutations else shapes[shape])
+            if shape=='typed-identity':replacement={'rc':0,'stdout':"{{ (("+register+".stdout | from_json) | combine({'identity':("+register+".stdout | from_json).identity[0:2] + [false,0,448]})) | to_json }}"}
+            override={'ansible.builtin.set_fact':{register:replacement},'tags':['always']}
+            if shape_stage!='cleanup':
+                index=next(i for i,t in enumerate(selected) if t.get('name')==task_name)
+                selected.insert(index+1,override)
         if failure=='copy':
             stage=next(t for t in selected if t['name'].startswith('Stage the exact'))
             stage['ansible.builtin.copy']['src']="{{ "+repr(str(root/'MISSING-heartbeat'))+" if item == 'pilot-wazuh-heartbeat' else "+repr(str(REPO/'playbooks/files'))+" ~ '/' ~ item }}"
@@ -409,12 +474,19 @@ class PreviewModuleTests(unittest.TestCase):
             central_task=next(t for t in selected if t['name'].startswith('Inspect compatibility'))
             central_task['ansible.builtin.script']['cmd']=central_task['ansible.builtin.script']['cmd'].replace('--reader-checker-sha256 {{ wazuh_reader_checker_hash | quote }}','--reader-checker-sha256 '+'0'*64)
         claim={'ansible.builtin.script':{'cmd':str(worker)+' writer-claim --owner '+OWNER+' --component central','executable':'python3'},'check_mode':False,'changed_when':False,'tags':['always']}
-        clean=picked(source,"Remove only this invocation's validated transient preview tools")
-        clean['ansible.builtin.script']['cmd']=clean['ansible.builtin.script']['cmd'].replace('../files/pilot-wazuh-delivery',shlex.quote(str(cleanup)),1)
+        clean=picked(source,"Settle only a positively pinned transient scope")
+        cleanup_task=next(t for t in clean['block'] if 'ansible.builtin.script' in t)
+        cleanup_task['ansible.builtin.script']['cmd']=cleanup_task['ansible.builtin.script']['cmd'].replace('../files/pilot-wazuh-delivery',shlex.quote(str(cleanup)),1)
+        if failure=='cleanup-lost':
+            index=clean['block'].index(cleanup_task)
+            clean['block'].insert(index+1,{'ansible.builtin.set_fact':{'wazuh_preview_cleanup':{'failed':True,'msg':'MODELED_CLEANUP_REPLY_LOST'}}})
+        if shape and shape_stage=='cleanup':
+            clean['block'].insert(clean['block'].index(cleanup_task)+1,override)
         release=picked(source,'Release only this exact writer after all mutators and recovery tasks have ended')
         release['ansible.builtin.script']['cmd']=release['ansible.builtin.script']['cmd'].replace('files/wazuh-transaction.py',shlex.quote(str(worker)),1)
         values={'wazuh_writer_owner':OWNER,'wazuh_writer_claimed':True,'wazuh_reader_operation':{'stdout':OP},
             'wazuh_preview_assets':{},'wazuh_preview_directory':{},'wazuh_preview_cleanup':{},'wazuh_preview_failed':False,
+            'wazuh_preview_allocation':'not-dispatched','wazuh_preview_settled':True,'wazuh_preview_cleanup_attempted':False,
             'wazuh_preview_central_dispatched':False,'wazuh_preview_admit_dispatched':False,'wazuh_reader_preview_admit':{},
             'wazuh_docker_version':'4.14.9','docker_pre':{'rc':0},'pilot_wazuh_manager_preview_fresh':False,
             'siem_forwarding_enabled':True,'siem_forward_transport':'tcp','siem_forward_port':'514','siem_relp_port':20514,
@@ -428,7 +500,7 @@ class PreviewModuleTests(unittest.TestCase):
         probe=root/'desired-api.json'
         record={'ansible.builtin.copy':{'dest':str(probe),'mode':'0600','content':"{{ {'desired_api': (wazuh_reader_preview_admit.rc | default(0)) == 0, 'stale_api': 'unrecognized arguments' in (wazuh_reader_preview_admit.stderr | default(''))} | to_json }}"},'check_mode':False,'no_log':True,'tags':['always']}
         play=[{'hosts':'localhost','connection':'local','gather_facts':False,'vars':values,
-            'tasks':[claim,{'block':selected,'rescue':[picked(source,"Retain the original Wazuh failure while settling transient preview ownership"),picked(source,"Surface the original Wazuh failure after its recorded task diagnostics")],'always':[record,clean,release,final]}]}]
+            'tasks':[claim,{'block':selected,'rescue':[picked(source,"Retain the original Wazuh failure while settling transient preview ownership"),picked(source,"Surface the original Wazuh failure after its recorded task diagnostics")],'always':[record,clean,release,picked(source,'Disclose retained preview scope and owner after an uncertain cleanup'),final]}]}]
         path=root/'play.yml';path.write_text(yaml.safe_dump(play,sort_keys=False))
         result=subprocess.run(['ansible-playbook','-i','localhost,',str(path),*(['--check'] if check else []),*(['--tags',tag] if tag!='all' else [])],
             cwd=REPO,capture_output=True,text=True,timeout=90,env=dict(os.environ,ANSIBLE_CONFIG=str(REPO/'ansible.cfg'),
@@ -439,10 +511,17 @@ class PreviewModuleTests(unittest.TestCase):
         else:
             for name in NAMES:self.assertEqual((installed/name).read_bytes(),(REPO/'playbooks/files'/name).read_bytes())
         self.assertEqual(installed.exists(),not fresh or not check)
-        if failure=='observer':
-            self.assertEqual(len(list(run.iterdir())),1)
+        if failure in ('observer','allocation-lost','cleanup-lost') or shape:
+            self.assertEqual(len(list(run.iterdir())),0 if failure=='cleanup-lost' or shape_stage=='cleanup' else 1)
+            self.assertTrue((ledger/'writer-active.json').exists(),'UNSETTLED_PREVIEW_WRITER_RELEASED')
             self.assertEqual(json.loads((ledger/'writer-active.json').read_text())['owner'],OWNER)
-            response=json.loads(next(root.glob('desired-api.json')).read_text()) if (root/'desired-api.json').exists() else {}
+            self.assertNotIn('writer-release',(root/'events').read_text())
+            self.assertIn('Preview cleanup retained owner=',result.stdout)
+            if shape:self.assertNotIn('undefined variable',result.stdout)
+            if failure=='allocation-lost':
+                self.assertIn('ORIGINAL_ALLOCATION_REPLY_LOST',result.stdout)
+                self.assertIn('allocation=dispatched-unknown',result.stdout)
+                self.assertNotIn('writer-release', (root/'events').read_text())
         elif failure in ('replacement','original-and-replacement'):
             scopes=list(run.iterdir());self.assertEqual(len(scopes),2)
             self.assertEqual(next(run.glob('*/FOREIGN')).read_text(),'retain foreign replacement')
@@ -477,6 +556,49 @@ class PreviewModuleTests(unittest.TestCase):
 
     def test_failed_dispatched_observer_retains_real_scope_and_writer(self):
         with tempfile.TemporaryDirectory() as temporary:self.run_case(Path(temporary),failure='observer')
+
+    def test_actual_allocation_reply_loss_retains_unknown_scope_and_writer(self):
+        with tempfile.TemporaryDirectory() as temporary:self.run_case(Path(temporary),failure='allocation-lost')
+
+    def test_preallocation_failure_releases_proven_no_scope(self):
+        with tempfile.TemporaryDirectory() as temporary:self.run_case(Path(temporary),failure='before-allocation')
+
+    def test_actual_cleanup_reply_loss_retains_writer_even_after_removal(self):
+        with tempfile.TemporaryDirectory() as temporary:self.run_case(Path(temporary),failure='cleanup-lost')
+
+    def test_actual_result_shapes_never_settle_unknown_allocation_stat_or_cleanup(self):
+        cases=[('allocation',name) for name in ('empty','failed','skipped','unreachable')]
+        cases += [('stat',name) for name in ('empty','failed','skipped','unreachable')]
+        cases += [('pin',name) for name in ('missing-rc','bool-rc','malformed','foreign')]
+        cases += [('cleanup',name) for name in ('empty','failed','skipped','unreachable','missing-rc','bool-rc','string-rc','malformed','foreign')]
+        cases += [('observer',name) for name in ('empty','failed','malformed','foreign')]
+        for stage,shape in cases:
+            with self.subTest(stage=stage,shape=shape),tempfile.TemporaryDirectory() as temporary:
+                self.run_case(Path(temporary),failure=stage+':'+shape)
+
+    def test_valid_shape_foreign_cleanup_certificates_cannot_release_writer(self):
+        for shape in ('wrong-owner','wrong-operation','wrong-path','wrong-identity','wrong-source','false-absence','numeric-settled','bool-schema'):
+            with self.subTest(shape=shape),tempfile.TemporaryDirectory() as temporary:
+                self.run_case(Path(temporary),failure='cleanup:'+shape)
+
+    def test_pin_and_cleanup_certificates_reject_bool_as_integer_identity(self):
+        for stage,shape in (('pin','bool-schema'),('pin','typed-identity'),('cleanup','typed-identity')):
+            with self.subTest(stage=stage,shape=shape),tempfile.TemporaryDirectory() as temporary:
+                self.run_case(Path(temporary),failure=stage+':'+shape)
+
+    def test_actual_end_host_consumes_same_positive_settlement(self):
+        source=yaml.safe_load((REPO/'playbooks/apply/wazuh-manager-apply.yml').read_text())[0]
+        end=picked(source,'End the completed version or recovery operation after durable writer release')
+        for settled in (False,True):
+            with self.subTest(settled=settled),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);marker=root/'following-task'
+                play=root/'end.yml';play.write_text(yaml.safe_dump([{'hosts':'localhost','connection':'local','gather_facts':False,
+                    'vars':{'wazuh_finish_host':True,'wazuh_preview_settled':settled},'tasks':[end,
+                    {'ansible.builtin.copy':{'dest':str(marker),'content':'host still active','mode':'0600'}}]}]))
+                result=subprocess.run(['ansible-playbook','-i','localhost,',str(play)],capture_output=True,text=True,timeout=30,
+                    env=dict(os.environ,ANSIBLE_LOCAL_TEMP=str(root/'local'),ANSIBLE_REMOTE_TMP=str(root/'remote')))
+                self.assertEqual(result.returncode,0,(result.stdout,result.stderr))
+                self.assertEqual(marker.exists(),not settled,'END_HOST_UNKNOWN_SETTLEMENT')
 
     def test_normal_apply_deploys_exact_desired_helpers_after_real_writer_claim(self):
         with tempfile.TemporaryDirectory() as temporary:self.run_case(Path(temporary),check=False,fresh=True)

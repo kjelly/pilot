@@ -214,11 +214,15 @@ class ManagerScriptArgumentTests(unittest.TestCase):
   with tempfile.TemporaryDirectory(prefix='wazuh-reader-import-') as temporary:
    root=Path(temporary);apply=root/'playbooks/apply';fixtures=root/'playbooks/test/fixtures';files=root/'playbooks/files'
    for path in (apply,fixtures,files):path.mkdir(parents=True)
+   (apply/'files').mkdir()
+   coordinator=(REPO/'playbooks/apply/files/wazuh-transaction.py').read_bytes()
+   (apply/'files/wazuh-transaction.py').write_bytes(coordinator)
    expected={}
    for name in ('pilot-wazuh-heartbeat','pilot-wazuh-delivery','pilot-siem-relp-check'):
     payload=(REPO/'playbooks/files'/name).read_bytes();(files/name).write_bytes(payload)
     expected[name]=hashlib.sha256(payload).hexdigest()
    assertion={'ansible.builtin.assert':{'that':[
+    'wazuh_preview_coordinator_hash == '+repr(hashlib.sha256(coordinator).hexdigest()),
     'wazuh_reader_checker_hash == '+repr(expected['pilot-wazuh-heartbeat']),
     'wazuh_reader_tools["pilot-wazuh-delivery"] == '+repr(expected['pilot-wazuh-delivery']),
     'wazuh_reader_tools["pilot-siem-relp-check"] == '+repr(expected['pilot-siem-relp-check'])]}}

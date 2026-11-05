@@ -169,6 +169,9 @@
         wazuh_finish_host: false
         wazuh_reader_enable_admitted: false
         wazuh_reader_enable_committed: false
+        wazuh_preview_allocation: not-dispatched
+        wazuh_preview_settled: true
+        wazuh_preview_cleanup_attempted: false
         wazuh_preview_assets: {}
         wazuh_preview_directory: {}
         wazuh_preview_cleanup: {}
@@ -342,6 +345,14 @@
           no_log: true
           tags: [always]
 
+        - name: "Record allocation intent before dispatching any transient effect"
+          ansible.builtin.set_fact:
+            wazuh_preview_allocation: dispatched-unknown
+            wazuh_preview_settled: false
+            wazuh_preview_prefix: "/run/pilot-wazuh-preview-{{ wazuh_writer_owner }}-{{ wazuh_reader_operation.stdout }}-"
+          when: ansible_check_mode
+          tags: [always]
+
         - name: "Allocate an exclusive transient desired-tool preview scope"
           ansible.builtin.tempfile:
             state: directory
@@ -353,12 +364,44 @@
           when: ansible_check_mode
           tags: [always]
 
+        - name: "Require an explicit successful allocation response"
+          ansible.builtin.assert:
+            that:
+              - wazuh_preview_directory is mapping
+              - not (wazuh_preview_directory.failed | default(false))
+              - not (wazuh_preview_directory.skipped | default(false))
+              - not (wazuh_preview_directory.unreachable | default(false))
+              - wazuh_preview_directory.path is string
+              - wazuh_preview_directory.path.startswith(wazuh_preview_prefix)
+            quiet: true
+          when: ansible_check_mode
+          tags: [always]
+
         - name: "Pin this invocation's transient directory before any staged copy"
           ansible.builtin.stat:
             path: "{{ wazuh_preview_directory.path }}"
             follow: false
             get_checksum: false
           register: wazuh_preview_stat
+          when: ansible_check_mode
+          tags: [always]
+
+        - name: "Require complete native allocation identity before creating a capability"
+          ansible.builtin.assert:
+            that:
+              - wazuh_preview_stat is mapping
+              - not (wazuh_preview_stat.failed | default(false))
+              - not (wazuh_preview_stat.skipped | default(false))
+              - not (wazuh_preview_stat.unreachable | default(false))
+              - wazuh_preview_stat.stat.exists is sameas true
+              - wazuh_preview_stat.stat.isdir is sameas true
+              - wazuh_preview_stat.stat.islnk is sameas false
+              - wazuh_preview_stat.stat.dev is integer
+              - wazuh_preview_stat.stat.inode is integer
+              - wazuh_preview_stat.stat.uid is integer
+              - wazuh_preview_stat.stat.gid is integer
+              - wazuh_preview_stat.stat.mode == '0700'
+            quiet: true
           when: ansible_check_mode
           tags: [always]
 
@@ -375,6 +418,39 @@
           when: ansible_check_mode
           tags: [always]
           no_log: true
+
+        - name: "Authenticate the empty transient scope header before any staged copy"
+          ansible.builtin.script:
+            cmd: >-
+              ../files/pilot-wazuh-delivery preview-pin {{ wazuh_preview_assets | to_json | quote }}
+            executable: python3
+          register: wazuh_preview_pin
+          changed_when: false
+          check_mode: false
+          when: ansible_check_mode
+          no_log: true
+          tags: [always]
+
+        - name: "Accept only the exact authenticated allocation binding"
+          ansible.builtin.assert:
+            that:
+              - wazuh_preview_pin.rc is integer and wazuh_preview_pin.rc is not boolean and wazuh_preview_pin.rc == 0
+              - not (wazuh_preview_pin.failed | default(false))
+              - not (wazuh_preview_pin.skipped | default(false))
+              - not (wazuh_preview_pin.unreachable | default(false))
+              - (wazuh_preview_pin.stdout | from_json).schema is integer and (wazuh_preview_pin.stdout | from_json).schema is not boolean
+              - ((wazuh_preview_pin.stdout | from_json).identity | select('integer') | list | length) == 5
+              - (wazuh_preview_pin.stdout | from_json) == {'schema':1,'kind':'WAZUH_PREVIEW_PIN','owner':wazuh_writer_owner,'operation':wazuh_reader_operation.stdout,'path':wazuh_preview_assets.path,'identity':wazuh_preview_assets.identity,'source_sha256':wazuh_reader_tools['pilot-wazuh-delivery']}
+            quiet: true
+          when: ansible_check_mode
+          no_log: true
+          tags: [always]
+
+        - name: "Record the positively pinned allocation before member copies"
+          ansible.builtin.set_fact:
+            wazuh_preview_allocation: scope-pinned
+          when: ansible_check_mode
+          tags: [always]
 
         - name: "Stage the exact desired preview tools without deploying installed assets"
           ansible.builtin.copy:
@@ -1045,23 +1121,49 @@
             msg: "Wazuh operation failed; the original task failure remains authoritative. Transient cleanup and exact writer settlement follow."
           tags: [always]
       always:
-        - name: "Remove only this invocation's validated transient preview tools"
-          ansible.builtin.script:
-            cmd: >-
-              ../files/pilot-wazuh-delivery preview-cleanup {{ wazuh_preview_assets | to_json | quote }}
-              {{ {'coordinator_sha256': wazuh_preview_coordinator_hash, 'calls': [{'dispatched': wazuh_preview_central_dispatched, 'response': wazuh_central_transaction.stdout | default('')}, {'dispatched': wazuh_preview_admit_dispatched, 'response': wazuh_reader_preview_admit.stdout | default('')}]} | to_json | quote }}
-            executable: python3
-          register: wazuh_preview_cleanup
-          changed_when: false
-          failed_when: false
-          check_mode: false
+        - name: "Settle only a positively pinned transient scope"
           when:
             - ansible_check_mode
             - wazuh_writer_claimed | default(false) | bool
-            - wazuh_preview_directory is defined
-            - wazuh_preview_directory.path is defined
-          no_log: true
+            - wazuh_preview_allocation == 'scope-pinned'
           tags: [always]
+          block:
+            - name: "Record cleanup intent before its foreground invocation"
+              ansible.builtin.set_fact:
+                wazuh_preview_cleanup_attempted: true
+            - name: "Remove only this invocation's validated transient preview tools"
+              ansible.builtin.script:
+                cmd: >-
+                  ../files/pilot-wazuh-delivery preview-cleanup {{ wazuh_preview_assets | to_json | quote }}
+                  {{ {'coordinator_sha256': wazuh_preview_coordinator_hash, 'calls': [{'dispatched': wazuh_preview_central_dispatched, 'response': wazuh_central_transaction.stdout | default('')}, {'dispatched': wazuh_preview_admit_dispatched, 'response': wazuh_reader_preview_admit.stdout | default('')}]} | to_json | quote }}
+                executable: python3
+              register: wazuh_preview_cleanup
+              changed_when: false
+              check_mode: false
+              no_log: true
+              tags: [always]
+            - name: "Require the complete bound absence certificate before settlement"
+              ansible.builtin.assert:
+                that:
+                  - wazuh_preview_cleanup is mapping
+                  - not (wazuh_preview_cleanup.failed | default(false))
+                  - not (wazuh_preview_cleanup.skipped | default(false))
+                  - not (wazuh_preview_cleanup.unreachable | default(false))
+                  - wazuh_preview_cleanup.rc is integer and wazuh_preview_cleanup.rc is not boolean and wazuh_preview_cleanup.rc == 0
+                  - (wazuh_preview_cleanup.stdout | from_json).schema is integer and (wazuh_preview_cleanup.stdout | from_json).schema is not boolean
+                  - ((wazuh_preview_cleanup.stdout | from_json).identity | select('integer') | list | length) == 5
+                  - (wazuh_preview_cleanup.stdout | from_json).observers_settled is sameas true
+                  - (wazuh_preview_cleanup.stdout | from_json).scope_absent is sameas true
+                  - (wazuh_preview_cleanup.stdout | from_json) == {'schema':1,'kind':'WAZUH_PREVIEW_CLEANUP','owner':wazuh_writer_owner,'operation':wazuh_reader_operation.stdout,'path':wazuh_preview_assets.path,'identity':wazuh_preview_assets.identity,'source_sha256':wazuh_reader_tools['pilot-wazuh-delivery'],'observers_settled':true,'scope_absent':true}
+                quiet: true
+              no_log: true
+            - name: "Publish positive transient settlement for every final consumer"
+              ansible.builtin.set_fact:
+                wazuh_preview_settled: true
+          rescue:
+            - name: "Retain unknown cleanup without masking the original operation failure"
+              ansible.builtin.set_fact:
+                wazuh_preview_settled: false
 
         - name: "Retain pending replay after this invocation's uncommitted local enable"
           ansible.builtin.command:
@@ -1090,23 +1192,23 @@
           check_mode: false
           when:
             - wazuh_writer_claimed is defined and wazuh_writer_claimed | bool
-            - (wazuh_preview_cleanup.rc | default(0)) == 0
+            - wazuh_preview_settled | bool
           tags: [always]
 
         - name: "Disclose retained preview scope and owner after an uncertain cleanup"
           ansible.builtin.debug:
-            msg: "Preview cleanup retained owner={{ wazuh_writer_owner }} operation={{ wazuh_reader_operation.stdout | default('unknown') }} scope={{ wazuh_preview_assets.path | default(wazuh_preview_directory.path | default('unknown')) }} status=foreground-or-scope-unsettled. Original task failure remains authoritative."
-          when: (wazuh_preview_cleanup.rc | default(0)) != 0
+            msg: "Preview cleanup retained owner={{ wazuh_writer_owner }} operation={{ wazuh_reader_operation.stdout | default('unknown') }} allocation={{ wazuh_preview_allocation }} prefix={{ wazuh_preview_prefix | default('not-dispatched') }} scope={{ wazuh_preview_assets.path | default(wazuh_preview_directory.path | default('unknown')) }} status=foreground-or-scope-unsettled. Original task failure remains authoritative."
+          when: not (wazuh_preview_settled | bool)
           tags: [always]
 
         - name: "Report unsettled transient scope without masking an earlier operation failure"
           ansible.builtin.assert:
-            that: (wazuh_preview_cleanup.rc | default(0)) == 0
+            that: wazuh_preview_settled | bool
             fail_msg: "Transient preview cleanup refused an unknown scope/member/process; scope and writer are retained for explicit inspection."
           when: not (wazuh_preview_failed | bool)
           tags: [always]
 
     - name: "End the completed version or recovery operation after durable writer release"
       ansible.builtin.meta: end_host
-      when: wazuh_finish_host
+      when: wazuh_finish_host and (wazuh_preview_settled | bool)
       tags: [always]
