@@ -199,6 +199,10 @@ func TestWazuhVersionCoordinatorBehavior(t *testing.T) {
 	runWazuhHarness(t, "testdata/wazuh_transaction_test.py", "Wazuh version coordinator behavioral controls")
 }
 
+func TestAptExactVersionTaskBehavior(t *testing.T) {
+	runWazuhHarness(t, "testdata/apt_exact_task_test.py", "real Ansible exact APT task controls")
+}
+
 // A prerequisite that is missing must stop the harness loudly. Each case puts a
 // shim first on PATH that behaves like the broken environment and checks the
 // probe's message names the fix, so a CI job without PyYAML or the pinned

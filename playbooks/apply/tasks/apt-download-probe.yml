@@ -28,6 +28,11 @@
 #
 # Inputs:
 #   _pilot_apt_missing                 : list[str], packages to probe
+#                                        (`name=exact-version` for an exact request)
+#   _pilot_apt_versions                : optional {package: exact version}; when
+#                                        set, the apt output paths are validated
+#                                        (apt-exact-stage.py --cache-preflight)
+#                                        before anything is downloaded
 #   pilot_apt_component                : str, for messages
 #   pilot_apt_probe_stage              : cache_hit | after_global_refresh |
 #                                        after_scoped_refresh
@@ -38,6 +43,14 @@
 #   rc: probe exit code
 #   stale: bool, a package download 404'd
 #   timed_out: bool (FATAL below when true)
+
+- name: "APT download probe ({{ pilot_apt_probe_stage }}) — validate exact-version output paths before downloading"
+  ansible.builtin.script:
+    cmd: "../files/apt-exact-stage.py --cache-preflight"
+    executable: python3
+  changed_when: false
+  check_mode: false
+  when: _pilot_apt_versions | default({}) | length > 0
 
 - name: "APT download probe ({{ pilot_apt_probe_stage }}) — apt-get install --download-only, never installs"
   ansible.builtin.command:
@@ -51,6 +64,8 @@
       - -y
       - -o
       - DPkg::Lock::Timeout=60
+      - -o
+      - APT::Get::AllowUnauthenticated=false
       - install
       - --download-only
   register: _pilot_apt_download_probe
