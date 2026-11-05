@@ -256,6 +256,7 @@ type fakeIPA struct {
 	noAdmins bool              // leave the reader out of admins
 	hang     map[string]bool   // JSON-RPC methods the server never answers (until the test ends)
 	stop     chan struct{}     // closed when the test ends, to release hung requests
+	onHang   func(string)      // called, with the method, when a request the server never answers arrives
 }
 
 // replay answers with a captured status, headers and body (the .status,
@@ -349,6 +350,9 @@ func (f *fakeIPA) serve(w http.ResponseWriter, r *http.Request) {
 	f.methods = append(f.methods, req.Method)
 	f.mu.Unlock()
 	if f.hang[req.Method] {
+		if f.onHang != nil {
+			f.onHang(req.Method)
+		}
 		select {
 		case <-r.Context().Done():
 		case <-f.stop:
@@ -430,6 +434,9 @@ func (d *fakeGolangDialer) FQDN(context.Context) (string, error) {
 	}
 	return golangTestFQDN, nil
 }
+
+// Close has nothing to end: the fake starts no ssh.
+func (d *fakeGolangDialer) Close() {}
 
 func (d *fakeGolangDialer) CA(context.Context) (*x509.CertPool, error) {
 	if golangDialerFaults.caErr != nil {

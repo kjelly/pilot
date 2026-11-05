@@ -50,6 +50,9 @@ type golangDialer interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 	FQDN(ctx context.Context) (string, error)
 	CA(ctx context.Context) (*x509.CertPool, error)
+	// Close ends every ssh the dialer started and returns once each is
+	// reaped; afterwards it starts none.
+	Close()
 }
 
 var newGolangDialer = func(t sshdial.Target) golangDialer { return &sshdial.Dialer{Target: t} }
@@ -227,6 +230,12 @@ func golangPreview(cmd *cobra.Command) error {
 	}
 
 	dialer := newGolangDialer(target)
+	// The first deferred call here, so the last to run: after the logout
+	// and CloseIdleConnections it ends what is still running, among it a
+	// tunnel whose TLS handshake a net/http dial goroutine still waits on
+	// once the logout gave up, and returns when each ssh is reaped: no ssh
+	// is left when the preview returns (spec §2.5).
+	defer dialer.Close()
 	fqdn, err := dialer.FQDN(ctx)
 	if err != nil {
 		return fmt.Errorf("讀取 %s 的 FQDN: %w", host, err) // gate: fqdn-read
@@ -242,8 +251,10 @@ func golangPreview(cmd *cobra.Command) error {
 	if err != nil {
 		return err // gate: client-new
 	}
-	// Last of the deferred calls, so after the logout: no ssh -W is left when
-	// the preview returns (spec §2.2 step 9).
+	// After the logout: ends the idle tunnel with a TLS close_notify. It is not
+	// what guarantees that no ssh -W is left: for a dial still in progress it
+	// only cancels the dial's context and returns, and net/http ends that
+	// connection later in a goroutine of its own. dialer.Close does (above).
 	defer client.CloseIdleConnections()
 	if err := client.Login(ctx, desired.Principal, password); err != nil {
 		return fmt.Errorf("登入 FreeIPA: %w", err) // gate: login

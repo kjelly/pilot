@@ -10,6 +10,12 @@
 // killed together with them. A hop that needs a password or a host key
 // confirmation fails instead of prompting (OpenSSH does not pass BatchMode to
 // a hop).
+//
+// A Dialer registers every ssh it starts until Wait has returned for it, and
+// Close ends what is still running and waits for it: the connections a
+// caller never closed (net/http dials in a goroutine of its own and
+// http.Transport.CloseIdleConnections does not wait for a dial in progress),
+// so that once the caller has closed the Dialer no ssh is left.
 package sshdial
 
 import (
@@ -192,25 +198,44 @@ func (b *boundedBuffer) String() string {
 // process is a started ssh with its exit status collected in the
 // background, so readers never race exec.Cmd.Wait.
 type process struct {
-	cmd    *exec.Cmd
-	stderr *boundedBuffer
-	done   chan struct{}
-	err    error
+	cmd      *exec.Cmd
+	stderr   *boundedBuffer
+	done     chan struct{}
+	err      error
+	killOnce sync.Once
 }
 
 // start is the only place an ssh process is started (a lint of this package
 // holds it to that): through childproc.Isolate, so ssh and the processes it
 // starts end together and a process that kept ssh's stderr cannot hold Wait
 // for more than childproc.WaitDelay.
-func start(cmd *exec.Cmd) (*process, error) {
+//
+// The process is registered with d until Wait has returned, so that Close
+// can end it whoever holds it (a net/http dial goroutine, an idle pool).
+// d.mu is held across Start: a Close that runs meanwhile waits for the
+// registration, and after Close nothing starts.
+func (d *Dialer) start(cmd *exec.Cmd) (*process, error) {
 	p := &process{cmd: cmd, stderr: &boundedBuffer{n: 4096}, done: make(chan struct{})}
 	cmd.Stderr = p.stderr
 	childproc.Isolate(cmd)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil, ErrDialerClosed
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("sshdial: start ssh: %w", err)
 	}
+	if d.live == nil {
+		d.live = map[*process]struct{}{}
+	}
+	d.live[p] = struct{}{}
 	go func() {
 		p.err = cmd.Wait()
+		// Before done: whoever waited on done finds p unregistered.
+		d.mu.Lock()
+		delete(d.live, p)
+		d.mu.Unlock()
 		close(p.done)
 	}()
 	return p, nil
@@ -240,19 +265,57 @@ func (p *process) failure() error {
 // and waits until Wait has returned. Once Wait has reaped ssh nothing is
 // signalled: the group id may have been given to an unrelated process.
 func (p *process) kill() {
-	select {
-	case <-p.done:
-	default:
-		_ = childproc.KillGroup(p.cmd)
-	}
+	p.signal()
 	<-p.done
 }
 
+// signal SIGKILLs ssh's process group once, unless Wait has reaped ssh.
+func (p *process) signal() {
+	p.killOnce.Do(func() {
+		select {
+		case <-p.done:
+		default:
+			_ = childproc.KillGroup(p.cmd)
+		}
+	})
+}
+
+// ErrDialerClosed: the Dialer was closed and starts no ssh.
+var ErrDialerClosed = errors.New("sshdial: dialer closed")
+
 // Dialer opens one `ssh -W` per connection. It is safe for concurrent use.
+// It must not be copied after first use.
 type Dialer struct {
 	Target      Target
 	Destination string // default DefaultDestination
 	SSH         string // ssh program; default "ssh" from PATH
+
+	mu     sync.Mutex
+	live   map[*process]struct{} // started, Wait not returned yet
+	closed bool
+}
+
+// Close ends every ssh the Dialer started that is still running, with what
+// each started in its process group: tunnels whose connection nobody closed
+// (a net/http dial goroutine still in the TLS handshake, a connection in an
+// idle pool), remote commands, a held lock (Lost fires). It returns once Wait
+// has returned for each (at most childproc.WaitDelay after the kill, when a
+// process that left the group holds stderr). After Close the Dialer starts
+// nothing: every call fails with ErrDialerClosed.
+func (d *Dialer) Close() {
+	d.mu.Lock()
+	d.closed = true
+	live := make([]*process, 0, len(d.live))
+	for p := range d.live {
+		live = append(live, p)
+	}
+	d.mu.Unlock()
+	for _, p := range live {
+		p.signal()
+	}
+	for _, p := range live {
+		<-p.done
+	}
 }
 
 func (d *Dialer) program() string {
@@ -301,7 +364,7 @@ func (d *Dialer) DialContext(ctx context.Context, _, _ string) (net.Conn, error)
 	// Not CommandContext: the connection outlives the dial's context.
 	cmd := exec.Command(d.program(), d.Target.args("-W", dest)...)
 	cmd.Stdin, cmd.Stdout = inR, outW
-	p, err := start(cmd)
+	p, err := d.start(cmd)
 	inR.Close()
 	outW.Close()
 	if err != nil {
@@ -390,7 +453,7 @@ func (d *Dialer) run(ctx context.Context, command string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, d.program(), d.Target.args()...)
 	cmd.Args = append(cmd.Args, command)
 	cmd.Stdout = &out
-	p, err := start(cmd)
+	p, err := d.start(cmd)
 	if err != nil {
 		return nil, err
 	}

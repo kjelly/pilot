@@ -44,7 +44,7 @@ func startViolations(t *testing.T, sources map[string]string) []string {
 			if !ok || fd.Body == nil {
 				continue
 			}
-			inStart := fd.Recv == nil && fd.Name.Name == "start"
+			inStart := fd.Recv != nil && fd.Name.Name == "start"
 			var isolateAt, startAt token.Pos
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
@@ -143,11 +143,11 @@ func TestRegression_SSHStartsOnlyThroughStart(t *testing.T) {
 		want    string
 	}{
 		"an ssh run in DialContext": {
-			mutate("sshdial.go", "p, err := start(cmd)\n\tinR.Close()", "if err := cmd.Run(); err != nil {\n\t\treturn nil, err\n\t}\n\tp, err := start(cmd)\n\tinR.Close()"),
+			mutate("sshdial.go", "p, err := d.start(cmd)\n\tinR.Close()", "if err := cmd.Run(); err != nil {\n\t\treturn nil, err\n\t}\n\tp, err := d.start(cmd)\n\tinR.Close()"),
 			".Run() outside func start",
 		},
 		"an ssh started in the lock": {
-			mutate("lock.go", "p, err := start(cmd)", "if err := cmd.Start(); err != nil {\n\t\treturn nil, err\n\t}\n\tp, err := start(cmd)"),
+			mutate("lock.go", "p, err := d.start(cmd)", "if err := cmd.Start(); err != nil {\n\t\treturn nil, err\n\t}\n\tp, err := d.start(cmd)"),
 			".Start() outside func start",
 		},
 		"start without Isolate": {
@@ -155,8 +155,8 @@ func TestRegression_SSHStartsOnlyThroughStart(t *testing.T) {
 			"must call childproc.Isolate(cmd) before cmd.Start()",
 		},
 		"Isolate after Start": {
-			mutate("sshdial.go", "\tchildproc.Isolate(cmd)\n\tif err := cmd.Start(); err != nil {\n\t\treturn nil, fmt.Errorf(\"sshdial: start ssh: %w\", err)\n\t}\n",
-				"\tif err := cmd.Start(); err != nil {\n\t\treturn nil, fmt.Errorf(\"sshdial: start ssh: %w\", err)\n\t}\n\tchildproc.Isolate(cmd)\n"),
+			mutate("sshdial.go", "\tchildproc.Isolate(cmd)\n\td.mu.Lock()\n\tdefer d.mu.Unlock()\n\tif d.closed {\n\t\treturn nil, ErrDialerClosed\n\t}\n\tif err := cmd.Start(); err != nil {\n\t\treturn nil, fmt.Errorf(\"sshdial: start ssh: %w\", err)\n\t}\n",
+				"\td.mu.Lock()\n\tdefer d.mu.Unlock()\n\tif d.closed {\n\t\treturn nil, ErrDialerClosed\n\t}\n\tif err := cmd.Start(); err != nil {\n\t\treturn nil, fmt.Errorf(\"sshdial: start ssh: %w\", err)\n\t}\n\tchildproc.Isolate(cmd)\n"),
 			"must call childproc.Isolate(cmd) before cmd.Start()",
 		},
 		"a kill of the one process": {

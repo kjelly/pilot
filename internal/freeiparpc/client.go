@@ -180,7 +180,10 @@ func (t *originTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // CloseIdleConnections closes the connections the client keeps open between
 // requests: with the SSH dialer, the ssh process of each. Call it when the
-// client is done; a request in flight is not touched.
+// client is done; a request in flight is not touched, nor is a dial in
+// progress: net/http cancels the dial's context and returns, and ends that
+// connection later in a goroutine of its own. A caller that must have no ssh
+// left when it returns closes the dialer too (sshdial.Dialer.Close waits).
 func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
 
 // Stats returns the counters so far.
