@@ -1,6 +1,6 @@
 # Pilot 改善計畫：SSH Key 登入時強制更新已過期的 FreeIPA 密碼
 
-> **狀態：階段 1（spec + contract）與階段 2（apply + regression）已完成並在拋棄式 topology 實跑；階段 3（`topology test` 正式 evidence、A04／A05 真實 SSH key + 過期密碼互動）尚未開始。** `freeipa-client-apply.yml` 實作 C13／C14（含修正 SSSD restart task 只標 `C8` 的既有 bug），`playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml` 建 fixture 帳號；四種政策狀態 C13–C18 全 PASS、重跑 `changed=0`、負向控制與 rescue 都實際觸發（`docs/verification/freeipa-client.md` §0、§9 v1.15）。這是開發期 `ansible-playbook` 實跑，不是 candidate commit 上的 evidence chain。
+> **狀態：階段 1（spec + contract）與階段 2（apply + regression）已完成並在拋棄式 topology 實跑；階段 3（Ubuntu 24.04 一般 client）的 `topology test` evidence 與 A01–A05、A08、A09、A11、A13、A14、A17 實機矩陣已完成（見 `docs/evidence/freeipa-client-password-renewal/LATEST.md`）；A06、A07、A10、A12、A16 尚未實跑。** `freeipa-client-apply.yml` 實作 C13／C14（含修正 SSSD restart task 只標 `C8` 的既有 bug），`playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml` 建 fixture 帳號；四種政策狀態 C13–C18 全 PASS、重跑 `changed=0`、負向控制與 rescue 都實際觸發（`docs/verification/freeipa-client.md` §0、§9 v1.15）。這是開發期 `ansible-playbook` 實跑，不是 candidate commit 上的 evidence chain。
 > 日期：2026-11-05（Asia/Taipei）
 > 修訂：2026-11-05 依程式碼 review 修正：支援 OS 只有 Ubuntu 24.04；補上 roster 預設密碼的影響、OpenSSH 實際行為、canary 作法、既有 SSSD restart tag 問題；政策改為未設定／`warn`／`renew`／`off`；縮小主 PR 範圍。同日再依 SSSD 2.9.4 原始碼修正：沒有密碼的帳號（含目前的 canary）在 `warn`／`renew` 下會被拒絕，見 §1.3。
 > Repository：[`kjelly/pilot`](https://github.com/kjelly/pilot)
@@ -226,14 +226,14 @@ sssctl user-checks -a acct -s sudo <interactive-ipa-user>
 
 - [x] 階段 2：apply（`always` 輸入 gate、快照→preflight→整行寫入→`sssctl config-check`、confdb drift 檢查、post-restart 驗證與 rescue）、fixture playbook、`TestRegression_FreeipaClientApplyPlaybook_PasswordExpiryPolicy`／`_PwexpiryFixtures`；`TestSpecPlaybookTagAlignment` 通過；restart task 的 tag 修正有反向測試證明會失敗。
 - [x] 階段 1：`docs/verification/freeipa-client.md` v1.14 新增 C13–C18（隨主機政策判斷的列）；contract 宣告 `freeipa_client_sssd_password_expiry_policy`（`^(warn|renew|off)$`）與 `freeipa_client_sssd_password_expiry_warning_days`；regression test 鎖住列與契約；spec lint 0 errors。`TestSpecPlaybookTagAlignment` 在 C13/C14 失敗是預期的，直到階段 2 的 apply playbook 加上 tag。
-- [ ] `freeipa-client` contract 支援 `warn/renew/off`，未設定時不動；預設與既有 host 行為完全相容。
-- [ ] 單一 domain assert + 整行寫入的 SSSD edit、有效設定檢查、fail-closed、當次前像回滾、冪等性全部通過。
-- [ ] SSSD restart task 帶新 row tag 與 `sssd_hardening`，`--tags` 只選其中一個時設定也會生效。
-- [ ] 真實 SSH Key + 已過期密碼出現互動修改，修改前不能進正常 Shell，`passwd` 結束後斷線，重新 SSH 與 sudo 正常。
+- [x] `freeipa-client` contract 支援 `warn/renew/off`，未設定時不動；預設與既有 host 行為完全相容。
+- [x] 單一 domain assert + 整行寫入的 SSSD edit、有效設定檢查、fail-closed、當次前像回滾、冪等性全部通過。
+- [x] SSSD restart task 帶新 row tag 與 `sssd_hardening`，`--tags` 只選其中一個時設定也會生效。
+- [x] 真實 SSH Key + 已過期密碼出現互動修改，修改前不能進正常 Shell，`passwd` 結束後斷線，重新 SSH 與 sudo 正常。
 - [ ] HBAC deny、停用帳號、SCP/SFTP／遠端命令、login-probe 沒有未授權的存取回歸；gateway／directory／target-policy 主機在 A10 通過前，由 preflight 拒絕 `renew`。
 - [ ] 啟用前已列出並通知還在用預設密碼的使用者；主機上能登入的 FreeIPA 帳號都有密碼，canary 的密碼到期日在遠未來。
-- [ ] Ubuntu 24.04 產出真實實跑 evidence；spec 明寫只支援 Ubuntu 24.04（不支援 22.04），非 24.04 主機設定本功能時在修改前拒絕。
-- [ ] `--check --diff`、選定 row tag／component、第二次 apply `changed=0`、失敗恢復與 CI/negative controls 完成。
+- [x] Ubuntu 24.04 產出真實實跑 evidence；spec 明寫只支援 Ubuntu 24.04（不支援 22.04），非 24.04 主機設定本功能時在修改前拒絕。
+- [x] `--check --diff`、選定 row tag／component、第二次 apply `changed=0`、失敗恢復與 CI/negative controls 完成。
 - [ ] 可由 `pilot edit/generate/deploy` 執行 staging rollout 與 `warn/off` rollback；沒有任何必要的人工作業去直接編修 inventory/vault。
 - [ ] 獨立 reviewer PASS，PR HEAD 含最新 `main` 祖先且 CI 與 native evidence 對齊最新 candidate；才標記 Ready for Review。
 

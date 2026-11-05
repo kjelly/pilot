@@ -70,7 +70,7 @@ freeipa-client=<client>` 讓 `groups['freeipa-server']` hostvars 偵測吃到真
    `no modifications to be performed`，不是猜測的 `already contains`。兩處都已修正並補冪等
    實測。
 
-**v1.14／v1.15（C13–C18：SSH key 登入時對已過期密碼的政策）— apply 與 fixture playbook 已實作，正式 evidence 尚未完成，2026-11-05**：
+**v1.14／v1.15（C13–C18：SSH key 登入時對已過期密碼的政策）— apply 與 fixture playbook 已實作，Ubuntu 24.04 `renew` 的 `topology test` evidence 已產生，2026-11-05**：
 新變數 `freeipa_client_sssd_password_expiry_policy`（`warn`／`renew`／`off`，未設定就不動）把 SSSD
 domain 的 `ipa_access_order` 設成 `expire, pwd_expire_policy_<warn|renew>` 或 `expire`。`renew` 讓用
 SSH key（或 GSSAPI）登入、但 FreeIPA 密碼已過期的人在拿到 shell 前先改密碼。roster 給的預設密碼是
@@ -90,8 +90,15 @@ SSH key（或 GSSAPI）登入、但 FreeIPA 密碼已過期的人在拿到 shell
   `ipa_access_order` 重複或未知形式、`sssctl config-check` 失敗、SSSD 沒載入政策、`--check`）都在
   修改前拒絕或由 rescue 還原，sssd.conf 位元組不變；hand-edit 後不重啟再跑 `--tags C14` /
   `--tags sssd_hardening` 會重啟 SSSD。
-- 尚未完成：`vm-target topology test` 的正式 evidence（candidate commit、L3 `--check --diff`、L6 冪等、
-  A04／A05 的真實 SSH key + 過期密碼互動），以及 gateway／directory／target-policy 主機（階段 3b）。
+- 目前有效 evidence（`renew`，Ubuntu 24.04 client + AlmaLinux 9 server，兩台全新 VM）：candidate
+  `be035352ab6ba186ea378077dbf61e7ed4673004`（tree `6074e9e501888c1117427869d03fc98e7b973ab0`）的
+  `vm-target topology test` 全部通過——L3 `--check --diff`、L4 apply、L5 verify（`freeipa-server.md` 20/0/0、
+  本 spec 18/0/0）、L6 `changed=0`；之後在同一組 VM 實跑 A01–A05、A08、A09、A11、A13、A14、A17
+  （真實 SSH key + 過期密碼：sshd 改跑 `passwd`、改完斷線、重新登入進 shell 且 sudo 正常，FreeIPA 到期日 +90 天）。
+  逐項結果與限制見 [evidence LATEST](../evidence/freeipa-client-password-renewal/LATEST.md)。
+- 尚未實跑：A06（停用帳號／HBAC deny）、A07（login-probe canary）、A10（gateway／directory／target-policy
+  主機，階段 3b）、A12（HA／offline）、A16（sudo cache 交叉）。密碼改完後約 3 秒內重新登入可能還會被拒絕一次
+  （evidence 有記錄）。
 
 **這台 client 從 FreeIPA 拿到什麼（AAA）**：
 - **Authentication（認證）**：帳號與 Kerberos 身分來自 FreeIPA，經 SSSD 提供給 NSS/PAM
