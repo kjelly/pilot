@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -351,5 +353,203 @@ esac
 		if pgrp != pid || session != pid || session == mySession {
 			t.Errorf("ssh pid %s has process group %s and session %s (this process's is %s): want a session of its own", pid, pgrp, session, mySession)
 		}
+	}
+}
+
+// reaped reports that pid has no /proc entry at all, not even a zombie: Wait
+// has returned for it.
+func reaped(pid int) bool {
+	_, err := os.Stat("/proc/" + strconv.Itoa(pid))
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// waitForFile waits until path exists (the fake ssh has got that far).
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s was never written: the fake ssh did not get there", filepath.Base(path))
+		}
+	}
+}
+
+// A tunnel nobody closes (net/http dials in a goroutine of its own, and
+// CloseIdleConnections does not wait for a dial in progress) is ended by
+// Dialer.Close, which returns once Wait has returned for it: ssh has no
+// /proc entry when Close returns. A helper in ssh's group goes with it at
+// once; an escaped one holds stderr, so Close takes the wait delay (and the
+// helper survives, nothing can reach it). Afterwards the Dialer starts no
+// ssh, and closing the connection or the Dialer again is harmless.
+func TestDialerCloseEndsATunnelNobodyClosed(t *testing.T) {
+	for _, escaped := range []bool{false, true} {
+		name := "a helper in ssh's group"
+		if escaped {
+			name = "an escaped helper"
+		}
+		t.Run(name, func(t *testing.T) {
+			if escaped {
+				needSetsid(t)
+			}
+			ssh, pids := scriptedSSH(t, "echo run >> \"$PIDS/log\"\n"+helper(escaped)+"exec sleep 300")
+			d := &Dialer{Target: Target{Host: "ipa1.example.test"}, SSH: ssh}
+			c, err := d.DialContext(context.Background(), "tcp", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitForFile(t, filepath.Join(pids, "ssh"))
+			sshPID, helperPID := pidFrom(t, filepath.Join(pids, "ssh")), pidFrom(t, filepath.Join(pids, "helper"))
+
+			elapsed := bounded(t, "Close", func() { d.Close() })
+			if !reaped(sshPID) {
+				t.Fatalf("ssh %d is not reaped when Close returned", sshPID)
+			}
+			if escaped {
+				if elapsed < childproc.WaitDelay-500*time.Millisecond {
+					t.Fatalf("Close returned after %s: it did not wait for Wait (the escaped helper holds stderr for the %s wait delay)", elapsed, childproc.WaitDelay)
+				}
+				mustSurvive(t, "the escaped helper", helperPID)
+			} else {
+				if elapsed >= childproc.WaitDelay {
+					t.Fatalf("Close took %s: the helper in ssh's group was not killed with it", elapsed)
+				}
+				mustBeGone(t, "the helper in ssh's group", helperPID)
+			}
+
+			if _, err := d.DialContext(context.Background(), "tcp", ""); !errors.Is(err, ErrDialerClosed) {
+				t.Fatalf("DialContext after Close: %v, want ErrDialerClosed", err)
+			}
+			if _, err := d.FQDN(context.Background()); !errors.Is(err, ErrDialerClosed) {
+				t.Fatalf("FQDN after Close: %v, want ErrDialerClosed", err)
+			}
+			if _, err := d.CA(context.Background()); !errors.Is(err, ErrDialerClosed) {
+				t.Fatalf("CA after Close: %v, want ErrDialerClosed", err)
+			}
+			if _, err := d.AcquireLock(context.Background(), LockOptions{Path: "/etc/ipa"}); !errors.Is(err, ErrDialerClosed) {
+				t.Fatalf("AcquireLock after Close: %v, want ErrDialerClosed", err)
+			}
+			if data, _ := os.ReadFile(filepath.Join(pids, "log")); string(data) != "run\n" {
+				t.Fatalf("ssh ran %q, want once: nothing is started after Close", data)
+			}
+			bounded(t, "closing the connection after Close", func() { _ = c.Close() })
+			bounded(t, "a second Close", func() { d.Close() })
+			d.mu.Lock()
+			left := len(d.live)
+			d.mu.Unlock()
+			if left != 0 {
+				t.Fatalf("%d processes still registered after every one was reaped", left)
+			}
+		})
+	}
+}
+
+// Close ends whatever the Dialer started, not only tunnels: a remote command
+// that is stalled (its caller gets an error, not ErrDialerClosed) and a held
+// lock (Lost fires).
+func TestDialerCloseEndsARemoteCommandAndAHeldLock(t *testing.T) {
+	ssh, pids := scriptedSSH(t, `
+case "$*" in
+*flock*) echo locked; record lock $$; exec cat ;;
+*"hostname -f"*) record fqdn $$; exec sleep 300 ;;
+esac
+exit 99
+`)
+	d := &Dialer{Target: Target{Host: "ipa1.example.test"}, SSH: ssh}
+	lock, err := d.AcquireLock(context.Background(), LockOptions{Path: "/etc/ipa"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fqdnErr := make(chan error, 1)
+	go func() { _, err := d.FQDN(context.Background()); fqdnErr <- err }()
+	waitForFile(t, filepath.Join(pids, "fqdn"))
+	lockPID, fqdnPID := pidFrom(t, filepath.Join(pids, "lock")), pidFrom(t, filepath.Join(pids, "fqdn"))
+
+	bounded(t, "Close", func() { d.Close() })
+	if !reaped(lockPID) || !reaped(fqdnPID) {
+		t.Fatalf("lock ssh %d reaped: %v, hostname -f ssh %d reaped: %v", lockPID, reaped(lockPID), fqdnPID, reaped(fqdnPID))
+	}
+	select {
+	case <-lock.Lost():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lock was not reported lost after Close ended its ssh")
+	}
+	select {
+	case err := <-fqdnErr:
+		var te *TunnelError
+		if err == nil || errors.Is(err, ErrDialerClosed) || !errors.As(err, &te) {
+			t.Fatalf("FQDN ended by Close returned %v, want the ssh failure (it was started before Close)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("FQDN did not return after Close ended its ssh")
+	}
+}
+
+// Dials racing Close: every ssh that started is reaped when Close returns,
+// and every dial that came after it is refused. start registers a process
+// under the lock that Close takes its snapshot under, so none escapes.
+func TestDialerCloseRacingDials(t *testing.T) {
+	ssh, pids := scriptedSSH(t, "record \"ssh.$$\" $$\nexec sleep 300")
+	d := &Dialer{Target: Target{Host: "ipa1.example.test"}, SSH: ssh}
+	const dialers = 8
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		conns []net.Conn
+		other []error
+	)
+	started := make(chan struct{}, dialers)
+	for range dialers {
+		wg.Go(func() {
+			first := true
+			// The cap only keeps a Close that is late from piling up
+			// processes: Close comes after the first tunnel of each.
+			for range 40 {
+				c, err := d.DialContext(context.Background(), "tcp", "")
+				if errors.Is(err, ErrDialerClosed) {
+					return
+				}
+				mu.Lock()
+				if err != nil {
+					other = append(other, err)
+				} else {
+					conns = append(conns, c)
+				}
+				mu.Unlock()
+				if first {
+					first = false
+					started <- struct{}{}
+				}
+				if err != nil {
+					return
+				}
+			}
+		})
+	}
+	for range dialers {
+		select {
+		case <-started:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the dialers never got a tunnel")
+		}
+	}
+	bounded(t, "Close", func() { d.Close() })
+	bounded(t, "the dialers", wg.Wait)
+	files, _ := filepath.Glob(filepath.Join(pids, "ssh.*"))
+	if len(files) < dialers {
+		t.Fatalf("recorded %d ssh, want at least %d", len(files), dialers)
+	}
+	for _, f := range files {
+		pid := pidFrom(t, f)
+		if !reaped(pid) {
+			t.Errorf("ssh %d is not reaped after Close returned", pid)
+		}
+	}
+	if len(other) != 0 {
+		t.Errorf("dials failed with something else than ErrDialerClosed: %v", other)
+	}
+	for _, c := range conns {
+		_ = c.Close()
 	}
 }

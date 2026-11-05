@@ -184,6 +184,18 @@ func (w *childWorld) tunnel() string {
 		"export " + childRelayEnv + "='" + w.f.srv.Listener.Addr().String() + "'\nexec \"$" + childExeEnv + "\"\n"
 }
 
+// frozenTunnel is the shell of -W calls whose from-th (1-based) and later
+// calls take the ClientHello into their stdin and never answer, as ssh -W does
+// in front of a SIGSTOPped httpd: the TLS handshake never completes, so the
+// dial that net/http runs in a goroutine of its own never does. Earlier calls
+// are working tunnels. Each frozen call records its pid as tunnel.<pid>.
+func (w *childWorld) frozenTunnel(from int) string {
+	count := filepath.Join(w.pids, "tunnels")
+	return "n=$(cat '" + count + "' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '" + count + "'\n" +
+		"if [ \"$n\" -ge " + strconv.Itoa(from) + " ]; then\n" +
+		recordPID(w.pids, "tunnel.$$", "$$") + "exec sleep 300\nfi\n" + w.tunnel()
+}
+
 // sshHooks are the shell of what the fake ssh does for each kind of call; an
 // empty hook is the working behaviour. A hook ends the call (exit or exec),
 // or falls through to exit 0.
@@ -382,16 +394,118 @@ func childRows() []childRow {
 			gate: "check-server", timeout: "4s", realDialer: true, extra: time.Second,
 			setup: func(t *testing.T, w *childWorld) {
 				w.f.hang = map[string]bool{"ping": true, "session_logout": true}
-				prev := golangLogoutTimeout
-				golangLogoutTimeout = time.Second
-				t.Cleanup(func() { golangLogoutTimeout = prev })
+				shortLogout(t)
 				w.fakeSSH(sshHooks{tunnel: holder(w.pids, false) + w.tunnel()})
 			},
 			wantErr: deadline, want: []string{"context deadline exceeded"}, gone: []string{"tunnel.*", "helper.*"},
 			methods: []string{"ping", "session_logout"}, calls: inventoryAndHosts,
 		},
+		childRow{
+			// SIGTERM, which the service manager sends, ends the preview like
+			// Ctrl-C does.
+			name: "C2b_sigterm_ends_a_stalled_ansible-inventory_and_its_helper",
+			gate: "ansible-inventory", timeout: "10m", setup: stallsWithHelper("ansible-inventory", false),
+			signal: syscall.SIGTERM, signalAt: "child",
+			wantErr: []error{context.Canceled}, notErr: deadline, want: []string{"ansible-inventory --list"},
+			gone: []string{"child", "helper.*"}, calls: []string{"ansible-inventory"},
+		},
+		childRow{
+			// The ping hangs and the deadline cancels it; the logout dials a
+			// fresh tunnel that works and is answered. The tunnel is closed
+			// with the client, before the preview returns.
+			name: "C15_a_logout_that_is_answered_leaves_no_tunnel",
+			gate: "check-server", timeout: "4s", realDialer: true,
+			setup: func(t *testing.T, w *childWorld) {
+				w.f.hang = map[string]bool{"ping": true}
+				w.fakeSSH(sshHooks{})
+			},
+			wantErr: deadline, want: []string{"context deadline exceeded"}, gone: []string{"tunnel.*"},
+			methods: []string{"ping", "session_logout"}, calls: inventoryAndHosts, sshCalls: 4,
+		},
+		childRow{
+			// The ping hangs and the deadline cancels it; the logout dials a
+			// fresh tunnel whose TLS handshake never completes (httpd stopped),
+			// so when the logout gives up that dial is still running in
+			// net/http's goroutine, which ends its connection only after
+			// CloseIdleConnections returned. The ssh must be reaped when the
+			// preview returns, not later by that goroutine (or never, once
+			// pilot exits).
+			name: "C13_a_logout_handshake_that_never_completes_leaves_no_tunnel",
+			gate: "check-server", timeout: "4s", realDialer: true, extra: time.Second,
+			setup: func(t *testing.T, w *childWorld) {
+				w.f.hang = map[string]bool{"ping": true}
+				shortLogout(t)
+				w.fakeSSH(sshHooks{tunnel: w.frozenTunnel(2)})
+			},
+			wantErr: deadline, want: []string{"context deadline exceeded"}, gone: []string{"tunnel.*"},
+			methods: []string{"ping"}, calls: inventoryAndHosts, sshCalls: 4,
+		},
+		childRow{
+			// The same with Ctrl-C once the server has the ping (live arm L2:
+			// httpd stopped after the login, one Ctrl-C).
+			name: "C13b_ctrl-c_then_a_logout_handshake_that_never_completes",
+			gate: "check-server", timeout: "10m", realDialer: true, extra: time.Second,
+			signal: syscall.SIGINT, signalAt: "pinged",
+			setup: func(t *testing.T, w *childWorld) {
+				w.f.hang = map[string]bool{"ping": true}
+				// pid.pinged names the first tunnel (an ssh already gone by the
+				// time it matters): the file only says the server has the ping.
+				w.f.onHang = func(string) {
+					if tunnels, _ := filepath.Glob(filepath.Join(w.pids, "pid.tunnel.*")); len(tunnels) > 0 {
+						if data, err := os.ReadFile(tunnels[0]); err == nil {
+							_ = os.WriteFile(filepath.Join(w.pids, "pid.pinged"), data, 0o600)
+						}
+					}
+				}
+				shortLogout(t)
+				w.fakeSSH(sshHooks{tunnel: w.frozenTunnel(2)})
+			},
+			wantErr: []error{context.Canceled}, notErr: deadline, want: []string{"interrupt signal received"}, gone: []string{"tunnel.*"},
+			methods: []string{"ping"}, calls: inventoryAndHosts, sshCalls: 4,
+		},
+		childRow{
+			// The login's own handshake never completes: the deadline ends the
+			// login while net/http still dials.
+			name: "C14_a_login_handshake_that_never_completes_leaves_no_tunnel",
+			gate: "login", timeout: "4s", realDialer: true,
+			setup: func(t *testing.T, w *childWorld) {
+				w.fakeSSH(sshHooks{tunnel: w.frozenTunnel(1)})
+			},
+			wantErr: deadline, want: []string{"登入 FreeIPA", "context deadline exceeded"}, gone: []string{"tunnel.*"},
+			calls: inventoryAndHosts, sshCalls: 3,
+		},
 	)
 	return rows
+}
+
+// shortLogout bounds the logout after the deadline to a second for the test.
+func shortLogout(t *testing.T) {
+	t.Helper()
+	prev := golangLogoutTimeout
+	golangLogoutTimeout = time.Second
+	t.Cleanup(func() { golangLogoutTimeout = prev })
+}
+
+// unreapedAtReturn lists, now that the preview has returned, the recorded
+// processes of the globs that are direct children of the preview and still
+// have a /proc entry (a zombie too: Wait has not returned for them). Helpers
+// are grandchildren, nobody waits for them. There is no grace: a child the
+// preview leaves to another goroutine to end is still there at this moment,
+// and in pilot, which exits right after the preview returns, it stays.
+func unreapedAtReturn(t *testing.T, pids string, globs []string) []string {
+	t.Helper()
+	var left []string
+	for _, glob := range globs {
+		if strings.HasPrefix(glob, "helper") {
+			continue
+		}
+		for _, pid := range recordedPIDs(t, pids, glob) {
+			if _, err := os.Stat("/proc/" + strconv.Itoa(pid)); err == nil {
+				left = append(left, glob+"="+strconv.Itoa(pid))
+			}
+		}
+	}
+	return left
 }
 
 // A fake tool stalls and starts a helper that keeps the output open: each row
@@ -450,6 +564,7 @@ func runChildRow(t *testing.T, row childRow, pids string) {
 	} else {
 		out, elapsed, runErr = runPreviewAndSignal(t, args, row.signal, filepath.Join(pids, "pid."+row.signalAt))
 	}
+	unreaped := unreapedAtReturn(t, pids, row.gone)
 
 	// Exit 1, the sentinel, the step.
 	if runErr == nil {
@@ -497,7 +612,11 @@ func runChildRow(t *testing.T, row childRow, pids string) {
 		t.Fatalf("returned after %s, want at least %s: the wait it is about did not happen", elapsed, row.minElapsed)
 	}
 
-	// No leftover process, except the ones that cannot be reached.
+	// No leftover process, except the ones that cannot be reached. A direct
+	// child is reaped when the preview returns, not after a grace.
+	if len(unreaped) != 0 {
+		t.Fatalf("still running or unreaped when the preview returned: %v", unreaped)
+	}
 	for _, glob := range row.gone {
 		assertGone(t, pids, glob)
 	}
@@ -603,9 +722,12 @@ func TestReconcileGolangLeavesAnIgnoredHangupAlone(t *testing.T) {
 // exit.
 func TestReconcileGolangLeavesNoTunnelAfterAPreview(t *testing.T) {
 	w, plan := successRun(t, false)
-	assertGone(t, w.pids, "tunnel.*")
 	if got := len(recordedPIDs(t, w.pids, "tunnel.*")); got < 1 {
 		t.Fatalf("recorded %d tunnels", got)
+	}
+	// No grace: a tunnel is reaped when the preview returns, not later.
+	if left := unreapedAtReturn(t, w.pids, []string{"tunnel.*"}); len(left) != 0 {
+		t.Fatalf("still running or unreaped when the preview returned: %v", left)
 	}
 	if _, err := os.Stat(plan); err != nil {
 		t.Fatalf("no plan: %v", err)
