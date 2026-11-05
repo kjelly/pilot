@@ -1,0 +1,17 @@
+# Apply chain for the freeipa-client password-expiry evidence run
+# (docs/verification/freeipa-client.md C13-C18). Order matters:
+#   1. FreeIPA server (provides the KDC/LDAP the client enrolls into)
+#   2. canonical demo user + sudo rule (the C5/C8 precondition, AGENTS.md 4.1)
+#   3. fixture accounts in four password states (C15-C17), set directly on
+#      FreeIPA with `ipa user-mod`; the roster is not involved
+#   4. freeipa-client, with
+#      -e freeipa_client_sssd_password_expiry_policy=<warn|renew|off>
+---
+- name: Install the FreeIPA server
+  ansible.builtin.import_playbook: ../apply/freeipa-server-apply.yml
+- name: Ensure the demo user and sudo rule exist
+  ansible.builtin.import_playbook: fixtures/freeipa-client-fixtures.yml
+- name: Ensure the password-state fixture accounts exist
+  ansible.builtin.import_playbook: fixtures/freeipa-client-pwexpiry-fixtures.yml
+- name: Enroll and configure the client
+  ansible.builtin.import_playbook: ../apply/freeipa-client-apply.yml

@@ -1146,16 +1146,28 @@ func TestRegression_FreeipaClientPwexpiryFixtures(t *testing.T) {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	src := string(raw)
-	for _, user := range []string{"pilot-pwexpired", "pilot-pwvalid", "pilot-pwnear", "pilot-nopw"} {
+	for _, user := range []string{"pilot-pwexpired", "pilot-pwvalid", "pilot-pwnear", "pilot-nopw", "pilot-pwchange", "pilot-pwrefuse"} {
 		if strings.Count(src, "ipa_fixture_user: "+user) != 1 {
 			t.Errorf("%s must be created by exactly one import of freeipa-client-fixtures.yml", user)
 		}
 	}
-	if got := strings.Count(src, "import_playbook: freeipa-client-fixtures.yml"); got != 4 {
-		t.Errorf("want 4 imports of the canonical user fixture, got %d", got)
+	if got := strings.Count(src, "import_playbook: freeipa-client-fixtures.yml"); got != 6 {
+		t.Errorf("want 6 imports of the canonical user fixture, got %d", got)
 	}
-	if got := strings.Count(src, "ipa_fixture_manage_sudorule: false"); got != 4 {
-		t.Errorf("every import must set ipa_fixture_manage_sudorule: false (the pilot-all rule is !authenticate), got %d", got)
+	// Only pilot-pwchange (A04, checks sudo after the change) keeps the pilot-all
+	// rule; the pilot-all rule is !authenticate, so no other account may get it.
+	if got := strings.Count(src, "ipa_fixture_manage_sudorule: false"); got != 5 {
+		t.Errorf("five imports must set ipa_fixture_manage_sudorule: false (all but pilot-pwchange), got %d", got)
+	}
+	if got := strings.Count(src, "ipa_fixture_user_ssh_public_key: \"{{ pwexpiry_probe_ssh_public_key | default('') }}\""); got != 6 {
+		t.Errorf("every import must take its SSH public key from pwexpiry_probe_ssh_public_key, got %d", got)
+	}
+	// The live-test accounts must stay out of the password-state loop: C15-C17
+	// pin the four state accounts, and A04/A05 own their accounts' passwords.
+	for _, user := range []string{"pilot-pwchange", "pilot-pwrefuse"} {
+		if strings.Contains(src, "{name: "+user) {
+			t.Errorf("%s must not be in pwexpiry_fixture_users", user)
+		}
 	}
 	if strings.Contains(src, "ipa user-add") {
 		t.Error("do not hand-roll `ipa user-add`; go through freeipa-client-fixtures.yml")
@@ -1170,5 +1182,38 @@ func TestRegression_FreeipaClientPwexpiryFixtures(t *testing.T) {
 	}
 	if strings.Contains(src, "freeipa-identity-apply") {
 		t.Error("the fixture states are made directly on FreeIPA, not through the roster apply")
+	}
+}
+
+// The evidence-run chain for C13-C18: the server first (the client enrolls into
+// it), then the fixture accounts, then the client. The accounts must exist
+// before the client first asks SSSD about them, otherwise SSSD's cached
+// "no rules / no key" answer outlives the test.
+func TestRegression_FreeipaClientPwexpiryChainOrder(t *testing.T) {
+	const path = "../../playbooks/test/freeipa-client-pwexpiry-chain.yml"
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	src := string(raw)
+	order := []string{
+		"../apply/freeipa-server-apply.yml",
+		"fixtures/freeipa-client-fixtures.yml",
+		"fixtures/freeipa-client-pwexpiry-fixtures.yml",
+		"../apply/freeipa-client-apply.yml",
+	}
+	last := -1
+	for _, want := range order {
+		i := strings.Index(src, "import_playbook: "+want)
+		if i < 0 {
+			t.Fatalf("chain must import %s", want)
+		}
+		if i < last {
+			t.Errorf("%s is imported out of order", want)
+		}
+		last = i
+	}
+	if strings.Contains(src, "password_expiry_policy:") {
+		t.Error("the policy is chosen by the caller with -e; the chain must not pin it")
 	}
 }
