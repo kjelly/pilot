@@ -448,7 +448,7 @@ func runChildRow(t *testing.T, row childRow, pids string) {
 		out, runErr = runReconcileCLI(t, args...)
 		elapsed = time.Since(begin)
 	} else {
-		out, runErr, elapsed = runPreviewAndSignal(t, args, row.signal, filepath.Join(pids, "pid."+row.signalAt))
+		out, elapsed, runErr = runPreviewAndSignal(t, args, row.signal, filepath.Join(pids, "pid."+row.signalAt))
 	}
 
 	// Exit 1, the sentinel, the step.
@@ -531,7 +531,7 @@ func runChildRow(t *testing.T, row childRow, pids string) {
 // pidFile exists (the tool it is stalled in is running, so the signal handlers
 // are installed). It returns what the run returned and how long after the
 // signal.
-func runPreviewAndSignal(t *testing.T, args []string, sig syscall.Signal, pidFile string) (string, error, time.Duration) {
+func runPreviewAndSignal(t *testing.T, args []string, sig syscall.Signal, pidFile string) (string, time.Duration, error) {
 	t.Helper()
 	resetReconcileFlags()
 	var out bytes.Buffer
@@ -548,10 +548,10 @@ func runPreviewAndSignal(t *testing.T, args []string, sig syscall.Signal, pidFil
 	}
 	select {
 	case err := <-done:
-		return out.String(), err, time.Since(begin)
+		return out.String(), time.Since(begin), err
 	case <-time.After(60 * time.Second):
 		t.Fatalf("%v did not end the preview within a minute", sig)
-		return "", nil, 0
+		return "", 0, nil
 	}
 }
 
@@ -571,7 +571,7 @@ func TestReconcileGolangLeavesAnIgnoredHangupAlone(t *testing.T) {
 		withFakeDialer(t, f)
 		dir := golangWorkspace(t, strings.Replace(captureRoster, "%s", "/bin/sh", 1), nil)
 		fakeTool(t, "ansible-inventory", stall(pids, "child"))
-		out, err, elapsed := runPreviewAndSignal(t, previewArgs("--timeout", "4s", "--plan-out", filepath.Join(dir, "plan.json")), syscall.SIGHUP, filepath.Join(pids, "pid.child"))
+		out, elapsed, err := runPreviewAndSignal(t, previewArgs("--timeout", "4s", "--plan-out", filepath.Join(dir, "plan.json")), syscall.SIGHUP, filepath.Join(pids, "pid.child"))
 		if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			t.Fatalf("err = %v after %s, want the deadline: the hangup ended the preview\n%s", err, elapsed, out)
 		}

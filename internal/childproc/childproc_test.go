@@ -259,7 +259,7 @@ func TestIsolateHasNoControllingTerminal(t *testing.T) {
 		}
 		// Printed for the parent: the control proves the probe can see the
 		// terminal at all.
-		os.Stdout.WriteString("PLAIN=" + strings.TrimSpace(string(a)) + " ISOLATED=" + strings.TrimSpace(string(b)) + "\n")
+		_, _ = os.Stdout.WriteString("PLAIN=" + strings.TrimSpace(string(a)) + " ISOLATED=" + strings.TrimSpace(string(b)) + "\n")
 		return
 	}
 	exe, err := os.Executable()
