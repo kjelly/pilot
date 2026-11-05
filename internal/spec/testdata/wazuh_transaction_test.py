@@ -6,9 +6,10 @@ parsing and the ordering of the real code, not VM/native evidence. The private
 filesystem, flock and file-policy code run for real in temporary directories.
 """
 import wazuh_hermetic  # noqa: F401  (tripwire first: no harness may touch real host state)
-from wazuh_models import Docker
+from wazuh_models import Docker, capture
 import ast
 import contextlib
+import errno
 import hashlib
 import importlib.util
 import io
@@ -45,39 +46,29 @@ MOUNT_NAMESPACE = {'text': '1 0 8:1 / / rw - ext4 /dev/synthetic rw\n'}
 w.MountTable = lambda text=None: RealMountTable(MOUNT_NAMESPACE['text'] if text is None else text)
 
 
-# `rpmkeys -Kv <rpm>` output shapes. MODELED on rpm 4.16 (AlmaLinux 9) from the documented
-# format, not captured: the native capture from the target run will be compared with these
-# shapes (line wording and, above all, the return code of each case) before they are trusted.
-# 'signed' is the accepted shape; every other shape must be refused by the coordinator's own
-# line-level assertion, so the rc=0 variants are what prove that assertion independently of rc.
+# `rpmkeys -Kv <rpm>`: native captures from the part-A target run (rpm 4.16 on AlmaLinux 9, a real
+# Wazuh 4.14.9 RPM; native-captures/rpmkeys-Kv.<case>.rc<N>.txt). The return code of each case is the
+# captured one. Two things the captures pin down:
+#   * a TAMPERED payload still prints `Header V3 RSA/SHA256 Signature, key ID 29111145: OK` on its first
+#     line, so the coordinator's line-level `Signature.*: OK` assertion alone cannot refuse it: only rpm's
+#     non-zero status does (rc 1);
+#   * an UNSIGNED package exits 0 with digest lines only, so only the line-level assertion refuses it.
+# The *-rc0 shapes below are NOT captures: they are the captured text with the return code forced to 0, to
+# prove the line-level assertion independently of rc.
+def rpmkeys_kv(name, path):
+    rc = int(re.search(r'\.rc([0-9])\.txt$', name)[1])
+    first, rest = capture(name).split('\n', 1)
+    return path + ':\n' + rest, rc
+
+
 RPMKEYS_KV = {
-    'signed': lambda path: (path + ':\n'
-                            '    Header V4 RSA/SHA256 Signature, key ID 29111145: OK\n'
-                            '    Header SHA256 digest: OK\n'
-                            '    Header SHA1 digest: OK\n'
-                            '    Payload SHA256 digest: OK\n'
-                            '    V4 RSA/SHA256 Signature, key ID 29111145: OK\n'
-                            '    MD5 digest: OK\n', 0),
-    # An unsigned package: every digest verifies, there is no Signature line at all.
-    'digest-only': lambda path: (path + ':\n'
-                                 '    Header SHA256 digest: OK\n'
-                                 '    Header SHA1 digest: OK\n'
-                                 '    Payload SHA256 digest: OK\n'
-                                 '    MD5 digest: OK\n', 0),
-    # Signed by a key that is not in the (vendor-only) key ring: rpm itself exits 1.
-    'nokey': lambda path: (path + ':\n'
-                           '    Header V4 RSA/SHA256 Signature, key ID b86b3716: NOKEY\n'
-                           '    Header SHA256 digest: OK\n'
-                           '    Payload SHA256 digest: OK\n'
-                           '    V4 RSA/SHA256 Signature, key ID b86b3716: NOKEY\n', 1),
-    # The same text with rc forced to 0 (modeled): only the coordinator's line check can refuse it.
-    'nokey-rc0': lambda path: RPMKEYS_KV['nokey'](path)[0:1] + (0,),
-    # A signature that does not verify, rc forced to 0 (modeled).
-    'bad-rc0': lambda path: (path + ':\n'
-                             '    Header V4 RSA/SHA256 Signature, key ID 29111145: BAD\n'
-                             '    Header SHA256 digest: OK\n'
-                             '    Payload SHA256 digest: OK\n', 0),
-    # rpmkeys printed nothing (rc 0): not evidence of a signature.
+    'signed': lambda path: rpmkeys_kv('rpmkeys-Kv.signed.rc0.txt', path),
+    'digest-only': lambda path: rpmkeys_kv('rpmkeys-Kv.unsigned.rc0.txt', path),
+    'nokey': lambda path: rpmkeys_kv('rpmkeys-Kv.nokey.rc1.txt', path),
+    'tampered': lambda path: rpmkeys_kv('rpmkeys-Kv.tampered.rc1.txt', path),
+    'truncated': lambda path: rpmkeys_kv('rpmkeys-Kv.truncated.rc1.txt', path),
+    'nokey-rc0': lambda path: (rpmkeys_kv('rpmkeys-Kv.nokey.rc1.txt', path)[0], 0),
+    'tampered-rc0': lambda path: (rpmkeys_kv('rpmkeys-Kv.tampered.rc1.txt', path)[0], 0),
     'empty': lambda path: ('', 0),
 }
 
@@ -169,6 +160,9 @@ class TypedErrorContractTests(unittest.TestCase):
             # label is a fixed operation name or argv[0]; the child's output is never appended.
             ('Runner.run', "'operation unavailable or timed out: ' + label"),
             ('Runner.run', "'operation failed: ' + label + ' rc=' + str(result.returncode)"),
+            # identifier is the registry's own numeric id (regex [0-9]+), cut to nine digits: no name, IP or text.
+            ('Central.check_agents', "'unknown retained agent version in manager registry (agent ID ' + identifier[:9] + ')'"),
+            ('Central.check_agents', "'a registered agent is newer than the central release (agent ID ' + identifier[:9] + ')'"),
         }, 'a new non-literal Refused message can carry tool output or secrets onto the screen')
 
     def test_typed_error_is_bounded_and_never_needs_escaping(self):
@@ -190,12 +184,10 @@ class TypedErrorContractTests(unittest.TestCase):
 
 
 class Commands:
-    """Native dpkg/rpm and manager-registry model shared by the agent tests."""
+    """Native dpkg/rpm model shared by the agent tests (rpm -q absent: native capture, rc 1 and the stdout text)."""
     def __init__(self, family='Debian', installed='4.14.1-1'):
         self.family, self.installed = family, installed
         self.calls = []
-        self.agent_release = '4.14.1'
-        self.unknown = False
 
     def run(self, argv, **kwargs):
         argv = [str(value) for value in argv]
@@ -204,14 +196,6 @@ class Commands:
             text, rc = ('install ok installed\t' + self.installed + '\tamd64', 0) if self.installed else ('', 1)
         elif argv[:2] == ['rpm', '-q']:
             text, rc = (self.installed + '\tx86_64', 0) if self.installed else ('package wazuh-agent is not installed\n', 1)
-        elif '-l' in argv:
-            # Shape captured from the real chain run recorded in docs/runbooks/wazuh-fim.md (agent_control -l).
-            text, rc = ('Wazuh agent_control. List of available agents:\n'
-                        '   ID: 000, Name: wazuh-manager (server), IP: 127.0.0.1, Active/Local\n'
-                        '   ID: 001, Name: wazuh-fim, IP: any, Active\n', 0)
-        elif '-i' in argv:
-            text, rc = ('Wazuh agent_control. Agent information:\n   Agent ID:   001\n   Agent Name: synthetic\n'
-                        '   Status:     Active\n   Client version:      ' + ('unknown' if self.unknown else 'Wazuh v' + self.agent_release) + '\n', 0)
         elif argv[0] == 'systemctl':
             text, rc = ('', 0) if argv[1] == 'is-active' else ('', 3)
         else:
@@ -357,7 +341,8 @@ class NativeDebianGuardTests(unittest.TestCase):
             elif argv[:2] == ['apt-mark', 'hold']:
                 self.held = True; text = ''
             elif argv[:2] == ['apt-cache', 'policy']:
-                text = '  Installed: ' + self.installed + '\n  Candidate: ' + self.candidate + '\n'
+                # MODELED unless policy_text is the captured output (native-captures/apt-cache-policy.*).
+                text = getattr(self, 'policy_text', None) or '  Installed: ' + self.installed + '\n  Candidate: ' + self.candidate + '\n'
             else:
                 raise AssertionError(argv)
             return subprocess.CompletedProcess(argv, 0, text, '')
@@ -381,6 +366,17 @@ class NativeDebianGuardTests(unittest.TestCase):
                 guard.verify('4.14.1-1')
             with self.assertRaises(w.Refused):
                 guard.verify('latest')
+
+    def test_the_captured_apt_policy_of_a_held_and_preferred_agent_verifies(self):
+        # Native capture: with the hold and the version preference in place the candidate is the installed
+        # version and newer repository versions carry priority -1 (a modeled foreign priority is the other
+        # test above). The real text, not a rebuilt one, goes through the real parser.
+        with tempfile.TemporaryDirectory() as temporary:
+            native = self.Native(installed='4.14.1-1', held=True)
+            native.policy_text = capture('apt-cache-policy.held-with-preference.rc0.txt')
+            state = self.guard(native, Path(temporary)).apt_state()
+            self.assertEqual((state['installed'], state['candidate'], state['held']), ('4.14.1-1', '4.14.1-1', True))
+            self.assertEqual(self.guard(native, Path(temporary)).verify('4.14.1-1')['guard'], 'apt-hold')
 
     def test_protect_holds_only_wazuh_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -637,7 +633,8 @@ class RpmFixture:
                         (folder / 'fresh.rpm').write_bytes(native.payload)
                     else: raise AssertionError(argv)
                     if rc not in kwargs.get('allowed', (0,)):
-                        raise w.Refused('modeled native RPM signature NOKEY')
+                        # Exactly what Runner.run reports for a non-zero tool status.
+                        raise w.Refused('operation failed: ' + (kwargs.get('operation') or argv[0]) + ' rc=' + str(rc))
                     return subprocess.CompletedProcess(argv, rc, text, '')
             native = Native(); guard = w.PackageGuard('RedHat', native, root)
             original = w.os.getxattr
@@ -747,7 +744,7 @@ class PrivateRpmKeyringTests(RpmFixture, unittest.TestCase):
             ring = guard.official_rpm_keyring(self.OWNER)
             artifact = Path(ring['database']).parent / 'foreign-alma.rpm'; artifact.write_bytes(b'foreign:3.1.5-8.el9')
             native.calls.clear()
-            with self.assertRaisesRegex(w.Refused, 'NOKEY'):
+            with self.assertRaisesRegex(w.Refused, 'RPM signature against only official Wazuh key rc=1'):
                 guard.verify_official_rpm(artifact, {'sha256': w.digest(artifact)}, ring, self.OWNER)
             self.assertEqual(len([call for call in native.calls if call[0] == 'rpmkeys']), 1)
             self.assertIn('--dbpath', native.calls[-1])
@@ -764,17 +761,37 @@ class PrivateRpmKeyringTests(RpmFixture, unittest.TestCase):
             guard.verify_official_rpm(artifact, provider, ring, self.OWNER)
             call = next(c for c in native.calls if c[0] == 'rpmkeys')
             self.assertEqual((call[1], call[3], call[-1]), ('--dbpath', '-Kv', str(artifact)))
-            # Trigger cases: a package whose digests verify but which carries no verified signature
-            # must be refused by the coordinator's own assertion, not only by rpm's exit status.
-            for shape in ('digest-only', 'nokey-rc0', 'bad-rc0', 'empty'):
+            # Trigger cases for the coordinator's OWN line-level assertion: no verified signature line, rc 0.
+            # 'digest-only' is the captured unsigned package; the other rc0 shapes force the return code.
+            for shape in ('digest-only', 'nokey-rc0', 'empty'):
                 with self.subTest(shape=shape):
                     native.rpmkeys = shape
                     with self.assertRaisesRegex(w.Refused, 'not signed by the authenticated official Wazuh key'):
                         guard.verify_official_rpm(artifact, provider, ring, self.OWNER)
-            # rpm's own non-zero status for an unknown key is still a refusal (a different one).
-            native.rpmkeys = 'nokey'
-            with self.assertRaisesRegex(w.Refused, 'NOKEY'):
+            # rpm's own non-zero status is refused first, with the rc named (captured: NOKEY, tampered, truncated).
+            for shape in ('nokey', 'tampered', 'truncated'):
+                with self.subTest(shape=shape):
+                    native.rpmkeys = shape
+                    with self.assertRaisesRegex(w.Refused, 'RPM signature against only official Wazuh key rc=1'):
+                        guard.verify_official_rpm(artifact, provider, ring, self.OWNER)
+
+    def test_a_tampered_rpm_is_stopped_by_rpms_status_because_its_signature_line_still_says_ok(self):
+        # Native capture: flipping one payload byte leaves `Header V3 RSA/SHA256 Signature ...: OK` as the
+        # FIRST line (the payload digest and the *payload* signature lines are the BAD ones), so the
+        # coordinator's line assertion is satisfied by a tampered package and only rc=1 refuses it.
+        tampered = capture('rpmkeys-Kv.tampered.rc1.txt')
+        self.assertTrue(re.search(r'Signature.*: OK', tampered), 'the capture must keep the property this test pins')
+        self.assertIn('Payload SHA256 digest: BAD', tampered)
+        with self.fixture() as (_, native, guard):
+            ring = guard.official_rpm_keyring(self.OWNER)
+            artifact = Path(ring['database']).parent / 'official.rpm'; artifact.write_bytes(b'official:4.14.1-1')
+            provider = {'sha256': w.digest(artifact)}
+            native.rpmkeys = 'tampered'
+            with self.assertRaisesRegex(w.Refused, 'RPM signature against only official Wazuh key rc=1'):
                 guard.verify_official_rpm(artifact, provider, ring, self.OWNER)
+            # With the status forced to 0 the line assertion is satisfied: the status IS the control.
+            native.rpmkeys = 'tampered-rc0'
+            guard.verify_official_rpm(artifact, provider, ring, self.OWNER)
 
     def test_a_scope_or_owner_that_is_not_the_exact_private_directory_is_refused(self):
         with self.fixture() as (root, native, guard):
@@ -846,7 +863,7 @@ class FreshRpmTests(RpmFixture, unittest.TestCase):
 
     def test_every_binding_failure_refuses_before_a_package_is_offered_for_install(self):
         cases = {
-            'a payload signed by another key': (lambda native: setattr(native, 'payload', b'foreign:' + self.PACKAGE.encode()), 'NOKEY'),
+            'a payload signed by another key': (lambda native: setattr(native, 'payload', b'foreign:' + self.PACKAGE.encode()), 'RPM signature against only official Wazuh key rc=1'),
             'an unsigned payload whose digests verify': (lambda native: setattr(native, 'rpmkeys', 'digest-only'),
                                                          'not signed by the authenticated official Wazuh key'),
             'an RPM that is another package version': (lambda native: setattr(native, 'identity', '4.14.9-1'), 'package identity mismatch'),
@@ -860,6 +877,42 @@ class FreshRpmTests(RpmFixture, unittest.TestCase):
                 with self.assertRaisesRegex(w.Refused, reason):
                     agent.fresh_rpm(self.OWNER, self.plan())
                 self.assertFalse(any(call[0] == 'dnf' and '--downloadonly' not in call for call in native.calls))
+                self.assertEqual(self.leftovers(root), [], 'a refused stage must leave no private directory behind')
+
+    @staticmethod
+    def leftovers(root):
+        return sorted(path.name for path in root.iterdir() if path.name.startswith(('agent-policy-', 'rpm-fresh-')))
+
+    def test_a_failed_stage_removes_only_what_it_created_and_a_successful_one_keeps_it_for_the_install(self):
+        with self.fixture() as (root, native, _):
+            agent, guard = self.agent(root, native)
+            staged = agent.fresh_rpm(self.OWNER, self.plan())
+            self.assertEqual(self.leftovers(root), ['agent-policy-' + self.OWNER, 'rpm-fresh-' + self.OWNER],
+                             'the playbook installs the staged RPM from these right after the stage')
+            self.assertTrue(Path(staged['package_path']).is_file())
+        # Failures at every depth: the key download, the provider check and an unexpected exception type.
+        def fails(native, guard):
+            native.failure = 'curl'
+        def breaks_provider(native, guard):
+            guard.official_rpm_provider = mock.Mock(side_effect=KeyError('provider'))
+        for name, setup, error in (('key download', fails, w.Refused), ('unexpected exception', breaks_provider, KeyError)):
+            with self.subTest(name), self.fixture() as (root, native, _):
+                agent, guard = self.agent(root, native)
+                setup(native, guard)
+                with self.assertRaises(error):
+                    agent.fresh_rpm(self.OWNER, self.plan())
+                self.assertEqual(self.leftovers(root), [])
+                self.assertTrue((root / 'agent.lock').exists(), 'only the lock file remains')
+        # A directory that already existed (the same token reused) is never removed.
+        with self.fixture() as (root, native, _):
+            agent, guard = self.agent(root, native)
+            folder = w.private_dir(root / ('rpm-fresh-' + self.OWNER))
+            (folder / 'earlier-evidence.txt').write_text('kept')
+            native.failure = 'curl'
+            with self.assertRaises(w.Refused):
+                agent.fresh_rpm(self.OWNER, self.plan())
+            self.assertEqual(self.leftovers(root), ['rpm-fresh-' + self.OWNER])
+            self.assertEqual((folder / 'earlier-evidence.txt').read_text(), 'kept')
 
     def test_a_payload_whose_hash_differs_from_the_authenticated_provider_is_not_selected(self):
         with self.fixture() as (root, native, _):
@@ -920,6 +973,44 @@ class FreshRpmTests(RpmFixture, unittest.TestCase):
             with self.assertRaises(w.Refused):
                 agent.fresh_rpm(self.OWNER, self.plan())
             self.assertFalse(any(call[0] == 'dnf' for call in native.calls))
+
+
+class InstalledCoordinatorTests(unittest.TestCase):
+    """The coordinator is installed 0700 as /usr/local/sbin/pilot-wazuh-transaction and run directly by the
+    pin task, the fresh-RPM stage and the C10/C12 rows: the file itself must be executable, not just importable."""
+    SOURCE = REPO / 'playbooks/apply/files/wazuh-transaction.py'
+
+    def install(self, directory, text=None):
+        path = Path(directory) / 'pilot-wazuh-transaction'
+        path.write_text(self.SOURCE.read_text() if text is None else text)
+        path.chmod(0o700)
+        return path
+
+    def test_the_first_line_is_a_portable_python3_shebang(self):
+        self.assertEqual(self.SOURCE.read_text().split('\n', 1)[0], '#!/usr/bin/env python3')
+
+    def test_the_installed_file_executes_directly_as_the_playbook_runs_it(self):
+        with tempfile.TemporaryDirectory(prefix='pilot-wazuh-installed-') as directory:
+            path = self.install(directory)
+            try:
+                help_run = subprocess.run([str(path), '--help'], capture_output=True, text=True, timeout=60)
+                bogus = subprocess.run([str(path), 'agent-upgrade'], capture_output=True, text=True, timeout=60)
+            except OSError as exc:
+                self.fail('the installed coordinator cannot be executed directly (%s); is %s mounted noexec?' % (exc, directory))
+            self.assertEqual(help_run.returncode, 0, help_run.stderr)
+            self.assertIn('agent-verify', help_run.stdout)
+            # Python's own argument parser rejected the action: the program ran (an exec failure never gets here).
+            self.assertEqual(bogus.returncode, 2)
+            self.assertIn('invalid choice', bogus.stderr)
+
+    def test_negative_control_a_copy_without_the_shebang_cannot_be_executed(self):
+        # This is the defect found on the native run: line 1 was a docstring, and executing the installed
+        # file failed with `[Errno 8] Exec format error`. The same harness must see it.
+        with tempfile.TemporaryDirectory(prefix='pilot-wazuh-installed-') as directory:
+            path = self.install(directory, self.SOURCE.read_text().split('\n', 1)[1])
+            with self.assertRaises(OSError) as failure:
+                subprocess.run([str(path), '--help'], capture_output=True, text=True, timeout=60)
+            self.assertEqual(failure.exception.errno, errno.ENOEXEC)
 
 
 class ProtectionFlowTests(unittest.TestCase):
@@ -1084,6 +1175,13 @@ class CentralTests(unittest.TestCase):
                         with self.assertRaisesRegex(w.Refused, reason):
                             action()
                     self.assertFalse(any(call[1] in ('compose', 'pull', 'stop', 'rm', 'up') for call in docker.calls if call[0] == 'docker'))
+        # The dashboard's ROOT package.json carries the OpenSearch Dashboards release at the top level and the
+        # Wazuh release one level down (native capture): reading it must not satisfy the plugin leg.
+        central, docker = self.central('4.14.1')
+        docker.dashboard_shape = 'opensearch-root'
+        for action in (central.discover, lambda: central.gate('4.14.1'), central.verify):
+            with self.assertRaisesRegex(w.Refused, 'dashboard Wazuh plugin version probe failed'):
+                action()
         # Accept case: both agree with the manager (also when stated explicitly, so the knob itself is inert).
         central, docker = self.central('4.14.1')
         docker.dashboard_release = docker.indexer_release = '4.14.1'
@@ -1150,17 +1248,49 @@ class CentralTests(unittest.TestCase):
     def test_registry_bounds_every_retained_agent_and_unknown_versions_are_refused(self):
         central, docker = self.central('4.14.1', agents={'001': '4.14.1', '002': '4.14.6'})
         self.assertEqual(central.check_agents('4.14.6'), {'001': '4.14.1', '002': '4.14.6'})
-        with self.assertRaisesRegex(w.Refused, 'newer than the central release'):
+        with self.assertRaisesRegex(w.Refused, r'newer than the central release \(agent ID 002\)'):
             central.check_agents('4.14.1')
-        docker.agents['002'] = 'unknown'
-        with self.assertRaisesRegex(w.Refused, 'unknown retained agent version'):
-            central.check_agents('4.14.9')
         docker.agents = {}
         self.assertEqual(central.check_agents('4.14.1'), {}, 'a registry with only the manager is valid')
         original = docker.run
         docker.run = lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, 'garbage', '') if '-l' in argv else original(argv, **kwargs)
         with self.assertRaisesRegex(w.Refused, 'unknown or ambiguous manager agent registry'):
             central.check_agents('4.14.9')
+
+    def test_captured_agent_states_connected_older_and_disconnected_are_accepted_never_connected_blocks(self):
+        # Native captures (agent_control -l/-i): an Active agent on an older release and a Disconnected
+        # one still report their release and are fine; a registered agent that never connected reports
+        # `Client version: (null)` with rc 0 and blocks (fail closed, decision A4) until it is removed.
+        central, docker = self.central('4.14.9', agents={'001': '4.14.1', '002': {'status': 'Disconnected', 'release': '4.14.9'}})
+        listing = docker.agent_list()
+        self.assertIn('Active', listing); self.assertIn('Disconnected', listing)
+        self.assertEqual(central.check_agents('4.14.9'), {'001': '4.14.1', '002': '4.14.9'})
+        self.assertEqual(central.verify(), {'pass': True, 'version': '4.14.9'})
+        docker.agents['003'] = {'status': 'Never connected'}
+        self.assertIn('Never connected', docker.agent_list())
+        self.assertIn('Client version:      (null)', docker.agent_info('003'))
+        for action in (lambda: central.check_agents('4.14.9'), central.verify, lambda: central.gate('4.14.9')):
+            with self.assertRaises(w.Refused) as refusal:
+                action()
+            self.assertEqual(str(refusal.exception), 'unknown retained agent version in manager registry (agent ID 003)')
+        # The refusal names the offending agent by its numeric id only: never its name, address or any text.
+        value = w.typed_error('refused', str(refusal.exception))
+        for leaked in ('ghost-never', '10.9.9.9', 'agent-003'):
+            self.assertNotIn(leaked, json.dumps(value))
+        # Removing the agent (manage_agents -r) restores the ordinary path.
+        del docker.agents['003']
+        self.assertEqual(central.verify(), {'pass': True, 'version': '4.14.9'})
+
+    def test_a_pre_4_14_agent_or_an_unparsable_registry_entry_blocks_and_is_named(self):
+        for release in ('4.8.0', '3.13.6'):
+            central, docker = self.central('4.14.1', agents={'001': '4.14.1', '017': release})
+            with self.assertRaisesRegex(w.Refused, r'unknown retained agent version in manager registry \(agent ID 017\)'):
+                central.verify()
+        # An id with many digits is bounded in the message.
+        central, docker = self.central('4.14.1', agents={'1234567890123': {'status': 'Never connected'}})
+        with self.assertRaises(w.Refused) as refusal:
+            central.verify()
+        self.assertEqual(str(refusal.exception), 'unknown retained agent version in manager registry (agent ID 123456789)')
 
     def test_verify_is_the_read_only_native_oracle_for_c12(self):
         central, docker = self.central('4.14.1', agents={'001': '4.14.1'})

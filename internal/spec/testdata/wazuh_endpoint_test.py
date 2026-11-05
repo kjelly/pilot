@@ -138,5 +138,74 @@ class EndpointTests(unittest.TestCase):
                     self.assertEqual(result, {'bound': success, 'address': address if success else ''}, (name, check))
 
 
+    def test_a_refused_binding_shows_only_its_typed_reason_through_the_real_script_module(self):
+        # The resolver hides its helper runs (the argument is the inventory evidence) but must still say why a
+        # binding was refused. Real ScriptModule, real production tasks, a real failing helper (rc 2).
+        reason = 'Wazuh endpoint identity is unknown, ambiguous or different'
+        with tempfile.TemporaryDirectory(prefix='wazuh-endpoint-reason-') as temporary:
+            root = Path(temporary); (root / 'tasks').mkdir(); (root / 'files').mkdir()
+            for name in ('wazuh-endpoint-resolve.yml', 'resolve-hosts-alias-target.yml'):
+                shutil.copy2(REPO / 'playbooks/apply/tasks' / name, root / 'tasks' / name)
+            shutil.copy2(REPO / 'playbooks/apply/files/wazuh-endpoint.py', root / 'files/wazuh-endpoint.py')
+            inv = root / 'inventory.yml'
+            inv.write_text(yaml.safe_dump({'all': {'hosts': {'observer': {'ansible_connection': 'local'},
+                'manager-a': {'ansible_host': '192.0.2.15', 'ansible_fqdn': 'manager.example.test'}}}}))
+            def run(raw, check=False):
+                play = root / 'play.yml'
+                play.write_text(yaml.safe_dump([{'hosts': 'observer', 'gather_facts': False,
+                    'vars': {'wazuh_endpoint_value': raw, 'wazuh_endpoint_manager': 'manager-a', 'wazuh_endpoint_inventory': ['manager-a']},
+                    'tasks': [{'ansible.builtin.include_tasks': {'file': 'tasks/wazuh-endpoint-resolve.yml', 'apply': {'tags': ['always']}}}]}]))
+                return subprocess.run(['ansible-playbook', '-i', str(inv), str(play), *(['--check'] if check else [])], cwd=REPO,
+                    capture_output=True, text=True, timeout=150,
+                    env=dict(os.environ, ANSIBLE_CONFIG=str(REPO / 'ansible.cfg'), ANSIBLE_CACHE_PLUGIN='memory',
+                             ANSIBLE_LOCAL_TEMP=str(root / 'local'), ANSIBLE_REMOTE_TEMP=str(root / 'remote'), ANSIBLE_NOCOLOR='1',
+                             PYTHONDONTWRITEBYTECODE='1'))
+            # Trigger: an association failure (an unknown NAME) and a binding failure (an external numeric
+            # address that is not the inventory manager), in apply and in check mode.
+            for raw, task in (('unknown.example.test', 'Refuse an endpoint the inventory does not vouch for'),
+                              ('203.0.113.5', 'Refuse a transport that is not the unique inventory manager')):
+                for check in (False, True):
+                    with self.subTest(raw=raw, check=check):
+                        result = run(raw, check)
+                        self.assertNotEqual(result.returncode, 0)
+                        shown = result.stdout + result.stderr
+                        self.assertIn(reason, shown)
+                        self.assertIn(task, shown, 'the refusal must come from the typed-reason task, not a censored helper run')
+                        self.assertNotIn('the output has been hidden', shown.split(task, 1)[1].split('PLAY RECAP')[0])
+                        # Nothing of the evidence leaks. (The shared resolver's own task titles name the address
+                        # being resolved; that is not part of the refusal, so the check starts at the refusal task.)
+                        refusal = shown.split('TASK [' + task, 1)[1]
+                        for secret in (raw, '192.0.2.15', 'manager.example.test', '"records"', 'files/wazuh-endpoint.py'):
+                            self.assertNotIn(secret, refusal, secret)
+                        self.assertNotIn('"records"', shown)
+            # Accept: the inventory manager binds, silently (the helper output stays censored).
+            result = run('192.0.2.15')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn('"records"', result.stdout)
+            self.assertNotIn('FAILED!', result.stdout, 'no refusal task may fire for a bound manager')
+            for task in ('Refuse an endpoint the inventory does not vouch for', 'Refuse a transport that is not the unique inventory manager'):
+                self.assertRegex(result.stdout, r'TASK \[' + task + r'[^\n]*\n(?:skipping: \[observer\])', task)
+
+    def test_a_helper_that_cannot_run_still_reports_a_bounded_generic_reason(self):
+        with tempfile.TemporaryDirectory(prefix='wazuh-endpoint-broken-') as temporary:
+            root = Path(temporary); (root / 'tasks').mkdir(); (root / 'files').mkdir()
+            for name in ('wazuh-endpoint-resolve.yml', 'resolve-hosts-alias-target.yml'):
+                shutil.copy2(REPO / 'playbooks/apply/tasks' / name, root / 'tasks' / name)
+            # A helper that dies with a traceback-like text on stdout and no typed error.
+            (root / 'files/wazuh-endpoint.py').write_text('import sys\nprint("Traceback SECRET_ARGUMENT_TEXT")\nsys.exit(1)\n')
+            inv = root / 'inventory.yml'
+            inv.write_text(yaml.safe_dump({'all': {'hosts': {'observer': {'ansible_connection': 'local'}}}}))
+            play = root / 'play.yml'
+            play.write_text(yaml.safe_dump([{'hosts': 'observer', 'gather_facts': False,
+                'vars': {'wazuh_endpoint_value': '192.0.2.15', 'wazuh_endpoint_manager': '', 'wazuh_endpoint_inventory': []},
+                'tasks': [{'ansible.builtin.include_tasks': {'file': 'tasks/wazuh-endpoint-resolve.yml', 'apply': {'tags': ['always']}}}]}]))
+            result = subprocess.run(['ansible-playbook', '-i', str(inv), str(play)], cwd=REPO, capture_output=True, text=True, timeout=150,
+                env=dict(os.environ, ANSIBLE_CONFIG=str(REPO / 'ansible.cfg'), ANSIBLE_CACHE_PLUGIN='memory',
+                         ANSIBLE_LOCAL_TEMP=str(root / 'local'), ANSIBLE_REMOTE_TEMP=str(root / 'remote'), ANSIBLE_NOCOLOR='1'))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Wazuh endpoint association failed', result.stdout)
+            self.assertNotIn('SECRET_ARGUMENT_TEXT', result.stdout + result.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

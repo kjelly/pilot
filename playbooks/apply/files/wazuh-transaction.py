@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Wazuh release compatibility and native package protection (Issue #244, part A).
 
 Read-only observations of a central stack's and an agent's effective Wazuh
@@ -573,7 +574,7 @@ class PackageGuard:
 
     def verify_overlay(self, overlay, owner):
         if overlay['owner'] != owner:
-            raise Refused('private DNF policy belongs to another writer')
+            raise Refused('private DNF policy belongs to another run')
         folder = canonical(self.root / ('agent-policy-' + owner))
         self.nevra(overlay['package'])
         expected = {str(folder / ('dnf-' + overlay['package'] + '.conf')),
@@ -872,11 +873,14 @@ class Central(Transaction):
                                '/var/ossec/bin/agent_control', '-i', identifier], timeout=30).stdout
             ids = re.findall(r'^\s*Agent ID:\s*([0-9]+)\s*$', text, re.M)
             releases = re.findall(r'^\s*Client version:\s*Wazuh v(4\.14\.[0-9]+)\s*$', text, re.M)
+            # Only the registry's own numeric id (bounded) names the offender: a registered agent
+            # that never connected (Client version: (null)) or reports a pre-4.14 release blocks
+            # until it is removed from the manager (manage_agents -r), by design (fail closed).
             if ids != [identifier] or len(releases) != 1:
-                raise Refused('unknown retained agent version in manager registry')
+                raise Refused('unknown retained agent version in manager registry (agent ID ' + identifier[:9] + ')')
             registry[identifier] = releases[0]
             if version(releases[0]) > version(target):
-                raise Refused('a registered agent is newer than the central release')
+                raise Refused('a registered agent is newer than the central release (agent ID ' + identifier[:9] + ')')
         return registry
 
     def health(self, release, images):
@@ -980,29 +984,46 @@ class Agent(Transaction):
         with self.lock():
             if self.family != 'RedHat' or self.installed() or plan != agent_plan('', plan['manager'], plan['version']):
                 raise Refused('fresh RPM stage requires the current compatible fresh plan')
-            guard = self.guard()
-            overlay = guard.overlay(owner, plan['package'])
-            provider = guard.official_rpm_provider(overlay, plan['package'])
-            keyring = guard.official_rpm_keyring(owner)
-            folder = private_dir(self.root / ('rpm-fresh-' + owner))
-            for path in folder.iterdir(): private_file(path, folder)
-            self.r.run(['dnf', '-c', overlay['config'], '-y', '--disableexcludes=wazuh',
-                        '--setopt=gpgcheck=1', '--setopt=localpkg_gpgcheck=1', 'install', '--downloadonly',
-                        '--downloaddir=' + str(folder), guard.nevra(plan['package'])], timeout=900,
-                       operation='stage exact official fresh Wazuh RPM')
-            matches = []
-            for path in folder.glob('*.rpm'):
-                private_file(path, folder)
-                if digest(path) == provider['sha256']: matches.append(path)
-            if len(matches) != 1:
-                raise Refused('fresh RPM stage does not contain one exact official payload')
-            path = matches[0]
-            guard.verify_official_rpm(path, provider, keyring, owner)
-            fields = self.r.run(['rpm', '-qp', '--qf', '%{NAME}\n%{VERSION}-%{RELEASE}\n%{ARCH}', path]).stdout.splitlines()
-            if fields != ['wazuh-agent', plan['package'], 'x86_64']:
-                raise Refused('fresh official RPM package identity mismatch')
-            config = guard.verify_overlay(overlay, owner)
-            return {'package_path': str(path), 'dnf_conf_file': config}
+            # A stage that fails or is refused leaves nothing behind: only directories this call
+            # created are removed (a pre-existing one is never touched). A successful stage keeps
+            # both, because the playbook installs the staged RPM from them right afterwards.
+            created = [path for path in (self.root / ('agent-policy-' + owner), self.root / ('rpm-fresh-' + owner))
+                       if not (path.exists() or path.is_symlink())]
+            try:
+                return self.stage_fresh_rpm(owner, plan)
+            except BaseException:
+                for path in created:
+                    # The original refusal is the truth to report; a leftover root-private directory
+                    # that cannot be removed must not replace it.
+                    with contextlib.suppress(OSError):
+                        if path.is_dir() and not path.is_symlink():
+                            shutil.rmtree(path)
+                raise
+
+    def stage_fresh_rpm(self, owner, plan):
+        guard = self.guard()
+        overlay = guard.overlay(owner, plan['package'])
+        provider = guard.official_rpm_provider(overlay, plan['package'])
+        keyring = guard.official_rpm_keyring(owner)
+        folder = private_dir(self.root / ('rpm-fresh-' + owner))
+        for path in folder.iterdir(): private_file(path, folder)
+        self.r.run(['dnf', '-c', overlay['config'], '-y', '--disableexcludes=wazuh',
+                    '--setopt=gpgcheck=1', '--setopt=localpkg_gpgcheck=1', 'install', '--downloadonly',
+                    '--downloaddir=' + str(folder), guard.nevra(plan['package'])], timeout=900,
+                   operation='stage exact official fresh Wazuh RPM')
+        matches = []
+        for path in folder.glob('*.rpm'):
+            private_file(path, folder)
+            if digest(path) == provider['sha256']: matches.append(path)
+        if len(matches) != 1:
+            raise Refused('fresh RPM stage does not contain one exact official payload')
+        path = matches[0]
+        guard.verify_official_rpm(path, provider, keyring, owner)
+        fields = self.r.run(['rpm', '-qp', '--qf', '%{NAME}\n%{VERSION}-%{RELEASE}\n%{ARCH}', path]).stdout.splitlines()
+        if fields != ['wazuh-agent', plan['package'], 'x86_64']:
+            raise Refused('fresh official RPM package identity mismatch')
+        config = guard.verify_overlay(overlay, owner)
+        return {'package_path': str(path), 'dnf_conf_file': config}
 
     def _runtime(self):
         package = self.installed()

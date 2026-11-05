@@ -1,5 +1,21 @@
-"""Native-command models shared by the Wazuh Python harnesses (no daemon, no host state)."""
+"""Native-command models shared by the Wazuh Python harnesses (no daemon, no host state).
+
+Wherever the Issue #244 part-A target run (2026-11-05, Ubuntu 24.04 / AlmaLinux 9 VMs, Wazuh
+4.14.1 and 4.14.9) saved a real capture, the model answers from that capture verbatim
+(native-captures/, one file per command and outcome, the return code in the file name) and only
+substitutes the fields a test varies (ids, names, releases, one daemon's state). What is not in
+native-captures/ is MODELED and says so where it is produced.
+"""
+import json
+from pathlib import Path
+import re
 import subprocess
+
+CAPTURES = Path(__file__).resolve().parent / 'native-captures'
+
+
+def capture(name):
+    return (CAPTURES / name).read_text()
 
 
 class Docker:
@@ -16,6 +32,7 @@ class Docker:
         self.project.mkdir(parents=True)
         self.compose = self.project / 'docker-compose.yml'
         self.compose.write_text('services: {}\n')
+        # id -> release (a connected agent) or {'status': 'Disconnected'|'Never connected', 'release': ...}
         self.agents = {'001': release} if agents is None else agents
         self.running = True
         self.stopped_daemons = set()
@@ -28,6 +45,7 @@ class Docker:
         # the "three components run the same release" claim.
         self.dashboard_release = None
         self.indexer_release = None
+        self.dashboard_shape = 'plugin'
         self.calls = []
         self.containers = []
         for number, service in enumerate(w.SERVICES):
@@ -48,6 +66,30 @@ class Docker:
                                                'com.docker.compose.project.config_files': str(self.compose)}}})
         return rows
 
+    def agent_list(self):
+        """agent_control -l: the captured header, manager row and footer around one row per agent."""
+        lines = capture('agent_control-l.active.rc0.txt').split('\n')
+        rows = [i for i, line in enumerate(lines) if re.match(r'^   ID: [0-9]+,', line)]
+        out = lines[:rows[1]]
+        for identifier, spec in self.agents.items():
+            status = 'Active' if isinstance(spec, str) else spec['status']
+            name, address = ('ghost-never', '10.9.9.9') if status == 'Never connected' else ('agent-' + identifier, 'any')
+            out.append('   ID: %s, Name: %s, IP: %s, %s' % (identifier, name, address, status))
+        return '\n'.join(out + lines[rows[-1] + 1:])
+
+    def agent_info(self, identifier):
+        """agent_control -i: the captured block for the agent's state, with only id, name and release substituted."""
+        spec = self.agents[identifier]
+        status = 'Active' if isinstance(spec, str) else spec['status']
+        release = spec if isinstance(spec, str) else spec.get('release')
+        text = capture({'Active': 'agent_control-i.active-older.rc0.txt', 'Disconnected': 'agent_control-i.disconnected.rc0.txt',
+                        'Never connected': 'agent_control-i.never-connected.rc0.txt'}[status])
+        text = re.sub(r'(Agent ID:\s+)[0-9]+', lambda m: m[1] + identifier, text)
+        if status != 'Never connected':
+            text = re.sub(r'(Agent Name: )\S+', lambda m: m[1] + 'agent-' + identifier, text)
+            text = re.sub(r'(Client version:\s+Wazuh v)[0-9.]+', lambda m: m[1] + release, text)
+        return text
+
     def run(self, argv, **kwargs):
         argv = [str(value) for value in argv]
         self.calls.append(argv)
@@ -57,24 +99,16 @@ class Docker:
         elif argv[:2] == ['docker', 'ps']:
             text = '\n'.join(row['Id'] for row in self.inspect())
         elif argv[-1] == 'info' and 'wazuh-control' in argv[-2]:
-            text = 'WAZUH_VERSION="v' + self.release + '"\nWAZUH_REVISION="40100"\nWAZUH_TYPE="server"\n'
+            text = re.sub(r'(WAZUH_VERSION="v)[0-9.]+', lambda m: m[1] + self.release, capture('wazuh-control-info.manager.rc0.txt'))
         elif argv[-1] == 'status':
-            required = ('modulesd', 'logcollector', 'remoted', 'analysisd', 'execd', 'db', 'authd', 'apid')
-            text = '\n'.join('wazuh-' + name + (' not running...' if name in self.stopped_daemons else ' is running...') for name in required)
-            text += '\nwazuh-clusterd not running...\n'
-            rc = 1
+            # Captured on a healthy manager: rc 1 because the optional daemons are intentionally stopped.
+            text, rc = capture('wazuh-control-status.manager.rc1.txt'), 1
+            for name in self.stopped_daemons:
+                text = text.replace('wazuh-%s is running...' % name, 'wazuh-%s not running...' % name)
         elif '-l' in argv:
-            # Shape captured from the real chain run recorded in docs/runbooks/wazuh-fim.md (agent_control -l).
-            text = ('Wazuh agent_control. List of available agents:\n'
-                    '   ID: 000, Name: wazuh-manager (server), IP: 127.0.0.1, Active/Local\n'
-                    + ''.join('   ID: %s, Name: agent-%s, IP: any, Active\n' % (key, key) for key in self.agents) + '\n')
+            text = self.agent_list()
         elif '-i' in argv:
-            # The -i block is modeled on the documented field layout; only the lines the parser reads matter.
-            identifier = argv[argv.index('-i') + 1]
-            release = self.agents[identifier]
-            text = ('Wazuh agent_control. Agent information:\n   Agent ID:   %s\n   Agent Name: agent-%s\n   IP address: any\n'
-                    '   Status:     Active\n\n   Client version:      %s\n' % (identifier, identifier,
-                                                                            'unknown' if release == 'unknown' else 'Wazuh v' + release))
+            text = self.agent_info(argv[argv.index('-i') + 1])
         else:
             raise AssertionError(argv)
         if rc not in kwargs.get('allowed', (0,)):
@@ -90,14 +124,24 @@ class Docker:
             identifier = argv[-1]
             service = next(row['service'] for row in self.containers if row['Image'] == identifier)
             repo = 'wazuh/' + service.replace('.', '-')
+            # RepoDigests shape: native capture (docker-image-inspect.repo-tags-and-digests.txt), where the
+            # official repository digest is the image id's own sha256.
             digests = {True: [repo + '@' + identifier], False: [],
                        'foreign': ['attacker/' + repo.split('/')[1] + '@' + identifier],
                        'malformed': [repo + '@sha256:not-a-digest', repo + ':4.14.1']}[self.repo_digests]
             return [{'Id': identifier, 'RepoDigests': digests}]
         if 'curl' in argv:
-            return {'status': self.indexer_status}
-        for path, override in (('/usr/share/wazuh-dashboard/plugins/wazuh/package.json', self.dashboard_release),
-                               ('/usr/share/wazuh-indexer/VERSION.json', self.indexer_release)):
-            if argv[-1] == path:
-                return {'version': self.release if override is None else override}
+            return dict(json.loads(capture('indexer-cluster-health.json')), status=self.indexer_status)
+        if argv[-1] == '/usr/share/wazuh-dashboard/plugins/wazuh/package.json':
+            if self.dashboard_shape == 'opensearch-root':
+                # The dashboard's ROOT package.json (native capture, Wazuh 4.14.9): its own version is the
+                # OpenSearch Dashboards release and the Wazuh release hides one level down. A coordinator
+                # that read this file would pass on `wazuh.version`; the plugin leg must not.
+                return {'name': 'opensearch-dashboards', 'version': '2.19.6', 'wazuh': {'version': self.release}}
+            # MODELED: the plugin package.json body was not saved in the native run (only its top-level
+            # version equality is proven, by C12 PASS); the dashboard VERSION.json capture is not this file.
+            return {'version': self.release if self.dashboard_release is None else self.dashboard_release}
+        if argv[-1] == '/usr/share/wazuh-indexer/VERSION.json':
+            value = json.loads(capture('indexer-VERSION.json'))
+            return dict(value, version=self.release if self.indexer_release is None else self.indexer_release)
         raise AssertionError(argv)

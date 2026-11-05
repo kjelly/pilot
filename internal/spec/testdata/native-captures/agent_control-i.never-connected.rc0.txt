@@ -1,0 +1,14 @@
+Wazuh agent_control. Agent information:
+   Agent ID:   003
+   Agent Name: ghost-never
+   IP address: 10.9.9.9
+   Status:     Never connected
+
+   Operating system:    (null)
+   Client version:      (null)
+   Configuration hash:  (null)
+   Shared file hash:    (null)
+   Last keep alive:     (null)
+
+   Syscheck last started at:  Unknown
+   Syscheck last ended at:    Unknown
