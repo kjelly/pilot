@@ -10,6 +10,7 @@ import argparse
 import importlib.util
 import hashlib
 import math
+import os
 import signal
 import time
 import json
@@ -314,7 +315,7 @@ def check_local(worktree: Path) -> tuple[str, str, list[str]]:
         return p.stdout.strip()
 
     sha = git("rev-parse", "HEAD")
-    branch = git("symbolic-ref", "--quiet", "--short", "HEAD")
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
     status = git("status", "--porcelain", "--untracked-files=all")
     # Local validation evidence should live in .pr-ready/ and remain untracked.
     changes = []
@@ -332,6 +333,66 @@ def check_local(worktree: Path) -> tuple[str, str, list[str]]:
 def fail_bool(section: dict[str, Any], key: str, errors: list[str]) -> None:
     if section.get(key) is not True:
         errors.append(f"assessment.{key} is not attested true")
+
+
+REGULAR_FILE_MODES = ("100644", "100755")
+
+
+def tracked_entry(root: Path, head: Any, path: Path) -> tuple[str, str, str, str] | None:
+    """(path relative to root, mode, type, object id) of `path` in the tree of commit `head`.
+
+    None when `head` does not track the path, or the path is outside `root`. Only Git objects of
+    `head` are read, so the answer is the same whichever branch is checked out. A head tree that
+    cannot be read raises GateError: the caller must not guess.
+    """
+    if not isinstance(head, str) or not SHA.fullmatch(head):
+        raise GateError(f"Cannot read the PR head tree: invalid head SHA {head!r}")
+    try:
+        rel = Path(os.path.abspath(path)).relative_to(os.path.abspath(root)).as_posix()
+    except ValueError:
+        return None
+    if rel == "." or "\0" in rel:
+        return None
+    # Literal pathspecs: a report summary such as ":(glob)x" must be a name, never pathspec magic.
+    p = subprocess.run(["git", "--literal-pathspecs", "-C", str(root), "ls-tree", "-z", head, "--", rel],
+                       capture_output=True, check=False)
+    if p.returncode:
+        raise GateError(f"Cannot read {rel} in PR head {head[:12]}: {p.stderr.decode(errors='replace').strip()[:300]}")
+    for row in filter(None, p.stdout.split(b"\0")):
+        meta, _, name = os.fsdecode(row).partition("\t")
+        if name == rel:
+            mode, kind, oid = meta.split()
+            return rel, mode, kind, oid
+    return None
+
+
+def checkout_head(root: Path) -> str | None:
+    p = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
+    return p.stdout.strip().lower() if p.returncode == 0 else None
+
+
+def log_artifact_problem(log_base: Path, logfile: str, head: str) -> str | None:
+    """Why `logfile` is not an existing log inside the PR worktree, or None when it is.
+
+    A log the PR head commits as a regular file exists as that Git blob, so the answer is the
+    same whichever branch is checked out. Any other log (the ignored `.pr-ready` receipts) must
+    be a file inside the worktree.
+    """
+    given = Path(logfile)
+    try:
+        entry = tracked_entry(log_base, head, given if given.is_absolute() else log_base / given)
+    except GateError:
+        entry = None  # nothing proves it at the head: the worktree check below decides
+    if entry is not None and entry[1] in REGULAR_FILE_MODES:
+        return None
+    try:
+        root = log_base.resolve(strict=True)
+        target = (given if given.is_absolute() else root / given).resolve(strict=True)
+        if not target.is_relative_to(root) or not target.is_file():
+            return "log artifact must be an existing file inside its PR worktree"
+    except OSError:
+        return f"log artifact missing/unreadable: {logfile}"
+    return None
 
 
 def validate_validation(value: Any, sha: str, errors: list[str], log_base: Path | None = None,
@@ -364,14 +425,9 @@ def validate_validation(value: Any, sha: str, errors: list[str], log_base: Path 
             if not isinstance(logfile, str) or not logfile.strip():
                 errors.append(f"{loc} lacks a log artifact")
             elif log_base is not None:
-                try:
-                    root = log_base.resolve(strict=True)
-                    target = Path(logfile)
-                    target = (target if target.is_absolute() else root / target).resolve(strict=True)
-                    if not target.is_relative_to(root) or not target.is_file():
-                        errors.append(f"{loc} log artifact must be an existing file inside its PR worktree")
-                except OSError:
-                    errors.append(f"{loc} log artifact missing/unreadable: {logfile}")
+                problem = log_artifact_problem(log_base, logfile, sha)
+                if problem:
+                    errors.append(f"{loc} {problem}")
             if item.get("head_unchanged") is False:
                 errors.append(f"{loc} executed while HEAD was changing")
 
@@ -737,19 +793,51 @@ class WaitStopped(GateError):
 
 
 def file_pin(path: Path) -> tuple[str, str]:
-    target = path.resolve(strict=True)
-    if not target.is_file():
-        raise GateError(f"Wait artifact is not a file: {path}")
-    return str(target), hashlib.sha256(target.read_bytes()).hexdigest()
+    """Pin of an untracked file: where it resolves to and the SHA-256 of its bytes."""
+    try:
+        target = path.resolve(strict=True)
+        if not target.is_file():
+            raise GateError(f"Wait artifact is not a file: {path}")
+        return str(target), hashlib.sha256(target.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise GateError(f"Wait artifact missing/unreadable: {path} ({exc.strerror or exc})") from exc
 
 
-def artifact_pins(evidence_path: Path, evidence: dict[str, Any], root: Path) -> dict[str, tuple[str, str]]:
-    """Pin evidence bytes and local files it references, including excluded .pr-ready logs.
+def tracked_pin(root: Path, head: str, entry: tuple[str, str, str, str], path: Path) -> tuple[str, str]:
+    """Pin of a file the PR head tracks: its Git blob, which no checkout can change.
+
+    The worktree copy is compared with that blob only while the worktree is at `head`; this also
+    catches a skip-worktree/assume-unchanged edit that `git status` hides. On any other branch the
+    worktree bytes say nothing about the PR and are not read.
+    """
+    rel, mode, kind, oid = entry
+    if mode not in REGULAR_FILE_MODES:
+        raise GateError(f"Wait artifact {rel} is a tracked {kind} (mode {mode}) at PR head, not a regular file")
+    if checkout_head(root) == head.lower():
+        hashed = subprocess.run(["git", "-C", str(root), "hash-object", f"--path={rel}", "--", str(path)],
+                                capture_output=True, text=True, check=False)
+        if hashed.returncode:
+            raise GateError(f"Tracked artifact {rel} cannot be read from the worktree: {hashed.stderr.strip()[:200]}")
+        if hashed.stdout.strip() != oid:
+            raise GateError(f"Tracked artifact {rel} differs from PR head {head[:12]} in the worktree")
+    return "git:" + rel, f"{mode} {oid}"
+
+
+def artifact_pins(evidence_path: Path, evidence: dict[str, Any], root: Path,
+                  head: str) -> dict[str, tuple[str, str]]:
+    """Pin the evidence JSON and the local files it references, including excluded .pr-ready logs.
+
+    A file the PR head `head` tracks is pinned by its Git blob there. `head` is the pinned PR head,
+    never the current checkout, so the pin and the classification of every path are the same
+    before and after the checkout moves to the starting branch. The evidence JSON and files the
+    head does not track (the ignored .pr-ready reports, logs and receipts) are pinned by path and
+    SHA-256 of their bytes.
 
     A report may remain a legacy inline summary. Path-shaped report references must exist;
     a report that existed when waiting began cannot disappear or change into a summary.
     """
-    paths = {str(evidence_path.absolute())}
+    evidence_key = str(evidence_path.absolute())
+    paths = {evidence_key}
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
@@ -759,7 +847,8 @@ def artifact_pins(evidence_path: Path, evidence: dict[str, Any], root: Path) -> 
                     path = path if path.is_absolute() else root / path
                     if path.is_file() or key == "log" or item.startswith((".", "/")) \
                             or (" " not in item and "://" not in item
-                                and ("/" in item or Path(item).suffix in {".md", ".json", ".log", ".txt"})):
+                                and ("/" in item or Path(item).suffix in {".md", ".json", ".log", ".txt"})) \
+                            or tracked_entry(root, head, path) is not None:
                         paths.add(str(path.absolute()))
                 visit(item)
         elif isinstance(value, list):
@@ -767,7 +856,11 @@ def artifact_pins(evidence_path: Path, evidence: dict[str, Any], root: Path) -> 
                 visit(item)
 
     visit(evidence)
-    return {path: file_pin(Path(path)) for path in sorted(paths)}
+    pins = {}
+    for path in sorted(paths):
+        entry = None if path == evidence_key else tracked_entry(root, head, Path(path))
+        pins[path] = file_pin(Path(path)) if entry is None else tracked_pin(root, head, entry, Path(path))
+    return pins
 
 
 def fetched_base(worktree: Path, remote: str, base: str) -> str | None:
@@ -817,7 +910,7 @@ class WaitPins:
         if not SHA.fullmatch(s.pr["baseRefOid"]):
             raise GateError("Wait requires a valid base SHA")
         return cls({key: s.pr[key] for key in keys}, review_pin(s),
-                   artifact_pins(evidence_path, evidence, root),
+                   artifact_pins(evidence_path, evidence, root, s.pr["headRefOid"]),
                    fetched_base(root, remote, s.pr["baseRefName"]))
 
     def verify(self, s: Snapshot, evidence_path: Path, evidence: dict[str, Any],
@@ -828,8 +921,17 @@ class WaitPins:
                 errors.append(f"Wait pin changed: PR {key}; revalidate evidence/review")
         if review_pin(s) != self.reviews:
             errors.append("Wait pin changed: PR review/comment content; triage again")
-        if artifact_pins(evidence_path, evidence, root) != self.artifacts:
-            errors.append("Wait pin changed: evidence/report/log artifact bytes or paths")
+        try:
+            current = artifact_pins(evidence_path, evidence, root, self.identity["headRefOid"])
+        except GateError as exc:
+            errors.append(f"Wait pin changed: {exc}")
+        else:
+            changed = sorted(key for key in self.artifacts.keys() | current.keys()
+                             if self.artifacts.get(key) != current.get(key))
+            if changed:
+                more = f" (+{len(changed) - 5} more)" if len(changed) > 5 else ""
+                errors.append("Wait pin changed: evidence/report/log artifact bytes or paths: "
+                              + ", ".join(changed[:5]) + more)
         if fetched_base(root, remote, self.identity["baseRefName"]) != self.base:
             errors.append("Wait pin changed: fetched base policy ref")
         return errors
@@ -846,6 +948,8 @@ def main() -> int:
     parser.add_argument("--evidence", type=Path, required=True, help="HEAD-specific evidence JSON")
     parser.add_argument("--worktree", type=Path, help="Original PR-branch worktree; verify clean and HEAD")
     parser.add_argument("--ready", action="store_true", help="Execute 'gh pr ready' only after all gates pass")
+    parser.add_argument("--restore-sha", help="Restore this verified starting commit before Ready; abort on restore failure")
+    parser.add_argument("--restore-branch", help="Starting branch to restore (omit for a detached start)")
     parser.add_argument("--wait", action="store_true", help="Keep polling actual pending CI; with --ready transition automatically")
     parser.add_argument("--poll-interval", type=float, default=30, help="Wait poll interval in seconds, >0 and <=60 (default 30)")
     parser.add_argument("--wait-timeout", type=float, help="Explicit optional wait limit in seconds; default waits until settled or cancelled")
@@ -857,6 +961,10 @@ def main() -> int:
         parser.error("--repo must be OWNER/REPO and --pr must be positive")
     if (args.ready or args.wait) and not args.worktree:
         parser.error("--ready/--wait requires --worktree to verify branch/clean tree")
+    if args.restore_branch is not None and not args.restore_sha:
+        parser.error("--restore-branch requires --restore-sha")
+    if args.restore_sha is not None and (not args.ready or not SHA.fullmatch(args.restore_sha)):
+        parser.error("--restore-sha requires --ready and a full commit SHA")
     if not math.isfinite(args.poll_interval) or not 0 < args.poll_interval <= 60:
         parser.error("--poll-interval must be >0 and <=60 seconds")
     if args.wait_timeout is not None and (not args.wait or not math.isfinite(args.wait_timeout) or args.wait_timeout <= 0):
@@ -867,6 +975,7 @@ def main() -> int:
     polls = 0
     pins = None
     ready_invoked = False
+    restored_local = None
     handlers = {}
     workflows = WorkflowHistory() if args.wait else None
 
@@ -905,14 +1014,17 @@ def main() -> int:
         evidence = json.loads(evidence_bytes)
         if not isinstance(evidence, dict):
             raise GateError("Evidence JSON must be an object")
-        conversation = args.wait or bool(evidence.get("disputed_review_comments"))
+        conversation = args.wait or bool(args.restore_sha) or bool(evidence.get("disputed_review_comments"))
 
         def inspect(snapshot: Snapshot) -> tuple[list[str], list[str], list[Any]]:
             local = check_local(args.worktree) if args.worktree else None
             ctx = evidence_context(args.worktree, snapshot.pr.get("headRefOid"), snapshot.pr.get("baseRefName"),
                                    args.base_remote)
-            errors = evaluate(snapshot, evidence, repo=args.repo, number=args.pr, local=local,
+            errors = evaluate(snapshot, evidence, repo=args.repo, number=args.pr,
+                              local=None if restored_local is not None else local,
                               log_base=args.worktree, ctx=ctx, allow_pending=args.wait)
+            if restored_local is not None and local != restored_local:
+                errors.append("Restored checkout changed before Ready transition")
             errors.extend(target_evidence_errors(snapshot.pr, evidence, args.repo))
             pending = classify_ci(snapshot, evidence).pending
             if workflows is not None:
@@ -952,12 +1064,34 @@ def main() -> int:
                     return 2
                 deadline()
                 if not pending:
+                    if args.restore_sha:
+                        # The final PR-branch preflight above must pass before leaving it.
+                        # Use the immutable workflow snapshot's normal safe landing helper.
+                        if pins is None:
+                            pins = WaitPins.capture(latest, args.evidence, evidence, args.worktree, args.base_remote)
+                        helper = Path(__file__).resolve().parents[2] / "_shared/scripts/checkout_preflight.py"
+                        restore = [sys.executable, str(helper), "--repo", str(args.worktree),
+                                   "--target", args.restore_sha, "--safe-sha", latest.pr["headRefOid"], "--execute"]
+                        if args.restore_branch is not None:
+                            restore.append("--branch=" + args.restore_branch)
+                        result = subprocess.run(restore, capture_output=True, text=True, check=False)
+                        if result.returncode:
+                            raise GateError("Checkout restoration failed; Ready not invoked: " +
+                                            (result.stdout or result.stderr).strip()[:1500])
+                        restored_local = (args.restore_sha, args.restore_branch or "HEAD", [])
+                        # Switching branches must precede the last remote/pin check too.
+                        latest = fetch_snapshot(args.repo, args.pr, conversation=True, workflows=args.wait)
+                        errors, pending, reuse = inspect(latest)
+                        if errors or pending:
+                            raise GateError("Post-restore preflight blocked Ready: " +
+                                            "; ".join(errors + pending))
+                        deadline()
                     ready_invoked = True
                     action = subprocess.run(["gh", "pr", "ready", str(args.pr), "-R", args.repo],
                                             capture_output=True, text=True, check=False)
                     if action.returncode:
                         raise GateError(f"gh pr ready failed: {(action.stderr or action.stdout).strip()[:700]}")
-                    after = fetch_snapshot(args.repo, args.pr, conversation=True, workflows=True) if args.wait else None
+                    after = fetch_snapshot(args.repo, args.pr, conversation=True, workflows=args.wait) if pins is not None else None
                     after_pr = after.pr if after is not None else gh_pr(args.repo, args.pr)
                     if after_pr.get("isDraft") is not False or after_pr.get("headRefOid") != evidence["head_sha"]:
                         raise GateError("PR state/HEAD changed during Ready transition; status requires reevaluation")
@@ -967,12 +1101,14 @@ def main() -> int:
                     if pins is not None:
                         errors = pins.verify(after, args.evidence, evidence, args.worktree, args.base_remote)
                         sha, branch, dirty = check_local(args.worktree)
-                        if sha != pins.identity["headRefOid"] or branch != pins.identity["headRefName"] or dirty:
+                        expected_local = restored_local or (pins.identity["headRefOid"], pins.identity["headRefName"], [])
+                        if (sha, branch, dirty) != expected_local:
                             errors.append("Local worktree changed during Ready transition")
                         ci = classify_ci(after, evidence)
                         errors.extend(ci.errors + ci.pending)
-                        lifecycle = workflows.inspect(after, args.repo)
-                        errors.extend(lifecycle.errors + lifecycle.pending)
+                        if workflows is not None:
+                            lifecycle = workflows.inspect(after, args.repo)
+                            errors.extend(lifecycle.errors + lifecycle.pending)
                         if errors:
                             raise GateError("Ready invoked but post-action verification failed: " + "; ".join(errors))
                     emit({"status": "READY", "pr": after_pr.get("url"), "head_sha": after_pr["headRefOid"],
