@@ -170,9 +170,10 @@ def sandbox(module):
 
     Nothing is created: every redirected path starts absent, exactly like a bare
     host, and a test that needs one creates it (or patches its own). Returns the
-    tree root. Constants evaluated at call time are patched here; code with
-    default arguments captured at definition time (root=ROOT) is covered by the
-    tripwire, which fails a test that forgets to pass its own root.
+    tree root. Every host path is read from the module at call time (the
+    coordinator resolves its default root from ROOT when it is constructed), so
+    patching the constants here is enough; the tripwire fails a test that still
+    names real host state.
     """
     import atexit
     import shutil
@@ -181,8 +182,8 @@ def sandbox(module):
     root = Path(tempfile.mkdtemp(prefix='pilot-wazuh-hermetic-'))
     atexit.register(shutil.rmtree, str(root), True)
     module.ROOT = root / 'var-backups-pilot-wazuh'
-    # The version coordinator has no host reader; a coordinator that gains one
-    # (reader custody) has its constants redirected here too.
+    # The version coordinator has no host reader; these constants only exist
+    # in a coordinator that gains one, and are redirected here when they do.
     reader = getattr(module, 'Reader', None)
     if reader is not None:
         reader.SPOOL = root / 'var-spool-rsyslog-pilot-wazuh'

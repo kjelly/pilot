@@ -36,7 +36,7 @@ def picked(play, name):
 
 
 class ManagerGateTests(unittest.TestCase):
-    def run_gate(self, stack='present', stack_release='4.14.1', docker_up=True, inputs=None, flags=(), agents=None, stopped_daemon=''):
+    def run_gate(self, stack='present', stack_release='4.14.1', docker_up=True, inputs=None, flags=(), agents=None, stopped_daemon='', dashboard_release=None, indexer_release=None):
         with tempfile.TemporaryDirectory(prefix='wazuh-manager-gate-') as temporary:
             root = Path(temporary)
             play = yaml.safe_load((SOURCE / 'wazuh-manager-apply.yml').read_text())[0]
@@ -44,7 +44,8 @@ class ManagerGateTests(unittest.TestCase):
             settings = root / 'settings.json'
             settings.write_text(json.dumps({'library': str(SOURCE / 'files/wazuh-transaction.py'), 'events': str(events),
                                             'stack': stack, 'stack_release': stack_release, 'docker_up': docker_up,
-                                            'agents': agents, 'stopped_daemon': stopped_daemon}))
+                                            'agents': agents, 'stopped_daemon': stopped_daemon,
+                                            'dashboard_release': dashboard_release, 'indexer_release': indexer_release}))
             (root / 'files').mkdir()
             (root / 'files/wazuh-transaction.py').write_text(
                 'import os, sys\nos.execv(sys.executable, [sys.executable, %r, %r, *sys.argv[1:]])\n' % (str(BACKEND), str(settings)))
@@ -137,6 +138,18 @@ class ManagerGateTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn('required manager native daemons are not healthy', run.stdout)
         self.assertNotIn('mutation', actions)
+
+    def test_a_dashboard_or_indexer_on_another_release_refuses_the_gate_before_the_stack_is_touched(self):
+        for knob, reason in (('dashboard_release', 'dashboard Wazuh plugin version probe failed'),
+                             ('indexer_release', 'indexer effective Wazuh version probe failed')):
+            run, actions, docker, facts = self.run_gate('present', '4.14.1', **{knob: '4.14.9'})
+            self.assertNotEqual(run.returncode, 0, knob)
+            self.assertIn(reason, run.stdout)
+            self.assertNotIn('mutation', actions)
+        # Accept case: the same stack with both components agreeing with the manager passes.
+        run, actions, docker, facts = self.run_gate('present', '4.14.1', dashboard_release='4.14.1', indexer_release='4.14.1')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn('mutation', actions)
 
     def test_a_missing_engine_fails_a_real_run_but_a_check_preview_defers_to_a_fresh_install(self):
         run, actions, docker, facts = self.run_gate('absent', docker_up=False)

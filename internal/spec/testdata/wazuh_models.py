@@ -23,6 +23,11 @@ class Docker:
         self.repo_digests = True
         self.drop = set()
         self.indexer_status = 'green'
+        # Per-component native release reports; None follows the manager's release. The
+        # dashboard (plugin package.json) and the indexer (VERSION.json) are separate legs of
+        # the "three components run the same release" claim.
+        self.dashboard_release = None
+        self.indexer_release = None
         self.calls = []
         self.containers = []
         for number, service in enumerate(w.SERVICES):
@@ -91,6 +96,8 @@ class Docker:
             return [{'Id': identifier, 'RepoDigests': digests}]
         if 'curl' in argv:
             return {'status': self.indexer_status}
-        if argv[-1] in ('/usr/share/wazuh-dashboard/plugins/wazuh/package.json', '/usr/share/wazuh-indexer/VERSION.json'):
-            return {'version': self.release}
+        for path, override in (('/usr/share/wazuh-dashboard/plugins/wazuh/package.json', self.dashboard_release),
+                               ('/usr/share/wazuh-indexer/VERSION.json', self.indexer_release)):
+            if argv[-1] == path:
+                return {'version': self.release if override is None else override}
         raise AssertionError(argv)

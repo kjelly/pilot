@@ -62,7 +62,7 @@ func TestRegression_WazuhFimC1InstalledSelectionStates(t *testing.T) {
 //	C7      /etc/hosts pins the wazuh-manager alias
 //	C8      <address> in ossec.conf points at the wazuh-manager alias
 //	C9      client.keys populated (agent-auth registration completed)
-//	C10     native/package version equality, exact pin, service and stable journal
+//	C10     native/package version equality, exact pin and service availability
 //
 // Cross-row invariants locked below:
 //

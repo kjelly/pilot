@@ -40,6 +40,8 @@ root = Path(tempfile.mkdtemp(prefix='wazuh-gate-model-'))
 docker = Docker(w, root, settings['stack_release'], settings.get('agents'))
 if settings['stack'] == 'absent':
     docker.drop = set(w.SERVICES)
+docker.dashboard_release = settings.get('dashboard_release')
+docker.indexer_release = settings.get('indexer_release')
 if settings.get('stopped_daemon'):
     docker.stopped_daemons.add(settings['stopped_daemon'])
 real_run, real_json = docker.run, docker.json
