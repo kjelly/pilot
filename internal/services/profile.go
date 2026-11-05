@@ -19,13 +19,14 @@ import (
 // part of this type; they are supplied to Compose through host-side secret
 // files and never projected into a guest.
 type Profile struct {
-	Name      string        `yaml:"name"`
-	Apt       AptProfile    `yaml:"apt"`
-	RPM       RPMProfile    `yaml:"rpm"`
-	OCI       OCIProfile    `yaml:"oci"`
-	Harbor    HarborProfile `yaml:"harbor"`
-	Storage   StoragePolicy `yaml:"storage"`
-	Retention Retention     `yaml:"retention"`
+	Name       string                   `yaml:"name"`
+	Apt        AptProfile               `yaml:"apt"`
+	RPM        RPMProfile               `yaml:"rpm"`
+	OCI        OCIProfile               `yaml:"oci"`
+	Harbor     HarborProfile            `yaml:"harbor"`
+	Storage    StoragePolicy            `yaml:"storage"`
+	Retention  Retention                `yaml:"retention"`
+	DataProbes map[Capability]DataProbe `yaml:"data_probes,omitempty"`
 }
 
 // AptProfile configures the Ubuntu package upstream and local proxy port.
@@ -84,16 +85,19 @@ type Retention struct {
 
 // ClientConfig is the non-secret contract injected into an opted-in VM.
 type ClientConfig struct {
-	Profile           string            `yaml:"profile"`
-	Fingerprint       string            `yaml:"fingerprint"`
-	HostIP            string            `yaml:"host_ip,omitempty"`
-	Hostname          string            `yaml:"hostname"`
-	AptProxyURL       string            `yaml:"apt_proxy_url"`
-	RPMBaseURL        string            `yaml:"rpm_base_url"`
-	RPMRepositories   map[string]string `yaml:"rpm_repositories,omitempty"`
-	RegistryMirrorURL string            `yaml:"registry_mirror_url"`
-	RegistryProjects  map[string]string `yaml:"registry_projects,omitempty"`
-	CAPEM             string            `yaml:"ca_pem"`
+	InstanceID        string                   `yaml:"instance_id,omitempty"`
+	Generation        uint64                   `yaml:"generation,omitempty"`
+	Profile           string                   `yaml:"profile"`
+	Fingerprint       string                   `yaml:"fingerprint"`
+	HostIP            string                   `yaml:"host_ip,omitempty"`
+	Hostname          string                   `yaml:"hostname"`
+	AptProxyURL       string                   `yaml:"apt_proxy_url"`
+	RPMBaseURL        string                   `yaml:"rpm_base_url"`
+	RPMRepositories   map[string]string        `yaml:"rpm_repositories,omitempty"`
+	RegistryMirrorURL string                   `yaml:"registry_mirror_url"`
+	RegistryProjects  map[string]string        `yaml:"registry_projects,omitempty"`
+	CAPEM             string                   `yaml:"ca_pem"`
+	DataProbes        map[Capability]DataProbe `yaml:"data_probes,omitempty"`
 }
 
 // BuiltInDevLite is the portable development profile. It deliberately uses
@@ -226,6 +230,11 @@ func (p Profile) Validate() error {
 	if p.Retention.CacheTTLHours <= 0 {
 		return errors.New("retention cache_ttl_hours must be positive")
 	}
+	for capability := range p.DataProbes {
+		if _, err := NormalizeRequirements(Requirements{capability}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -261,13 +270,13 @@ func validateURL(label, raw string, httpsOnly bool) error {
 	return nil
 }
 
-// Fingerprint returns a stable content hash for profile identity and state
-// invalidation. yaml.v3 preserves struct field order, so map ordering cannot
-// change this value.
+// Fingerprint binds physical stack configuration. Readonly data_probes are
+// excluded so consumer verification can evolve without recreating shared data.
 func (p Profile) Fingerprint() (string, error) {
 	if err := p.Validate(); err != nil {
 		return "", err
 	}
+	p.DataProbes = nil // Consumer verification policy never changes physical cache identity.
 	b, err := yaml.Marshal(p)
 	if err != nil {
 		return "", fmt.Errorf("marshal profile: %w", err)

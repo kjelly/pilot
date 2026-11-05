@@ -75,7 +75,7 @@ func TestReviewFixturesMirrorCanonicalContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mirrors, err := loader.LoadDir("docs/tmp/future/contracts")
+	mirrors, err := loader.LoadDir("internal/contract/testdata/review-fixtures")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestLoaderRejectsUnknownFields(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	fixture, err := os.ReadFile(filepath.Join(contractRepoRoot(t), "docs", "tmp", "future", "contracts", "docker.yaml"))
+	fixture, err := os.ReadFile(filepath.Join(contractRepoRoot(t), "internal", "contract", "testdata", "review-fixtures", "docker.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestLoaderRequiresV2SpecsForAutoDeploy(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	fixture, err := os.ReadFile(filepath.Join(contractRepoRoot(t), "docs", "tmp", "future", "contracts", "docker.yaml"))
+	fixture, err := os.ReadFile(filepath.Join(contractRepoRoot(t), "internal", "contract", "testdata", "review-fixtures", "docker.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

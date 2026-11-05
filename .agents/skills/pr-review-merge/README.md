@@ -19,40 +19,49 @@ Codex 的角色定義是 `.codex/agents/prm-*.toml` 的位元組副本。
 
 ## 使用
 
+每次只處理一個 PR。多個或全部項目先列候選並請使用者選一個，不自動處理下一個。
+依 checkout 契約（`.agents/skills/_shared/single-item-checkout.md`，以 repo 根目錄路徑引用；Claude Code 經 `.claude/skills/pr-review-merge` symlink 讀本 skill，相對的 `../_shared` 連結不會解析）先做 snapshot，再選定 PR，最後用 `checkout_preflight.py` 以完整 SHA 在目前乾淨 checkout 精確 land 該 PR 的原始 head branch（不以名稱 checkout、不建立 per-PR worktrees），之後才審查與測試。
+
 **Codex CLI**
 
 ```text
-$pr-review-merge 審查 kjelly/pilot 所有非 Draft PR；合格則 merge，不合格轉 Draft 並留言。
+$pr-review-merge 審查 kjelly/pilot 單一非 Draft PR #123；合格則 merge，不合格轉 Draft 並留言。
 ```
 
 **Claude Code / agy CLI / Antigravity IDE**
 
 ```text
-/pr-review-merge 審查 kjelly/pilot 所有非 Draft PR；合格則 merge，不合格轉 Draft 並留言。
+/pr-review-merge 審查 kjelly/pilot 單一非 Draft PR #123；合格則 merge，不合格轉 Draft 並留言。
 ```
 
 指定 PR：
 
 ```text
-/pr-review-merge 審查 kjelly/pilot #42 #43 #44
+/pr-review-merge 審查 kjelly/pilot #42
 ```
 
-**參數及預設策略：**最多 2 個獨立 Reviewer Subagents 並行、Merge 串行、預設 merge commit（本 repo 慣例；`apply_decision.py --method` 預設 `merge`）、禁止管理員繞過/Auto-merge/刪除分支（GitHub 的 deleteBranchOnMerge 會自己刪）。CI Pending、等待 Approval 或 Merge Queue 為 `WAITING`，不自動轉 Draft。重大安全/資料毀損風險若需要額外人類簽核，亦保持 WAITING。
+**參數及預設策略：**只處理選定的單一 PR，由獨立 Reviewer 審查，完成或受阻後停止，不自動處理下一項。預設 merge commit（本 repo 慣例；`apply_decision.py --method` 預設 `merge`）、禁止管理員繞過/Auto-merge/刪除分支（GitHub 的 deleteBranchOnMerge 會自己刪）。CI Pending、等待 Approval 或 Merge Queue 為 `WAITING`，不自動轉 Draft；`CHANGES_REQUESTED`（等原 reviewer 重新審查）、Reviewer 確認與本 PR 無關而失敗的 check、沒有新證據就重提已被反駁的 finding，也是 `WAITING`，否則 pr-ready 會再把它轉回 Ready。重大安全/資料毀損風險若需要額外人類簽核，亦保持 WAITING。
+
+**與 main 對齊：**gate 獨立讀取遠端 base branch（本 repo 為 `main`），要求即時 tip 是 PR HEAD 的祖先，並核對 PR 的 `baseRefOid`。即使沒有衝突、Base SHA 相同，HEAD 未包含最新 main 仍須先留言列出 HEAD/Base/live-base SHA 與修正步驟，再轉 Draft，交由 `pr-ready` 合併最新 base、重跑相關驗證/CI 與獨立審查。不需等完整 semantic review；讀取失敗、祖先關係未知或確認期間 SHA 變動仍是 WAITING。PR HEAD 與 main 不必是同一個 commit。
+
+**Actual-run 紀錄：**base branch 的 `.github/pr-evidence.json` 要求 `actual-run` 紀錄時，`review_gate.py` 以 GitHub API 在 PR 的 **base SHA** 讀這份 manifest（不讀 head，PR 不能放寬自己的要求），並檢查 reviewer evidence 的 `target_validation`：缺少或格式錯、`blocked`、PR 改到 manifest `required_paths`（`playbooks/**`、`contracts/**`）卻寫 `not-needed`、或 `required` 卻沒有 HEAD 上已提交且寫明 tested revision 的 `docs/evidence/**` 紀錄（tested revision 等於 HEAD，或是 HEAD 的祖先且之後只改 evidence-only 檔案），一律 `WAITING`，不會 merge。manifest 格式、glob 與 evidence-only delta 規則沿用 issue-to-pr 的 `scripts/repo_evidence.py`（依路徑載入）。缺紀錄本身轉 Draft 仍需 reviewer 開 blocking `P1` finding。
 
 ## 內部安全檢查（供 Agent 呼叫）
 
+`$SNAP` 是 checkout 契約取得的 snapshot 目錄；腳本從那裡執行，不從目前切到的 branch 執行。
+
 ```bash
-# 取得完整（跨分頁）Ready PR 清單
-python3 scripts/list_ready.py --repo OWNER/REPO
+# 列出完整（跨分頁）Ready PR 候選清單，供使用者選一個（列出不等於授權處理）
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/list_ready.py" --repo OWNER/REPO
 
 # Reviewer 綁定 HEAD/Base SHA 的證據檔產生後，進行唯讀 Quality Gate
-python3 scripts/review_gate.py --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/review_gate.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json
 
 # 乾跑（不變更 GitHub）
-python3 scripts/apply_decision.py --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json
 
 # 真正執行：僅在通過 live gate 時才合併或降草稿
-python3 scripts/apply_decision.py --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json --execute
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json --execute
 ```
 
 `apply_decision.py` 不會相信先前的 gate 結果，會在 mutation 前重新檢查 HEAD/Base 與 GitHub API 狀態，並使用同一 repository 的跨程序寫入鎖（POSIX `flock`）。`gh pr merge --match-head-commit` 可防止合併錯誤的 HEAD；結果還要遠端驗證 `state == MERGED`。Draft 先留言具體 blocking findings 才執行 `gh pr ready --undo`。
@@ -65,7 +74,7 @@ python3 scripts/apply_decision.py --repo OWNER/REPO --pr 123 --evidence /safe/st
 python3 -m unittest discover -s tests -v
 ```
 
-測試使用模擬 `gh`，**不碰真實 GitHub**。必須在自己的 repository 上做一次 end-to-end 驗證，才能確認平台版本、GitHub 權限、branch rules 和 Agent subagent runtime 均正常。
+測試使用模擬 `gh`，**不碰真實 GitHub**；contents/compare API 的回應取自 `tests/fixtures/github_api.json`（對 kjelly/pilot 唯讀 `gh api` 的實際擷取）。`apply_decision.py` 的寫入鎖在測試中指向每個測試自己的暫存 `PRM_STATE_DIR`，不碰 `~/.cache/pr-review-merge`，兩個同時跑的 `make skill-test` 不會互搶。必須在自己的 repository 上做一次 end-to-end 驗證，才能確認平台版本、GitHub 權限、branch rules 和 Agent subagent runtime 均正常。
 
 ## 與其他 Skill 的關係
 

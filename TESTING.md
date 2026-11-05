@@ -40,7 +40,7 @@ rm -rf .verification/ ~/.local/share/pilot/history.db
 ## 1. 測試分層
 
 ```bash
-# L1 — Go 單元/整合測試（PTY subprocess 的 CI=1 由測試自行設定）
+# L1 — 完整 Go 單元/整合測試入口（完整套件交給 CI；本地範圍見 §3）
 make test
 
 # L2 — 靜態分析
@@ -62,12 +62,29 @@ go run ./cmd/pilot vm-target test --name <vm> \
 - **完整 normal + race**：`make test-all` 依序執行兩份完整測試，即使帶 `-j`
   也不會重疊；normal 失敗會立即停止。請勿另外同時啟動完整測試或其他大量
   Ansible 測試，以免 subprocess 與 CPU 互相爭用耗盡每套測試的時間預算。
+  這個完整入口會清除 `GO_TEST_RUN_REGEX`、`GO_TEST_REPORT_DIR`、`GO_TEST_JSON`
+  與 `CI_SHARD_INDEX` 的選擇範圍，包括透過 recursive Make 繼承的命令列變數；
+  其他業務環境與工具可用性維持原狀。GNU Make harness 同時鎖住環境變數與
+  命令列變數兩條路徑，避免正常測試全跑、race 卻只跑到某個 shard。
 - **時間預算**：`make test` 與 `make test-race` 均使用 `-count=1 -timeout 45m`，
   normal 的預設 10 分鐘不足以完成安裝了 Ansible 的本機整合測試；`internal/spec`
   已長到超過原本的 30 分鐘上限（本機約 29.3 分鐘、CI runner 上更久），所以兩者
   都放寬到 45 分鐘，CI 的 `Go test` job 預算隨之是 60 分鐘。測試入口保留呼叫者的環境，不更動工具可用性或跳過條件。
 - **race detector**：`make test-race` 執行完整 race suite，CI 跑的就是這個 target。
 - **Python callback**：`make test-callback`。
+- **CI evidence-only 沿用**：同 repo、同 PR、同實際測試的 base parent，且 24 小時內已有完整成功
+  workflow 的 ancestor candidate，才可沿用 Go 與 playbook integration 結果。
+  raw candidate 到 PR HEAD 的差異只能是 `docs/evidence/**`，兩次 merge tree 的
+  差異也只能是 evidence（或空差異）。schema v2 receipt 記錄 frozen `GITHUB_SHA`
+  merge、tree、兩個實際 parent 與成功 run 的 attempt；merge 第二個 parent 必須
+  等於當次 PR head，checkout 必須等於 frozen merge。PR event 的原始 base 欄位
+  不能代替實際 base parent，移動中的 main ref 也不能代替當次測試輸入。
+  程式、依賴、workflow 或實際 base 改動都不沿用。舊 schema、缺少 merge object、沒有 receipt、
+  artifact 過期、API 失敗或不明狀態就跑完整 CI；不串接沿用結果。快速驗證仍會
+  重跑。這代表沿用既有成功結果，不保證浮動 runner／套件來源此刻完全相同。
+  PR 的首次完整驗證與 main／release 發布都照常執行。
+- **Playbook runtime suites**：alert rules、identity noop、SSH cache、secret 與
+  server pool 分別跑在獨立的 matrix jobs；映像發布仍依賴全部驗證成功。
 - **MCP server**（`pilot mcp serve`）：`cmd/pilot/cmd/mcp_edit_tools_test.go` /
   `mcp_test.go` 用真的 MCP client（非 mock handler）對編譯出的 `pilot` binary
   跑 capabilities/inspect/plan/apply 全流程,含 workspace revision 前後比對、
@@ -76,6 +93,51 @@ go run ./cmd/pilot vm-target test --name <vm> \
   `go run ./cmd/pilot mcp serve --dir <workspace> --allow-write` 起一個
   stdio server,再用任一 MCP client 送 tool call。
 
+### 1.1 Go CI 分片、權重與結果核對
+
+分片數與 package 契約的唯一設定是
+[ci-go-test-shards.json](scripts/ci-go-test-shards.json)。目前 spec/cmd 各兩個
+top-level shards，rest 一組；`changes` job 由此產生 matrix 與並行上限。
+package selector 使用 race build 的 package 清單，新增 package 自動進入 rest。
+callback、skill、duplicate-key 與 Go fixture 測試都只在唯一的 rest entry 執行。
+
+[ci-go-test-weights.json](scripts/ci-go-test-weights.json) 保存成功完整 race run
+量出的毫秒權重及來源 candidate/run/toolchain。LPT 依耗時降序分派，相同耗時按
+測試名稱、相同累積耗時按 shard index 決定；新增測試使用 1,000 ms 預設權重並
+列在報告，不需要手動補測試名稱。Example 與 Fuzz seeds 隨其 top-level 項目執行。
+
+以下入口已以實際 GNU Make、Python 與 Go fixture 執行；不啟動大型完整套件：
+
+```bash
+make ci-workflow-test
+make ci-go-runtime-test
+python3 scripts/ci-go-test-shards.py matrix
+GO_TEST_PACKAGES=./cmd/pilot/cmd GO_TEST_RUN_REGEX='^TestCIGoShardEvidence$' make test-race
+```
+
+`GO_TEST_RUN_REGEX` 是本機指定測試的入口，未設定時維持完整 package 行為；明確
+設定成空字串會失敗。CI 則依 discovery/manifest 產生 selector，同時混入本機
+selector 與 `CI_SHARD_INDEX` 或報告目錄會拒絕。
+
+每個 CI shard 的 artifact 保存原始 Go JSON、stderr、discovery、完整 partition
+與摘要，綁定 revision/tree、run/attempt、工具鏈及設定/權重 hash。
+`go-test-results` 重新讀取實際事件，驗證所有預定 tests/packages 恰好出現、每項
+有成功或合法 skip 結果，並確認同 group 的完整 partition 一致。缺少 artifact、
+混用 run、漏測或重複分派都會阻擋 image/receipt。原有強制 Ansible/root 入口仍
+依各自契約驗證，合法的 opt-in skip 保留名稱與原因。
+
+權重更新由 coding agent 取回成功完整 package 報告，交給工具的 `weights` 操作；
+可使用 baseline 或 shard 數為 1 的完整模式，不能將局部 shard 報告當成完整權重
+來源。工具會先重新核對 raw events，再產生權重檔，更新後提交新 candidate 並跑
+完整 CI。`summarize` 可合併同 run/attempt 的 Actions job/run metadata，區分排隊、
+準備、build、test、post-test 與 runner 分鐘；未取得的資料保留為缺失。
+
+回滾分片可將 spec/cmd 的 `shards` 改為 1，重新產生 matrix 並提交驗證；此模式
+不需要權重檔，仍保留完整 discovery/事件核對及發布 gate。若要退回導入前工具，
+須將 matrix、Makefile、結果 job、image dependencies 與對應契約測試一起還原。
+導入期間的完整/分片對照由 `compare` 操作核對同一 candidate 的 top-level、
+subtest verdict 與 skip 原因；完整對照 jobs 是暫時驗收成本，收斂時移除。
+
 ## 2. Pre-requisites
 
 ```bash
@@ -83,12 +145,19 @@ make test-prereq     # go / docker / ansible 一鍵檢查
 ./pilot doctor       # ansible 工具鏈 + vm-target（KVM/virt-customize）前置
 ```
 
-## 3. 交付前 SOP checklist（新增/修改功能一律照跑）
+## 3. 交付前 SOP checklist
+
+本地驗證依 [共用驗證流程](.agents/skills/_shared/local-validation.md) 建立本次
+candidate 的測試計畫：只跑受影響的 regression 與必要的 runtime checks，包含
+shared helper 的 importers。`cmd/pilot/cmd` 與 `internal/spec` 是大型套件，必須
+明確選擇 regression，不能因為修改其中一個測試就重跑整包。完整 normal/race
+套件由 CI 負責；使用者明確要求或 CI 不可用時才在本地擴大，並記錄理由。
+角色檔案檢查與實際啟動確認也使用同一份流程，避免到昂貴驗證階段才發現角色不可用。
 
 ```bash
 go build ./...                      # 1) 編譯
 go vet ./...                        # 2) 靜態分析
-make test-all                      # 3) 依序跑完整 normal 與 race，任一失敗即停止
+# 3) 執行本次 candidate 測試計畫選定的 regression，完整套件結果由 CI 確認
 make playbook-lint                  # 4) playbook 有動的話
 # 5) spec/playbook 有動的話：vm-target test 真跑一輪（見 AGENTS.md §1.4）
 ```

@@ -1,0 +1,33 @@
+---
+# Controller-side orchestration uses only existing inventory connections.
+# This diagnostic intentionally emits one real Wazuh alert per invocation.
+- name: Generate a fresh Wazuh delivery challenge across the selected hosts
+  hosts: "{{ wazuh_delivery_manager_group | default('wazuh-manager') }}"
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Require one explicit receiver and one manager for this challenge
+      ansible.builtin.assert:
+        that:
+          - groups.get(wazuh_delivery_receiver_group | default('log-server'), []) | length == 1
+          - ansible_play_hosts_all | length == 1
+      run_once: true
+
+    - name: Create a unique private receiver challenge without a success receipt
+      ansible.builtin.command:
+        argv:
+          - /usr/local/libexec/pilot-wazuh-delivery
+          - challenge
+          - "{{ hostvars[wazuh_delivery_receiver].siem_log_root | default('/var/log/siem', true) }}"
+          - "{{ ansible_hostname }}"
+      vars:
+        wazuh_delivery_receiver: "{{ (groups.get(wazuh_delivery_receiver_group | default('log-server'), []) + [inventory_hostname]) | first }}"
+      delegate_to: "{{ wazuh_delivery_receiver }}"
+      register: wazuh_delivery_challenge
+      # A diagnostic challenge is ephemeral evidence, not deployed configuration.
+      changed_when: false
+
+    - name: Emit a real alert through the already monitored active-responses.log and wait for alerts.json
+      ansible.builtin.command:
+        argv: [/usr/local/libexec/pilot-wazuh-delivery, inject, "{{ wazuh_delivery_challenge.stdout }}"]
+      changed_when: false

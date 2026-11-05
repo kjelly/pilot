@@ -359,7 +359,7 @@ func TestRosterLintCmd_EncryptedRosterReportsAClearError(t *testing.T) {
 	defer rootCmd.SetArgs(nil)
 
 	err := rootCmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "ansible-vault encrypted") {
-		t.Fatalf("Execute() error = %v, want an ansible-vault-encrypted message", err)
+	if err == nil || !strings.Contains(err.Error(), "ansible-vault encrypted") || !strings.Contains(err.Error(), "--vault-password-file") {
+		t.Fatalf("Execute() error = %v, want an ansible-vault-encrypted message pointing at --vault-password-file", err)
 	}
 }

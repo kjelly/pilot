@@ -62,6 +62,7 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/factcache"
+	"github.com/kjelly/pilot/internal/services"
 	"github.com/kjelly/pilot/internal/sshcontrol"
 	"github.com/kjelly/pilot/internal/statefile"
 	"github.com/kjelly/pilot/internal/targetalias"
@@ -87,9 +88,11 @@ const stateVersion = 1
 
 // Target describes one libvirt domain that pilot is using as a target host.
 type Target struct {
-	Name      string `json:"name"` // libvirt domain name AND ansible inventory host key
-	BaseImage string `json:"base_image"`
-	Status    Status `json:"status"`
+	// ServiceConsumer persists beyond CLI exit and is released only after verified teardown.
+	ServiceConsumer *services.Consumer `json:"service_consumer,omitempty"`
+	Name            string             `json:"name"` // libvirt domain name AND ansible inventory host key
+	BaseImage       string             `json:"base_image"`
+	Status          Status             `json:"status"`
 	// MAC is deterministically derived from Name so the same target
 	// always claims the same address from the network's DHCP pool.
 	MAC string `json:"mac"`
@@ -450,12 +453,22 @@ const DefaultVCPUs = 2
 const DefaultMemoryMB = 2048
 
 func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
+	if opt.Services != nil {
+		if err := opt.Services.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	if opt.Name == "" {
 		return nil, errors.New("vmtarget: name is required")
 	}
 	if !validName(opt.Name) {
 		return nil, fmt.Errorf("vmtarget: invalid name %q (want [a-zA-Z0-9_.-]+)", opt.Name)
 	}
+	unlockDomain, err := services.LockConsumerDomain(ctx, opt.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockDomain()
 	baseAbs, err := m.PrepareBaseImage(ctx, opt.BaseImage)
 	if err != nil {
 		return nil, fmt.Errorf("vmtarget: prepare base image: %w", err)
@@ -533,6 +546,9 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 		CreatedAt:   now,
 		StartedAt:   now,
 	}
+	if err = m.registerServiceConsumer(ctx, tg, opt.Services); err != nil {
+		return nil, fmt.Errorf("vmtarget: register service consumer: %w", err)
+	}
 
 	// Reserve the name in state BEFORE creating any on-disk or libvirt
 	// artifact, under the cross-process lock. This is the authoritative
@@ -580,7 +596,14 @@ func (m *Manager) Up(ctx context.Context, opt Options) (*Target, error) {
 				})
 				return
 			}
-			m.teardown(ctx, tg)
+			if tg.ServiceConsumer != nil {
+				if cleanupErr := m.teardownServiceConsumer(ctx, tg); cleanupErr != nil {
+					slog.Warn("service consumer cleanup unverified; retaining target and registration", "target", tg.Name, "err", cleanupErr)
+					return
+				}
+			} else {
+				m.teardown(ctx, tg)
+			}
 			_ = m.store.Mutate(func(targets []Target) ([]Target, error) {
 				out := targets[:0]
 				for _, existing := range targets {
@@ -1067,6 +1090,10 @@ func (m *Manager) teardown(ctx context.Context, t *Target) {
 	// the overlay, which RemoveAll below discards anyway.
 	_, _ = m.virsh(ctx, "undefine", t.Name,
 		"--snapshots-metadata", "--managed-save", "--nvram") // ignore "not found"
+	m.cleanupTargetArtifacts(ctx, t)
+}
+
+func (m *Manager) cleanupTargetArtifacts(ctx context.Context, t *Target) {
 	if err := m.removeStaticIP(ctx, t); err != nil {
 		slog.Warn("failed to remove static IP reservation", "target", t.Name, "err", err)
 	}
@@ -1098,6 +1125,11 @@ func (m *Manager) Down(ctx context.Context, name string) error {
 	if name == "" {
 		return errors.New("vmtarget: name is required")
 	}
+	unlockDomain, err := services.LockConsumerDomain(ctx, name)
+	if err != nil {
+		return err
+	}
+	defer unlockDomain()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1120,7 +1152,13 @@ func (m *Manager) Down(ctx context.Context, name string) error {
 	// running domain); the record is then dropped under the lock via
 	// Mutate so a concurrent writer's entries are never clobbered. If the
 	// record vanished in between (a racing Down), removal is a no-op.
-	m.teardown(ctx, found)
+	if found.ServiceConsumer != nil {
+		if err := m.teardownServiceConsumer(ctx, found); err != nil {
+			return err
+		}
+	} else {
+		m.teardown(ctx, found)
+	}
 	return m.store.Mutate(func(targets []Target) ([]Target, error) {
 		out := targets[:0]
 		for _, t := range targets {

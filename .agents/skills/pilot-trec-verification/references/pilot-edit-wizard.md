@@ -3,8 +3,9 @@
 > Reference for the `pilot-trec-verification` skill.
 > Read before authoring or changing any `pilot edit` drive script.
 > Covers CI=1, text-field pre-fill, the vault/group_vars cursor reset, the
-> single-keypress y/n change, the nested-YAML exception, `inventory generate`
-> backfill, the `host_vars/` editor, and the top-menu / roster / freeipa-dns items.
+> single-keypress y/n change, the vault editor's nested-YAML refusal,
+> `inventory generate` backfill, the `host_vars/` editor, the top-menu /
+> freeipa-dns items, and the roster editor with its few hand-edit exceptions.
 
 Every normative rule below also appears as a one-line entry in
 `../SKILL.md`'s rules table; the detail here is the evidence behind it.
@@ -83,13 +84,15 @@ its default before your script's own steps for that screen ever run. Send just
 `n` (or `y`) and move on to the next `EXPECT`.
 `[live 2026-07-17: derailed a `pilot deploy` preflight-mode select this way]`
 
-## The vault editor refuses nested-structure YAML — a real exception
+## The vault editor refuses nested-structure YAML — not a licence to hand-edit
 
-`pilot edit`'s vault editor explicitly declines 「複雜 YAML（例如
-roster/list/nested map）」 and tells you to use a text editor. That is a
-legitimate, tool-endorsed exception to "no hand-edited YAML" — but **only** for
-files the tool itself declines. Everything the wizard *will* edit (scalar vault
-entries, `hosts.yml`, `group_vars`) must still go through it.
+`pilot edit`'s `.vault/` editor declines 「複雜 YAML（例如
+roster/list/nested map）」 and suggests a text editor (`edit_tui_vault.go`).
+For a FreeIPA roster that refusal is not the way in: the top-menu `roster`
+item has its own editor (last section of this file). Everything the wizard edits —
+scalar vault entries, `hosts.yml`, `group_vars/`, `host_vars/`, the roster
+fields listed below — must go through it. Hand-edit only what no screen
+covers, and name the reason in the evidence record.
 
 ## `pilot inventory generate --dir <path>` backfills and scaffolds
 
@@ -111,8 +114,7 @@ Don't hand-write `host_vars/*.yml` for a key this screen covers — use the wiza
 
 ## Top-menu items beyond hosts/group_vars/vault
 
-- `roster` — append-only FreeIPA Users/Groups CRUD against a canonical roster
-  (see below).
+- `roster` — the canonical FreeIPA roster editor (see the last section).
 - `freeipa-dns manifest` (`cmd/pilot/cmd/edit_tui_dns.go`) — append/edit CRUD
   for `docs/specs/freeipa-dns.md`'s DNS zones/records manifest: zone
   state/records_mode/split-horizon-ack, and A/AAAA/CNAME records including a
@@ -137,40 +139,97 @@ re-verify against the live item list (`PILOT_DEBUG_MENU=1`, or an MCP
 an old transcript. `SELECT` needs the Huh `--pointer`
 described in `select-labels.md`.
 
-## The FreeIPA identity roster is no longer 100% hand-authored
+## The FreeIPA identity roster: use the `roster` editor
 
-Two features cover part of it, narrowing but not eliminating the nested-YAML
-hand-edit exception. `[live 2026-07-25, round 16]`
+`[re-checked against source 2026-10-31; rows below not yet re-driven live]`
 
-**NFS-role-add bootstrap** (`edit_tui.go`'s `pushNFSRoleBootstrap`): the moment
-a host's role checklist (or a role preset/copy-roles action) newly checks
-`freeipa-nfs-server` and that host has no `freeipa_roster_file` yet, the wizard
-auto-derives `<workspace>/.vault/ipa-identity.yaml`, sets that host's
-`freeipa_roster_file` extra var to it, prompts once for the FreeIPA admin
-password (masked `EchoPassword` input — never appears in a
-`--secret-env`/`--secret-file`-protected recording), and writes a *minimal*
-roster: `schema_version: 1`, `freeipa.admin.{principal, password}`, and one
-`nfs.servers` entry for that host with `shares: []`. It also creates/fills
-`.vault/main.yaml`'s `ipa_admin_password` from the same value, never clobbering
-an existing non-`CHANGE-ME` one. Fires only for `freeipa-nfs-server`, never
-`freeipa-nfs-client`.
+Top menu `roster — FreeIPA users/groups/sudo(...)` asks for
+`Roster 檔路徑(canonical FreeIPA roster)`, default
+`<dir>/.vault/ipa-identity.yaml`. A missing file gets an offer to create a
+minimal skeleton, and an older schema is upgraded automatically with a backup
+(`pushRosterManager`, `edit_tui_roster.go`). The `管理 <path>` menu:
 
-**Roster manager** (top-menu `roster` → `👤 Users` / `👥 Groups`): append-only.
-Adding a user writes only `{name, state: present}`; adding a group writes only
-`{name, state: present, category}` (category from a 4-way picker —
-`team-`/`data-`/`access-`/`role-`, matching the runbook §2 prefix rule). Both
-dry-run against the roster validator first and refuse, showing the violation,
-rather than writing anything invalid.
+| Item | What it edits | Code |
+|---|---|---|
+| `👤 Users` | `➕ 新增 User`; per field: `state` (`present`/`disabled`), `first`, `last`, `display_name`, `email`, `uid`, `gid`, `login_shell`, `home_directory`, `enabled`, `password.initial` (masked), `password.force_change`, `password.preserve_existing`, `ssh_keys.values` (add/modify/remove; writes `authoritative: true`), `authentication.allowed` | `pushRosterUserDetail` |
+| `👥 Groups` | add (category `team-*`/`data-*`/`role-*`, then name); `type`, `description`, `gid`, `membership.authoritative`, `membership.users`, `membership.groups` | `pushRosterGroupDetail` |
+| `🔐 Host access` | `Hostgroups` (add; `description`, `membership.hosts`, `membership.hostgroups`); `HBAC rules` (add; `subjects.groups`, `subjects.users`, `targets.hostgroups`, `targets.hosts`, `services`; `🗑  Delete login rule` sets `state: absent`, `♻️  Restore login rule` undoes it); the `hbac.disable_allow_all` toggle | `edit_tui_roster_access.go` |
+| `🛡️  Sudo commands & rules` | `Command groups` (add; `commands`); `Sudo rules` (add; `subjects.groups`, `allow.command_category`, `allow.command_groups`, `allow.commands`) | `edit_tui_roster_sudo.go` |
+| `🏛️  Access governance` | `🔑 Static HBAC` (the HBAC editor above), `⏳ Grants` (`temporary_grant`/`sudo_grant`/`breakglass`: add, per-field edit, `state` present/absent), `🚨 Break-glass` activate/deactivate/history, `🔍 Explain access` (read-only) | `edit_tui_roster_grants.go`, `edit_tui_roster_breakglass.go` |
+| `🔒 Identity hardening` | `🔑 Password policies`, `🗝️  Credential policies (SSH hygiene)` (add, fields, `state`), `🛡️  Privileged identity baseline`, `🩺 Hygiene report (read-only)` | `edit_tui_identity_hardening.go` |
 
-Neither screen can set membership, passwords, `ssh_keys`, HBAC/sudo rules,
-hostgroups, or NFS shares/exports — those still need a hand edit under the
-tool-endorsed exception above. `./pilot roster lint <file>` validates a
-hand-edited roster against the same rules the apply playbook enforces, without
-a live target.
+Every write is checked by the roster validator first and refused, showing the
+violation, rather than writing anything invalid. A valid write lands on disk at
+once; there is no separate save step, so the `✅` banner is the save
+confirmation. Still read the roster back afterwards (rule 6). The roster
+screens refuse an ansible-vault-encrypted roster
+(`⚠️  roster 已加密，無法在這裡預覽/編輯 users；…`); keep a disposable
+workspace's roster plaintext, as the wizard writes it.
 
-**Every user needs an explicit `ssh_keys: { authoritative: true, values: [...] }`
-block added by hand before a real `freeipa-identity` reconcile, even if the list
-is empty.** A user with no `ssh_keys` field crashes
-`freeipa-identity-apply.yml`'s user-normalization task on `ansible-core 2.19.x`.
-Suspected playbook bug, not a trec-driver issue — full writeup in
-`docs/runbooks/minimal-poc-architecture.md` §6.
+Two more roster writes happen without the `roster` menu:
+
+- **NFS-role-add bootstrap** (`edit_tui.go`'s `pushNFSRoleBootstrap`): when a
+  host's role checklist (or a role preset/copy-roles action) newly checks
+  `freeipa-nfs-server` and that host has no `freeipa_roster_file`, the wizard
+  sets it to `<workspace>/.vault/ipa-identity.yaml`. If that file is missing it
+  writes a minimal roster at the current schema: `freeipa.admin.{principal,
+  password}`, empty `netgroups`/`grants`, and one `nfs.servers` entry for the
+  host with `shares: []`. The admin password is reused from `.vault/main.yaml`
+  when it already holds a real one, otherwise a masked prompt asks once; a
+  missing `.vault/main.yaml` is created, and an empty or `CHANGE-ME`
+  `ipa_admin_password` in it is filled, from the same value. If the roster exists, a
+  missing `nfs.servers` entry is appended instead (`autofixNFSRosterEntry`).
+  Never fires for `freeipa-nfs-client`.
+- **Admin password sync**: changing `ipa_admin_password` in `.vault/main.yaml`
+  through the `.vault/` editor also updates `freeipa.admin.password` in the
+  rosters under the workspace's `.vault/`; a roster it cannot update is listed
+  as not synced (AGENTS.md §5.7, `edit_tui_vault_roster_sync.go`).
+
+A user without an `ssh_keys` field, which is what `➕ 新增 User` writes, is
+fine. `freeipa-identity-apply.yml` has handled it since round 16 (`792c8bcb`),
+so do not hand-add an empty `ssh_keys` block. Add keys with `ssh_keys.values`.
+
+### The only roster hand edits: what no screen covers
+
+Hand-edit only these, record each one and its reason in the evidence record,
+and run `./pilot roster lint <roster-file>` afterwards. It checks the same
+rules `freeipa-identity-apply.yml` enforces, without a live target.
+
+- **`netgroups`** — no screen; the only `netgroup` match in
+  `cmd/pilot/cmd/edit_tui*.go` is a code comment.
+- **NFS shares and clients**: `nfs.servers[].shares[]` (exports, ownership,
+  ACL, automount) and `nfs_clients`. The bootstrap above writes `shares: []`
+  and nothing edits them; `edit_tui_roster.go`'s header lists `nfs_clients` as
+  out of scope.
+- **An HBAC rule's `targets.hostcat` and `enabled`.** New rules get explicit
+  `hosts`/`hostgroups` and `enabled: true` (`pushRosterAddHBACServices`), and
+  editing targets deletes `hostcat` (`pushRosterHBACTargets`,
+  `pushRosterHBACHosts`). So the admin break-glass rule that
+  `hbac.disable_allow_all` requires (`subjects.users: [admin]`,
+  `targets.hostcat: all`, enabled; `freeipa-identity-apply.yml`'s
+  `Gate: enabled admin break-glass rule exists`) is a hand edit. Add it before
+  you flip the toggle.
+- **A sudo rule's `options`** (for example `!authenticate`), **`subjects.users`,
+  `targets`, `deny`, `run_as` and `enabled`.** `newRosterSudoRule` writes
+  `options: []`, `hostcat: all`, `run_as.users: [root]` and `enabled: true`;
+  `pushRosterSudoRuleDetail` edits only `subjects.groups` and the three
+  `allow.*` fields.
+- **Removing users, groups, hostgroups, sudo rules and command groups.** The
+  user `state` picker offers only `present`/`disabled`
+  (`rosterUserStateChoices`), a group's `state` is shown read-only, and the
+  other three have no delete. For a user or group never applied to FreeIPA,
+  use `pilot roster remove-user`/`remove-group` instead of editing; they
+  refuse an entry FreeIPA shows was ever applied.
+- **`freeipa.*` apart from `admin.password`** (`admin.principal`, `server`,
+  `defaults`, `safety`). If `freeipa.admin.password` already differs from the
+  vault, the sync above does not repair it; AGENTS.md §5.7 names a hand edit of
+  the roster as the fix (`TestFreeIPARosterDriftRecoveryIsAHandEdit`).
+- **`auth_policies`, `account_policies`, `security.grant_policies`,
+  `security.conflicts`, `policy_exceptions` and `migration`** — no screen
+  (`edit_tui_roster_grants.go`'s header: no roster CRUD primitives yet). A
+  credential policy's `review` decisions go through `pilot identity review`,
+  not an edit.
+- **Roster `hosts[]` entries other than `freeipa-client` hosts.** The manager
+  adds an entry, with `ansible_host` as `ip_address`, for every `hosts.yml`
+  host tagged `freeipa-client` (`AutoFillFreeIPAClientRosterHosts`); no screen
+  adds other hosts or edits an entry.

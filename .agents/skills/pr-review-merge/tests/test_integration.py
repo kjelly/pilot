@@ -26,6 +26,13 @@ if a[:2] == ['pr', 'view']:
     d['view_count'] = d.get('view_count', 0) + 1
     if d.get('race_on_view') == d['view_count']:
         d['view']['headRefOid'] = 'c'*40
+    names = d.get('base_name_on_view', {})
+    count = str(d['view_count'])
+    if count in names:
+        if names[count] is None:
+            d['view'].pop('baseRefName', None)
+        else:
+            d['view']['baseRefName'] = names[count]
     emit(d['view'])
 if a[:2] == ['pr', 'checks']:
     persist()
@@ -41,8 +48,28 @@ if a[0] == 'api' and '/rules/branches/' in a[-1]:
     if d.get('rules_error'):
         print('rules denied', file=sys.stderr); persist(); sys.exit(1)
     emit([d.get('rules', [])])
+if a[0] == 'api' and '/git/ref/heads/' in a[-1]:
+    d['ref_count'] = d.get('ref_count', 0) + 1
+    if d.get('ref_error'):
+        persist(); print('ref unavailable', file=sys.stderr); sys.exit(1)
+    if d.get('race_on_ref') == d['ref_count']:
+        d['live_base'] = 'd'*40
+    emit({'object': {'type': 'commit', 'sha': d.get('live_base', d['view']['baseRefOid'])}})
 if a[0] == 'api' and '/pulls?' in a[-1]:
     emit(d.get('pages', []))
+if a[0] == 'api' and '/compare/' in a[-1] and a[-1] not in d.get('api', {}):
+    if d.get('ancestry_error'):
+        persist(); print('comparison unavailable', file=sys.stderr); sys.exit(1)
+    base, head = a[-1].split('/compare/')[1].split('...')
+    aligned = d.get('ancestor', True)
+    emit({'status': 'ahead' if aligned else 'diverged', 'behind_by': 0 if aligned else 1,
+          'merge_base_commit': {'sha': base if aligned else 'e'*40}})
+if a[0] == 'api' and ('/contents/' in a[-1] or '/compare/' in a[-1]):
+    # Answers recorded from real `gh api` calls (fixtures/github_api.json); anything else is
+    # GitHub's real 404 for a path or commit it does not have.
+    d.setdefault('api_calls', []).append(a[-1])
+    answer = d.get('api', {}).get(a[-1], d['not_found'])
+    persist(); sys.stdout.write(answer['stdout']); sys.stderr.write(answer['stderr']); sys.exit(answer['rc'])
 if a[:2] == ['pr', 'comment']:
     if d.get('fail_comment'):
         persist(); print('comment denied', file=sys.stderr); sys.exit(1)
@@ -79,13 +106,17 @@ def evidence():
             'no_ci_rationale':''}
 
 
+GITHUB_API = json.loads((ROOT / 'tests' / 'fixtures' / 'github_api.json').read_text())
+
+
 def fixture():
     return {'view': {'number':42, 'url':'https://github.com/acme/demo/pull/42',
                      'state':'OPEN', 'isDraft':False, 'headRefOid':HEAD, 'baseRefOid':BASE,
                      'baseRefName':'main', 'mergeable':'MERGEABLE', 'mergeStateStatus':'CLEAN',
                      'reviewDecision':'APPROVED', 'autoMergeRequest':None},
             'checks':[{'name':'unit','bucket':'pass','state':'SUCCESS','link':'https://example.com'}],
-            'rules':[], 'threads':0}
+            'rules':[], 'threads':0, 'api': {},
+            'not_found': GITHUB_API['contents']['manifest_absent_at_d013ed95']}
 
 
 class Integration(unittest.TestCase):
@@ -98,8 +129,15 @@ class Integration(unittest.TestCase):
         (self.bin / 'gh').chmod(0o755)
         self.fixture_file = self.path / 'fixture.json'; self.fixture_file.write_text(json.dumps(fixture()))
         self.evidence_file = self.path / 'evidence.json'; self.evidence_file.write_text(json.dumps(evidence()))
+        # The actor's repository flock lives under PRM_STATE_DIR (default ~/.cache/pr-review-merge).
+        # A per-test directory keeps overlapping test runs from contending for the user's real lock.
+        state = str(self.path / 'state')
         self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ.get('PATH','')}",
-                        MOCK_GH_DATA=str(self.fixture_file))
+                        MOCK_GH_DATA=str(self.fixture_file), PRM_STATE_DIR=state)
+        previous = os.environ.get('PRM_STATE_DIR')
+        os.environ['PRM_STATE_DIR'] = state
+        self.addCleanup(lambda: os.environ.__setitem__('PRM_STATE_DIR', previous) if previous is not None
+                        else os.environ.pop('PRM_STATE_DIR', None))
 
     def state(self):
         return json.loads(self.fixture_file.read_text())
@@ -157,6 +195,167 @@ class Integration(unittest.TestCase):
         calls=[a[1] for a in d['calls'] if a[0]=='pr' and a[1] in ('comment','ready','merge')]
         self.assertEqual(calls,['comment','ready'])
 
+    def test_base_mismatch_comments_then_drafts_without_review(self):
+        self.patch(live_base='c'*40)
+        self.evidence_file.write_text('{}')
+        proc, out = self.actor(execute=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out['outcome'], 'DRAFT-BLOCKED')
+        d = self.state()
+        self.assertTrue(d['view']['isDraft'])
+        self.assertIn(BASE, d['comments'][0])
+        self.assertIn('c'*40, d['comments'][0])
+        self.assertIn('pr-ready', d['comments'][0])
+        writes = [a[1] for a in d['calls'] if a[:2] in
+                  (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])]
+        self.assertEqual(writes, ['comment', 'ready'])
+
+    def test_base_mismatch_comment_failure_preserves_ready(self):
+        self.patch(live_base='c'*40, fail_comment=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_behind_head_comments_then_drafts_without_review(self):
+        self.patch(ancestor=False)
+        self.evidence_file.write_text('{}')
+        proc, out = self.actor(execute=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(out['outcome'], 'DRAFT-BLOCKED')
+        d = self.state()
+        self.assertTrue(d['view']['isDraft'])
+        self.assertIn(HEAD, d['comments'][0])
+        self.assertIn(BASE, d['comments'][0])
+        self.assertIn('pr-ready', d['comments'][0])
+        writes = [a[1] for a in d['calls'] if a[:2] in
+                  (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])]
+        self.assertEqual(writes, ['comment', 'ready'])
+
+    def test_behind_head_comment_failure_preserves_ready(self):
+        self.patch(ancestor=False, fail_comment=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_ancestry_unavailable_never_mutates(self):
+        self.patch(ancestry_error=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'WAITING')
+        self.assertFalse(self.state().get('comments'))
+
+    def test_base_moves_after_ancestry_gate_never_mutates(self):
+        self.patch(ancestor=False, race_on_ref=3)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state().get('comments'))
+        self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_head_repaired_during_comment_prevents_draft(self):
+        self.patch(ancestor=False, race_on_view=4)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertTrue(self.state().get('comments'))
+        self.assertFalse(self.state()['view']['isDraft'])
+        self.assertFalse(any(a[:2] == ['pr', 'ready'] for a in self.state()['calls']))
+
+    def test_base_ref_unavailable_never_mutates(self):
+        self.patch(ref_error=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'WAITING')
+        self.assertFalse(self.state().get('comments'))
+
+    def test_base_moves_after_mismatch_gate_never_mutates(self):
+        self.patch(live_base='c'*40, race_on_ref=3)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state().get('comments'))
+        self.assertFalse(self.state()['view']['isDraft'])
+
+    def test_base_name_changes_before_action_never_write(self):
+        # Both branch names resolve to the same live SHA. Only branch identity changes.
+        for mode in ('base_mismatch', 'base_behind', 'merge', 'semantic_draft'):
+            for name in ('release', None, '', 7):
+                with self.subTest(mode=mode, name=name):
+                    d = fixture()
+                    if mode == 'base_mismatch':
+                        d['live_base'] = 'c'*40
+                    if mode == 'base_behind':
+                        d['ancestor'] = False
+                    if mode == 'semantic_draft':
+                        d['checks'][0]['bucket'] = 'fail'
+                    d['base_name_on_view'] = {'3': name}
+                    self.fixture_file.write_text(json.dumps(d))
+                    self.evidence_file.write_text('{}' if mode.startswith('base_') else json.dumps(evidence()))
+                    proc, out = self.actor(execute=True)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertEqual(out['outcome'], 'ERROR')
+                    self.assertIn('changed immediately before action', out['error'])
+                    self.assertFalse(out['executed'])
+                    state = self.state()
+                    self.assertFalse(state['view']['isDraft'])
+                    self.assertEqual(state['view']['state'], 'OPEN')
+                    self.assertFalse(any(a[:2] in (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])
+                                         for a in state['calls']))
+
+    def test_base_name_changes_during_confirmation_wait_without_writes(self):
+        for mode in ('base_mismatch', 'base_behind'):
+            with self.subTest(mode=mode):
+                d = fixture()
+                if mode == 'base_mismatch':
+                    d['live_base'] = 'c'*40
+                else:
+                    d['ancestor'] = False
+                d['base_name_on_view'] = {'2': 'release'}
+                self.fixture_file.write_text(json.dumps(d))
+                self.evidence_file.write_text('{}')
+                proc, out = self.actor(execute=True)
+                self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                self.assertEqual(out['outcome'], 'WAITING')
+                self.assertIn('changed while confirming', ' '.join(out['gate']['reasons']))
+                self.assertFalse(any(a[:2] in (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])
+                                     for a in self.state()['calls']))
+
+    def test_base_name_changes_during_final_gate_wait_without_writes(self):
+        for fail_ci in (False, True):
+            for name in ('release', None, '', 7):
+                with self.subTest(fail_ci=fail_ci, name=name):
+                    d = fixture()
+                    d['base_name_on_view'] = {'2': name}
+                    if fail_ci:
+                        d['checks'][0]['bucket'] = 'fail'
+                    self.fixture_file.write_text(json.dumps(d))
+                    proc, out = self.actor(execute=True)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertEqual(out['outcome'], 'WAITING')
+                    self.assertIn('changed during live gate', ' '.join(out['gate']['reasons']))
+                    self.assertFalse(any(a[:2] in (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])
+                                         for a in self.state()['calls']))
+
+    def test_base_name_changes_after_comment_prevent_draft(self):
+        for mode in ('base_mismatch', 'base_behind', 'semantic_draft'):
+            for name in ('release', None, '', 7):
+                with self.subTest(mode=mode, name=name):
+                    d = fixture()
+                    if mode == 'base_mismatch':
+                        d['live_base'] = 'c'*40
+                    if mode == 'base_behind':
+                        d['ancestor'] = False
+                    if mode == 'semantic_draft':
+                        d['checks'][0]['bucket'] = 'fail'
+                    d['base_name_on_view'] = {'4': name}
+                    self.fixture_file.write_text(json.dumps(d))
+                    self.evidence_file.write_text('{}' if mode.startswith('base_') else json.dumps(evidence()))
+                    proc, out = self.actor(execute=True)
+                    self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+                    self.assertEqual(out['outcome'], 'ERROR')
+                    self.assertIn('changed after comment', out['error'])
+                    self.assertTrue(out['comment_posted'])
+                    self.assertFalse(out['executed'])
+                    self.assertFalse(self.state()['view']['isDraft'])
+                    writes = [a[1] for a in self.state()['calls'] if a[:2] in
+                              (['pr', 'comment'], ['pr', 'ready'], ['pr', 'merge'])]
+                    self.assertEqual(writes, ['comment'])
+
     def test_failed_ci_draft(self):
         self.patch(checks=[{'name':'lint','state':'FAILURE','bucket':'fail'}])
         proc,out=self.actor(execute=True)
@@ -209,6 +408,13 @@ class Integration(unittest.TestCase):
         self.assertEqual(out['outcome'],'ERROR')
         self.assertFalse(any(a[:2]==['pr','merge'] for a in self.state()['calls']))
 
+    def test_base_moves_during_successful_ancestry_check_never_mutates(self):
+        self.patch(race_on_ref=2)
+        _, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'WAITING')
+        self.assertFalse(self.state().get('comments'))
+        self.assertFalse(any(a[:2] == ['pr', 'merge'] for a in self.state()['calls']))
+
     def test_draft_comment_failure_prevents_downgrade(self):
         self.patch(fail_comment=True, checks=[{'name':'unit','state':'FAILURE','bucket':'fail'}])
         proc,out=self.actor(execute=True)
@@ -226,6 +432,72 @@ class Integration(unittest.TestCase):
         proc,out=self.actor(execute=True)
         self.assertEqual(out['outcome'],'WAITING')
         self.assertFalse(any(a[:2]==['pr','merge'] for a in self.state()['calls']))
+
+    def test_actor_lock_stays_in_the_test_state_dir(self):
+        proc, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'MERGED', proc.stderr)
+        self.assertTrue(any((self.path / 'state' / 'locks').glob('*.lock')))
+
+    # kjelly/pilot PR #177's tail, as GitHub answered it: candidate 2d70670 plus the evidence-only
+    # commit 1262c6a7 that records its run, against a base (main at fdb6f03e) whose
+    # .github/pr-evidence.json requires the actual-run record.
+    CAPTURED_HEAD = '1262c6a7ba7fcd83326165c3e05647c62129b9c8'
+    CAPTURED_BASE = 'fdb6f03e9152de5e48dc6b9870cab2d050bf962e'
+    CANDIDATE = '2d70670935bdfe8b3ac5fbbb337ce6e5b0c874c5'
+    RECORD = 'docs/evidence/os-patch-sla/2026-10-29-2d70670.md'
+
+    def use_captured_pr(self, target_validation):
+        head, base, api = self.CAPTURED_HEAD, self.CAPTURED_BASE, GITHUB_API
+        d = self.state()
+        d['view'].update(headRefOid=head, baseRefOid=base)
+        d['api'] = {
+            f'repos/acme/demo/contents/.github/pr-evidence.json?ref={base}': api['contents']['manifest_at_fdb6f03e'],
+            f'repos/acme/demo/contents/{self.RECORD}?ref={head}': api['contents']['evidence_record'],
+            f'repos/acme/demo/compare/{self.CANDIDATE}...{head}': api['compare']['ahead_evidence_only'],
+            f'repos/acme/demo/compare/d013ed95cf65216a40deefcc2de9c6a4dd57f4ef...{head}': api['compare']['ahead_with_code'],
+        }
+        self.fixture_file.write_text(json.dumps(d))
+        e = evidence()
+        e.update(head_sha=head, base_sha=base)
+        e['tests'][0]['sha'] = head
+        if target_validation is not None:
+            e['target_validation'] = target_validation
+        self.evidence_file.write_text(json.dumps(e))
+
+    def captured_record(self, **extra):
+        tv = {'decision': 'required', 'artifact': self.RECORD, 'tested_revision': self.CANDIDATE,
+              'reason': 'Changes playbooks/apply/os-patch-sla-apply.yml (AGENTS.md 1.4 actual-run rule)'}
+        tv.update(extra)
+        return tv
+
+    def test_captured_pr_with_its_record_merges(self):
+        self.use_captured_pr(self.captured_record())
+        proc = self.script('review_gate.py', '--pr', '42', '--evidence', str(self.evidence_file))
+        out = json.loads(proc.stdout)
+        self.assertEqual(out['decision'], 'MERGE', out['reasons'])
+        self.assertEqual([self.CANDIDATE], [d['from'] for d in out['target_validation']['delta_accepted']])
+        calls = self.state()['api_calls']
+        self.assertIn(f'repos/acme/demo/contents/.github/pr-evidence.json?ref={self.CAPTURED_BASE}', calls)
+        self.assertNotIn(f'repos/acme/demo/contents/.github/pr-evidence.json?ref={self.CAPTURED_HEAD}', calls)
+
+    def test_captured_pr_without_a_record_is_not_merged(self):
+        self.use_captured_pr(None)
+        proc, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'WAITING', proc.stderr)
+        self.assertIn("requires the 'actual-run' record", ' '.join(out['gate']['reasons']))
+        self.assertFalse(any(a[:2] in (['pr', 'merge'], ['pr', 'comment'], ['pr', 'ready'])
+                             for a in self.state()['calls']))
+
+    def test_captured_pr_record_of_an_older_candidate_waits(self):
+        self.use_captured_pr(self.captured_record(tested_revision='d013ed95cf65216a40deefcc2de9c6a4dd57f4ef'))
+        proc = self.script('review_gate.py', '--pr', '42', '--evidence', str(self.evidence_file))
+        self.assertEqual(proc.returncode, 1)
+        reasons = ' '.join(json.loads(proc.stdout)['reasons'])
+        self.assertIn('does not cover HEAD', reasons)
+        self.assertIn('playbooks/apply/os-patch-sla-apply.yml', reasons)
+        # The record names d013ed9 as its baseline, so naming a SHA alone does not bind it: the
+        # ancestry and evidence-only delta check is what refuses this.
+        self.assertNotIn('does not name the tested revision', reasons)
 
     def test_ready_inventory_paginated(self):
         ready = {'number':42,'state':'open','draft':False,'html_url':'https://github.com/acme/demo/pull/42',

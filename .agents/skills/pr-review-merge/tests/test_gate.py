@@ -37,6 +37,28 @@ class Fake:
         self.r = []
         self.t = 0
         self.counter = 0
+        # {(path, ref): bytes}; no entry is GitHub's 404, so no .github/pr-evidence.json.
+        self.files = {}
+        # {(base, head): compare result as gh_runtime.compare returns it}
+        self.compares = {}
+        self.calls = []
+        self.live_base = B
+        self.ancestor = True
+
+    def is_ancestor(self, repo, base, head):
+        self.calls.append(('is_ancestor', base, head))
+        return self.ancestor
+
+    def branch_head(self, repo, branch):
+        return self.live_base
+
+    def file_at(self, repo, path, ref):
+        self.calls.append(('file_at', path, ref))
+        return self.files.get((path, ref))
+
+    def compare(self, repo, base, head):
+        self.calls.append(('compare', base, head))
+        return self.compares.get((base, head))
 
     def pr_view(self, repo, number):
         self.counter += 1
@@ -58,11 +80,96 @@ class GateTests(unittest.TestCase):
                         client=Fake() if gh is None else gh)
 
     def test_merge_full_pass(self):
-        self.assertEqual(self.gate()['decision'], 'MERGE')
+        result = self.gate()
+        self.assertEqual(result['decision'], 'MERGE')
+        self.assertEqual(result['base_name'], 'main')
 
     def test_skip_draft(self):
         f = Fake(); f.v['isDraft'] = True
         self.assertEqual(self.gate(gh=f)['decision'], 'SKIP')
+
+    def test_base_ref_mismatch_drafts_even_without_review(self):
+        f = Fake(); f.live_base = 'c' * 40
+        result = self.gate(data={}, gh=f)
+        self.assertEqual(result['decision'], 'DRAFT')
+        self.assertIn(B, result['reasons'][0])
+        self.assertIn(f.live_base, result['reasons'][0])
+        self.assertIn('pr-ready', result['reasons'][0])
+
+    def test_missing_or_malformed_base_name_waits(self):
+        for name in (None, '', 7, []):
+            with self.subTest(name=name):
+                f = Fake(); f.v['baseRefName'] = name
+                result = self.gate(gh=f)
+                self.assertEqual(result['decision'], 'WAITING')
+                self.assertIn('base branch name unavailable', ' '.join(result['reasons']))
+
+    def test_actor_missing_gate_base_identity_fails_closed(self):
+        from unittest import mock
+        import apply_decision
+        for decision in ('DRAFT', 'MERGE'):
+            for name in (None, '', 7, []):
+                with self.subTest(decision=decision, name=name):
+                    gate = {'decision': decision, 'head_sha': H, 'base_sha': B, 'live_base_sha': B}
+                    if name is not None:
+                        gate['base_name'] = name
+                    with mock.patch.object(apply_decision, 'evaluate', return_value=gate), \
+                         mock.patch.object(apply_decision, 'pr_view') as read, \
+                         mock.patch.object(apply_decision, 'run_gh') as write:
+                        result = apply_decision._perform_locked(Repo.parse('acme/demo'), 42, {}, 'merge', True)
+                    self.assertEqual(result['outcome'], 'ERROR')
+                    self.assertIn('Gate base branch identity unavailable', result['error'])
+                    read.assert_not_called()
+                    write.assert_not_called()
+
+    def test_base_ref_unavailable_waits(self):
+        f = Fake()
+        def unavailable(repo, branch):
+            raise GitHubError('permission denied')
+        f.branch_head = unavailable
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
+
+    def test_head_missing_latest_base_drafts_without_review(self):
+        f = Fake(); f.ancestor = False
+        result = self.gate(data={}, gh=f)
+        self.assertEqual(result['decision'], 'DRAFT')
+        self.assertTrue(result['base_behind'])
+        self.assertIn(H, result['reasons'][0])
+        self.assertIn(B, result['reasons'][0])
+        self.assertIn(('is_ancestor', B, H), f.calls)
+
+    def test_unknown_ancestry_waits(self):
+        f = Fake(); f.ancestor = None
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
+
+    def test_ancestry_api_failure_waits(self):
+        f = Fake()
+        def unavailable(*args):
+            raise GitHubError('comparison unavailable')
+        f.is_ancestor = unavailable
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
+
+    def test_base_moves_while_confirming_behind_waits(self):
+        f = Fake(); f.ancestor = False
+        refs = iter([B, 'c' * 40])
+        f.branch_head = lambda repo, branch: next(refs)
+        self.assertEqual(self.gate(data={}, gh=f)['decision'], 'WAITING')
+
+    def test_head_moves_while_confirming_behind_waits(self):
+        f = Fake(); f.ancestor = False
+        original = f.pr_view
+        def moving(repo, number):
+            v = original(repo, number)
+            if f.counter > 1:
+                v['headRefOid'] = 'c' * 40
+            return v
+        f.pr_view = moving
+        self.assertEqual(self.gate(data={}, gh=f)['decision'], 'WAITING')
+
+    def test_base_ref_mismatch_changes_during_confirmation_waits(self):
+        f = Fake(); refs = iter(['c' * 40, B])
+        f.branch_head = lambda repo, branch: next(refs)
+        self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
 
     def test_stale_head(self):
         e = sample(); e['head_sha'] = B
@@ -127,9 +234,71 @@ class GateTests(unittest.TestCase):
         f = Fake(); f.v['reviewDecision'] = 'REVIEW_REQUIRED'
         self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
 
-    def test_changes_requested(self):
+    def test_changes_requested_waits_for_re_review(self):
+        # pr-ready marks a PR Ready without waiting for re-approval; a Draft here would loop.
         f = Fake(); f.v['reviewDecision'] = 'CHANGES_REQUESTED'
-        self.assertEqual(self.gate(gh=f)['decision'], 'DRAFT')
+        result = self.gate(gh=f)
+        self.assertEqual(result['decision'], 'WAITING')
+        self.assertIn('re-review', ' '.join(result['reasons']))
+
+    def test_p4_finding_is_nonblocking(self):
+        e = sample()
+        e['findings'] = [{'severity': 'P4', 'path': 'pkg/a.go', 'line': 3, 'reason': 'Naming nit',
+                          'recommendation': 'Rename the helper'}]
+        self.assertEqual(self.gate(data=e)['decision'], 'MERGE')
+        e['findings'][0]['severity'] = 'P5'
+        self.assertEqual(self.gate(data=e)['decision'], 'WAITING')
+
+    def test_unrelated_failing_check_waits_instead_of_draft(self):
+        f = Fake(); f.c[0]['bucket'] = 'fail'
+        e = sample()
+        e['unrelated_failing_checks'] = [{'name': 'test', 'reviewer_confirmed': True,
+                                          'reason': 'Same timeout fails on main at the base SHA, run 40802511042'}]
+        result = self.gate(data=e, gh=f)
+        self.assertEqual(result['decision'], 'WAITING')
+        self.assertIn('unrelated to this PR', ' '.join(result['reasons']))
+        for bad in ({'name': 'test', 'reviewer_confirmed': False, 'reason': e['unrelated_failing_checks'][0]['reason']},
+                    {'name': 'test', 'reviewer_confirmed': True, 'reason': 'flaky'}):
+            e['unrelated_failing_checks'] = [bad]
+            self.assertEqual(self.gate(data=e, gh=f)['decision'], 'DRAFT')
+        e['unrelated_failing_checks'] = [{'name': 'other', 'reviewer_confirmed': True,
+                                          'reason': 'Same timeout fails on main at the base SHA, run 40802511042'}]
+        self.assertEqual(self.gate(data=e, gh=f)['decision'], 'DRAFT')
+        e['unrelated_failing_checks'] = 'test'
+        self.assertEqual(self.gate(data=e, gh=f)['decision'], 'DRAFT')
+
+    def test_repeated_disputed_finding_needs_new_evidence(self):
+        reply = 'https://github.com/acme/demo/pull/42#issuecomment-6501033173'
+        e = sample(); e['verdict'] = 'BLOCK'
+        e['findings'] = [{'severity': 'P2', 'path': 'pkg/a.go', 'line': 21, 'reason': 'Rescue skips rollback',
+                          'recommendation': 'Tag the rescue always', 'blocking': True,
+                          'disputed_reply_url': reply}]
+        result = self.gate(data=e)
+        self.assertEqual(result['decision'], 'WAITING')
+        self.assertIn('without new evidence', ' '.join(result['reasons']))
+        self.assertNotIn('BLOCK verdict needs', ' '.join(result['reasons']))
+        e['findings'][0]['new_evidence'] = 'short'
+        self.assertEqual(self.gate(data=e)['decision'], 'WAITING')
+        e['findings'][0]['new_evidence'] = '--tags C3 run on HEAD left /etc/x modified: log ci/run-77'
+        result = self.gate(data=e)
+        self.assertEqual(result['decision'], 'DRAFT')
+        self.assertIn('Disputed in ' + reply, ' '.join(result['reasons']))
+
+    def test_disputed_reply_url_must_be_on_this_pr(self):
+        e = sample(); e['verdict'] = 'BLOCK'
+        e['findings'] = [{'severity': 'P1', 'path': 'pkg/a.go', 'line': 21, 'reason': 'Data race in writes',
+                          'recommendation': 'Use mutex', 'blocking': True,
+                          'new_evidence': 'go test -race ./pkg reports the race at a.go:21 on HEAD'}]
+        for url in ('https://github.com/acme/demo/pull/43#issuecomment-1',
+                    'https://github.com/other/demo/pull/42#issuecomment-1',
+                    'https://github.com/acme/demo/pull/42',
+                    'https://github.com/acme/demo/pull/42#issuecomment-1x', 7):
+            e['findings'][0]['disputed_reply_url'] = url
+            result = self.gate(data=e)
+            self.assertEqual(result['decision'], 'WAITING', url)
+            self.assertIn('not a comment on this PR', ' '.join(result['reasons']))
+        e['findings'][0]['disputed_reply_url'] = 'https://github.com/acme/demo/pull/42#discussion_r2470013377'
+        self.assertEqual(self.gate(data=e)['decision'], 'DRAFT')
 
     def test_merge_conflict(self):
         f = Fake(); f.v['mergeable'] = 'CONFLICTING'

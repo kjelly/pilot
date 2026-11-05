@@ -1,38 +1,7 @@
-# ----------
 ---
-# Apply playbook for docs/verification/os-patch-sla.md
-#
-# Two-stage OS patching with automatic rollback.
-#
-# Usage (sandbox):
-#   ansible-playbook -i inventory-sandbox.yaml playbooks/apply/os-patch-sla-apply.yml -e patch_stage=sandbox
-#
-# Usage (staging):
-#   ansible-playbook -i inventory-staging.yaml playbooks/apply/os-patch-sla-apply.yml -e patch_stage=staging -e confirm_staging=true
-#
-# Usage (prod, gated by staging attestation):
-#   ansible-playbook -i inventory-prod.yaml playbooks/apply/os-patch-sla-apply.yml -e patch_stage=prod -e confirm_prod=true -e staging_attested_within_hours=24
-#
-# Variables: patch_stage, confirm_staging, confirm_prod, staging_attested_within_hours, unattended_origins, reboot_if_needed
-#
-# unattended-upgrades package (spec row C8, issue #167):
-#   Steps 1b-1e install the `unattended-upgrades` package itself. Without
-#   them Step 4 (systemd start+enable) fails on any host that lacks the
-#   package, and Step 3's `failed_when: false` hid the missing command.
-#   * Step 1 keeps its own strict `update_cache: true` (apt-repository-
-#     fault-tolerance spec §17: OS patching needs the whole configured
-#     package universe to be trustworthy; cmd/pilot/cmd/apt_policy_test.go
-#     aptUpdateCacheAllowlist pins it).
-#   * The install goes through tasks/apt-package-install.yml with
-#     pilot_apt_policy: strict (the only sanctioned apt install route,
-#     TestAptDirectInstallAllowlist). That include runs REAL apt-get update
-#     and download-only probes even under --check, so it is skipped under
-#     --check; --check therefore cannot see the unit of a package that is
-#     still missing. Step 3, Step 4 and the restart handler are gated on
-#     `unattended_upgrades_usable` (package present, or a real run) and a
-#     check-mode run on a host without the package says apply will install
-#     it instead of failing (AGENTS.md section 4.0, 4.5 point 4).
-
+# Security-only patching; native failures are fatal. Policy is restored on
+# failure, but packages already updated require an external snapshot/backup.
+# See docs/verification/os-patch-sla.md for stage and self-attestation policy.
 - name: OS patch SLA apply (stage={{ patch_stage }}, target={{ target_group | default(patch_stage) }})
   hosts: "{{ target_group | default(patch_stage) }}"
   become: true
@@ -43,8 +12,19 @@
   # explicit -e target_group= overrides; otherwise the group is named by patch_stage.
   vars:
     patch_stage: sandbox
-    unattended_origins:
-      - "{{ ansible_distribution | lower }}:{{ ansible_distribution_release }}-security"
+    unattended_origins: "{{ os_patch_security_origins.stdout | from_json }}"
+    os_patch_policy_path: /etc/apt/apt.conf.d/99pilot-security-upgrades
+    os_patch_policy_content: |
+      # Managed by pilot: only trusted security archives for this release.
+      #clear Unattended-Upgrade::Allowed-Origins;
+      #clear Unattended-Upgrade::Origins-Pattern;
+      Unattended-Upgrade::Allowed-Origins {
+      {% for origin in unattended_origins %}
+          "{{ origin }}";
+      {% endfor %}
+      };
+      Unattended-Upgrade::DevRelease "false";
+      Unattended-Upgrade::MinimalSteps "true";
     reboot_if_needed: false
     confirm_staging: false
     confirm_prod: false
@@ -58,6 +38,7 @@
     # sandbox/staging/prod group with Debian hosts) would blow up on Step 1
     # with a confusing apt error instead of a clear "not supported" message.
     - name: "Gate: os-patch-sla only supports Debian/Ubuntu (RHEL/EL not yet implemented)"
+      tags: [always]
       ansible.builtin.debug:
         msg: >-
           Skipping {{ inventory_hostname }}: os-patch-sla-apply.yml only
@@ -70,15 +51,18 @@
       when: ansible_os_family != 'Debian'
 
     - name: "Gate: end play here for non-Debian hosts"
+      tags: [always]
       ansible.builtin.meta: end_host
       when: ansible_os_family != 'Debian'
 
     - name: "Gate: patch_stage must be sandbox|staging|prod"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - patch_stage in ['sandbox', 'staging', 'prod']
         fail_msg: "patch_stage={{ patch_stage }} invalid. Use sandbox|staging|prod."
     - name: "Gate: staging/prod requires explicit confirm"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - (patch_stage == 'sandbox') or
@@ -86,6 +70,7 @@
             (patch_stage == 'prod' and confirm_prod | bool)
         fail_msg: "patch_stage={{ patch_stage }} but confirm flag is false. Pass -e confirm_staging=true / confirm_prod=true to actually patch."
     - name: "Gate: patch_stage must match this host's inventory environment group"
+      tags: [always]
       ansible.builtin.assert:
         that:
           - not ('prod' in group_names and patch_stage != 'prod')
@@ -97,10 +82,11 @@
           group 只是給 target_group 篩選用的標籤,不會自動決定 patch_stage——必須自己
           帶對的 -e patch_stage=,且要跟這台機器所屬的環境 group 一致。
     - name: "Gate: prod requires recent staging attestation"
+      tags: [always]
       ansible.builtin.assert:
         that:
-          # Real gate calls a script or a db check; here we keep a
-          # placeholder so --check works without orchestration.
+          # Operator self-attestation age, not an automated observation.
+          - (staging_attested_within_hours | int) >= 0
           - (staging_attested_within_hours | int) <= 168
         fail_msg: "prod gate: no staging attestation within 168h; re-attest staging or specify -e staging_attested_within_hours=..."
       when: patch_stage == 'prod'
@@ -120,7 +106,7 @@
         argv: [dpkg-query, -W, -f, "${db:Status-Status}", unattended-upgrades]
       register: uu_pkg_probe
       changed_when: false
-      failed_when: false
+      failed_when: uu_pkg_probe.rc not in [0, 1]
       check_mode: false
 
     - name: "Step 1b: Record unattended-upgrades presence"
@@ -151,7 +137,7 @@
         argv: [dpkg-query, -W, -f, "${db:Status-Status}", unattended-upgrades]
       register: uu_pkg_probe_after
       changed_when: false
-      failed_when: false
+      failed_when: uu_pkg_probe_after.rc not in [0, 1]
       check_mode: false
       when: not ansible_check_mode
 
@@ -178,100 +164,160 @@
           missing and the service unit does not exist (spec C8).
       when: not ansible_check_mode
 
-    - name: "Step 2: Capture pre-upgrade package set (for rollback sanity)"
-      ansible.builtin.command: "dpkg-query -W -f='${Package} ${Version}\n'"
-      register: pre_upgrade_pkgs
+    - name: "Step 2a: Discover trusted native security archives"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - |
+            import apt, json, platform
+            r = platform.freedesktop_os_release()
+            d = r["ID"].capitalize()
+            c = apt.Cache()
+            origins = {o.origin + ":" + o.archive
+                       for p in c for v in p.versions for o in v.origins
+                       if o.trusted and o.origin == d and
+                       (o.archive == r["VERSION_CODENAME"] + "-security" if d == "Ubuntu"
+                        else o.codename == r["VERSION_CODENAME"] + "-security" and o.label == "Debian-Security")}
+            print(json.dumps(sorted(origins)))
+      register: os_patch_security_origins
       changed_when: false
+      check_mode: false
 
-    - name: "Step 3: Run unattended-upgrades in non-interactive mode (security only)"
-      ansible.builtin.command: >-
-        unattended-upgrade
-          --debug
-          --non-interactive
-          --allow-downgrades
-          --no-progress
-          -d
-      register: uu_run
-      changed_when: "'Packages installed' in uu_run.stdout or 'pkgs to upgrade' in uu_run.stdout"
-      failed_when: false
-      when: unattended_upgrades_usable | bool
-      # unattended-upgrade is idempotent; rc 0 means "no work" or "applied".
-      # We don't fail the playbook on a non-zero exit of unattended-upgrade
-      # itself (verify catches it), but Step 1e has already made sure the
-      # command exists, so a non-zero rc here is a real unattended-upgrade
-      # result and Step 3b surfaces it instead of leaving it silent.
+    - name: "Gate: origins must be a nonempty subset of native trusted security archives"
+      ansible.builtin.assert:
+        that:
+          - unattended_origins is sequence and unattended_origins is not string
+          - unattended_origins | length > 0
+          - unattended_origins | difference(os_patch_security_origins.stdout | from_json) | length == 0
+        fail_msg: "unattended_origins must select trusted security origins from current apt metadata; refresh metadata before applying."
+      when: not ansible_check_mode or (os_patch_security_origins.stdout | from_json | length > 0)
 
-    - name: "Step 3b: Report the unattended-upgrade exit status"
-      ansible.builtin.debug:
-        msg: >-
-          unattended-upgrade rc={{ uu_run.rc | default('n/a') }}
-          {{ ('stderr: ' ~ (uu_run.stderr_lines | default([]) | last | default(''))) if (uu_run.rc | default(0)) != 0 else '' }}
-      when:
-        - unattended_upgrades_usable | bool
-        - uu_run is not skipped
-        - (uu_run.rc | default(0)) != 0
+    - name: "Step 2b: Read the managed policy before mutation"
+      ansible.builtin.stat:
+        path: "{{ os_patch_policy_path }}"
+      register: os_patch_policy_before
 
-    - name: "Step 4 (check mode): unattended-upgrades is not installed, so there is no unit to preview"
-      ansible.builtin.debug:
-        msg: >-
-          Check mode: unattended-upgrades is not installed on
-          {{ inventory_hostname }}, so its service unit does not exist yet.
-          Skipping the start+enable preview; apply will install the package
-          (Step 1c) and then start and enable the service.
-      when: not (unattended_upgrades_usable | bool)
+    - name: "Step 2c: Read the existing managed policy bytes"
+      ansible.builtin.slurp:
+        src: "{{ os_patch_policy_path }}"
+      register: os_patch_policy_bytes
+      when: os_patch_policy_before.stat.exists
 
-    - name: "Step 4: Ensure unattended-upgrades is enabled + timer active"
-      ansible.builtin.systemd:
-        name: unattended-upgrades
-        state: started
-        enabled: true
-      when: unattended_upgrades_usable | bool
-
-    - name: "Step 5: Drop /etc/apt/apt.conf.d/50unattended-upgrades with security origins"
+    - name: "Step 2d: Snapshot the previous managed policy before changing it"
       ansible.builtin.copy:
-        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        content: "{{ os_patch_policy_bytes.content | b64decode }}"
+        dest: /etc/apt/99pilot-security-upgrades.pre-os-patch-sla.bak
         owner: root
         group: root
-        mode: '0644'
-        content: |
-          Unattended-Upgrade::Allowed-Origins {
-              "{{ unattended_origins | join('";\n              "') }}";
-          };
-          Unattended-Upgrade::DevRelease "false";
-          Unattended-Upgrade::MinimalSteps "true";
-      notify: restart unattended-upgrades
+        mode: '0600'
+      when:
+        - os_patch_policy_before.stat.exists
+        - (os_patch_policy_bytes.content | b64decode) != os_patch_policy_content
+
+    - name: "Apply security policy and updates; restore policy on failure"
+      block:
+        - name: "Step 5: Install security-only policy before unattended-upgrade"
+          ansible.builtin.copy:
+            dest: "{{ os_patch_policy_path }}"
+            owner: root
+            group: root
+            mode: '0644'
+            content: "{{ os_patch_policy_content }}"
+          notify: restart unattended-upgrades
+          when: unattended_origins | length > 0
+
+        - name: "Step 2e: Validate the effective native security policy"
+          ansible.builtin.shell: >-
+            /usr/bin/python3 -c 'import apt, apt_pkg, platform; r=platform.freedesktop_os_release(); d=r["ID"].capitalize(); c=apt.Cache(); want={o.origin+":"+o.archive for p in c for v in p.versions for o in v.origins if o.trusted and o.origin==d and (o.archive==r["VERSION_CODENAME"]+"-security" if d=="Ubuntu" else o.codename==r["VERSION_CODENAME"]+"-security" and o.label=="Debian-Security")}; a=apt_pkg.config.value_list("Unattended-Upgrade::Allowed-Origins"); p=apt_pkg.config.value_list("Unattended-Upgrade::Origins-Pattern"); print(a,p,sorted(want)); raise SystemExit(not want or not a or not set(a).issubset(want) or bool(p))'
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Step 2: Capture pre-upgrade package set"
+          ansible.builtin.command:
+            argv: [dpkg-query, -W, -f, "${binary:Package}\t${db:Status-Status}\t${Version}\n"]
+          register: pre_upgrade_pkgs
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Step 3: Run unattended-upgrades in non-interactive mode (security only)"
+          ansible.builtin.command:
+            argv: [unattended-upgrade, --debug]
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          register: uu_run
+          changed_when: false
+          when:
+            - unattended_upgrades_usable | bool
+            - not ansible_check_mode
+
+        - name: "Step 3c: Capture post-upgrade package set and report actual package changes"
+          ansible.builtin.command:
+            argv: [dpkg-query, -W, -f, "${binary:Package}\t${db:Status-Status}\t${Version}\n"]
+          register: post_upgrade_pkgs
+          changed_when: pre_upgrade_pkgs.stdout != post_upgrade_pkgs.stdout
+          when: not ansible_check_mode
+
+        - name: "Step 3d: Fail closed if security upgrades remain"
+          ansible.builtin.shell: >-
+            /usr/bin/python3 -c 'import apt, apt_pkg; c=apt.Cache(); n=sum(p.is_installed and any(apt_pkg.version_compare(v.version,p.installed.version)>0 and any(o.archive.endswith("-security") for o in v.origins) for v in p.versions) for p in c); print(n); raise SystemExit(n != 0)'
+          changed_when: false
+          when: not ansible_check_mode
+
+        - name: "Step 4 (check mode): unattended-upgrades is not installed, so there is no unit to preview"
+          ansible.builtin.debug:
+            msg: >-
+              Check mode: unattended-upgrades is not installed; apply will install
+              the package and start and enable the service. No upgrades run in preview.
+          when: not (unattended_upgrades_usable | bool)
+
+        - name: "Step 4: Ensure unattended-upgrades is enabled + timer active"
+          ansible.builtin.systemd:
+            name: unattended-upgrades
+            state: started
+            enabled: true
+          when: unattended_upgrades_usable | bool
+
+      rescue:
+        - name: "Restore existing managed policy after failure"
+          ansible.builtin.copy:
+            content: "{{ os_patch_policy_bytes.content | b64decode }}"
+            dest: "{{ os_patch_policy_path }}"
+            owner: "{{ os_patch_policy_before.stat.uid }}"
+            group: "{{ os_patch_policy_before.stat.gid }}"
+            mode: "{{ os_patch_policy_before.stat.mode }}"
+          when: os_patch_policy_before.stat.exists
+
+        - name: "Remove newly created managed policy after failure"
+          ansible.builtin.file:
+            path: "{{ os_patch_policy_path }}"
+            state: absent
+          when: not os_patch_policy_before.stat.exists
+
+        - name: "Fail after restoring policy; package rollback requires external recovery"
+          ansible.builtin.fail:
+            msg: >-
+              OS security patching failed: {{ ansible_failed_result.msg | default('native operation failed') }}
+              (rc={{ ansible_failed_result.rc | default('n/a') }}).
+              Managed policy restored; already updated packages are not rolled back.
 
   post_tasks:
-    - name: "Step 6: Spec verification (read-only check)"
-      # needs shell, not command: the pipe/redirect below aren't argv tokens
-      # to apt itself — command execs argv directly with no shell involved,
-      # so `| wc -l | tr -d ' '` would get passed straight to apt as literal
-      # arguments (that's what produced "Command line option 'l' ... is not
-      # understood").
-      ansible.builtin.shell: "apt list --upgradable 2>/dev/null | wc -l | tr -d ' '"
-      register: post_upgrade_count_run
+    - name: "Step 6: Observe general updates independently of security convergence"
+      ansible.builtin.shell: >-
+        /usr/bin/python3 -c 'import apt; c=apt.Cache(); print("general-updates=" + str(sum(p.is_upgradable for p in c)))'
       changed_when: false
-      # shell doesn't support check_mode and is skipped under --check by
-      # default, leaving post_upgrade_count_run.stdout blank; this is
-      # read-only so forcing it to actually run under --check is safe (same
-      # idiom as keycloak-apply.yml's "pilot-infra docker network exists"
-      # pre-flight check).
       check_mode: false
-    - ansible.builtin.debug:
-        msg: "post-upgrade upgradeable count = {{ post_upgrade_count_run.stdout }}"
 
     - name: "Step 7: Reboot if required (sandbox/staging only)"
       ansible.builtin.reboot:
         reboot_timeout: 600
       when:
         - reboot_if_needed | bool
-        - patch_stage != 'prod'  # prod: orchestrate reboot separately
+        - patch_stage != 'prod'
 
   handlers:
     - name: restart unattended-upgrades
       ansible.builtin.systemd:
         name: unattended-upgrades
         state: restarted
-      # The same gate as Step 4: under --check Step 5 reports changed and
-      # notifies, but a host without the package has no unit to restart.
       when: unattended_upgrades_usable | bool

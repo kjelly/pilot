@@ -445,6 +445,15 @@
             rsyslog_selinux_tcp_port: "{{ siem_relp_port }}"
           when: siem_receiver_relp_enabled | bool
 
+        - name: "Install the Wazuh real-delivery oracle"
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
+          ansible.builtin.copy:
+            src: ../files/pilot-wazuh-delivery
+            dest: /usr/local/libexec/pilot-wazuh-delivery
+            owner: root
+            group: root
+            mode: "0755"
+
         - name: "Step 3: Render 10-siem-receiver.conf (imtcp + %HOSTNAME% dynaFile routing)"
           tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11]
           ansible.builtin.copy:
@@ -484,7 +493,19 @@
               template(name="SiemAuditPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/audit.log")
               template(name="SiemAuthPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/auth.log")
 
+              template(name="SiemWazuhPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/wazuh-alerts.log")
+              template(name="SiemWazuhJSON" type="string" string="%msg:::drop-last-lf%\n")
+
               ruleset(name="siemReceiver") {
+                  # Reserved transport marker only; JSON containing this text
+                  # remains a real alert and continues to its normal route.
+                  if ($syslogfacility-text == 'syslog' and $programname == 'rsyslogd' and re_match($msg, '^[[:space:]]*PILOT-WAZUH-TRANSPORT-HEARTBEAT-v1[[:space:]]*$')) then {
+                      stop
+                  }
+                  if ($syslogfacility-text == 'local5' and $programname == 'pilot-wazuh-alert') then {
+                      action(type="omfile" dynaFile="SiemWazuhPath" template="SiemWazuhJSON" createDirs="on")
+                      stop
+                  }
                   if $syslogfacility-text == 'local6' then {
                       action(type="omfile" dynaFile="SiemAuditPath" createDirs="on")
                   }

@@ -21,11 +21,12 @@ The prompt 「偵測到 …/.vault/main.yaml，這次佈署要用它當密碼變
 satisfy a *different*, Go-side check: `contracts/freeipa-identity.yaml`'s
 required-input preflight wants a bare top-level `ipa_admin_password` key.
 
-A canonical (`schema_version: 1`) roster's own top-level-key gate
-(`internal/inventory/roster_validate.go`'s `checkTopLevelKeys`) **rejects** a bare
-`ipa_admin_password` at the roster's top level — the admin credential must live
-nested under `freeipa.admin.password`. So the roster file can **never** satisfy
-this contract check by itself, no matter what you answer.
+A canonical roster's own top-level-key gate
+(`internal/inventory/roster_validate.go`'s `checkTopLevelKeys`), at every
+`schema_version`, **rejects** a bare `ipa_admin_password` at the roster's top
+level — the admin credential must live nested under `freeipa.admin.password`.
+So the roster file can **never** satisfy this contract check by itself, no
+matter what you answer.
 
 **Correct sequence for a canonical roster:**
 

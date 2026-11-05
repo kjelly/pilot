@@ -1,63 +1,57 @@
 # multi-vm-networking.md -- cross-VM connectivity in vm-target
 
-When two or more `pilot vm-target` VMs need to talk to each other,
-there are a few non-obvious details beyond "they share a libvirt
-network."
+When two or more `pilot vm-target` VMs need to talk to each other, there are
+a few non-obvious details beyond "they share a libvirt network". Checked
+against `pilot vm-target topology --help`, `cmd/pilot/cmd/vm_target_topology.go`
+and `internal/vmtarget/topology.go`.
 
-## The libvirt default network
+## The libvirt network
 
-By default every `vm-target up` uses `--network default`, which is a
-libvirt NAT network (`virbr0` bridge, 192.168.123.0/24, dnsmasq DHCP).
-All VMs on this network can reach each other directly via their
-192.168.123.x addresses.
+Every `vm-target up` uses `--network default` unless told otherwise: a
+libvirt NAT network with dnsmasq DHCP. VMs on it reach each other directly
+by IP. The subnet depends on the host (`192.168.122.0/24` on some hosts,
+`192.168.123.0/24` on others), and lease order is not guaranteed: read IPs
+from `vm-target list` or `topology status`, never hard-code them.
 
 ```bash
-# verify after bring-up
-go run ./cmd/pilot vm-target exec --name <server> -- ping -c1 <client-ip>
-go run ./cmd/pilot vm-target exec --name <client> -- ping -c1 <server-ip>
+pilot vm-target exec --name <server> -- ping -c1 <client-ip>
+pilot vm-target exec --name <client> -- ping -c1 <server-ip>
 ```
 
-Both must respond. If either does not, the libvirt firewall
-(`nwfilter`) or host `iptables` may be blocking. Diagnose:
+If either fails, the libvirt firewall (`nwfilter`) or host `iptables` may be
+blocking:
 
 ```bash
 sudo iptables -L FORWARD -n -v | grep virbr
 sudo virsh net-dumpxml default | grep -A5 filter
 ```
 
+Services on the NAT network are reachable from the host and from other VMs
+on it, not from outside the host. For outside access, join a routed or
+bridged libvirt network with `--network <name>` (topology: `network:`).
+
 ## Hostname resolution between VMs
 
-The VMs do **not** have a shared DNS. For any service whose TLS cert
-or Kerberos principal includes a hostname (e.g. `ipa.pilot.internal`),
-**every VM that needs to reach that service** must have the hostname
-in its `/etc/hosts`. The server's apply playbook writes the server's own
-`/etc/hosts` entry, but the **client needs it too** -- and a vm-target
-VM's own inventory has no path to edit a *different* VM's `/etc/hosts`
-(`references/vm-target-basics.md`'s "inventory contract": each `run`
-only ever sees the one target it was invoked against).
+The VMs share no DNS. For a service whose TLS certificate or Kerberos
+principal names a host (for example `ipa1.ipa.pilot.internal`), **every VM
+that reaches that service** needs the name in its `/etc/hosts`. A server
+playbook writes its own entry, but a single-VM inventory has no path to
+another VM's `/etc/hosts`.
 
-**Recommended: `pilot vm-target wire`** -- no playbook change needed,
-works from the CLI, and is idempotent (safe to re-run after a
-`vm-target reset` wiped the target's `/etc/hosts`):
+**Recommended: `wire`.** It resolves each peer's current IP from vm-target
+state and replaces one marked block in `/etc/hosts` on every call, so it is
+safe to rerun after a `reset` or a peer's re-`up`:
 
 ```bash
 pilot vm-target wire --name <server> --peer <client>
-pilot vm-target wire --name <client> --peer <server>
-# --peer <other-name>=<alias> if the /etc/hosts entry needs a different
-# hostname than the target's own name (e.g. the FQDN a cert expects)
-pilot vm-target wire --name ipa-client --peer ipa-primary=ipa.pilot.internal
+pilot vm-target wire --name <client> --peer <server>=<fqdn-the-cert-expects>
 ```
 
-Under the hood this resolves `--peer`'s current IP via vm-target's own
-state (never hand-typed / never goes stale across a re-`up`) and writes
-a single marked block to `/etc/hosts`, replacing it wholesale on every
-call -- so re-running never leaves duplicate lines the way a manual
-`>> /etc/hosts` append would.
+In a topology file the same entries go under `wire:`, and `topology up`,
+`topology reset`/`rollback` and `topology test --ephemeral` apply them.
 
-**Alternative: bake it into the playbook itself**, if you want the
-apply to be self-contained even outside of vm-target (e.g. also runs
-against real hosts with real DNS already resolving, where `wire` is a
-no-op you'd skip):
+**Alternative: in the playbook**, when it must also run unchanged against
+real hosts:
 
 ```yaml
 - name: "Pin server FQDN on client"
@@ -69,141 +63,93 @@ no-op you'd skip):
   delegate_to: "{{ client_host }}"
 ```
 
-This requires `client_host` to already be a resolvable inventory host
-in the SAME play (i.e. combined via `vm-target run --group`, since a
-plain single-target inventory has no other host to `delegate_to`). The
-server IP and client host must be passed as `-e` vars (never
-hard-coded -- AGENTS.md §4). Prefer `wire` unless the playbook must
-also work unchanged against real, already-networked hosts.
+`client_host` must be a host in the same play (a grouped inventory, since a
+single-VM inventory has no other host), and `server_ip`/`client_host` come
+from `-e` or inventory, never hard-coded (AGENTS.md §4).
 
-## Combining nodes into one inventory (`--group`)
+## Combining running VMs in one inventory (`run --group`)
 
-When the playbook's own `hosts:` pattern needs to see more than one
-vm-target VM in a single play (not just resolve hostnames, but actually
-run tasks against both, e.g. a primary+replica FreeIPA install), a
-single-target inventory is not enough. Use
-`vm-target run --group <groupname>=<target1>,<target2> ...` -- see
-`references/vm-target-basics.md`'s `--group` section for the full
-example. Pair it with `wire` above when the playbook also needs
-`/etc/hosts` entries rather than just inventory group membership.
+When one play must run tasks on several VMs (a primary + replica install),
+use `vm-target run --group <group>=<vm1>,<vm2> ...`; see
+`vm-target-basics.md`. Pair it with `wire` when the playbook also needs
+names to resolve. For a scenario you will bring up, reset or test more than
+once, use a topology file instead.
 
-## Declarative topology (`vm-target topology`)
+## Topology files (`vm-target topology`)
 
-`--group` and `wire` above are composable building blocks, but for a
-scenario with 3+ named roles (primary/replica/client), assembling the
-right sequence of `up`/`wire`/`--group` calls by hand means the agent
-has to parse each step's printed IP to build the next command, and
-re-derive the same sequence every time the scenario is reset or
-extended. `vm-target topology` makes the scenario itself a file:
+A topology YAML declares every node once (examples in `docs/topologies/`):
 
 ```yaml
-# ha-topology.yaml
+services: local                # optional: none, local or a profile path; applies to every node
 nodes:
-  - name: ipa-primary
-    base_image: rocky9
-    groups: [ipa_masters]
-    wire: [ipa-replica, ipa-ha-client]
-  - name: ipa-replica
-    base_image: rocky9
-    groups: [ipa_replicas]
-    wire: ["ipa-primary=ipa1.ipa.pilot.internal"]
-  - name: ipa-ha-client
-    base_image: rocky9
-    groups: [ipa_clients]
-    wire: [ipa-primary, ipa-replica]
+  - name: ipa-primary          # [a-zA-Z0-9_.-]+, unique
+    base_image: almalinux-9    # alias or local qcow2 path; default ubuntu-24.04
+    memory: 3072
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-server]   # ansible groups for the rendered inventory
+    wire: ["ipa-replica=ipa2.ipa.pilot.internal"]   # peer must be a node in this file
+  # - name: ipa-replica ...
 ```
+
+Other node fields: `ssh_user`, `vcpus`, `disk`, `network`, `hosts`,
+`keep_on_failure`. Validation rejects an empty node list, duplicate or
+invalid names, a `wire` peer that is not a node in the file, a node wiring
+itself and unparseable timeouts.
 
 ```bash
-pilot vm-target topology up        --topology ha-topology.yaml   # concurrent, idempotent
-pilot vm-target topology status    --topology ha-topology.yaml   # name/status/ip/groups/wire table
-pilot vm-target topology inventory --topology ha-topology.yaml   # real ansible groups, no target_group=all hack
-pilot vm-target topology down      --topology ha-topology.yaml
-pilot vm-target topology snapshot  --topology ha-topology.yaml --tag pre-drill
-pilot vm-target topology rollback  --topology ha-topology.yaml --tag pre-drill
-pilot vm-target topology reset     --topology ha-topology.yaml
+pilot vm-target topology up        --topology <file>   # concurrent; skips names already in state
+pilot vm-target topology status    --topology <file>   # name/status/ip/groups/wire
+pilot vm-target topology inventory --topology <file> [--out <path>]
+pilot vm-target topology snapshot  --topology <file> --tag <t>
+pilot vm-target topology rollback  --topology <file> --tag <t>   # then re-wires
+pilot vm-target topology reset     --topology <file>             # clean checkpoint, then re-wires
+pilot vm-target topology test      --topology <file> --playbook <pb> --verify <spec>=<limit> [--ephemeral]
+pilot vm-target topology down      --topology <file>
 ```
 
-`up` provisions every not-yet-running node **concurrently** (one
-`*vmtarget.Manager` per node, all pointed at the same state dir). This
-used to be sequential-only out of caution, but the 2026-07-06 state-race
-fix (see `pilot-vm-target-up-concurrency-race` memory and AGENTS.md
-§5.1) closed the lost-state-entry bug for good — `Manager.Up` reserves
-its name via `Store.Mutate` (cross-process flock) before touching disk
-or libvirt, so concurrent `Up` calls for different names are safe
-(regression test: `TestUp_ConcurrentDifferentNames_BothPersist`).
-Concurrency is per-Manager-instance, not per-goroutine-on-one-Manager:
-`Manager.Up` holds an in-process lock for its whole call (including the
-multi-minute boot/SSH wait), so goroutines sharing one `Manager` would
-just queue — `topology up` gives each node its own `Manager` instead.
-An already-running node (same name) is left alone, so re-running `up`
-after adding a node to the spec only provisions the new one. Wiring
-happens after every node is up (it needs every peer's final IP), so it
-still runs as a separate, sequential pass — no IP copy-paste between
-steps either way.
+- `groups:` become real inventory groups, so a playbook's `hosts:` pattern
+  and each `--verify <spec>=<group>` match without `-e target_group=all`.
+  Use the group names the playbooks and specs actually target (for example
+  `docker`, `log-server`, `freeipa-server`); a label nothing reads leaves
+  `site.yml` plays with no hosts.
+- `topology up` provisions every missing node concurrently, then wires.
+  A declared name already in pilot state, whatever its status, is skipped
+  and adopted: `topology up` wires it if it declares `wire:`, and `topology down`
+  later destroys it with the rest. Check `vm-target list` for name
+  collisions with other sessions first. `topology test --ephemeral` refuses
+  to start on any collision instead.
+- `rollback` and `reset` re-apply every node's `wire:` because the `clean`
+  checkpoint predates wiring; a per-VM `vm-target reset` would silently drop
+  it. Use `topology reset` to test "does this reinstall from scratch".
+  [freeipa-server-replica-ha-drill.md](../../../../docs/runbooks/freeipa-server-replica-ha-drill.md)
+  §13 runs it.
+- `topology test` behaviour, `--ephemeral` and `--keep-on-failure`:
+  SKILL.md §4.
 
-`topology inventory`'s `groups:` list feeds the same
-`RenderGroupedInventory` machinery as `run --group`, so a playbook
-whose `hosts:` pattern matches a real group name (e.g. `ipa_masters`)
-needs no `-e target_group=...` workaround — pass
-`--inventory $(...) topology inventory --topology ... --out /tmp/inv.yaml)`
-or `-e target_group=ipa_masters` against the rendered file.
+## Time sync (Kerberos, TLS, any certificate validation)
 
-`snapshot`/`rollback`/`reset` apply the equivalent single-VM operation to
-every node in the spec **concurrently**, so a whole multi-VM scenario can
-be checkpointed or restored to a known state in one call (e.g. "does
-`ipa-replica-install` rerun cleanly from scratch?") instead of resetting
-each VM by hand and re-running `wire` yourself for every peer pair.
-`rollback`/`reset` re-apply every node's declared `wire:` peers
-afterward — the auto-`clean` snapshot `up` takes predates wiring, so a
-plain single-VM `reset` would otherwise silently drop `/etc/hosts`
-wiring on every node it touches. `snapshot` skips the re-wire step since
-it never touches disk state. See
-`docs/runbooks/freeipa-server-replica-ha-drill.md` §11 for real captured
-output of `topology reset` reverting a node's disk (a planted marker
-file disappears) and then automatically restoring its wiring.
+Kerberos rejects tickets when client and KDC clocks differ by more than
+five minutes. The HA drill measured VM clocks 54–90 minutes behind after
+`up`/`reset`, with `chronyd` active but never synchronised, and the FreeIPA
+case study found no time daemon at all on its ubuntu-24.04 VM. Check
+`timedatectl` on every VM before applying a time-sensitive service; the
+drill's fix (`hwclock -s` on AlmaLinux, `date -s "@<host epoch>"` on Ubuntu)
+is in
+[freeipa-server-replica-ha-drill.md](../../../../docs/runbooks/freeipa-server-replica-ha-drill.md)
+§2 and §15. The repo's NTP role is
+`playbooks/apply/core-infra-provider-apply.yml`.
 
-Reach for `--group`/`wire` directly for a one-off/ad-hoc combination of
-already-up targets; reach for `topology` when the same named scenario
-gets brought up, reset, or extended more than once.
+## Two-node health checks
 
-## Time sync (Kerberos, TLS, any cert validation)
-
-Kerberos rejects tickets if the clock skew between client and KDC
-exceeds 5 minutes. The ubuntu-24.04 cloud image has **no** NTP daemon
-installed by default. Install on every VM before applying any
-time-sensitive service:
+A server-side `ss -tlnp` only proves the service is bound; only a
+client-side request proves the path is open and the service answers. While
+debugging:
 
 ```bash
-go run ./cmd/pilot vm-target exec --name <vm> --     sudo apt-get install -y systemd-timesyncd
-go run ./cmd/pilot vm-target exec --name <vm> --     sudo timedatectl set-ntp true
+pilot vm-target exec --name <server> -- sh -c "ss -tlnp | grep -E ':<port> '"
+pilot vm-target exec --name <client> -- curl -fsS -o /dev/null -w '%{http_code}' http://<server-ip>:<port>/
 ```
 
-Or delegate to the `ntp` role if one exists in your playbook suite.
-
-## Port exposure
-
-VMs on `default` are NAT'd behind the host, so services on them are
-accessible from the host and from other VMs on the same network, but
-**not** from outside the host. No `--port-forward` or bridge setup is
-needed for cross-VM communication.
-
-If the spec requires external access (e.g. testing from a laptop),
-use `--network <name>` to join a routed or bridged libvirt network
-instead of the default NAT network.
-
-## Two-node health check pattern
-
-Before declaring "server is up" in a multi-VM spec, run the same
-check from **both nodes**:
-
-```bash
-# server-side: ports listening
-go run ./cmd/pilot vm-target exec --name <server> --     ss -tlnp | grep -E ':<port> '
-
-# client-side: can reach server's port
-go run ./cmd/pilot vm-target exec --name <client> --     curl -fsS -o /dev/null -w '%{http_code}' http://<server-ip>:<port>/
-```
-
-The server-side check only confirms the service is bound. The
-client-side check confirms the network path is open and the
-service answers.
+For evidence, make the client-side request a spec row and verify it against
+the client group (SKILL.md §7).

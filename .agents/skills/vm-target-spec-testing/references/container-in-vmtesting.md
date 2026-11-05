@@ -1,18 +1,22 @@
 # container-in-vmtesting.md -- docker/podman inside a vm-target
 
 > **Not to be confused with `vm-target run --sandbox`.** This file is
-> about containers your *playbook* starts **inside the VM under test**
-> (e.g. a FreeIPA server container). `--sandbox` is a different thing:
-> it runs `ansible-playbook` itself inside a throwaway container **on
-> the host**, targeting the VM over SSH -- see
-> `references/vm-target-basics.md`'s "Sandbox mode" section. The traps
-> below apply regardless of whether the *outer* ansible-playbook run
-> used `--sandbox` or not.
+> about containers your *playbook* starts **inside the VM under test**.
+> `--sandbox` is a different thing: it runs `ansible-playbook` itself
+> inside a throwaway container **on the host**, targeting the VM over
+> SSH -- see `vm-target-basics.md`'s "Running Ansible: host or
+> `--sandbox`" section. The traps below apply either way.
 
 When your apply playbook runs `community.docker.docker_container`
-inside a `pilot vm-target` host, you add an extra layer of indirection
-that breaks several assumptions. This file documents the traps and the
-patterns.
+inside a `pilot vm-target` host (several `playbooks/apply/*.yml` do:
+`git grep -l community.docker.docker_container playbooks/apply`), you add
+an extra layer of indirection that breaks several assumptions. This file
+documents the traps and the patterns.
+
+The FreeIPA examples come from an abandoned attempt to run the FreeIPA
+server as a container. `freeipa-server-apply.yml` now installs natively on
+an EL9 host, and its header explains why the container path must not come
+back. The traps are general.
 
 ## Trap 1: image entrypoint is often missing or broken
 
@@ -56,20 +60,28 @@ docker exec <container> /usr/sbin/ipactl status
 docker exec <container> bash -lc 'ipactl status'
 ```
 
-## Trap 3: bind-mount survives vm-target down
+## Trap 3: bind-mounted state survives a re-run
 
 Playbooks that use `volumes: ["/host/path:/container/data:Z"]` write
-state **outside** the VM's qcow2. A subsequent `vm-target up` reuses
-the same host directory. This is great for idempotency (re-applying
-skips already-installed services) and terrible for debugging (a
-half-baked install silently masks the real failure).
+state to `/host/path` **on the VM**, outside the container. Recreating the
+container or re-running the playbook on the same VM reuses it. This is
+great for idempotency (re-applying skips already-installed services) and
+terrible for debugging (a half-baked install silently masks the real
+failure).
 
-**Pattern**: after a failed run, delete the per-target dir:
+**Pattern**: after a failed run, put the VM back to its post-`up` state
+before retrying:
 
 ```bash
-pilot vm-target down --name <name>
-sudo rm -rf /var/lib/libvirt/images/pilot/<name>
+pilot vm-target reset --name <name>   # revert to the pristine post-up snapshot
 ```
+
+A failed `vm-target test` rolls back to its `pre-test-*` snapshot, which only
+removes what that run wrote; state from earlier runs on the same VM stays.
+`pilot vm-target down` also clears it: the VM's whole filesystem, bind-mounted
+paths included, lives in the per-target overlay that `down` deletes. Do not
+`rm -rf` under `/var/lib/libvirt/images/pilot` yourself; other sessions' VMs
+live there.
 
 ## Trap 4: community.docker.docker_container detach:false does not surface exit codes
 

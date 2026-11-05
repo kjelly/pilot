@@ -1,0 +1,65 @@
+name: Detection engine rollback provenance
+on:
+  push:
+    branches: [fix/detection-engine-current-run-backups]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'playbooks/apply/detection-engine-apply.yml'
+      - 'cmd/pilot/cmd/detection_engine_*'
+      - 'scripts/tests/detection-engine-rollback-vm.py'
+      - '.github/workflows/detection-engine-rollback.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Ansible and VM toolchain (missing KVM is a failure)
+        run: |
+          test -c /dev/kvm
+          python3 -m pip install 'ansible-core==2.19.2' PyYAML
+          ANSIBLE_COLLECTIONS_PATH="$PWD/.verification/collections" ansible-galaxy collection install ansible.posix -p .verification/collections
+          sudo env "PATH=$PATH" "ANSIBLE_COLLECTIONS_PATH=$PWD/.verification/collections" ansible-doc -t callback ansible.posix.json > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients cloud-image-utils acl
+          sudo systemctl start libvirtd
+          sudo virsh net-start default || sudo virsh net-info default
+      - name: Build immutable candidate binaries
+        run: |
+          mkdir -p .verification/rollback-provenance
+          go build -o .verification/pilot ./cmd/pilot
+          go build -ldflags '-X main.version=rollback-old' -o .verification/engine-old ./cmd/pilot-detection-engine
+          go build -ldflags '-X main.version=rollback-new' -o .verification/engine-new ./cmd/pilot-detection-engine
+      - name: Real Ansible file-level regression tests (no skipped tool dependency)
+        run: |
+          set -o pipefail
+          command -v ansible-playbook
+          go test -count=1 -timeout 15m -v -run '^TestDetectionEngine' ./cmd/pilot/cmd | tee .verification/rollback-provenance/file-unit-tests.log
+      - name: Create dedicated vm-target
+        run: |
+          sudo mkdir -p /var/lib/libvirt/images/pilot
+          sudo curl --fail --location --max-time 180 https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img -o /var/lib/libvirt/images/pilot/rollback-base.qcow2
+          sudo env "PATH=$PATH" .verification/pilot vm-target up --name "de-rollback-${GITHUB_RUN_ID}" --base-image /var/lib/libvirt/images/pilot/rollback-base.qcow2 --ssh-user root --hosts detection-engine --memory 1024
+      - name: Real Ansible fault matrix on isolated vm-target
+        run: |
+          sudo env "PATH=$PATH" "ANSIBLE_COLLECTIONS_PATH=$PWD/.verification/collections" python3 scripts/tests/detection-engine-rollback-vm.py --pilot .verification/pilot --name "de-rollback-${GITHUB_RUN_ID}" --old-binary .verification/engine-old --new-binary .verification/engine-new --evidence .verification/rollback-provenance --base-image /var/lib/libvirt/images/pilot/rollback-base.qcow2
+      - name: Preserve all evidence including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: detection-engine-rollback-${{ github.sha }}
+          path: .verification/rollback-provenance/
+          include-hidden-files: true
+      - name: Tear down only dedicated target
+        if: always()
+        run: sudo env "PATH=$PATH" .verification/pilot vm-target down --name "de-rollback-${GITHUB_RUN_ID}"

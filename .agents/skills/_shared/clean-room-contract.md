@@ -93,8 +93,15 @@ source, that is a **stop condition** — see §8.
 
 In order, and recorded:
 
-1. Record the existing VM inventory, then remove every VM belonging to the
-   runbook under test.
+1. Record the existing VM inventory (`pilot vm-target list`, `virsh list --all`).
+   Remove only VMs this run created in an earlier attempt, or that the user
+   explicitly named as disposable for this run, each with `pilot vm-target down`
+   (`topology down` for a topology this run brought up). Every other VM stays,
+   even one whose name matches the runbook's example: sibling clones and other
+   sessions share the pilot data dir and the libvirt host, so `vm-target list`
+   shows their VMs too. Use fresh run-scoped names instead (below). Never delete
+   files under `/var/lib/libvirt/images/pilot` by hand; `down` removes a
+   target's directory itself.
 2. Remove the entire disposable workspace.
 3. **Prove prohibited stale state is absent** — don't assume removal worked.
    Check for surviving VMs, workspace directories, generated inventory, vault

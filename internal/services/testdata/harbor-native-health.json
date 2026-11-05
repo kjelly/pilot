@@ -1,0 +1,33 @@
+{
+  "components": [
+    {
+      "name": "core",
+      "status": "healthy"
+    },
+    {
+      "name": "database",
+      "status": "healthy"
+    },
+    {
+      "name": "jobservice",
+      "status": "healthy"
+    },
+    {
+      "name": "portal",
+      "status": "healthy"
+    },
+    {
+      "name": "redis",
+      "status": "healthy"
+    },
+    {
+      "name": "registry",
+      "status": "healthy"
+    },
+    {
+      "name": "registryctl",
+      "status": "healthy"
+    }
+  ],
+  "status": "healthy"
+}

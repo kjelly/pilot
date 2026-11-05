@@ -1,4 +1,4 @@
-.PHONY: build test clean vet lint help install install-callback-user install-callback-system uninstall-callback test-callback test-prereq pilot-cli-image pilot-cli-test-image
+.PHONY: build test clean vet lint pilot-mcp-cross mcp-remote-test help install install-callback-user install-callback-system uninstall-callback test-callback test-prereq pilot-cli-image pilot-cli-test-image
 
 BIN := pilot
 PKG := ./cmd/pilot
@@ -12,6 +12,15 @@ PILOT_ACCESS_GATEWAY_VERSION ?= 0.0.0-dev
 # variable), while local builds derive them from this worktree.
 PILOT_GIT_SHA ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unknown)
 PILOT_GIT_DIRTY ?= $(shell if git diff --quiet --ignore-submodules HEAD -- 2>/dev/null; then echo false; else echo true; fi)
+
+# `./...` stops at tmp/: tmp/go.mod makes the gitignored scratch directory (checkouts
+# of other PRs, loose test programs) a separate module, so `make test`, `make vet` and
+# `make lint` never compile it (AGENTS.md §5). Keep the literal `./...` in the Go targets:
+# TestCompleteTestSuitesRunSequentially drives them with a stub `go` that checks the
+# exact arguments.
+# golangci-lint v1 cannot read this repository's v2 config and reports it as a config
+# error; CI pins v2.12.1 (.github/workflows/ci.yml). Override the binary with GOLANGCI_LINT=.
+GOLANGCI_LINT ?= golangci-lint
 
 USER_CALLBACK_DIR := $(HOME)/.ansible/plugins/callback
 SYSTEM_CALLBACK_DIR := /etc/ansible/plugins/callback
@@ -41,13 +50,29 @@ release:       	## Compile stripped release binary
 
 # -timeout 45m: same per-package budget as test-race below (see its comment).
 test:          	## Run all Go tests with the same per-package budget as CI
-	go test -count=1 -timeout 45m ./...
+	$(if $(filter 1,$(PILOT_COMPLETE_TEST_SUITES)),$(PILOT_COMPLETE_GO_ENV) )go test -count=1 -timeout 45m ./...
+
+# pilot-mcp runs on the user's machine, which may be macOS: cmd/pilot does
+# not build for darwin, so pilot-mcp must (spec 2026-10-30-pilot-mcp-remote-access §5.1).
+pilot-mcp-cross: ## Build pilot-mcp for linux and darwin (amd64, arm64)
+	@for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+		echo "pilot-mcp $$t"; \
+		GOOS=$${t%/*} GOARCH=$${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/pilot-mcp || exit 1; \
+	done
+
+# pilot-mcp against a real sshd on 127.0.0.1, whose docker is a stand-in
+# that execs the real pilot mcp remote (spec 2026-10-30-pilot-mcp-remote-access
+# §13.2). PILOT_REQUIRE_SSHD_TESTS=1 turns the no-sshd skip into a failure.
+mcp-remote-test: ## Run the pilot-mcp integration tests against a local sshd
+	PILOT_REQUIRE_SSHD_TESTS=1 go test -count=1 -timeout 10m -run 'TestIntegration' ./internal/mcpclient
 
 vet:           	## Run go vet
 	go vet ./...
 
-lint:          	## Run golangci-lint
-	golangci-lint run ./...
+lint:          	## Run golangci-lint (v2; CI pins v2.12.1)
+	@v=$$($(GOLANGCI_LINT) version 2>&1 | head -n 1); \
+	  echo "$$v" | grep -Eq 'version v?2\.' || { echo "make lint: golangci-lint v2 required (CI pins v2.12.1 in .github/workflows/ci.yml; go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.1); found: $$v" >&2; exit 1; }
+	$(GOLANGCI_LINT) run ./...
 
 # -timeout: go test's default is 10m per package. Under -race on GitHub
 # runners, internal/spec takes 12-15m when it passes (738-895 s on
@@ -59,15 +84,26 @@ lint:          	## Run golangci-lint
 # about 1.5x over the 29.3 m local figure for the slowest package. CI runs this
 # target; its job timeout-minutes must stay at least 10m above this
 # (TestCIGoTestTimeoutFiresBeforeJobLimit).
-test-race:     	## Run tests with the race detector (CI runs this target)
-	go test -race -count=1 -timeout 45m ./...
+GO_TEST_PACKAGES ?= ./...
+# Full suites bypass orchestration and scrub only its private scope. Merely
+# using env -u before recursive make cannot clear command-line MAKEOVERRIDES.
+PILOT_COMPLETE_GO_ENV := env -u GO_TEST_RUN_REGEX -u GO_TEST_REPORT_DIR -u GO_TEST_JSON -u CI_SHARD_INDEX -u PILOT_COMPLETE_TEST_SUITES -u MAKEFLAGS -u MFLAGS
+ifeq ($(PILOT_COMPLETE_TEST_SUITES),1)
+GO_TEST_RACE_PREFIX = $(PILOT_COMPLETE_GO_ENV)
+GO_TEST_RACE_JSON =
+else
+GO_TEST_RACE_PREFIX = $(if $(or $(GO_TEST_REPORT_DIR),$(filter-out undefined,$(origin GO_TEST_RUN_REGEX))),python3 scripts/ci-go-test-shards.py record -- )
+GO_TEST_RACE_JSON = $(if $(filter 1,$(GO_TEST_JSON)), -json)
+endif
+test-race:     	## Run tests with the race detector (CI selects a package shard)
+	$(GO_TEST_RACE_PREFIX) go test -race -count=1 -timeout 45m $(GO_TEST_PACKAGES)$(GO_TEST_RACE_JSON)
 
 # Keep these as ordered recipe steps, not prerequisites: `make -j test-all`
 # must not run two complete subprocess-heavy suites against the same machine.
 # Stop after a failed normal suite; a successful validation requires both runs.
 test-all:      	## Run complete normal and race suites sequentially
-	$(MAKE) test
-	$(MAKE) test-race
+	$(MAKE) test PILOT_COMPLETE_TEST_SUITES=1
+	$(MAKE) test-race GO_TEST_PACKAGES=./... PILOT_COMPLETE_TEST_SUITES=1
 
 clean:         	## Remove build artifacts
 	rm -f $(BIN)
@@ -99,6 +135,15 @@ uninstall-callback: ## Remove installed callback plugin
 
 test-callback: ## Run Python callback unit tests
 	cd ansible_callback && python3 -m unittest test_pilot_diagnose.py test_pilot_result.py -v
+
+.PHONY: ci-workflow-test
+ci-workflow-test: ## Verify candidate CI reuse against real Git histories and API controls
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_validation_reuse.py'
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_go_test_shards.py'
+
+.PHONY: ci-go-runtime-test
+ci-go-runtime-test: ## Verify Go CI evidence against small real race binaries
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_go_test_shards_runtime.py'
 
 skill-test:    ## Run the unit tests of every project-local agent skill (.agents/skills/*/tests; CI runs this)
 	@for skill in .agents/skills/*/; do \
@@ -150,10 +195,11 @@ identity-ssh-cache-live-test: ## Require an external private fixture config for 
 .PHONY: identity-ssh-cache-test identity-ssh-cache-live-test
 
 identity-secret-test: ## Require real Ansible for password transport, failure, cleanup and rerun regressions (issue 118).
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText|FreeIPANFSServerAdminPasswordDriftGate|FreeIPANFSServerAdminPasswordGateIsVisible)$$' ./internal/spec/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^(TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText|FreeIPANFSServerAdminPasswordDriftGate|FreeIPANFSServerAdminPasswordGateIsVisible)|TestIdentityDriftSharedNormalizationInAnsible)$$' ./internal/spec/
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^(TestYAML11NonStringMatchesAnsible|TestAnsibleTagsMatchTheClassifier)$$' ./internal/inventory/
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^TestRegression_IdentitySecretDriftProbe' ./internal/accessgrants/
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 4m -run '^TestIdentitySecretDriftCommands' ./cmd/pilot/cmd/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_IdentitySecretDriftProbe' ./internal/accessgrants/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 8m -run '^TestIdentitySecretDriftCommands' ./cmd/pilot/cmd/
+	python3 -I playbooks/check/files/test_identity_object_observer.py
 
 # ROOT_TESTS are the internal/inventory tests that call requireRoot: what a
 # roster write keeps when pilot runs as root (pilot-cli under `docker run`).

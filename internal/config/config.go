@@ -13,6 +13,7 @@ import (
 
 type Config struct {
 	DataDir      string        `yaml:"data_dir"`
+	ServicesDir  string        `yaml:"services_dir,omitempty"`
 	Sandbox      SandboxConfig `yaml:"sandbox,omitempty"`
 	HBACServices []string      `yaml:"hbac_services,omitempty"`
 }
@@ -32,7 +33,8 @@ type SandboxConfig struct {
 func Default() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
-		DataDir: filepath.Join(home, ".local", "share", "pilot"),
+		DataDir:     filepath.Join(home, ".local", "share", "pilot"),
+		ServicesDir: filepath.Join(home, ".local", "share", "pilot-services"),
 		Sandbox: SandboxConfig{
 			Pull: "missing",
 		},

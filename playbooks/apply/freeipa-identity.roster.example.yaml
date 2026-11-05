@@ -1,5 +1,5 @@
 ---
-# Canonical freeipa-identity roster (schema_version: 2).
+# Canonical freeipa-identity roster (schema_version: 3).
 #
 # Keep the real file outside git and encrypt it with ansible-vault. Because
 # `groups` and `hosts` are Ansible magic variables, DO NOT pass this file with
@@ -12,12 +12,13 @@
 #     --vault-password-file ~/.vault/vault-pass
 #
 # Identity, HBAC/sudo, Kerberos NFSv4 server, and IPA automount clients are
-# supported. An old schema_version: 1 roster auto-migrates the first time
-# `pilot edit`/the MCP roster driver/`pilot deploy`/`pilot reconcile` opens
-# it (EnsureRosterCurrent) — or run `pilot roster migrate <file>` explicitly.
+# supported. An older schema_version: 1 or 2 roster auto-migrates to 3 the
+# first time `pilot edit`/the MCP roster driver/`pilot deploy`/`pilot
+# reconcile` opens it (EnsureRosterCurrent) — or run `pilot roster migrate
+# <file>` explicitly.
 # `migration` (declarative bulk rename/removal) remains a separate
 # fail-closed delivery batch.
-schema_version: 2
+schema_version: 3
 
 freeipa:
   server: ipa1.ipa.pilot.internal
@@ -159,13 +160,13 @@ hostgroups:
       hosts: []
       hostgroups: [web-servers]
 
-# Netgroups are optional and v2-only: a FreeIPA netgroup can contain users,
-# groups, hosts, hostgroups, and nested netgroups, feeding NSS/NFS/legacy
-# UNIX consumers (not HBAC/sudo, which stay hostgroup-scoped). Names must
-# match ^ng-[a-z0-9][a-z0-9_.-]*$ and not collide with a hostgroup name;
-# membership.authoritative must be true; every reference must resolve to
-# something else declared in this roster; no netgroup may directly or
-# transitively contain itself.
+# Netgroups are optional (schema v2 and later): a FreeIPA netgroup can
+# contain users, groups, hosts, hostgroups, and nested netgroups, feeding
+# NSS/NFS/legacy UNIX consumers (not HBAC/sudo, which stay hostgroup-scoped).
+# Names must match ^ng-[a-z0-9][a-z0-9_.-]*$ and not collide with a
+# hostgroup name; membership.authoritative must be true; every reference
+# must resolve to something else declared in this roster; no netgroup may
+# directly or transitively contain itself.
 netgroups:
   - name: ng-project-alpha-clients
     state: present
@@ -304,12 +305,17 @@ nfs_clients:
     automount: {location: default, enable_service: true}
     verification_mounts: [/projects/alpha]
 
+# Access grants (schema v3). Left empty here; add them with `pilot edit`'s
+# Access governance editor.
+grants: []
+
 # ---------------------------------------------------------------------------
 # v3.2 Identity & Credential Hardening fields — password_policies,
 # credential_policies, security.privileged_identity, users[].authentication
-# — are schema_version: 3 only, so they are commented out here rather than
-# live YAML (this file is schema_version: 2 above; grafting v3-only fields
-# into it live would make the example fail its own declared schema). Field
+# — are left commented out here rather than live YAML: they reference a
+# role-privileged group this example does not declare, users[].authentication
+# belongs inside an existing users: entry, and on apply they change FreeIPA
+# password policy and authentication types. Field
 # names/units below are confirmed against a real FreeIPA server, not
 # guessed — see docs/verification/freeipa-identity.md §10 for the full
 # vm-target evidence (2026-08-27) this was verified against, including the

@@ -1,11 +1,37 @@
 ---
 name: pr-ready
-description: Repair and verify existing GitHub Draft pull requests until merge-ready, then mark them Ready for Review; use when asked to process one or more Draft PRs, repair CI/review findings, or manage an iterative PR quality gate with independent subagents. Never merge PRs.
+description: Repair and verify existing GitHub Draft pull requests until merge-ready, then mark them Ready for Review; use when asked to process exactly one Draft PR per invocation after checking out its original head branch, repair CI/review findings, or manage an iterative PR quality gate with independent subagents. Never merge PRs.
 ---
 
 # PR Ready — multi-agent Draft PR remediation
 
+## Single-item checkout contract (mandatory)
+
+Follow the single-item scope and branch checkout contract,
+`.agents/skills/_shared/single-item-checkout.md`, from the repo root (a path, not a
+relative link: Claude Code presents this skill as the symlink `.claude/skills/<name>`,
+where `../_shared` does not exist). Resolve this skill's directory with `realpath`
+before reading shared files or taking the snapshot. Apply it
+before analysis, edits, review, tests or delegation. Handle exactly one Issue/PR
+per invocation; multiple/all targets require choosing one with the user. Checkout
+the selected branch in the current clean checkout; do not create per-item worktrees.
+Before each dispatch the contract's role check applies: PASS dispatches, DRIFT (the
+target branch carries a different role file) dispatches with the snapshot as the
+binding contract and a reported pin difference, STOP is `BLOCKED`. At the end, whatever
+the outcome, the contract's restore step switches back to the starting branch when that
+is safe, and otherwise stays and reports why.
+
+For target evidence after integrating an advanced base, read
+`$SNAP/.agents/skills/_shared/target-evidence-reuse.md` from the verified snapshot,
+not from the branch being worked on (an older PR branch lacks it). This
+exception requires base-manifest `kind: target-run` and a fresh dependency review;
+it never reuses stale review judgments or CI receipts.
+
 ## Project runtime configuration
+
+Before implementation or expensive validation, follow the snapshot's repo-root
+`.agents/skills/_shared/local-validation.md` for the shared role startup check
+and candidate-specific local test plan. Static role checks do not prove launchability.
 
 This skill is repository-local: use the native `pr-sa`, `pr-coder`, and `pr-reviewer`
 definitions shipped beside it; there is no personal installation. Codex invocation:
@@ -20,19 +46,27 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   `xhigh`. `cmd/pilot/cmd/agent_skill_consistency_test.go` keeps the three
   platform copies of each role and the installed `.codex/agents` /
   `.claude/agents` files identical.
-- Delegate by the configured native role name, with a fresh independent context;
-  do not override its model/effort or use a conversation fork that inherits another
-  model. Report unavailable roles/models rather than silently substituting them.
-- Resolve packaged scripts and references relative to this `SKILL.md`, including
-  when operating in another worktree. Do not fall back to `~/.agents/skills`.
+- Delegate by the configured native role name, with a fresh independent context.
+  For Codex, follow `.agents/skills/_shared/codex-role-dispatch.md` from the verified
+  snapshot: an explicit unavailable-agent-type error permits the documented
+  `default` transport only after verifying effective selection and model/effort
+  pins under that contract; unknown or conflicting settings block it. Report and
+  record this transport; never silently substitute models, inherit
+  the parent conversation, or bypass independent review. Other dispatch failures
+  remain blockers.
+- Run packaged scripts and read references from the verified snapshot (`$SNAP`) the
+  checkout contract takes, by absolute snapshot paths, never from the branch being
+  worked on: it may predate or replace them. `$REPO_ROOT` is the current checkout.
+  Do not fall back to `~/.agents/skills`.
 
 You are the **orchestrator**, not the implementer of last resort. Execute the work; do not stop after making a plan. This skill supports Codex, Claude Code, and Antigravity CLI (`agy`). Use each runtime's native subagent mechanism; role contracts are under `references/roles.md` and the platform-native `pr-sa`, `pr-coder`, `pr-reviewer` agent definitions ship beside this skill (`platforms/<platform>/agents/`).
 
 ## Pilot: turn review history into a verification plan
 
 Read [shared historical checks and vm-target prompts](../pilot-code-review/references/pilot-history-checks.md)
-before SA/Coder dispatch. Resolve the reference to an absolute path for children
-working elsewhere. Read all relevant earlier findings and actual fix commits,
+before SA/Coder dispatch. Resolve the reference to its absolute path inside the
+verified snapshot for the children: the checked-out PR branch may predate it.
+Read all relevant earlier findings and actual fix commits,
 not merely the latest “fixed” comment. Maintain a finding ledger with root-cause
 class, trigger, invariant, fix SHA and regression/counterexample. On the second
 occurrence of a class, send SA to assess related callers/includes/backends before
@@ -49,34 +83,98 @@ semantic assertions: Root must inspect target artifacts and put their paths and
 limits into the review report and `assessment.rationale` before `--ready`.
 Text-only changes need no unrelated VM run.
 
+## Pilot: cycle-time rules
+
+Measured on this repository (2026-10-28 to 2026-11-01), a `pr-ready` round took about half a
+day, and the time went to re-verification rather than to fixing: a full local
+`go test ./...` (35 to 60 minutes beside other sessions) plus CI (30 to 47 minutes) plus a
+fresh review for every new HEAD, evidence-only commits and base-branch merges included;
+Coder rounds that polished P3/P4 remarks; and hours blocked on a question nobody was awake
+to answer. These rules remove that cost without weakening a gate:
+
+1. **Local receipts cover what the diff touches.** Run `go vet` and the tests of the Go
+   packages the diff changes (plus the packages that import a changed shared helper), the
+   regressions the fix adds, `make skill-test` for `.agents/skills` changes, and
+   `make lint` (CI pins golangci-lint v2.12.1; `make lint` refuses a v1 binary). The whole
+   suite is CI's `Go test` job: do not run `go test ./...` or `-race ./...` locally unless
+   the user asks or CI is unavailable, and never beside a live vm-target run. A failure in
+   a package the diff does not touch is rerun alone once; if it passes, record both
+   receipts and the flake's issue number; if it fails again, it is a finding.
+2. **Receipts and the review survive an evidence-only delta.** `pr_gate.py` accepts a
+   receipt or an independent review taken at an ancestor of HEAD when every file changed
+   since matches the base manifest's `evidence_only_paths` (the rule `issue_gate.py` already
+   applies; the gate lists accepted deltas under `receipt_reuse`). Order the work
+   accordingly: freeze the code, review it, run the target evidence on that commit, commit
+   the record, let the receipts carry over. `evidence.head_sha` still names HEAD.
+3. **P3/P4 close the round; they do not start another.** When the reviewer returns PASS
+   with only P3/P4 remarks, do not dispatch a Coder: reply, resolve the thread, and record
+   them under "Not in this PR" in the PR body or in a follow-up issue. Fix one in the same
+   round only when the user asks for it.
+4. **One reviewer per round over the whole diff**; a delta review only for a delta. Two
+   reviewers split by layer doubled the cost and still missed the defects the merge review
+   found afterwards.
+5. **Align with the latest base before Ready.** Independently read the current
+   base ref (`main` here) and require that exact commit to be an ancestor of PR
+   HEAD, even when GitHub reports no conflicts and PR Base SHA equals the live tip.
+   When behind, integrate the verified base into the original head branch using
+   a merge commit under the checkout contract; no force-push. A feature HEAD
+   normally differs from main: SHA equality of HEAD and main is not required.
+   Reconcile any PR Base/live-base metadata mismatch as well. Before Ready,
+   `pr_gate.py` verifies both metadata and ancestry against the live remote;
+   rerun affected validation/CI and obtain fresh independent review after base
+   integration. Repeat alignment if main advances before the final gate.
+   If access or metadata still prevents reconciliation, keep Draft with the exact
+   observed SHAs and blocker. A conflict confined to Markdown (changelog rows, runbook wording) is a
+   non-execution edit: keep the target evidence through `target_reuse`
+   (`$SNAP/.agents/skills/_shared/target-evidence-reuse.md`), rerun the touched-package
+   receipts and a delta review. A conflict in an execution-affecting file is a new
+   candidate.
+6. **A bounced PR gets the merge reviewer's rubric before Ready.** When the PR carries an
+   `Automated PR review: Draft required` comment, the final review round also follows
+   [the merge gate's reviewer definition](../pr-review-merge/platforms/claude/agents/prm-reviewer.md):
+   it lists every earlier finding's class with the regression that now covers it and
+   checks the base manifest's required record against HEAD. A second finding of the same
+   class goes to SA for a class-level fix before another Coder round.
+7. **Do not block on a question that has a conservative answer.** Ask the user only for a
+   destructive or irreversible step, a scope change, or an authorization (staging/prod).
+   Otherwise take the conservative default, record it in the checkpoint and the final
+   report, and go on: pending CI means keep the active invocation waiting with
+   `pr_gate.py --wait --ready` after push and evidence preparation; an unrelated
+   failing check goes into `unrelated_failing_checks` with the reviewer's confirmation; a
+   force-pushed or moved head means stop with `DRAFT-BLOCKED` and the facts.
+8. **Mind the machine.** Before a test run longer than a few minutes, check for other
+   `go test` processes (`pgrep -fc 'go test'`); when there are any, pass `-p` at or below
+   half the cores. Never start one beside a live vm-target chain.
+
 ## Inputs and preflight
 
-- Accept one or more PR numbers/URLs or an explicit instruction to process **all Draft PRs** in the current GitHub repo. If no target is supplied, use the current branch's PR when unambiguous; otherwise list Draft PRs and identify the scope before mutation.
-- Verify `git`, `gh`, `python3`, an authenticated `gh auth status`, repository identity, clean worktree, and write permission to each PR head branch. If an action is permission-blocked, request the normal permission grant; **never** bypass sandbox/branch protections.
-- Fetch for each PR: description/body, diff, base/head SHAs, linked issues, acceptance criteria, review comments and threads, required checks, all CI checks, branch restrictions, dependency edges. Do not assume a comment is resolved simply because it is outdated.
+- Accept one PR number/URL. Multiple targets or **all Draft PRs** require asking the user to select one; never process a batch. If no target is supplied, use the current branch's PR when unambiguous; otherwise list Draft PRs and identify the scope before mutation.
+- Verify `git`, `gh`, `python3`, an authenticated `gh auth status`, repository identity, a clean checkout, and write permission to the selected PR's head branch. If an action is permission-blocked, request the normal permission grant; **never** bypass sandbox/branch protections.
+- Fetch for the selected PR: description/body, diff, base/head SHAs, linked issues, acceptance criteria, review comments and threads, required checks, all CI checks, branch restrictions, dependency edges. Do not assume a comment is resolved simply because it is outdated.
 - Skip closed/merged PRs and never revert a non-Draft PR to Draft. If a Draft already meets every gate, do not make unnecessary changes.
 
-## Worktree and dependency isolation
+## Branch checkout and dependency isolation
 
-- One existing PR **head branch** per isolated Git worktree; confirm the worktree HEAD equals the GitHub PR head before working. Preserve the original branch and PR; no duplicate PRs, no destructive resets or force-push.
+- Checkout the existing PR **head branch** in the current clean checkout; confirm branch name and HEAD equal the GitHub PR head before working. Do not create per-PR worktrees. Preserve the original branch and PR; no duplicate PRs, no destructive resets or force-push.
 - For fork PRs, confirm head repository and permissions; if updating the original head is impossible, report `DRAFT-BLOCKED` rather than creating a replacement.
-- Build a dependency DAG; process prerequisites before dependents. Run at most **two independent PRs concurrently** by default. Never run concurrent writers on the same branch/worktree or shared mutable resources.
-- Each PR owns its own state/checkpoint and validation receipts. Checkpoint after every meaningful step; on resume, revalidate the current remote HEAD and invalidate stale evidence.
+- Inspect dependencies as read-only context. An unmet prerequisite blocks this PR; do not start that prerequisite or another PR. Never let two writers touch the same branch/checkout or shared mutable resources at the same time.
+- Keep this PR's state/checkpoint and validation receipts under `.pr-ready/<N>/` (N = PR number): one checkout serves different PRs over time, so never reuse another PR's state. Checkpoint after every meaningful step; on resume, revalidate the current remote HEAD and invalidate stale evidence.
 
 ## Per-PR execution loop
 
-1. **Analyze first.** Gather GitHub context; derive acceptance criteria and reproduce reported failures. Check whether the PR already passes the entire quality gate.
+1. **Analyze first.** Gather GitHub context; derive acceptance criteria and reproduce reported failures. Triage every review comment as a claim (`valid`, `invalid`, `needs_evidence`, `nonblocking`) per [review comments](references/review-comments.md); only `valid` findings go to Coder. Check whether the PR already passes the entire quality gate.
 2. **SA (`pr-sa`)** independently diagnose root cause, architectural impact, design options, and regressions. Produce a concise evidence-backed diagnosis.
-3. **Coder (`pr-coder`)** owns implementation *only* in that PR's worktree. Repair root cause, add or strengthen regressions, run tests, lint, and static analysis as applicable. Never weaken assertions, silence errors, skip meaningful checks, or hardcode expected results. Commit only changes belonging to this PR.
-4. **Reviewer (`pr-reviewer`)** must be an independent agent/context, not the Coder relabelled. Review current diff for correctness, architecture, security, concurrency, edge cases, semantic regressions and test adequacy. Use [the shared severity/origin rubric](../issue-to-pr/references/severity.md); return P0/P1/P2 blocking findings with precise file:line evidence and report P3/P4 separately. Origin is relative to the PR base, not the previous review. A fix is not closed until its regression and relevant target evidence are checked; an outdated thread alone is not proof.
-5. If blocking findings remain, hand back to Coder; rerun impacted checks and reviewer on the new commit. After **three effective unsuccessful fix rounds**, reassign SA for a fresh diagnosis. If still stuck, record `DRAFT-BLOCKED`, preserve the PR, and continue with other independent work.
-6. Before pushing, verify branch identity, uncommitted changes, and remote movement. Push **only the original PR head branch** (no force). After any push, discard all previously successful CI results as evidence for the new HEAD, and re-query GitHub until checks settle or an external blocker prevents completion.
-7. Create a HEAD-specific evidence JSON using `references/evidence-schema.md`. Prefer `scripts/run_check.py` for local check receipts. Run `scripts/pr_gate.py` for a **fail-closed** machine-assisted gate; unresolved items remain Draft. `pr_gate.py --ready` is the *only* recommended mutation step to call `gh pr ready` after passing all automated checks and explicit reviewer/acceptance attestations. Never invoke `gh pr ready` on a failing gate.
-8. Final report: PR URL/number, `READY` or `DRAFT-BLOCKED`, actual fixes/root cause, independent review result, test/CI results, final HEAD SHA, blockers/next action. Do not claim READY if GitHub post-action verification failed.
+3. **Coder (`pr-coder`)** owns implementation *only* in the verified checkout of that PR's head branch. Repair root cause, add or strengthen regressions, run tests, lint, and static analysis for the packages the diff touches (cycle-time rule 1; the whole suite is CI's job). Never weaken assertions, silence errors, skip meaningful checks, or hardcode expected results. Commit only changes belonging to this PR.
+4. **Reviewer (`pr-reviewer`)** must be an independent agent/context, not the Coder relabelled. Review current diff for correctness, architecture, security, concurrency, edge cases, semantic regressions and test adequacy. Use [the shared severity/origin rubric](../issue-to-pr/references/severity.md); return P0/P1/P2 blocking findings with precise file:line evidence and report P3/P4 separately. Origin is relative to the PR base, not the previous review. A fix is not closed until its regression and relevant target evidence are checked; an outdated thread alone is not proof. Give it each review comment Root would dispute with the comment and the code only, not Root's conclusion; the dispute stands only if the reviewer's own verdict agrees.
+5. If blocking findings remain, hand back to Coder; rerun impacted checks and reviewer on the new commit. A PASS with only P3/P4 remarks ends the round (cycle-time rule 3). After **three effective unsuccessful fix rounds**, reassign SA for a fresh diagnosis. If still stuck, record `DRAFT-BLOCKED`, preserve the PR, and end this invocation without starting another item.
+6. Before pushing, verify branch identity, uncommitted changes, and remote movement. Push **only the original PR head branch** (no force). After any push, discard all previously successful CI results as evidence for the new HEAD. Prepare evidence, then keep the active invocation waiting with the command in step 7 until checks settle or a real blocker prevents completion. Pending alone does not end the invocation.
+7. Create a HEAD-specific evidence JSON using `references/evidence-schema.md`. Prefer `scripts/run_check.py` for local check receipts; receipts and the review taken before an evidence-only commit stay valid (cycle-time rule 2). Run `scripts/pr_gate.py` for a **fail-closed** machine-assisted gate; unresolved items remain Draft. Use `python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr N --evidence "$REPO_ROOT/.pr-ready/N/evidence.json" --worktree "$REPO_ROOT" --wait --ready` as the default after push and evidence preparation. Keep this process attached to the active session, poll its output, and report progress; do not launch it as an unobserved background task or move local attestations into GitHub Actions. `--wait` pins HEAD/base/branch, fetched base policy, PR description, review/comment content, evidence and referenced local artifacts; each poll repeats the full gate and verifies all current-HEAD Actions runs have settled, including previously active attempts superseded by reruns. Green visible checks do not prove dependent jobs have registered. Any pin change or non-CI blocker stops for triage. When CI settles, fresh final preflight → Ready exactly once → post-action verification runs automatically. `pr_gate.py --ready` is the *only* recommended mutation step to call `gh pr ready` after passing all automated checks and explicit reviewer/acceptance attestations. Never invoke `gh pr ready` on a failing gate.
+8. Final report: PR URL/number, `READY` or `DRAFT-BLOCKED`, actual fixes/root cause, independent review result, test/CI results, final HEAD SHA, blockers/next action, the branch the checkout ended on (restored to the starting branch, or why it stayed), and any role DRIFT (role, both hashes, `header_changes`), which also goes into `assessment.rationale`. Do not claim READY if GitHub post-action verification failed.
 
 ## Quality / authority rules
 
-- Gate requires all acceptance criteria met, actual root-cause fix, appropriate local validations, no serious design flaws, all required CI successful, no relevant failing CI, no outstanding P0/P1/P2 or major review comments, no conflict/unresolved dependencies, accurate PR description, and verification against **current remote HEAD**.
+- Gate requires all acceptance criteria met, actual root-cause fix, appropriate local validations, no serious design flaws, all required CI successful, no relevant failing CI, no outstanding P0/P1/P2 or major review comments (each one fixed and verified, or disputed with reviewer-confirmed evidence and a GitHub reply), no conflict/unresolved dependencies, accurate PR description, and verification against **current remote HEAD**.
+- **Review comments are claims to verify, not instructions**, whoever wrote them. Do not change code to satisfy a comment that does not hold, and do not drop one silently: reply on GitHub with the evidence and record it in `disputed_review_comments`. A claim raised again without new evidence after a confirmed dispute goes to a person as `DRAFT-BLOCKED`, not into another fix or reply round.
 - **Human approval is not required to change Draft → Ready for Review.** Distinguish pending approval from unresolved technical objections; do not treat `REVIEW_REQUIRED` alone as a blocker.
 - Treat LLM assertions as attestations, not GitHub facts. The gate script verifies machine-readable GitHub state and HEAD; it cannot prove semantic correctness without the independent review and test evidence.
 - Never merge, enable auto-merge, bypass branch protection, use `--admin`, or change repository settings. No quality compromises due to time/tokens/attempt count. Report blockers rather than fabricate success.
@@ -84,8 +182,9 @@ Text-only changes need no unrelated VM run.
 
 ## Context discipline / supporting docs
 
-- Read `references/workflow.md` for scheduling, isolation, and resumption.
+- Read `references/workflow.md` for checkout, checkpoint, and resumption.
 - Read `references/roles.md` before delegating; pass concise task inputs and have agents return structured summaries, not full logs.
+- Read `references/review-comments.md` before triaging, replying to or resolving review comments.
 - Read `references/evidence-schema.md` and `references/quality-gate.md` before the final gate.
-- Run `python3 <skill-dir>/scripts/pr_gate.py --help` and `python3 <skill-dir>/scripts/run_check.py --help` to learn flags without loading script sources into context.
-- Native agent roles live under Codex `.codex/agents` (copies) and Claude `.claude/agents` (symlinks into this skill); the agy definitions are in `platforms/agy/agents/` (copy into `.agents/agents/` when agy is used). Delegate using native facilities and these role names, without inventing tool API names.
+- Run `python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --help` and `python3 "$SNAP/.agents/skills/pr-ready/scripts/run_check.py" --help` to learn flags without loading script sources into context.
+- Native agent roles live under Codex `.codex/agents` (copies) and Claude `.claude/agents` (symlinks into this skill); the agy definitions are in `platforms/agy/agents/` (copy into `.agents/agents/` when agy is used, and list `/.agents/agents/` in `$(git rev-parse --git-path info/exclude)`). Delegate using native facilities and these role names, without inventing tool API names.

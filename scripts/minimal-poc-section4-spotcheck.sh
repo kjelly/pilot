@@ -132,7 +132,7 @@ rc=$?
 if [ $rc -eq 0 ]; then
   emit 4.1-alice-allowed-cmd pass "sudo -n $ALICE_SUDO_CMD succeeded for $ALICE_USER"
 else
-  emit 4.1-alice-allowed-cmd fail "sudo -n $ALICE_SUDO_CMD failed for $ALICE_USER (roster/sudo drift, or stale sssd cache — see runbook §6): $out"
+  emit 4.1-alice-allowed-cmd fail "sudo -n $ALICE_SUDO_CMD failed for $ALICE_USER (roster/sudo drift, or the known SSSD sudo-cache bug #214 — see runbook §6): $out"
 fi
 
 out=$(SSHPASS="$ALICE_PASSWORD" sshpass -e ssh "${SSH_OPTS[@]}" "${ALICE_USER}@${NEXUS_IP}" "sudo -n $ALICE_DENIED_CMD" 2>&1)

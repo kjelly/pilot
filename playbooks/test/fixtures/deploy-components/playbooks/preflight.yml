@@ -1,0 +1,5 @@
+- name: Native fixture SSH preflight
+  hosts: all
+  gather_facts: false
+  tasks:
+    - ansible.builtin.ping:

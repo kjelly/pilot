@@ -25,22 +25,27 @@ func testServiceBootstrap(t *testing.T) ServiceBootstrap {
 		RegistryMirrorURL: bundle.Client.RegistryMirrorURL,
 		RegistryProjects:  bundle.Client.RegistryProjects,
 		CAPEM:             bundle.Client.CAPEM,
+		DataProbes:        vmServiceDescriptors(),
 	}
 }
 
 func TestServiceBootstrapRenderCloudInit(t *testing.T) {
 	service := testServiceBootstrap(t)
+	service.InstanceID, service.Generation = "shared-instance", 4
 	got, err := service.RenderCloudInit()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
+		"/etc/pilot/service-instance.json",
+		`"instance_id":"shared-instance"`,
+		`"generation":4`,
 		"/usr/local/share/ca-certificates/pilot-services.crt",
 		"/etc/apt/apt.conf.d/99pilot-services",
 		"/etc/yum.repos.d/pilot-services.repo",
 		"/etc/docker/daemon.json",
 		"update-ca-certificates",
-		"/pulp/api/v3/status/",
+		"/repodata/repomd.xml",
 		"cache.pilot.internal",
 		"192.168.122.1 cache.pilot.internal",
 		"[pilot-pulp-almalinux-9-baseos]",
@@ -90,5 +95,24 @@ func TestServiceBootstrapRejectsInvalidCA(t *testing.T) {
 	service.CAPEM = "not-a-certificate"
 	if _, err := service.RenderCloudInit(); err == nil || !strings.Contains(err.Error(), "CA") {
 		t.Fatalf("want CA validation error, got %v", err)
+	}
+}
+
+func TestServiceBootstrapSelectedFilesAndChecks(t *testing.T) {
+	for _, capability := range []services.Capability{services.APT, services.RPM, services.OCI} {
+		s := testServiceBootstrap(t)
+		s.Requirements = services.Requirements{capability}
+		out, e := s.RenderCloudInit()
+		if e != nil {
+			t.Fatal(e)
+		}
+		for c, file := range map[services.Capability]string{services.APT: "/etc/apt/apt.conf.d/99pilot-services", services.RPM: "/etc/yum.repos.d/pilot-services.repo", services.OCI: "/etc/docker/daemon.json"} {
+			if strings.Contains(out, file) != (c == capability) {
+				t.Fatalf("%s unexpected file scope: %s", capability, file)
+			}
+		}
+		if capability == services.APT && (strings.Contains(out, "/manifests/") || strings.Contains(out, "repomd.xml")) {
+			t.Fatal("APT-only guest probes unrelated caches")
+		}
 	}
 }

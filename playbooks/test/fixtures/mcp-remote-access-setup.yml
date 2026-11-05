@@ -1,0 +1,164 @@
+---
+# Test-environment setup for the pilot-mcp end-to-end run
+# (docs/superpowers/specs/2026-10-30-pilot-mcp-remote-access-spec.md §13.3).
+# It turns a disposable host into a pilot-mcp deploy node: an SSH account
+# in the docker group, the per-environment .vault (root, 0700) and
+# .pilot-data directories, a managed-host account the containerised
+# Ansible logs in to, and the pilot-cli image loaded from a `docker save`
+# tarball. It is not tied to a docs/verification spec.
+#
+# Prerequisite: Docker on the host (playbooks/apply/docker-apply.yml).
+# Every value is test-only; nothing here is a real deploy node's layout.
+# Idempotent: a second run reports changed=0.
+- name: Prepare a disposable host as a pilot-mcp deploy node
+  hosts: all
+  become: true
+  vars:
+    mcp_e2e_account: pilot-mcp
+    mcp_e2e_managed_user: mcp-managed
+    mcp_e2e_env_root: /srv/pilot-mcp-e2e/env
+    mcp_e2e_envs: [prod, staging]
+    mcp_e2e_image_tar: ""
+    mcp_e2e_image: ""
+    mcp_e2e_image_alias: ""
+    mcp_e2e_client_pubkey: ""
+    mcp_e2e_managed_pubkey: ""
+    mcp_e2e_managed_privkey_file: ""
+  pre_tasks:
+    - name: "Gate: every input is provided"
+      ansible.builtin.assert:
+        that:
+          - mcp_e2e_image_tar | length > 0
+          - mcp_e2e_image | length > 0
+          - mcp_e2e_client_pubkey | length > 0
+          - mcp_e2e_managed_pubkey | length > 0
+          - mcp_e2e_managed_privkey_file | length > 0
+        fail_msg: >-
+          Pass mcp_e2e_image_tar, mcp_e2e_image, mcp_e2e_client_pubkey,
+          mcp_e2e_managed_pubkey and mcp_e2e_managed_privkey_file with -e.
+      tags: [always]
+
+  tasks:
+    # The read-only probes run in check mode too: a skipped command has no
+    # rc, and the tasks that read it would fail (AGENTS.md §4.5 item 4).
+    - name: Docker is installed
+      ansible.builtin.command:
+        argv: [docker, version]
+      changed_when: false
+      check_mode: false
+
+    - name: The pilot-mcp SSH account can use docker
+      ansible.builtin.user:
+        name: "{{ mcp_e2e_account }}"
+        groups: [docker]
+        append: true
+        shell: /bin/bash
+
+    - name: The managed-host account exists
+      ansible.builtin.user:
+        name: "{{ mcp_e2e_managed_user }}"
+        shell: /bin/bash
+
+    - name: Each account has an .ssh directory
+      ansible.builtin.file:
+        path: "/home/{{ item }}/.ssh"
+        state: directory
+        owner: "{{ item }}"
+        group: "{{ item }}"
+        mode: "0700"
+      loop:
+        - "{{ mcp_e2e_account }}"
+        - "{{ mcp_e2e_managed_user }}"
+
+    - name: The client key may only run commands (restrict)
+      ansible.builtin.copy:
+        dest: "/home/{{ mcp_e2e_account }}/.ssh/authorized_keys"
+        content: "restrict {{ mcp_e2e_client_pubkey | trim }}\n"
+        owner: "{{ mcp_e2e_account }}"
+        group: "{{ mcp_e2e_account }}"
+        mode: "0600"
+
+    - name: The containerised Ansible logs in to the managed-host account
+      ansible.builtin.copy:
+        dest: "/home/{{ mcp_e2e_managed_user }}/.ssh/authorized_keys"
+        content: "{{ mcp_e2e_managed_pubkey | trim }}\n"
+        owner: "{{ mcp_e2e_managed_user }}"
+        group: "{{ mcp_e2e_managed_user }}"
+        mode: "0600"
+
+    - name: Each environment has a root-only .vault
+      ansible.builtin.file:
+        path: "{{ mcp_e2e_env_root }}/{{ item }}/.vault"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop: "{{ mcp_e2e_envs }}"
+
+    - name: Each environment has a .pilot-data directory
+      ansible.builtin.file:
+        path: "{{ mcp_e2e_env_root }}/{{ item }}/.pilot-data"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop: "{{ mcp_e2e_envs }}"
+
+    - name: Each .vault holds the managed-host key the inventory names
+      ansible.builtin.copy:
+        src: "{{ mcp_e2e_managed_privkey_file }}"
+        dest: "{{ mcp_e2e_env_root }}/{{ item }}/.vault/id_ed25519"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ mcp_e2e_envs }}"
+
+    - name: Each .vault holds a placeholder main.yaml
+      ansible.builtin.copy:
+        dest: "{{ mcp_e2e_env_root }}/{{ item }}/.vault/main.yaml"
+        content: "e2e_placeholder: not-a-secret\n"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ mcp_e2e_envs }}"
+
+    - name: Check whether the image is already loaded
+      ansible.builtin.command:
+        argv: [docker, image, inspect, "{{ mcp_e2e_image }}"]
+      register: mcp_e2e_image_present
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Copy the image tarball
+      ansible.builtin.copy:
+        src: "{{ mcp_e2e_image_tar }}"
+        dest: /var/tmp/pilot-mcp-e2e-image.tar
+        mode: "0600"
+      when: mcp_e2e_image_present.rc != 0
+
+    - name: Load the image
+      ansible.builtin.command:
+        argv: [docker, load, -i, /var/tmp/pilot-mcp-e2e-image.tar]
+      changed_when: true
+      when: mcp_e2e_image_present.rc != 0
+
+    - name: Remove the tarball
+      ansible.builtin.file:
+        path: /var/tmp/pilot-mcp-e2e-image.tar
+        state: absent
+
+    - name: Check whether the alias tag exists
+      ansible.builtin.command:
+        argv: [docker, image, inspect, "{{ mcp_e2e_image_alias }}"]
+      register: mcp_e2e_alias_present
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: mcp_e2e_image_alias | length > 0
+
+    - name: Tag the alias
+      ansible.builtin.command:
+        argv: [docker, tag, "{{ mcp_e2e_image }}", "{{ mcp_e2e_image_alias }}"]
+      changed_when: true
+      when: mcp_e2e_image_alias | length > 0 and mcp_e2e_alias_present.rc != 0

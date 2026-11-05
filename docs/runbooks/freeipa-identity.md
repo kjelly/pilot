@@ -18,7 +18,23 @@
 
 ## 0.5 目前有效的事實快照
 
-- 最新驗證（2026-10-27，PR #138 review 修正）：candidate `2c35804fe552188f881496abe8ca4aeca1816f89`，
+- 最新驗證（2026-10-31，issue #214 clients 的 sudo 快取更新）：candidate
+  `077052112eb306ca3cd9ce6a502789e0b657f1ff`，tree `71094bda565ddb56c9a4493c717f76d9d53ef08b`；
+  在乾淨、隔離的 `git archive` 複本執行。AlmaLinux 9.8 provider，兩台 enrolled clients（Ubuntu
+  24.04／SSSD 2.9.4、AlmaLinux 9.8／SSSD 2.9.8），另有一組以 `pilot reconcile` 執行的 entry point 拓樸。
+  `topology test --ephemeral`（全新主機，apply 為 dirty）identity verify **24/24 PASS（fail=0 skip=0）**，
+  冪等 `changed=0`；同一個 snapshot、同一份名冊透過 playbook 比對 base 與 candidate：新規則與
+  主機加進 hostgroup 在 base 仍拒絕（25 秒後也是）、candidate 立即允許，撤銷與規則刪除兩邊都立即
+  拒絕（使用者加進既有規則在 `sss_cache -E` 就會生效，兩邊都允許）。SSSD 啟動後約 10 秒才寫
+  `sudoLastFullRefreshTime`，28 次重啟中有 27 次剛好是重啟後第 10 秒，所以新規則（嚴格晚於
+  重啟完成那一秒）不會與重啟同一秒競爭；舊規則（`>=` 重啟前取的秒）在同一秒競爭與時鐘調回時
+  誤判完成 6/6，candidate 兩者都 fail closed。client 無回應、被暫停、SSSD 連不上 FreeIPA、`restart`
+  失敗與卡住都以 `PARTIAL` 列出並可重試；`pilot reconcile` 帶 deferred optional client（別名互為前綴）
+  時略過它並保留待更新狀態；`--check`、`--tags sudo`／`client-cache`、`refresh=false`、沒有 `ldb-tools`
+  的舊 client 皆通過。未涵蓋：非 root 的 `become`、超過兩台 client、replica 延遲、自然（非注入）
+  故障、marker 欄位不存在的原生狀態、FreeIPA server／replica 不更新。見
+  [evidence](../evidence/freeipa-identity-sudo-cache/2026-10-31-0770521.md)。
+- SSH key 快取驗證（2026-10-27，PR #138 review 修正；其後 refresh task 已由 #214 變更）：candidate `2c35804fe552188f881496abe8ca4aeca1816f89`，
   tree `eba8be23b181597da990e1517c35d28c525a464e`；在乾淨、隔離 checkout 執行。
 - 實際目標為三台拋棄式 AlmaLinux 9.8／FreeIPA 4.13.4 VM：`freeipa-server` group
   一台 provider，`freeipa-client` group 兩台已 enroll clients（`ansible-inventory --graph`
@@ -38,6 +54,10 @@
   驗收後本次三台 disposable VM 已清理，非現存部署 inventory。Image digest、執行輸入
   hashes、真實失敗與恢復見
   [目前有效 evidence](../evidence/freeipa-identity-ssh-cache/2026-10-27-2c35804-live.md)。
+- 範例名冊 `freeipa-identity.roster.example.yaml` 目前為 schema v3（2026-10-31 由 v2 升級：
+  只改版本號並加上空的 `grants: []`，與 `pilot roster lint --upgrade` 的結果相同）。§3 第 5 步
+  `pilot roster lint --vault-password-file` 同日只在本機對該範例的加密副本實跑（`ok: schema v3;
+  no issues found`），不涉及目標主機；上方的 apply 驗證未因此重跑。
 
 已部署 FreeIPA 的日常 roster 調和入口是 **`pilot reconcile`**，不是全站 `pilot
 deploy`：兩者同樣會先做 preflight、stage gate、preview 與人工確認，但前者只顯示
@@ -88,12 +108,28 @@ ansible-vault encrypt ~/.vault/ipa-identity.yaml
 # 4.（選）把 vault 密碼寫進檔案，之後免手打
 printf '%s' 'YOUR-VAULT-PASSWORD' > ~/.vault/vault-pass
 chmod 600 ~/.vault/vault-pass
+
+# 5. 在 repo 根目錄驗證加密名冊（記憶體內解密，不寫出明文檔）
+go run ./cmd/pilot roster lint --vault-password-file ~/.vault/vault-pass ~/.vault/ipa-identity.yaml
 ```
+
+第 5 步要求 exit 0 與 `ok: schema v3; no issues found`。2026-10-31 在本機照第 1、4、5 步
+實跑（HOME 指向拋棄式目錄、拋棄式 vault 密碼；第 2 步略過，直接驗證未修改的 example；
+第 3 步改用 `--vault-password-file` 非互動加密）的真實輸出：
+
+```text
+$ go run ./cmd/pilot roster lint --vault-password-file ~/.vault/vault-pass ~/.vault/ipa-identity.yaml
+ok: schema v3; no issues found
+```
+
+不帶 `--vault-password-file` 時，加密名冊會 exit 1：`<file> is ansible-vault encrypted;
+rerun with --vault-password-file <path>`。lint 通過只代表名冊結構正確，不取代 §4.2 的
+`--check --diff` 與實際 apply／verify。
 
 Canonical schema（完整範例見 `freeipa-identity.roster.example.yaml`）：
 
 ```yaml
-schema_version: 2
+schema_version: 3
 freeipa:
   server: ipa1.ipa.pilot.internal
   admin:
@@ -124,17 +160,18 @@ hosts: []
 hostgroups: []    # membership.hostgroups (nested) is authoritative too
 hbac: {}
 sudo: {}
-netgroups: []     # optional, v2-only — see freeipa-identity.roster.example.yaml
+netgroups: []     # optional (schema v2 and later) — see freeipa-identity.roster.example.yaml
+grants: []        # schema v3 access grants (pilot edit → Access governance)
 ```
 
-新的 roster 直接寫 `schema_version: 2`；既有的 `schema_version: 1` roster
+新的 roster 直接寫 `schema_version: 3`；既有的 `schema_version: 1` 或 `2` roster
 不需要手動改版本號——`pilot edit`/MCP roster driver/`pilot deploy`/`pilot
 reconcile` 的 preflight 一開啟 roster 就會自動呼叫 `EnsureRosterCurrent`
 升級（已驗證、有備份、atomic），或用 `pilot roster migrate <file>`
 （加密 roster 補 `--vault-password-file <path>`）手動觸發。
 
 `freeipa_domain` 唯一設定於 inventory 的 `group_vars/freeipa.yml`；roster
-只保存 FreeIPA 身分、群組與授權規則（新 v2 roster 不要再寫
+只保存 FreeIPA 身分、群組與授權規則（新 roster 不要再寫
 `freeipa.domain`/`freeipa.realm`——那兩個欄位只為了相容舊 v1 roster 保留）。
 `realm` 由 domain 大寫推導，server FQDN 由 inventory/target facts 或 roster
 的驗證欄位提供。
@@ -205,6 +242,8 @@ ipa_hbac_rules:                     # 控制「誰能登入哪些主機」，見
 ansible-vault edit ~/.vault/ipa-identity.yaml
 ```
 
+改完先跑 §3 第 5 步的 `pilot roster lint --vault-password-file`，再做 §4.2。
+
 ### 4.2 先 dry-run 看差異（強烈建議）
 
 ```bash
@@ -253,7 +292,24 @@ ansible-playbook -i inventory-freeipa.yaml \
 
 非金鑰的授權變更（使用者資料、群組、HBAC、sudo…）要等 client 的 SSSD 快取更新才生效。
 只有選到 `identity` 或 `client-cache` 的 run（含不帶 tags 的完整 apply）會對 enrolled
-clients 執行 `sss_cache -E`。其他 tags（例如 `--tags sudo`、`--tags C9`）或
+clients 執行快取更新：`sss_cache -E`、重啟 SSSD，並等到該 client 自己的
+`sudoLastFullRefreshTime` 變成一個重啟前沒有的新值、且晚於重啟完成的那一秒（每台上限 60 秒，
+`ipa_identity_sudo_refresh_timeout`；只有 `sss_cache -E` 不會讓新套用的 sudo 規則出現，見
+issue #214。舊的 SSSD 實例在重啟當秒寫入的值、或時鐘往回調之後比重啟時間還新的舊值，都不算完成）。
+任何一台沒完成就以
+`Authorization cache refresh PARTIAL` 失敗並列出那些 client，下一次相同的 apply 會重做。
+client 需要 `ldb-tools`（`freeipa-client-apply.yml` 安裝；較舊的 client 沒有它時，這一步會以
+`ldbsearch not found; … re-run freeipa-client-apply.yml` 失敗並列為 PARTIAL，重跑一次 client apply 即可）。
+成本：clients 是逐台序列處理，每台約 10 秒（SSSD 啟動後約 10 秒才做 sudo full refresh）；一台無回應
+最多 90 秒、SSSD 連不上 FreeIPA 最多 60 秒。`sss_cache -E` 或重啟失敗（含逾時）時，helper 會再用
+`systemctl is-active sssd` 檢查 SSSD 的實際狀態，沒在跑就啟動它，並把結果寫進錯誤訊息
+（`SSSD is active`、`SSSD was inactive and was started`、`… could not be started`）；該 client 仍然列為
+PARTIAL，不會因此被當成已完成。每次有授權變更的 apply 都會重啟每台 client 的 SSSD。重啟期間實測
+（Ubuntu 24.04、AlmaLinux 9.8，各約 1 200 次對已快取使用者的 `getent`／`id`）沒有失敗；SSH 金鑰登入、
+root 的 `sudo -l -U` 與第一次對尚未快取使用者的 `getent` 在 SSSD 重啟前後約 0.2 秒內各有 1–3 次失敗，
+之後全部成功（密碼登入沒有測），clients 很多時仍請避開尖峰。範圍只有 `freeipa-client` 群組：
+FreeIPA server 與 replica 不會被重啟（它們的 sudo 快取仍照 SSSD 自己的週期）。
+其他 tags（例如 `--tags sudo`、`--tags C9`）或
 `--skip-tags client-cache` 仍會先在 provider 的 journal 記下「待更新」，不會連到 clients，
 並印出 `Report deferred authorization cache refresh` 提示；下一次選到 `identity`/
 `client-cache` 的 apply 即使 IPA 已無變更也會更新全部 clients。`-e
@@ -503,6 +559,52 @@ gate 的通過、失敗與手動修正後的復原都已驗證；`pilot edit --a
 [3b4bdb1](../evidence/freeipa-nfs-server/2026-10-28-3b4bdb1.md)。`playbooks/apply/freeipa-nfs-server-apply.yml` 的
 sha256 在 `3b4bdb1` 是 `88247b6e…`，之後是 `945657769b99…`，差別只在 no_log 名冊 gate 的 `fail_msg` 文字與註解。
 
+### 4.6 比對名冊與 FreeIPA 現況：`pilot identity drift`
+
+`pilot identity drift <名冊> -i <inventory>` 唯讀地比對名冊與 FreeIPA 現況，涵蓋 HBAC/sudo grants、`auth_policies`、
+`account_policies`、`password_policies`、使用者驗證類型；加上 `--include-users-groups` 後另外比對名冊的 users/groups
+（見下）。admin 密碼的來源與失敗訊息見 §4.5。它不會修改 FreeIPA（`--repair-managed` 除外，且不併用下面兩個新旗標）。
+
+輸出（**這一節描述目前有效的契約；`--format json` 的形狀對所有使用者都變了**）：
+
+- table：每列 `<category>\tname=<名稱>\taction=<動作>\tdetail=<說明>`，開頭一行
+  `partial coverage; not inspected: [...]` 列出尚未涵蓋的項目；沒有差異時印 `no drift found within inspected scope`
+  （不是「完全一致」：未涵蓋的項目沒有被檢查）。
+- `--format json`：版本化 envelope
+  `{"schema_version": 1, "complete": false, "covered": [...], "uncovered": [...], "items": [{"category","name","action","detail"}]}`。
+  `items` 依 category、name、action、detail 排序，沒有差異時是 `[]`（不是 `null`）；`complete` 在 phase 1 一律是 `false`
+  （還有手寫 HBAC/sudo 規則附件、hosts/hostgroups/netgroups、密碼動作沒有比對）。這取代了舊的 `{"Items": [...]}`
+  （沒有差異時是 `{"Items": null}`）：讀舊形狀的腳本要改讀 `items`。
+- `--exit-code`（CI 用）：`0` 完整涵蓋且沒有差異（phase 1 還到不了：涵蓋不完整，所以乾淨的執行也回傳 `3`）、`1` 錯誤、`2` 有 apply 會處理或需要人工處理的差異
+  （任何 action 不是 `report`）、`3` 只有 report-only 的差異，或涵蓋不完整。沒有這個旗標時，有差異也回傳 `0`。
+- action 詞彙：`create`、`delete`、`update`、`add_member`、`remove_member` 是 apply 會做的事；`manual` 是 apply 會失敗、
+  要人工處理的狀態；`report` 是 apply 不會碰的物件（只報告）。
+
+`--include-users-groups`（opt-in）比對的範圍與語意：
+
+- user：不存在（`user_missing`）、roster `state: absent` 但還在（`user_should_be_absent`）、停用/啟用（`user_enabled`）、
+  屬性（`user_attribute`，只列欄位名稱）、SSH 公鑰集合（`user_ssh_keys`，只列數量）、roster 沒有的使用者
+  （`user_unexpected`，report-only）。
+- SSH 公鑰以 FreeIPA 自己的正規化後整串比對（options、type、blob、comment 都算）：只改 comment 或只改 options，
+  apply 也會改寫該使用者，drift 同樣報告；只有 roster 管理 `ssh_keys` 的使用者才會解析金鑰。輸出只有雜湊與數量，
+  不含金鑰內容。
+- `email` 沒有 `@` 時，比對前先補上 FreeIPA 的預設 e-mail domain（FreeIPA 也是這樣儲存）。
+- preserved 使用者（`ipa user-del --preserve`，`user-find` 預設看不到）：roster `state: absent` 的會被 apply 永久刪除
+  （`user_should_be_absent`/`delete`）；roster `present` 的 apply 無法建立（`user-add` 回 already exists，之後
+  `group-add-member` 失敗），回報 `user_preserved`/`manual`，要先還原（`ipa user-undel`）或刪除；roster 沒有的只報告。
+- group：不存在（`group_missing`）、成員缺少（`group_member_missing`）、成員多出（authoritative 群組是
+  `group_member_extra`，apply 會移除；累加式群組是 `group_member_unmanaged`，只報告）、roster 沒有的群組
+  （`group_unexpected`，report-only）。只看直接成員，不看 `memberof`（巢狀間接成員）。Pilot 自己的
+  `pilot-internal-history-g-<sha256>` 歷史 marker group 不列入。
+- 需要探測主機（預設 `freeipa-server` 群組的第一台）上有 FreeIPA Python client（`ipalib`、`ipapython`）與
+  `/usr/bin/python3`。observer 失敗時錯誤訊息是固定文字，指名哪一類失敗（缺 Python client、沒有 Kerberos 憑證、
+  API 呼叫失敗、搜尋被截斷、roster 的公鑰無效…），不含例外文字；失敗是錯誤，不是空報告。
+
+`--repair-managed` 的行為不變（印出 apply 的輸出，可搭配 `--format json`），但不能與 `--include-users-groups` 或
+`--exit-code` 併用：repair 只修 grants 時代那幾類，不修 users/groups。
+
+實跑摘要（2026-10-30，candidate `3a40ee11`，tree `4056b686`，單台拋棄式 vm-target 上的 FreeIPA 4.13.4）：從安裝後 snapshot 還原的 realm 上（先套用 legacy 與 v2 fixture，再跑 `vm-target test`）identity apply 的 `vm-target test` verify **24/24 PASS**、冪等 `changed=0`；tag-scoped apply 皆 `failed=0`；drift 的 perturb → drift（exit 2）→ apply → drift（exit 3、0 個 actionable）→ 重跑 `changed=0` 全部通過，含 preserved 使用者、沒有 `@` 的 e-mail、只改 comment／options 的公鑰；drift 前後 FreeIPA 狀態相同；drift 輸出（含 `-vvv`）沒有任何密碼或 sentinel。observer 自己的失敗類別都沒有在實機觸發（只有 fake ipalib 的 real-Ansible 測試涵蓋）；實機走過的失敗只有名冊公鑰 gate 與既有 probe task。見 [evidence](../evidence/identity-drift-178/2026-10-30-3a40ee1.md)。
+
 ---
 
 ## 5. 冪等性
@@ -579,7 +681,9 @@ playbook 只認英文輸出。
     [目前有效 evidence](../evidence/freeipa-identity-ssh-cache/2026-10-27-2c35804-live.md)。
     `ipa_identity_refresh_sssd_cache` 僅控制既有非金鑰授權更新；SSH 流程不受它停用。
     原 #115 實測的約 60 秒至超過 16 分鐘延遲仍是歷史基線，不能當作本次修正的驗收證據。
+  - **永久退役主機（#226）**：保留 canonical host entry，明確設為 `state: absent`；正常路徑使用 host decommission 的 plan/apply/resume。alias 由實際 inventory 的唯一 `ipa_client_fqdn` 或既有退役 receipt 綁定。已移除 inventory 的舊待辦必須提供單次精確 alias/FQDN/stage、原因與來源 mapping；缺席本身不授權丟棄。中央 host/DNS 清理確認後，journal 才記錄獨立的 `retired` audit 並解除該 alias 的待辦；離線與 deferred 主機繼續保留。退役 alias 不接受兩種 cache refresh，最終 gate 讀回最新 journal。舊 plan 無 alias 時只能由可信原 Host.Name 恢復，否則重新 plan 或明示 mapping recovery；不猜 FQDN 為 alias。欄位與完整 acceptance 邊界見 [退役契約](../verification/freeipa-identity.md#161-永久退役與-ssh-傳播待辦契約issue-226)。
   - 一次多把金鑰 → list 放多行即可。
+  - journal 的 I/O 錯誤必須修復後重試；已看得到退役 receipt 時仍不能略過持久化確認。無變更重試會同步既有 file/directory，退役狀態查詢也會在既有鎖下確認同步，失敗就拒絕完成。這些確認不改寫 receipt、epoch、金鑰或待辦。
 - **純金鑰帳號**：省略 `password:`、只給 `ssh_keys:`，就是完全 key-based、無密碼登入
   （對齊 FreeIPA workshop 的 SSH key-management 流程）。
 - 金鑰走 `argv`（非 shell）傳入，內含空格/base64 不會被 shell 破壞。
@@ -998,13 +1102,12 @@ ssh alice@<enrolled-host>        # 無需該主機上有 authorized_keys 即可�
 同一次 play 內所有後續 `ipa` 指令都用這個 ticket，不受影響）。
 
 **改完 sudo rule 的屬性（host/cmd/runas category、attach 的 host/command/使用者）後，
-已經 enroll 過的 client 不會馬上反映**——SSSD 的 sudo provider 有自己的快取
-TTL，即使 server 端 LDAP 已經是新值，client 上跑 `sudo` 可能還是照舊規則判斷，
-在快取過期前一直看到（錯誤的）結果。要立刻驗證，在該 client 上執行：
-
-```bash
-sss_cache -E && systemctl restart sssd    # 強制清快取、重新從 server 拉 sudo 規則
-```
+已經 enroll 過的 client 的 SSSD sudo 快取不會自己馬上更新**（smart refresh 15 分鐘、
+full refresh 6 小時）。不需要手動清快取：選到 `identity` 或 `client-cache` 的 apply 在結束前
+會對每台 enrolled client 做完上面的 sudo full refresh，exit 0 之後 `sudo -n` 就反映新規則
+（新增與撤銷都是）。若 apply 因 `--tags` 縮小而只印出 `Report deferred authorization cache
+refresh`，或以 `PARTIAL` 失敗，重跑相同的 apply（或 `--tags client-cache`）即可，不要手動
+`sss_cache -E && systemctl restart sssd` 然後把結果記成通過。
 
 ---
 
@@ -1048,3 +1151,4 @@ sss_cache -E && systemctl restart sssd    # 強制清快取、重新從 server �
 | 2026-08-11 | v1.3 | Roster schema v2 交付：schema v1/v2 版本判定與自動升級（`pilot roster migrate`、`EnsureRosterCurrent`，含 ansible-vault 加密 roster 支援）、netgroups 首次成為 first-class 物件、hostgroup 巢狀 membership（`membership.hostgroups`）從完全未 reconcile 變成 authoritative、NFS export selector 新增 hostgroup/netgroup 型別（`@value` 渲染）。§0.5 快照更新、§3 canonical schema 範例改為 v2 並補上 netgroups/巢狀 hostgroup 說明。完整逐項證據、LDAP schema gotcha 見 `docs/verification/freeipa-identity.md` v1.6；`freeipa-identity.roster.example.yaml` 與 `.agents/skills/freeipa-roster-authoring/SKILL.md` 同步更新為 v2 | pilot |
 | 2026-10-15 | v1.4 | §0.5 加上 `freeipa-identity.md` v1.12 的最新驗證（PR #89，candidate `decc613`）：ldapi row 以 root 執行、netgroup SOP 步驟 1 改走 ldapi | pilot |
 | 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步（含沒加引號、YAML 可能讀成數字／日期／布林值的密碼，打不開的 lock 檔）、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步）、舊版 root 留下的 lock 檔如何處理、要跟著改的名冊被鎖住或不能寫時整次存檔拒絕、自動化遇到寫不進的名冊時該步失敗（MCP apply 會 rollback，`--actions` 停在那一步、保留之前的步驟，plan 失敗）、plan／MCP apply 只在真的要改 `.vault/` 以外的名冊時失敗、apply rollback 保留被其他操作改過的名冊、名冊的寫入方式；review 後修正：同一個名冊的多個 hard link 名稱共用 inode 鎖與同一個 journal 身分、plan 的暫存複本保留 `.vault/` 別名結構、rollback 以 apply 前的狀態與寫入紀錄判斷哪些檔案是名冊（一般 vault 檔一律還原）、rollback 期間保留對名冊的登記直到還原結束；暫存目錄以持有的 flock 判斷建立者是否還在（不以 pid）；`RemoveRosterFile` 的呼叫端要先停掉 journal（candidate `3b4bdb1`、`22cad092` 與 `09119dd` 都曾對兩台全新 VM 實跑，見 §4.5 末段；rollback 的還原路徑、plan 的探測、MCP plan/apply 與暫存目錄清掃沒有實機觸發） | pilot |
+| 2026-10-31 | v1.6 | §3 名冊範例與說明改為 schema v3（`schema_version: 3`、`grants: []`，netgroups 註明 v2 起支援），新增第 5 步 `pilot roster lint --vault-password-file`（加密名冊在記憶體內解密），附本機實跑輸出；§4.1 編輯後先跑該步；§0.5 補上範例名冊與該步的事實。未重跑目標主機：v2 → v3 只改版本號並加空的 `grants: []`，與 `EnsureRosterCurrent` 載入時套用的升級相同，apply playbook 對 v2/v3 的差別只在允許的頂層 key | pilot |

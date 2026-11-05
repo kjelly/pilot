@@ -12,22 +12,23 @@ RELP/mTLS 的輸入、輪替與保證邊界見 [RELP runbook](./siem-relp-mtls.m
 
 ## 0.5 目前有效的事實快照
 
-2026-10-20，候選 `34cfabea416eb9645aaa323e541198ae39bbbe96`，
-tree `67f0299bcd8a39fc77ffd0e85821e6576ebd7211`，正式 target run 由乾淨隔離 checkout 執行。
-實際 inventory：`log-server = aq-log`；
-`audit-log-forwarding = aq-log, aq-ubuntu, aq-el`。前兩台 Ubuntu 24.04.4、後者 AlmaLinux 9.8
-（SELinux Enforcing）；對齊採 A，中央主機也部署 forwarding 以提供本機 selftest。
-使用獨立測試 CA 與私密 PEM 輸入（`siem_relp_ca_pem`、`siem_relp_cert_pem`、
-`siem_relp_key_pem`），未使用正式 vault／PKI。
+2026-10-30，候選 `c97caf38cb0694274b65a5e2a07537fafe69421e`，
+tree `c13922899fc1bfaa26ec5f496c3d626b3202f86a`（PR #188：Step 1d preflight 與 Step 5a–5e 的
+distro rsyslog policy 改寫），正式 target run 由乾淨隔離 checkout 執行。
+實際 inventory：`log-server = pr188-log`；
+`audit-log-forwarding = pr188-log, pr188-u24, pr188-el9`。前兩台 Ubuntu 24.04.4
+（logrotate 3.21.0）、後者 AlmaLinux 9.8（SELinux Enforcing，logrotate 3.18.0）；
+對齊採 A，中央主機也部署 forwarding。TCP 預設，未使用 vault。
 
-Fresh L3/L4 通過，receiver **11/11**、sender **66/66**，L6 三台 **changed=0**。
-三台 × 四種 TLS 狀態的 **12 項** rollback 負例、兩種 OS 的 C19 程序保留均通過；
-負例後再次 **77/77**、全鏈三台 **changed=0**。整庫普通 Go、race、build、vet、
-golangci-lint 與阻擋性 playbook／CI 同等檢查通過；L2 ansible-lint 仍有 advisory findings。
-測試 VM 已清理，共用 cache services 保留運行。
+Fresh L3/L4 通過，receiver **11/11**、sender **66/66**，L6 三台 **changed=0**；
+套用後三台 `logrotate -d` 無重複、無解析錯誤，`logrotate.service` 成功。
+邊界案例（單獨的 `/var/log/syslog` stanza 以 BASE/本版對照、glob 在 Step 1d 於第一次設定檔寫入前拒絕、
+EL 只剩一個路徑時移除檔案、保留 mode/owner/group 與 symlink）均通過；BASE 在單獨 stanza 與 glob
+兩種情況都留下 `duplicate log entry`。測試 VM 已清理。
+完整版本、指紋與驗證範圍見 [本輪證據摘要](../evidence/audit-log-forwarding/2026-10-30-c97caf38cb06.md)。
 
-本輪未重跑大流量、輪替與 decommission；歷史結果保留原候選歸屬。
-完整版本、指紋與驗證範圍見 [本輪證據摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
+RELP/mTLS、大流量、輪替與 decommission 本輪未重跑；RELP/mTLS 最後驗證於 `34cfabea416eb9645aaa323e541198ae39bbbe96`，
+見 [該次證據摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
 
 ## 1. 部署契約
 

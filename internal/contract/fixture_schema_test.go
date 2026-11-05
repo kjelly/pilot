@@ -214,7 +214,7 @@ func TestFinalContractFixturesStrictAndSemanticallyValid(t *testing.T) {
 	if len(loaded) != 41 {
 		t.Fatalf("production loader contract count = %d, want 41", len(loaded))
 	}
-	paths, err := filepath.Glob(filepath.Join(root, "docs", "tmp", "future", "contracts", "*.yaml"))
+	paths, err := filepath.Glob(filepath.Join(root, "internal", "contract", "testdata", "review-fixtures", "*.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,9 +275,9 @@ func TestFixtureSemanticValidationRejectsInvalidContracts(t *testing.T) {
 	t.Parallel()
 
 	root := repoRoot(t)
-	docker := decodeFixtureContract(t, filepath.Join(root, "docs", "tmp", "future", "contracts", "docker.yaml"))
-	freeIPA := decodeFixtureContract(t, filepath.Join(root, "docs", "tmp", "future", "contracts", "freeipa-server.yaml"))
-	restic := decodeFixtureContract(t, filepath.Join(root, "docs", "tmp", "future", "contracts", "restic-backup.yaml"))
+	docker := decodeFixtureContract(t, filepath.Join(root, "internal", "contract", "testdata", "review-fixtures", "docker.yaml"))
+	freeIPA := decodeFixtureContract(t, filepath.Join(root, "internal", "contract", "testdata", "review-fixtures", "freeipa-server.yaml"))
+	restic := decodeFixtureContract(t, filepath.Join(root, "internal", "contract", "testdata", "review-fixtures", "restic-backup.yaml"))
 
 	tests := []struct {
 		name    string
@@ -434,7 +434,7 @@ func TestFixtureSuiteRejectsDuplicateRowOwnership(t *testing.T) {
 	t.Parallel()
 
 	root := repoRoot(t)
-	dns := decodeFixtureContract(t, filepath.Join(root, "docs", "tmp", "future", "contracts", "dns.yaml"))
+	dns := decodeFixtureContract(t, filepath.Join(root, "internal", "contract", "testdata", "review-fixtures", "dns.yaml"))
 	duplicate := cloneFixtureContract(t, dns)
 	duplicate.ID = "dns-duplicate"
 	if err := validateFixtureSuite(root, []fixtureContract{dns, duplicate}); err == nil ||

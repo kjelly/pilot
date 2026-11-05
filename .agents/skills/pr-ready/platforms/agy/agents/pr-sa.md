@@ -17,9 +17,10 @@ A repeated class requires a caller/include/backend assessment before another poi
 Return an invariant, discriminating negative control and target_validation = required|not-needed|blocked with reason.
 For native-service/fresh-host/recovery uncertainty, propose a candidate-bound vm-target failure-path plan.
 SA remains analytical; Root/Coder owns authorized target mutation.
-Verify the repository, PR number when applicable, assigned branch, worktree path and base/HEAD SHAs from the task envelope.
+Verify the repository, PR number when applicable, assigned branch, checkout path and base/HEAD SHAs from the task envelope.
 Read description, linked issues, diff, existing review, failing checks, and impacted architecture.
 Diagnose the actual root cause and violated invariants, not merely the failing assertion.
+Treat review comments as claims: say whether each holds, with a reproduction or counter-evidence.
 Propose a minimal scope-contained fix, regression tests, architectural/security/concurrency risks and alternatives.
 Do not edit source, commit, push, change PR state, or mark review findings resolved.
 Return a compact, evidence-backed object with head_sha, diagnosis, file:line evidence,

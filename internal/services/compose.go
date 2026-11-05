@@ -1,12 +1,12 @@
 package services
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -53,6 +53,9 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return Bundle{}, fmt.Errorf("create service root: %w", err)
 	}
+	if err := prepareCredentials(root); err != nil {
+		return Bundle{}, err
+	}
 	for _, dir := range []string{"apt", "pulp/settings/certs", "pulp/pulp_storage", "pulp/pgsql", "pulp/containers", "pulp/container_build", "pulp/secrets", "harbor", "ca"} {
 		path := filepath.Join(root, dir)
 		if err := os.MkdirAll(path, 0o755); err != nil {
@@ -79,22 +82,22 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 	if err := writeAtomicMode(caKeyPath, caKeyPEM, 0o600); err != nil {
 		return Bundle{}, err
 	}
-	adminPassword, err := loadOrCreateSecret(filepath.Join(root, "harbor", "secrets", "admin-password"))
+	adminPassword, err := readSecret(filepath.Join(root, "harbor", "secrets", "admin-password"))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create Harbor admin password: %w", err)
 	}
-	databasePassword, err := loadOrCreateSecret(filepath.Join(root, "harbor", "secrets", "database-password"))
+	databasePassword, err := readSecret(filepath.Join(root, "harbor", "secrets", "database-password"))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create Harbor database password: %w", err)
 	}
-	pulpAdminPassword, err := loadOrCreateSecret(filepath.Join(root, "pulp", "secrets", "admin-password"))
+	pulpAdminPassword, err := readSecret(filepath.Join(root, "pulp", "secrets", "admin-password"))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create Pulp admin password: %w", err)
 	}
 	if err := writeAtomicMode(filepath.Join(root, "pulp", "admin.env"), []byte("PULP_DEFAULT_ADMIN_PASSWORD="+pulpAdminPassword+"\n"), 0o600); err != nil {
 		return Bundle{}, fmt.Errorf("write Pulp admin environment: %w", err)
 	}
-	pulpSecretKey, err := loadOrCreateSecret(filepath.Join(root, "pulp", "settings", "secret-key"))
+	pulpSecretKey, err := readSecret(filepath.Join(root, "pulp", "settings", "secret-key"))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("create Pulp secret key: %w", err)
 	}
@@ -117,41 +120,18 @@ func RenderBundle(profile Profile, root string, bindIP net.IP) (Bundle, error) {
 	if err := writeAtomicMode(harborPath, []byte(renderHarborYML(profile, root, host, adminPassword, databasePassword)), 0o600); err != nil {
 		return Bundle{}, err
 	}
-	fingerprint, err := profile.Fingerprint()
+	client, err := profile.ClientContract(bindIP, string(caPEM))
 	if err != nil {
 		return Bundle{}, err
 	}
-	projects := make(map[string]string, len(profile.OCI.Registries))
-	for _, registry := range profile.OCI.Registries {
-		projects[registry.Name] = fmt.Sprintf("http://%s:%d/%s", serviceHostname, profile.Harbor.HTTPPort, registry.ProxyProject)
-	}
-	rpmRepositories := make(map[string]string, len(profile.RPM.Repos))
-	for _, repo := range profile.RPM.Repos {
-		rpmRepositories[repo.Name] = fmt.Sprintf("http://%s:8080/pulp/content/%s/%s", serviceHostname, profile.Name, repo.Name)
-	}
-	rpmBaseURL := ""
-	for _, repo := range profile.RPM.Repos {
-		rpmBaseURL = rpmRepositories[repo.Name]
-		break
-	}
+
 	return Bundle{
 		Root:             root,
 		ComposePath:      composePath,
 		HarborConfigPath: harborPath,
 		CAPEMPath:        caPath,
 		CAKeyPath:        caKeyPath,
-		Client: ClientConfig{
-			Profile:           profile.Name,
-			Fingerprint:       fingerprint,
-			HostIP:            host,
-			Hostname:          serviceHostname,
-			AptProxyURL:       fmt.Sprintf("http://%s:%d", serviceHostname, profile.Apt.Port),
-			RPMBaseURL:        rpmBaseURL,
-			RPMRepositories:   rpmRepositories,
-			RegistryMirrorURL: fmt.Sprintf("http://%s:%d", serviceHostname, profile.Harbor.HTTPPort),
-			RegistryProjects:  projects,
-			CAPEM:             string(caPEM),
-		},
+		Client:           client,
 	}, nil
 }
 
@@ -211,9 +191,9 @@ func renderHarborYML(profile Profile, root, host, adminPassword, databasePasswor
 		"hostname: " + host,
 		"http:",
 		fmt.Sprintf("  port: %d", profile.Harbor.HTTPPort),
-		"harbor_admin_password: " + adminPassword,
+		"harbor_admin_password: " + strconv.Quote(adminPassword),
 		"database:",
-		"  password: " + databasePassword,
+		"  password: " + strconv.Quote(databasePassword),
 		"  max_idle_conns: 100",
 		"  max_open_conns: 900",
 		"jobservice:",
@@ -240,26 +220,6 @@ func renderHarborYML(profile Profile, root, host, adminPassword, databasePasswor
 		"    location: " + filepath.Join(root, "harbor", "logs"),
 		"", // Harbor installer fills the generated Compose topology.
 	}, "\n")
-}
-
-func loadOrCreateSecret(path string) (string, error) {
-	if b, err := os.ReadFile(path); err == nil {
-		value := strings.TrimSpace(string(b))
-		if value != "" {
-			return value, nil
-		}
-	} else if !os.IsNotExist(err) {
-		return "", err
-	}
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	value := base64.RawURLEncoding.EncodeToString(b)
-	if err := writeAtomicMode(path, []byte(value+"\n"), 0o600); err != nil {
-		return "", err
-	}
-	return value, nil
 }
 
 func loadOrCreateCA(dir string) ([]byte, []byte, error) {
@@ -303,6 +263,13 @@ func loadOrCreateCA(dir string) ([]byte, []byte, error) {
 }
 
 func writeAtomicMode(path string, data []byte, mode os.FileMode) error {
+	return writeAtomicModeContext(context.Background(), path, data, mode)
+}
+
+func writeAtomicModeContext(ctx context.Context, path string, data []byte, mode os.FileMode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".pilot-service-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create %s: %w", path, err)
@@ -317,11 +284,21 @@ func writeAtomicMode(path string, data []byte, mode os.FileMode) error {
 		tmp.Close()
 		return fmt.Errorf("write %s: %w", path, err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync service file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", path, err)
+	}
+	// Persistence can block long enough for graceful cancellation. This is
+	// the final cancellation boundary: invoking rename enters the irreversible
+	// commit window, and an already-entered syscall cannot be canceled safely.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("install %s: %w", path, err)
 	}
-	return nil
+	return syncDirectory(filepath.Dir(path))
 }

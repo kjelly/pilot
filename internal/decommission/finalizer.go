@@ -145,7 +145,9 @@ func Finalize(ctx context.Context, in FinalizeInput) (*FinalizeResult, error) {
 	}
 	defer func() { _ = lock.release() }()
 
-	fresh, err := CheckFreshness(ctx, in.PlanInputForFreshness, in.Plan.PlanHash)
+	planInput := in.PlanInputForFreshness
+	planInput.previousPlan = in.Plan
+	fresh, err := CheckFreshness(ctx, planInput, in.Plan.PlanHash)
 	if err != nil {
 		// ErrPlanStale (or a workspace error) — nothing has been mutated.
 		return nil, err

@@ -1,0 +1,15 @@
+Read-only native GET capture, 2026-11-04, before Issue #238 changes.
+APT report retains native HTML/title; operational form/content was removed.
+Pulp 3.85.25 retains database/Redis flags and worker/content schema; names replaced
+with synthetic values and identifiers/timestamps/versions/disk metrics omitted.
+Effective CACHE_ENABLED=False was independently inspected by Root; Redis false
+is an expected optional state, not proof of failure.
+Harbor 2.15.1 retains native component names and healthy status, no operational
+identifiers. Source captures remain external /tmp/issue-238-state/native-*.
+These fixtures establish native response schemas, not runtime target evidence.
+
+Pulp users response captured separately on a temporary official Pulp 3.85.25
+container inside the owned disposable KVM target. Only synthetic admin existed.
+HTTP 200 results array and username fields preserved; timestamp, URLs, password
+metadata and unrelated account fields omitted. Actual wrong-password HTTP 401
+was observed by Root. Temporary container and synthetic credential file removed.

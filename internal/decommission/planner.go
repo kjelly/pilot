@@ -52,6 +52,9 @@ type PlanInput struct {
 
 	// Now overrides time.Now for deterministic tests. Nil means time.Now.
 	Now func() time.Time
+	// previousPlan is set only by Apply/Finalize from their persisted plan.
+	// It is deliberately unavailable as a CLI or exported planning override.
+	previousPlan *Plan
 }
 
 func (in PlanInput) now() time.Time {
@@ -118,6 +121,10 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 		ExpiresAt:          now.Add(DefaultPlanTTL).Format(time.RFC3339Nano),
 		InventoryRevision:  canonicalInventoryHash(hf),
 	}
+	retirement, err := bindPreviousRetirement(in.previousPlan, plan)
+	if err != nil {
+		return nil, err
+	}
 
 	// INV-13/HD23: a control-plane FreeIPA server/replica host gets a hard
 	// blocker immediately — no further generic planning, no bypass flag.
@@ -147,7 +154,7 @@ func PlanHost(ctx context.Context, in PlanInput) (*Plan, error) {
 
 	var componentIDs []string
 	for _, role := range sortedRoles {
-		cp := planComponent(ctx, role, in.Catalog, in.RetentionDispositions, in.Providers, *target, hf.Hosts, in.WorkspaceDir, in.OfflineDisposition)
+		cp := planComponent(ctx, role, in.Catalog, in.RetentionDispositions, in.Providers, *target, hf.Hosts, in.WorkspaceDir, in.OfflineDisposition, retirement)
 		if cp.RetentionRequired {
 			plan.RetentionRequirements = append(plan.RetentionRequirements, RetentionRequirement{
 				ComponentID: cp.ComponentID,
@@ -242,7 +249,7 @@ func extractDecommissionPolicy(v *contract.DecommissionPolicy) (contract.Decommi
 // its own reasons (retention below is independent either way; an
 // unsupported/unproven service principal, a roster validation failure,
 // etc. surface as a provider-specific blocker, never silently ignored).
-func planComponent(ctx context.Context, role string, catalog contract.Catalog, dispositions map[string]RetentionDisposition, provs map[string]providers.Provider, host inventory.Host, hosts []inventory.Host, workspaceDir string, offline OfflineDisposition) ComponentPlan {
+func planComponent(ctx context.Context, role string, catalog contract.Catalog, dispositions map[string]RetentionDisposition, provs map[string]providers.Provider, host inventory.Host, hosts []inventory.Host, workspaceDir string, offline OfflineDisposition, retirement *providers.RetirementIdentity) ComponentPlan {
 	// Fail-closed default (spec.md §14.1 rule 4): every component is
 	// assumed to need a reachable host unless a matched contract's typed
 	// Lifecycle.Decommission explicitly says otherwise below — set first
@@ -265,11 +272,16 @@ func planComponent(ctx context.Context, role string, catalog contract.Catalog, d
 
 	if provider, ok := provs[matched.ID]; ok && provider != nil {
 		cp.ProviderRegistered = true
+		var identity *providers.RetirementIdentity
+		if matched.ID == providers.FreeIPAClientProviderID {
+			identity = retirement
+		}
 		steps, err := provider.Plan(ctx, providers.PlanInput{
 			HostName:           host.Name,
 			FQDN:               providerFQDN(host),
 			OfflineDisposition: string(offline),
 			RosterPath:         rosterPathFor(workspaceDir, hosts, host),
+			RetirementIdentity: identity,
 		})
 		if err != nil {
 			cp.Blockers = append(cp.Blockers, Blocker{Code: classifyProviderPlanError(err), Detail: err.Error()})

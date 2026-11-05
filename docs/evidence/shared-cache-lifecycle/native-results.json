@@ -1,0 +1,82 @@
+{
+  "attach-1": {
+    "rc": 0,
+    "seconds": 0.553
+  },
+  "attach-0": {
+    "rc": 0,
+    "seconds": 0.655
+  },
+  "healthy_attach": {
+    "containers": 11,
+    "identities_unchanged": true,
+    "files_unchanged": true
+  },
+  "vm-up-consumer-a": {
+    "rc": 0,
+    "seconds": 19.441
+  },
+  "inventory-consumer-a": {
+    "rc": 0,
+    "seconds": 0.041
+  },
+  "vm-up-consumer-b": {
+    "rc": 0,
+    "seconds": 21.223
+  },
+  "inventory-consumer-b": {
+    "rc": 0,
+    "seconds": 0.045
+  },
+  "consumers-two": {
+    "rc": 0,
+    "seconds": 0.034
+  },
+  "refuse-down": {
+    "rc": 1,
+    "seconds": 0.032
+  },
+  "refuse-purge": {
+    "rc": 1,
+    "seconds": 0.032
+  },
+  "refuse-repair": {
+    "rc": 1,
+    "seconds": 0.043
+  },
+  "vm-down-a": {
+    "rc": 0,
+    "seconds": 1.333
+  },
+  "consumers-one": {
+    "rc": 0,
+    "seconds": 0.031
+  },
+  "surviving-guest-cache-request": {
+    "rc": 0,
+    "seconds": 0.822
+  },
+  "attach-with-consumer": {
+    "rc": 0,
+    "seconds": 0.154
+  },
+  "vm-down-b": {
+    "rc": 0,
+    "seconds": 0.856
+  },
+  "continuity": {
+    "requests": 54,
+    "failures": 0,
+    "response_hash": "26758a13cecfaff9ff274d31ea9a4633674a999bd130c09f6ecd66a4b8071184",
+    "container_identities_unchanged": true
+  },
+  "attach-after-holder-kill": {
+    "rc": 0,
+    "seconds": 0.219
+  },
+  "native_lock": {
+    "cancel_rc": 1,
+    "holder_killed_reacquired": true
+  },
+  "status": "pass"
+}

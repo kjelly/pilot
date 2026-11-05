@@ -195,7 +195,7 @@ S3 identity。`restic_password` 是 repository 加密密碼，不能用 S3 secre
 `freeipa-identity` 是 day-2 reconcile，但 `freeipa-nfs-server` 在 day-1 也會讀取同一份
 canonical roster。因此 `.vault/ipa-identity.yaml` 必須具備：
 
-- `schema_version: 1`。
+- `schema_version: 3`（目前版本；`1`、`2` 的舊名冊也可，`pilot edit`/`pilot deploy` 開啟時會自動升級）。
 - `freeipa` connection/safety block。
 - `users`、`groups`、`hosts`、`hbac`、`sudo`、`nfs` objects。
 - `nfs.servers` 中有 `nexus` 的 canonical FQDN/IP、NFS service principal、export、ACL

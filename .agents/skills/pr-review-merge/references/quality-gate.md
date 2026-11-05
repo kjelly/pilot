@@ -2,17 +2,22 @@
 
 | Signal | Decision | Why |
 |---|---|---|
-| Independent reviewer finds P0/P1/P2, failing unit/regression tests, GH checks `fail` or `cancel`, unresolved review threads, merge conflict, `CHANGES_REQUESTED` | DRAFT | Confirmed defect or blocker; comment with proof and next fix |
-| GH checks `pending`, review `REVIEW_REQUIRED`, PR mergeability `UNKNOWN`, unavailable GraphQL threads, base/head mismatch, incomplete reviewer coverage, PR dependency not satisfied | WAITING | Transient or unverified conditions; keep Ready |
+| Independent reviewer finds P0/P1/P2 (a repeated disputed claim only with new evidence), failing unit/regression tests, GH checks `fail` or `cancel` not confirmed unrelated, unresolved review threads, merge conflict | DRAFT | Confirmed defect or blocker; comment with proof and next fix |
+| PR `baseRefOid` differs from the independently read live `baseRefName` tip, confirmed with fresh PR/ref reads | DRAFT | Record both SHAs and branch, comment before converting, and direct `pr-ready` to reconcile/integrate and revalidate; no completed semantic review is required for this operational hand-off |
+| Live base tip is not an ancestor of PR HEAD, confirmed with fresh PR/ref reads (even if metadata matches and there are no conflicts) | DRAFT | Record HEAD/Base/live-base SHAs, comment then convert; `pr-ready` must merge the latest base, rerun affected checks/CI and obtain fresh independent review |
+| GH checks `pending`, review `REVIEW_REQUIRED`, PR mergeability `UNKNOWN`, unavailable GraphQL threads, stale review head/base without confirmed live-base mismatch, incomplete reviewer coverage, PR dependency not satisfied | WAITING | Transient or unverified conditions; keep Ready |
+| `CHANGES_REQUESTED`; a `fail`/`cancel` check listed in `unrelated_failing_checks`; a disputed finding repeated without `new_evidence` | WAITING | The PR has nothing left to change: a reviewer has to re-review, a check has to be rerun after its cause is fixed, or a person decides between two reviews. A Draft would be undone by `pr-ready` |
 | Active rules include `merge_queue` | WAITING | `gh pr merge` may enqueue or enable auto-merge without a final merge; do not trigger automatically |
 | Empty CI, no documented rationale or no positive test evidence | WAITING | Absent checks are not an implicit pass |
 | Every gate clear, no unresolved threads, base/HEAD unchanged, branch mergeability `MERGEABLE`, merge state `CLEAN`, tests/CI passed | MERGE | Attempt `gh pr merge --merge --match-head-commit SHA` (merge commits are this repository's practice); verify state `MERGED` |
-| Repository-mandated actual-run evidence missing for a change that needs it (`.github/pr-evidence.json`, AGENTS.md §1) | DRAFT | Hard repository rule violated; the reviewer files a `P1` at the changed path naming the missing `docs/evidence` record |
+| The base branch's `.github/pr-evidence.json` requires a record and `target_validation` is missing, malformed, `blocked`, `not-needed` for a `required_paths` change, or `required` without a committed `docs/evidence` record that names a tested revision covering HEAD (same SHA or evidence-only delta); the manifest cannot be read | WAITING | Checked by the gate against GitHub at the base/HEAD SHAs; the gate has no finding of its own, so it never merges and never drafts |
+| The reviewer's blocking `P1` at the changed path for a missing mandated actual-run record (AGENTS.md §1) | DRAFT | Hard repository rule violated; the finding names the missing `docs/evidence` record |
 | Closed, already merged or Draft | SKIP | Out of scope |
 
 Additional rules:
 - Any unexpected CLI/API response or inability to inspect **active branch rules** makes the result WAITING. If branch rules cannot be read, do not auto-merge.
 - Both required checks and other displayed checks must pass; skipped checks are permitted only if GitHub treats them as non-failing and reviewer has verified all relevant test areas. An unexpected bucket is WAITING.
+- Unavailable or malformed live base refs or ancestry comparisons remain WAITING. The base branch name is part of the confirmed identity: retargeting to another branch at the same SHA also invalidates it. Missing names and PR/ref movement during confirmation or the final gate require a fresh gate. The actor checks that exact name and live ref before writing and again after posting a Draft explanation. Feature HEAD differing from main is normal: require main as an ancestor of HEAD, not identical commits.
 - No `--admin`, `--auto`, `--delete-branch`, rebase, force push, or bypass. Respect repo's allowed merge methods; no fallback to a different method without authorization. In this repository the method is `merge` (the project default of `apply_decision.py`); GitHub deletes the head branch itself.
 - Only the actor mutates PR state. Before mutation it recomputes the gate live. `MERGE` only authorizes an **attempt**; GitHub still enforces its own rules.
 - Never interpret a merge queue enqueue operation as merged. Only PR remote `state == MERGED` constitutes success.

@@ -14,10 +14,42 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
+  changes:
+    name: Check candidate CI validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      evidence_only: ${{ steps.diff.outputs.evidence_only }}
+      reused_run_id: ${{ steps.diff.outputs.reused_run_id }}
+      go_test_matrix: ${{ steps.go_matrix.outputs.matrix }}
+      go_test_max_parallel: ${{ steps.go_matrix.outputs.max_parallel }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Verify candidate reuse controls
+        run: make ci-workflow-test
+      - name: Generate Go test matrix
+        id: go_matrix
+        run: python3 scripts/ci-go-test-shards.py matrix --github-output >> "$GITHUB_OUTPUT"
+      - name: Find a successful full candidate run
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-validation-reuse.py >> "$GITHUB_OUTPUT"
+
   test:
-    name: Go test
+    name: Go test (${{ matrix.shard }})
+    needs: changes
+    if: needs.changes.outputs.evidence_only != 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.changes.outputs.go_test_max_parallel) }}
+      matrix: ${{ fromJSON(needs.changes.outputs.go_test_matrix) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -43,6 +75,13 @@ jobs:
       - name: go build
         run: go build ./...
 
+      - name: Select Go packages
+        env:
+          PILOT_TEST_SHARD: ${{ matrix.group }}
+        run: |
+          packages=$(bash scripts/ci-go-test-packages.sh "$PILOT_TEST_SHARD")
+          echo "GO_TEST_PACKAGES=$(printf '%s\n' "$packages" | paste -sd ' ' -)" >> "$GITHUB_ENV"
+
       - name: go test
         # The flags, including go test's -timeout (45m), live in the Makefile.
         # -timeout counts from when a test binary starts, so this job's
@@ -51,12 +90,29 @@ jobs:
         # (warm cache) those took 32 s and about 155 s. A hung test then ends
         # in a Go stack dump that names it, not a silent job cancellation
         # (TestCIGoTestTimeoutFiresBeforeJobLimit).
+        env:
+          PILOT_TEST_SHARD: ${{ matrix.group }}
+          CI_SHARD_INDEX: ${{ matrix.index }}
+          GO_TEST_JSON: '1'
+          GO_TEST_REPORT_DIR: .verification/go-shard-${{ matrix.shard }}
         run: make test-race
 
+      - name: Upload Go shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-shard-${{ github.run_attempt }}-${{ matrix.shard }}
+          path: .verification/go-shard-${{ matrix.shard }}/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Install PyYAML
+        if: matrix.group == 'rest'
         run: python3 -m pip install pyyaml
 
       - name: ansible_callback unit tests
+        if: matrix.group == 'rest'
         working-directory: ansible_callback
         run: python3 -m unittest test_pilot_diagnose.py -v
 
@@ -65,10 +121,43 @@ jobs:
       # run nowhere else (AGENTS.md §5.7: a test nobody runs is another list
       # that drifts).
       - name: Agent skill unit tests (make skill-test)
+        if: matrix.group == 'rest'
         run: make skill-test
 
       - name: Duplicate YAML key check (repo-wide)
+        if: matrix.group == 'rest'
         run: python3 scripts/check-yaml-duplicate-keys.py
+
+      - name: Go CI evidence runtime tests
+        if: matrix.group == 'rest'
+        run: make ci-go-runtime-test
+
+  go-test-results:
+    name: Verify Go shard execution
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: go-shard-${{ github.run_attempt }}-*
+          path: .verification/go-shards
+      - name: Verify actual Go execution
+        run: python3 scripts/ci-go-test-shards.py verify-run .verification/go-shards --artifact-prefix "go-shard-${GITHUB_RUN_ATTEMPT}-" --output .verification/go-shards-summary.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-shards-summary-${{ github.run_attempt }}
+          path: .verification/go-shards-summary.json
+          if-no-files-found: error
+          retention-days: 7
 
   playbook-lint:
     # L1 syntax (blocking) + duplicate-key check + L2 ansible-lint (advisory)
@@ -78,17 +167,8 @@ jobs:
     # delivery image.
     name: Playbook lint
     runs-on: ubuntu-latest
-    # The Go -timeout values in the Makefile targets these steps run
-    # (identity-noop 5m, identity-ssh-cache 10m, identity-secret 10m + 5m +
-    # 5m + 4m, freeipa-server-pool 5m = 44m) are hang caps: a hung step fails
-    # at its own cap, with go test's stack dump naming the test, and the job
-    # normally takes about 20 minutes. The job budget must not be below the
-    # sum of those caps, so a step is never cut off by an anonymous job
-    # cancellation; 50 is that 44m plus room for the toolchain setup, the
-    # syntax-check loop and the alert-rules suite (no explicit cap).
-    # TestCIJobTimeoutCoversMakeTargetCaps keeps this in step with the
-    # Makefile.
-    timeout-minutes: 50
+    # Runtime suites run independently below; syntax/lint remains a quick job.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -105,33 +185,35 @@ jobs:
       - name: make playbook-lint
         run: make playbook-lint
 
-      # promtool unit tests of the host-health/login-probe alert rules and
-      # the Alertmanager inhibit behaviour (docs/verification/alertmanager.md
-      # §1.7), with the Prometheus/Alertmanager images the playbooks pin.
-      # They render the rules with the ansible-core installed above; the Go
-      # test job skips them (no images, no ansible-playbook), so here
-      # PILOT_REQUIRE_CONTAINER_TESTS=1 pulls the images and turns a skip
-      # into a failure.
+  playbook-integration:
+    name: Playbook integration (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.evidence_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [alert-rules-test, identity-noop-test, identity-ssh-cache-test, identity-secret-test, freeipa-server-pool-test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ansible toolchain
+        run: |
+          python3 -m pip install "ansible-core==2.19.*" ansible-lint pyyaml requests
+          ansible-galaxy collection install ansible.posix community.docker community.postgresql community.general
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: make alert-rules-test
-        run: make alert-rules-test
-
-      - name: make identity-noop-test
-        run: make identity-noop-test
-
-      - name: make identity-ssh-cache-test
-        run: make identity-ssh-cache-test
-
-      - name: make identity-secret-test
-        run: make identity-secret-test
-
-      - name: make freeipa-server-pool-test
-        run: make freeipa-server-pool-test
+      # Each Make target retains its required-container flags and assertions.
+      - name: Run integration suite
+        env:
+          TARGET: ${{ matrix.target }}
+        run: make "$TARGET"
 
   root-tests:
     # The roster ownership tests need root: pilot-cli runs pilot as root
@@ -187,6 +269,46 @@ jobs:
           version: v2.12.1
           args: --timeout=5m
 
+  pilot-mcp-cross:
+    # pilot-mcp is the client users install on Linux or macOS laptops;
+    # cmd/pilot itself does not build for darwin, so this keeps pilot-mcp
+    # (internal/mcpclient, internal/mcpwire) free of Linux-only imports.
+    name: pilot-mcp cross-compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make pilot-mcp-cross
+        run: make pilot-mcp-cross
+
+  mcp-remote:
+    # pilot-mcp end to end against a real sshd; the deploy node's docker is
+    # a stand-in that execs the real `pilot mcp remote`.
+    name: pilot-mcp integration (sshd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install openssh-server
+        run: command -v sshd || test -x /usr/sbin/sshd || (sudo apt-get update && sudo apt-get install -y --no-install-recommends openssh-server)
+
+      - name: make mcp-remote-test
+        run: make mcp-remote-test
+
   image:
     # Builds the delivery image (images/Dockerfile.pilot-cli, see DELIVERY.md)
     # once every other job here has passed (needs lists them all, root-tests
@@ -199,7 +321,7 @@ jobs:
     #   pull_request, or a fork -> build only, nothing is pushed
     # :latest is moved only by the promote job below.
     name: pilot-cli image
-    needs: [test, playbook-lint, root-tests, thanos-retention, lint]
+    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]
     runs-on: ubuntu-latest
     # A cold-cache build took 3 min on 2026-10-27.
     timeout-minutes: 20
@@ -272,6 +394,28 @@ jobs:
             PILOT_SESSION_STORE_VERSION=${{ steps.version.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  ci-receipt:
+    name: Record full candidate validation
+    needs: [changes, image]
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.changes.outputs.evidence_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Record frozen tested merge and parents
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-validation-reuse.py --record ci-validation.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-validation-${{ github.run_attempt }}
+          path: ci-validation.json
+          if-no-files-found: error
+          retention-days: 7
 
   promote:
     # Points :latest at this run's image while its commit is still main's

@@ -22,6 +22,9 @@ func renderDomainXML(t *Target) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "<domain type='kvm'>\n")
 	fmt.Fprintf(&sb, "  <name>%s</name>\n", t.Name)
+	if t.ServiceConsumer != nil {
+		fmt.Fprintf(&sb, "  <uuid>%s</uuid>\n", t.ServiceConsumer.ID)
+	}
 	fmt.Fprintf(&sb, "  <memory unit='MiB'>%d</memory>\n", t.MemoryMB)
 	fmt.Fprintf(&sb, "  <currentMemory unit='MiB'>%d</currentMemory>\n", t.MemoryMB)
 	fmt.Fprintf(&sb, "  <vcpu placement='static'>%d</vcpu>\n", t.VCPUs)

@@ -120,8 +120,9 @@ check on `audit.rules.j2` for concrete examples).
 
 ## 5. Run it for real — budget for the environment to win the first round
 
-Delegate the mechanics to `vm-target-spec-testing` (up → apply → verify →
-idempotency → cross-check → down). The meta-lesson for THIS skill: **a
+Delegate the mechanics to `vm-target-spec-testing` (`vm-target test` or
+`topology test --ephemeral`: dry-run → apply → verify → idempotency, then
+candidate-bound evidence and teardown). The meta-lesson for THIS skill: **a
 spec and playbook that lint clean and parse correctly will still break on
 first contact with a real target**, in ways no amount of re-reading the
 YAML would have caught. From the log-server/audit-log-forwarding case
@@ -180,5 +181,6 @@ than duplicating the explanation.
    was extracted from: the rsyslog-vs-Loki evaluation, the four real bugs
    found during vm-target testing, and how each was root-caused.
 2. `vm-target-spec-testing` skill — the mechanics referenced by step 5
-   (VM lifecycle, fact snapshot, dry-run, apply, verify, cross-check,
-   teardown). This skill does not duplicate that content.
+   (inventory facts, `vm-target test` / `topology test`, candidate freeze
+   and evidence, debugging, teardown). This skill does not duplicate that
+   content.

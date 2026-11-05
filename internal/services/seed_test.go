@@ -16,6 +16,7 @@ import (
 func TestSeedServicesCreatesOnDemandRPMAndHarborProxy(t *testing.T) {
 	root := t.TempDir()
 	profile := BuiltInDevLite()
+	wantCAPEM := writeSeedTestCAPEM(t, root)
 	if err := os.MkdirAll(filepath.Join(root, "harbor", "secrets"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +29,6 @@ func TestSeedServicesCreatesOnDemandRPMAndHarborProxy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "pulp", "secrets", "admin-password"), []byte("pulp-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	wantCAPEM := writeSeedTestCAPEM(t, root)
 	var gotRemote, gotRepository, gotDistribution, gotSync, gotRegistry, gotProject map[string]any
 	var taskPolls int
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -120,6 +120,7 @@ func TestSeedServicesCreatesOnDemandRPMAndHarborProxy(t *testing.T) {
 func TestSeedServicesIsIdempotentForExistingResources(t *testing.T) {
 	root := t.TempDir()
 	profile := BuiltInDevLite()
+	wantCAPEM := writeSeedTestCAPEM(t, root)
 	if err := os.MkdirAll(filepath.Join(root, "harbor", "secrets"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +133,7 @@ func TestSeedServicesIsIdempotentForExistingResources(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "pulp", "secrets", "admin-password"), []byte("pulp-secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_ = writeSeedTestCAPEM(t, root)
+	_ = wantCAPEM
 	posts := 0
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Method == http.MethodPost {

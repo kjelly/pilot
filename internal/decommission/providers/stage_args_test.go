@@ -44,7 +44,13 @@ func hasAnyStage(call []string) bool {
 func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 	exec := &fakeAnsibleExecutor{fn: func(args []string) (*ansible.Result, error) {
 		if queryKind(args) != "" {
-			return &ansible.Result{Stdout: "HOST_INSPECT[c1.ipa.pilot.internal]: host not found"}, nil
+			// Native host-show resolves the short transport alias; this fixture
+			// must not turn an unclassified string into an absence observation.
+			body := "Host name: c1.ipa.pilot.internal\n0 services matched"
+			if queryKind(args) == "gateway_scope" {
+				body = "GATEWAY_SCOPE_READY=true"
+			}
+			return &ansible.Result{Stdout: "HOST_INSPECT[" + queryControl(args, "pilot_decommission_target_fqdn") + "]: " + body}, nil
 		}
 		return &ansible.Result{Stdout: "IPA_CLIENT_ENROLLED=true"}, nil
 	}}
@@ -59,7 +65,7 @@ func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 	if _, err := p.Inspect(ctx, InspectInput{HostName: "c1"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, step := range []Step{{Action: ActionFreeIPAClientUninstall, TargetIdentity: "c1"}, {Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "c1.ipa.pilot.internal"}} {
+	for _, step := range []Step{{Action: ActionFreeIPAClientUninstall, TargetIdentity: "c1"}, {Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "c1.ipa.pilot.internal", Params: map[string]string{"inventory_alias": "c1"}}} {
 		ex, err := p.ExecutorForStep(step)
 		if err != nil {
 			t.Fatal(err)
@@ -71,23 +77,25 @@ func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 	if _, err := p.query(ctx, "host_object", "c1.ipa.pilot.internal"); err != nil {
 		t.Fatal(err)
 	}
-	if len(exec.calls) != 4 {
-		t.Fatalf("got %d ansible-playbook calls, want 4", len(exec.calls))
+	if len(exec.calls) != 6 {
+		t.Fatalf("got %d ansible-playbook calls, want 6 including both read-only pre-uninstall probes", len(exec.calls))
 	}
-	for i, want := range [][]string{hostStageArgs, hostStageArgs, serverStageArgs} {
+	for i, want := range map[int][]string{0: hostStageArgs, 3: hostStageArgs, 4: serverStageArgs} {
 		if !hasArgs(exec.calls[i], want) {
 			t.Errorf("call %d = %v, want %v", i, exec.calls[i], want)
 		}
 	}
-	if hasAnyStage(exec.calls[3]) {
-		t.Errorf("read-only query call %v carries a stage", exec.calls[3])
+	for _, i := range []int{1, 2, 5} {
+		if hasAnyStage(exec.calls[i]) {
+			t.Errorf("read-only query call %v carries a stage", exec.calls[i])
+		}
 	}
 
 	// A stage error stops the run before ansible-playbook starts.
 	stop := errors.New("prod needs --confirm-prod")
 	exec.calls = nil
 	p.cfg.ServerStageArgs = func() ([]string, error) { return nil, stop }
-	ex, _ := p.ExecutorForStep(Step{Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "c1.ipa.pilot.internal"})
+	ex, _ := p.ExecutorForStep(Step{Action: ActionFreeIPAIdentityApplyConverge, TargetIdentity: "c1.ipa.pilot.internal", Params: map[string]string{"inventory_alias": "c1"}})
 	if err := ex.Execute(ctx); !errors.Is(err, stop) {
 		t.Fatalf("Execute with a stage error = %v, want it to wrap %v", err, stop)
 	}

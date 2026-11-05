@@ -313,6 +313,47 @@ to turn this off while the flag is on), since each call is a real action
 against a live host — the sudo check's own commands are exactly what
 generates auditd/PAM events on the target.
 
+### Remote MCP access with `pilot-mcp`
+
+`pilot-mcp` (Linux and macOS, `go build -o <bin-dir>/pilot-mcp ./cmd/pilot-mcp`)
+lets a coding agent use the MCP server above on a deploy node. It fetches the
+configuration from GitHub with the user's own Git credentials, runs one
+`docker run <repo>:<tag> pilot mcp remote session …` on the deploy node over
+SSH, sends the snapshot, then relays MCP over stdio. Secrets stay in the
+deploy node's `.vault`, mounted read-only; sessions are `observe` or `edit`,
+never raw, active or repair. Spec:
+`docs/superpowers/specs/2026-10-30-pilot-mcp-remote-access-spec.md`; setup and
+troubleshooting: `docs/runbooks/mcp-remote-access.md`.
+
+| Command | Appropriate use |
+|---|---|
+| `pilot-mcp connect --profile <name> [--image <repo>:<tag>]` | Run by the coding agent as its MCP server command. |
+| `pilot-mcp doctor --profile <name>` | Check the profile, Git, SSH, the image and an MCP handshake. |
+| `pilot-mcp changes --profile <name> --into <clone>` | Write an ended edit session's changes into a clean clone for review; it never commits or pushes. |
+| `pilot mcp remote …` | Runs inside the container; started by `pilot-mcp`, not by hand. |
+
+Profiles live in `~/.config/pilot-mcp/profiles.yaml` (mode `600`), one per
+environment and mode:
+
+```yaml
+version: 1
+profiles:
+  <profile>:
+    source: {url: "https://github.com/<org>/<config-repo>", ref: main, subdir: "<env dir>"}
+    target: {ssh_host: "<ssh-alias>", env: prod, env_root: "<env-root>", image: "<repo>:<tag>"}
+    mode: observe
+```
+
+Add it to an agent:
+
+```bash
+claude mcp add --transport stdio --scope user <name> -- <bin-dir>/pilot-mcp connect --profile <profile> --image <repo>:<tag>
+codex mcp add <name> -- <bin-dir>/pilot-mcp connect --profile <profile> --image <repo>:<tag>
+```
+
+For Codex, also set `startup_timeout_sec = 90` under `[mcp_servers.<name>]` in
+`~/.codex/config.toml`.
+
 ### Spec and verification
 
 | Command | Appropriate use |

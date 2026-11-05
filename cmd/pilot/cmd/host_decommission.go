@@ -573,9 +573,23 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 	// the freeipa-server or wazuh-manager hosts for central ones.
 	scope := decommission.NewStageScope(hf.Hosts, auth)
 	hostStage := scope.ArgsFunc([]string{hostName})
+	retirementStage, err := scope.Stage([]string{hostName})
+	if err != nil {
+		return nil, err
+	}
+	var retirementFQDN string
+	for _, host := range hf.Hosts {
+		if host.Name == hostName {
+			retirementFQDN = host.Extra["ipa_client_fqdn"]
+			break
+		}
+	}
 
 	freeipaClient := providers.NewFreeIPAClientProvider(providers.FreeIPAClientProviderConfig{
 		Executor:              runner,
+		InventoryAlias:        hostName,
+		InventoryFQDN:         retirementFQDN,
+		RetirementStage:       retirementStage,
 		ClientInventory:       invPath,
 		ServerInventory:       invPath,
 		DecommissionPlaybook:  "playbooks/decommission/freeipa-client-decommission.yml",

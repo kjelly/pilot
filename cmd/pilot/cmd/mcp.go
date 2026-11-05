@@ -11,6 +11,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -76,70 +77,115 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 	if mcpTransport != "stdio" {
 		return fmt.Errorf("unsupported --transport %q: only \"stdio\" is implemented", mcpTransport)
 	}
+	opts := mcpServeOptions{
+		Dir:                  mcpDir,
+		AuditDir:             mcpAuditDir,
+		AllowWrite:           mcpAllowWrite,
+		EnableDiagnose:       mcpEnableDiagnose,
+		EnableDiagnoseActive: mcpEnableDiagnoseActive,
+		EnableDiagnoseRaw:    mcpEnableDiagnoseRaw,
+		EnableRepair:         mcpEnableRepair,
+		DiagnoseInventory:    mcpDiagnoseInventory,
+		DiagnoseStepTimeout:  mcpDiagnoseStepTimeout,
+		FreeIPAReader:        diagnoseFreeIPAReader{Principal: mcpDiagnoseFreeIPAPrincipal, Keytab: mcpDiagnoseFreeIPAKeytab},
+	}
+	// StdioTransport owns stdout exclusively from here on: nothing in
+	// this command path writes to cmd.OutOrStdout() after this call, so
+	// stdout only ever carries the transport's own newline-delimited
+	// JSON-RPC (spec's "MCP stdout 不得包含 TUI 輸出" invariant).
+	return serveMCP(cmd.Context(), opts, &mcp.StdioTransport{})
+}
 
+// mcpServeOptions is everything `pilot mcp serve` reads from its flags,
+// so `pilot mcp remote` can start the same server with fixed options.
+type mcpServeOptions struct {
+	Dir                  string
+	AuditDir             string
+	AllowWrite           bool
+	EnableDiagnose       bool
+	EnableDiagnoseActive bool
+	EnableDiagnoseRaw    bool
+	EnableRepair         bool
+	DiagnoseInventory    string
+	DiagnoseStepTimeout  time.Duration
+	FreeIPAReader        diagnoseFreeIPAReader
+}
+
+// serveMCP builds the MCP server for opts and serves it on transport
+// until the client disconnects or ctx is cancelled.
+func serveMCP(ctx context.Context, opts mcpServeOptions, transport mcp.Transport) error {
+	server, err := newMCPServer(opts)
+	if err != nil {
+		return err
+	}
+	return server.Run(ctx, transport)
+}
+
+// newMCPServer registers the tool families opts enables, exactly as
+// `pilot mcp serve` always has.
+func newMCPServer(opts mcpServeOptions) (*mcp.Server, error) {
 	// Canonicalize once, at startup — no tool call takes a workspace path
 	// argument, so nothing after this point can redirect either root.
-	canonicalDir, err := filepath.Abs(mcpDir)
+	canonicalDir, err := filepath.Abs(opts.Dir)
 	if err != nil {
-		return fmt.Errorf("resolve --dir: %w", err)
+		return nil, fmt.Errorf("resolve --dir: %w", err)
 	}
-	auditDir := mcpAuditDir
+	auditDir := opts.AuditDir
 	if auditDir == "" {
 		auditDir = filepath.Join(canonicalDir, ".pilot", "audit", "edit")
 	}
 	canonicalAuditDir, err := filepath.Abs(auditDir)
 	if err != nil {
-		return fmt.Errorf("resolve --audit-dir: %w", err)
+		return nil, fmt.Errorf("resolve --audit-dir: %w", err)
 	}
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "pilot-edit", Version: rootCmd.Version}, nil)
 	registerEditTools(server, editMCPToolsOptions{
 		Dir:          canonicalDir,
 		AuditDir:     canonicalAuditDir,
-		WriteEnabled: mcpAllowWrite,
+		WriteEnabled: opts.AllowWrite,
 	})
 
-	freeIPAReader := diagnoseFreeIPAReader{Principal: mcpDiagnoseFreeIPAPrincipal, Keytab: mcpDiagnoseFreeIPAKeytab}
-	if err := validateFreeIPAReader(freeIPAReader); err != nil {
-		return err
+	if err := validateFreeIPAReader(opts.FreeIPAReader); err != nil {
+		return nil, err
 	}
 
-	if mcpEnableDiagnose || mcpEnableDiagnoseRaw || mcpEnableRepair || mcpEnableDiagnoseActive {
+	if opts.EnableDiagnose || opts.EnableDiagnoseRaw || opts.EnableRepair || opts.EnableDiagnoseActive {
 		// Same directory as --dir in every real deployment (hosts.yml and
 		// inventory.yml are sibling files there) — default to it so a
 		// flag-value-swallowing typo like `--diagnose-inventory --dir
 		// /path` can't silently point diagnostics at a bogus path (it now
 		// falls back to a sane default instead of an empty string).
-		diagnoseInventoryPath := mcpDiagnoseInventory
+		diagnoseInventoryPath := opts.DiagnoseInventory
 		if diagnoseInventoryPath == "" {
 			diagnoseInventoryPath = filepath.Join(canonicalDir, "inventory.yml")
 		}
 		canonicalDiagnoseInventory, err := filepath.Abs(diagnoseInventoryPath)
 		if err != nil {
-			return fmt.Errorf("resolve --diagnose-inventory: %w", err)
+			return nil, fmt.Errorf("resolve --diagnose-inventory: %w", err)
 		}
 		runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
 		if err != nil {
-			return fmt.Errorf("prepare ansible runtime for --enable-diagnose/--enable-diagnose-raw/--enable-repair: %w", err)
+			return nil, fmt.Errorf("prepare ansible runtime for --enable-diagnose/--enable-diagnose-raw/--enable-repair: %w", err)
 		}
 		diagnoseOpts := diagnoseMCPToolsOptions{
 			WorkspaceDir:   canonicalDir,
 			Inventory:      canonicalDiagnoseInventory,
 			AuditDir:       canonicalAuditDir,
-			StepTimeout:    mcpDiagnoseStepTimeout,
+			StepTimeout:    opts.DiagnoseStepTimeout,
 			AnsibleRuntime: runtime,
-			FreeIPAReader:  freeIPAReader,
+			FreeIPAReader:  opts.FreeIPAReader,
 		}
-		if mcpEnableDiagnose {
+		if opts.EnableDiagnose {
 			registerDiagnoseTools(server, diagnoseOpts)
 		}
-		if mcpEnableDiagnoseActive {
+		if opts.EnableDiagnoseActive {
 			registerActiveDiagnoseTools(server, diagnoseOpts)
 		}
-		if mcpEnableDiagnoseRaw {
+		if opts.EnableDiagnoseRaw {
 			registerDiagnoseRunTool(server, diagnoseOpts)
 		}
-		if mcpEnableRepair {
+		if opts.EnableRepair {
 			// A SEPARATE tool family and options struct from diagnose's
 			// own (see mcp_repair_tools.go) even though it shares the
 			// same inventory/runtime — an Agent Runtime session started
@@ -149,15 +195,10 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 			registerRepairTools(server, repairMCPToolsOptions{
 				Inventory:      canonicalDiagnoseInventory,
 				AuditDir:       canonicalAuditDir,
-				StepTimeout:    mcpDiagnoseStepTimeout,
+				StepTimeout:    opts.DiagnoseStepTimeout,
 				AnsibleRuntime: runtime,
 			})
 		}
 	}
-
-	// StdioTransport owns stdout exclusively from here on: nothing in
-	// this command path writes to cmd.OutOrStdout() after this call, so
-	// stdout only ever carries the transport's own newline-delimited
-	// JSON-RPC (spec's "MCP stdout 不得包含 TUI 輸出" invariant).
-	return server.Run(cmd.Context(), &mcp.StdioTransport{})
+	return server, nil
 }

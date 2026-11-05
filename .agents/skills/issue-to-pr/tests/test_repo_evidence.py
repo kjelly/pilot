@@ -177,6 +177,67 @@ class RequiredEvidenceTests(Base):
         na.update(reason="Docs-only change; no runtime behaviour touched at all.", reviewer_confirmed=True)
         self.assertEqual([], self.ctx().check_required([na]))
 
+    def required_paths(self, paths=("deploy/**",)):
+        """Base manifest whose e2e-run also lists required_paths; HEAD is still the fix branch."""
+        head = git(self.wt, "rev-parse", "HEAD")
+        git(self.wt, "checkout", "-q", "main")
+        manifest = json.loads(json.dumps(MANIFEST))
+        manifest["required_evidence"][0]["required_paths"] = list(paths)
+        commit(self.wt, ".github/pr-evidence.json", json.dumps(manifest))
+        git(self.wt, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(self.wt, "checkout", "-q", "fix/1-x")
+        self.assertEqual(head, git(self.wt, "rev-parse", "HEAD"))
+
+    NA = {"id": "e2e-run", "status": "not-applicable", "reviewer_confirmed": True,
+          "reason": "Docs-only change; no runtime behaviour touched at all."}
+
+    def test_not_applicable_is_refused_for_required_paths(self):
+        # pr-review-merge refuses not-needed for these paths; refusing here keeps an issue-to-pr PR from
+        # reaching Ready only to wait at the merge gate.
+        self.required_paths()
+        self.assertEqual([], self.ctx().check_required([self.NA]))  # src/app.go is not covered
+        commit(self.wt, "deploy/site.yml", "- hosts: all\n")
+        errs = self.ctx().check_required([self.NA])
+        self.assertTrue(any("not-applicable is refused" in e and "deploy/site.yml" in e for e in errs), errs)
+
+    def test_required_paths_see_both_names_of_a_rename(self):
+        self.required_paths()
+        # The file is on the base branch already; the change only moves it out of deploy/.
+        git(self.wt, "checkout", "-q", "main")
+        commit(self.wt, "deploy/old.yml", "- hosts: all\n")
+        git(self.wt, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(self.wt, "checkout", "-q", "fix/1-x")
+        git(self.wt, "merge", "-q", "--no-edit", "main")
+        self.assertEqual([], self.ctx().check_required([self.NA]))
+        git(self.wt, "mv", "deploy/old.yml", "old.yml")
+        git(self.wt, "commit", "-q", "-m", "move it out")
+        errs = self.ctx().check_required([self.NA])
+        self.assertTrue(any("deploy/old.yml" in e for e in errs), errs)
+
+    def test_changes_on_the_base_branch_alone_do_not_count(self):
+        # Only the change itself (from the merge base) counts, not what the base branch did since.
+        self.required_paths()
+        git(self.wt, "checkout", "-q", "main")
+        commit(self.wt, "deploy/later.yml", "- hosts: all\n")
+        git(self.wt, "update-ref", "refs/remotes/origin/main", "HEAD")
+        git(self.wt, "checkout", "-q", "fix/1-x")
+        self.assertEqual([], self.ctx().check_required([self.NA]))
+
+    def test_required_paths_need_a_listable_change(self):
+        self.required_paths()
+        ctx = self.ctx()
+        ctx.base_ref = "refs/remotes/origin/no-such-branch"
+        self.assertTrue(any("cannot be listed" in e for e in ctx.check_required([self.NA])))
+
+    def test_required_paths_must_be_relative_globs(self):
+        base = json.loads(json.dumps(MANIFEST))
+        for paths in ("deploy/**", ["/etc/**"], ["../x"], [""], [1], ["a\\b"]):
+            with self.subTest(paths=paths):
+                base["required_evidence"][0]["required_paths"] = paths
+                self.assertTrue(any("required_paths must be" in e for e in re_.validate_manifest(base)))
+        base["required_evidence"][0]["required_paths"] = ["**"]  # broad is stricter, so allowed
+        self.assertEqual([], re_.validate_manifest(base))
+
     def test_unknown_status_duplicates_and_extra_entries_are_validated(self):
         self.with_artifact()
         self.assertTrue(self.ctx().check_required([self.entry(status="done")]))

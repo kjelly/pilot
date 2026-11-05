@@ -303,13 +303,16 @@ var specTagMap = []specTagMapping{
 
 // Specs with no apply playbook in playbooks/apply/ at all.
 var tagCheckExemptSpecs = map[string]string{
-	"hello-localhost.md":             "smoke-test spec; its playbook lives in playbooks/test/",
-	"core-infra.md":                  "composite host-baseline spec: satisfied by dns/ntp/keycloak playbooks together, no single apply playbook",
-	"sso-composition-example.md":     "documentation example of the spec-supplier pattern, never applied",
-	"snmp-monitoring-integration.md": "cross-cutting spec spanning internal/monitoring, internal/detection, internal/agentcontroller, internal/repair, internal/diagnose — verified by each package's own Go tests (see the spec's Checks probes), no single apply playbook",
-	"host-decommission.md":           "cross-cutting spec spanning internal/decommission, cmd/pilot/cmd (CLI+TUI), internal/store — verified by each package's own Go tests (see the spec's Checks probes); live-provider cleanup reuses freeipa-client/freeipa-identity/internal-endpoint/wazuh-fim's own apply playbooks rather than owning a decommission-specific one",
-	"apt-repository-tolerance.md":    "cross-cutting spec for the shared playbooks/apply/tasks/apt-*.yml framework (docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md) — verified by this package's own static/regression Go tests (see the spec's Checks probes) plus each consuming playbook's own row tags (e.g. freeipa-client C1/C8), no single apply playbook of its own",
-	"outbound-webhook.md":            "Go CLI + SQLite durable outbox + HTTP dispatcher feature (docs/tmp/now/spec.md), not a system-service playbook — verified by internal/outbound, internal/contract, internal/store, and cmd/pilot/cmd's own Go tests (see the spec's Checks probes), no apply playbook of its own",
+	"gateway-scope-retirement-server.md": "cross-controller retirement fixture: effective live group/member and host-absence outcomes span gateway-scope publication and identity/decommission cleanup, with no separate apply playbook",
+	"gateway-scope-retirement-client.md": "cross-controller retirement fixture: survivor sshd PAM and sudo are effective access outcomes after server-side cleanup, with no client mutation task of their own",
+	"wazuh-alert-delivery.md":            "controller-orchestrated real-alert cross-check spanning manager and log-server; its fixture lives in playbooks/test/fixtures and consumes a unique receiver challenge",
+	"hello-localhost.md":                 "smoke-test spec; its playbook lives in playbooks/test/",
+	"core-infra.md":                      "composite host-baseline spec: satisfied by dns/ntp/keycloak playbooks together, no single apply playbook",
+	"sso-composition-example.md":         "documentation example of the spec-supplier pattern, never applied",
+	"snmp-monitoring-integration.md":     "cross-cutting spec spanning internal/monitoring, internal/detection, internal/agentcontroller, internal/repair, internal/diagnose — verified by each package's own Go tests (see the spec's Checks probes), no single apply playbook",
+	"host-decommission.md":               "cross-cutting spec spanning internal/decommission, cmd/pilot/cmd (CLI+TUI), internal/store — verified by each package's own Go tests (see the spec's Checks probes); live-provider cleanup reuses freeipa-client/freeipa-identity/internal-endpoint/wazuh-fim's own apply playbooks rather than owning a decommission-specific one",
+	"apt-repository-tolerance.md":        "cross-cutting spec for the shared playbooks/apply/tasks/apt-*.yml framework (docs/superpowers/specs/2026-09-14-pilot-access-gateway-stateless-freeipa-portal-spec.md) — verified by this package's own static/regression Go tests (see the spec's Checks probes) plus each consuming playbook's own row tags (e.g. freeipa-client C1/C8), no single apply playbook of its own",
+	"outbound-webhook.md":                "Go CLI + SQLite durable outbox + HTTP dispatcher feature (docs/tmp/now/spec.md), not a system-service playbook — verified by internal/outbound, internal/contract, internal/store, and cmd/pilot/cmd's own Go tests (see the spec's Checks probes), no apply playbook of its own",
 }
 
 // rowShapedTag matches IDs like C1, R2, C2.5.1 — the shapes spec row IDs

@@ -37,8 +37,8 @@
 # the new L3 check-mode step correctly fails fast on this before any
 # mutation — if a future site.yml component adds another required-with-no-
 # default var, expect the same failure mode here, not a check-mode bug.
-#   ROSTER    — path to a canonical freeipa-identity roster (schema_version:
-#               1; see playbooks/apply/freeipa-identity.roster.example.yaml).
+#   ROSTER    — path to a canonical freeipa-identity roster (see
+#               playbooks/apply/freeipa-identity.roster.example.yaml).
 #               freeipa-nfs-server-apply.yml reads this unconditionally
 #               (include_vars with no `when:` guard) even though this
 #               topology never runs the separate freeipa-identity reconcile
@@ -89,7 +89,13 @@ VERIFY_ARGS=(
 )
 
 echo "=== provisioning topology: $TOPOLOGY ==="
-./pilot vm-target topology up --topology "$TOPOLOGY"
+# --fresh: every node must be absent and is created by this run, so the
+# teardown below removes only this run's VMs. Plain `up` would adopt an
+# existing VM with a declared name (another session's `nexus`, say: every
+# clone and session on the host shares vm-target), and the EXIT trap would
+# then destroy it. A failed `up --fresh` tears down what it created itself,
+# which is why the trap is installed only after it succeeds.
+./pilot vm-target topology up --fresh --topology "$TOPOLOGY"
 
 cleanup() {
   echo "=== tearing down topology: $TOPOLOGY ==="

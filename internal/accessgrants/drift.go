@@ -13,7 +13,9 @@
 // a full FreeIPA CLI `--raw` attribute parse whose exact field format
 // this delivery had no live FreeIPA target to confirm; see that
 // playbook's header comment for the reasoning. That remains open
-// follow-up work, not a silently-dropped requirement.
+// follow-up work, not a silently-dropped requirement. IncludeIdentityObjects
+// additionally probes canonical users/groups through the shared apply
+// normalization and a credential-free RPC projection (identity_objects.go).
 package accessgrants
 
 import (
@@ -73,19 +75,22 @@ type LivePasswordPolicy struct {
 // FreeIPA state at probe time, for internal/inventory's desired state to
 // be diffed against.
 type LiveState struct {
-	SchemaVersion  int                           `json:"schema_version"`
-	LiveHBACNames  []string                      `json:"live_hbac_names"`
-	LiveSudoNames  []string                      `json:"live_sudo_names"`
-	HBACExists     map[string]bool               `json:"hbac_exists"`
-	SudoExists     map[string]bool               `json:"sudo_exists"`
-	UserExpiration map[string]string             `json:"user_expiration"`
-	HostAuthInd    map[string][]string           `json:"host_auth_ind"`
-	UserAuthType   map[string][]string           `json:"user_auth_type"`
-	PasswordPolicy map[string]LivePasswordPolicy `json:"password_policy"`
+	IdentityObjects *IdentityObjects              `json:"identity_objects"`
+	SchemaVersion   int                           `json:"schema_version"`
+	LiveHBACNames   []string                      `json:"live_hbac_names"`
+	LiveSudoNames   []string                      `json:"live_sudo_names"`
+	HBACExists      map[string]bool               `json:"hbac_exists"`
+	SudoExists      map[string]bool               `json:"sudo_exists"`
+	UserExpiration  map[string]string             `json:"user_expiration"`
+	HostAuthInd     map[string][]string           `json:"host_auth_ind"`
+	UserAuthType    map[string][]string           `json:"user_auth_type"`
+	PasswordPolicy  map[string]LivePasswordPolicy `json:"password_policy"`
 }
 
 // DriftProbeOptions configures a single live-state probe.
 type DriftProbeOptions struct {
+	// IncludeIdentityObjects enables the staged users/groups observer.
+	IncludeIdentityObjects bool
 	// RosterFile and Inventory are required. RosterFile MUST have already
 	// passed inventory.ValidateRosterFile.
 	RosterFile string
@@ -188,6 +193,7 @@ func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) 
 	defer os.Remove(outputPath)
 
 	extraVars := map[string]any{
+		"pilot_drift_identity_objects":       opts.IncludeIdentityObjects,
 		"freeipa_roster_file":                absRosterFile,
 		"pilot_drift_output":                 outputPath,
 		"pilot_drift_hbac_names":             emptyOr(opts.HBACNames),
@@ -268,6 +274,8 @@ func DriftProbe(ctx context.Context, opts DriftProbeOptions) (LiveState, error) 
 
 // DriftItem is one detected mismatch between desired and live state.
 type DriftItem struct {
+	// Action distinguishes mutation from report-only unmanaged objects.
+	Action string `json:",omitempty"`
 	// Category is one of: hbac_orphan, sudo_orphan, hbac_missing,
 	// sudo_missing, hbac_should_be_absent, account_expiration,
 	// auth_indicator.
@@ -533,6 +541,17 @@ func DriftOnce(ctx context.Context, opts DriftProbeOptions) (DriftReport, error)
 		return DriftReport{}, err
 	}
 	report := ComputeDrift(plan.HBACRules, plan.SudoRules, plan.AuthPolicyHosts, plan.AccountExpirations, plan.PasswordPolicies, plan.UserAuthTypes, staticAbsentHBAC, live)
+	if opts.IncludeIdentityObjects {
+		if live.IdentityObjects == nil {
+			return DriftReport{}, fmt.Errorf("accessgrants: identity object observation is missing")
+		}
+		objects, err := ComputeIdentityObjectDrift(*live.IdentityObjects)
+		if err != nil {
+			return DriftReport{}, err
+		}
+		report.Items = append(report.Items, objects...)
+	}
+	sortDriftItems(report.Items)
 
 	if opts.StateDir != "" {
 		if auditErr := AppendAuditEvent(opts.StateDir, AccessAuditEvent{

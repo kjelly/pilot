@@ -18,6 +18,14 @@
 
 ---
 
+## GitHub Issue 標籤
+
+建立本 repo 的 Issue（包含其他 skill 建立的 follow-up）前，必須依照
+`.agents/skills/issue-filing/SKILL.md` 查詢現有 labels、選擇適用標籤，
+並在建立後讀回驗證。無法選擇或驗證時須明確回報，不可假稱完成。
+
+---
+
 ## 0. 為什麼有這份檔
 
 2026-07-01 這個 repo 出了一次 spec-vs-inventory 不一致的事故：
@@ -118,11 +126,16 @@ ansible-playbook -i <inventory> playbooks/apply/...yml \
 不是「預期 PLAY RECAP: changed=8..12」，而是保存**這次真的跑出來**的完整輸出。
 原始 stdout/stderr、逐 row 結果與失敗紀錄放在 `.verification/` 或 pilot append-only
 evidence store；需要提交的 sanitized 摘要放在
-`docs/evidence/<feature>/<date>-<tested-revision>.md`。
+`docs/evidence/<feature>/<change>.md`（一個變更一份，例如 `issue-214.md`；同一變更的
+每個 candidate 就地覆寫，舊 candidate 由 Git history 保存），由 `pilot vm-target test
+--evidence-record` 產生機器部分、操作者只補失敗路徑與未涵蓋範圍兩段
+（`docs/actual-run-evidence.md` §3.1）；pilot 在鏈成功時同步改寫
+`docs/evidence/<feature>/LATEST.md`。
 
 runbook/spec 只保留一份「目前有效」摘要：測試日期、tested revision、tested tree、
-target/inventory、PASS/FAIL 數字，以及 evidence record 連結。重新驗證時**取代**摘要與
-latest link，不把新一輪 transcript 追加到原文件。歷史過程由獨立 evidence record 與
+target/inventory、PASS/FAIL 數字，以及指向 `docs/evidence/<feature>/LATEST.md` 的
+連結（evidence-only 路徑；重新驗證只改 evidence 目錄，不再為了換 link 而改
+spec/runbook）。不把新一輪 transcript 追加到原文件。歷史過程由 evidence record 的
 Git history 保存。
 
 如果跑了但失敗，完整失敗輸出也要進 artifact；只有仍會影響目前操作的症狀、原因與
@@ -135,13 +148,12 @@ inventory**（§0.1）確認該 group / host 真的存在——vm-target 用 `sh
 真實主機用 `ansible-inventory -i <inv> --graph`。對不上就是 `skipping: no hosts
 matched`（或更糟，打錯機器）。**不要**從 spec 設計意圖推斷它「應該」在。
 
-**對應 regression test**：`internal/spec/core_infra_provider_db_regression_test.go::TestRegression_SpecAndInventoryAgree`
-以 vm-target 作為參考環境，跑 `go run ./cmd/pilot vm-target show-inventory --name core`，
-比對 spec §1 聲稱的 group set 跟 inventory 實際的 host set。任何不一致 CI 會 fail。
-（這條 CI 檢查的是 repo 內 spec 文件對測試環境的一致性；上真實主機時，同樣的
-「對齊」責任落在你執行前的 `ansible-inventory` 確認,不受此 test 影響。）
-
-新增 spec 時也照這個 pattern 寫 regression test — 見 §3 範本。
+**沒有測試會替你抓這種不一致。** 本檔先前寫的
+`internal/spec/core_infra_provider_db_regression_test.go::TestRegression_SpecAndInventoryAgree`
+從來不存在（2026-10-31 查過 Git 全部歷史，這個名字只出現在文件與測試註解），「不一致
+CI 會 fail」也不成立。CI 也做不到：vm-target 的參考 inventory 要有 VM 在跑才讀得到。
+spec 跟 inventory 對齊只能靠上面這一步：執行前讀 inventory 的事實，對不上時依 §2.1
+做 A/B 決定，並記在 §2 事實快照。
 
 ### 1.4 首選：用 `vm-target test` 一次跑完 fresh → verify → idempotency
 
@@ -168,8 +180,10 @@ pilot vm-target test --name <vm> \
     -- -e target_group=all -e <var>=<val> -e @~/.vault/<secrets>.yaml
 ```
 
-把它印出的 PLAY RECAP（兩次）+ verify verdict 保存進 evidence artifact，並在
-spec/runbook 更新短摘要與連結，就滿足 §1.2。
+加上 `--evidence-record docs/evidence/<feature>/<change>.md`，pilot 會把兩次 PLAY
+RECAP、verify verdict、tested revision、執行閉包的檔案 hash、target 與 redaction 掃描
+寫進 record（`docs/actual-run-evidence.md` §3.1），你只補失敗路徑與未涵蓋範圍兩段，
+spec/runbook 連到 `LATEST.md` 即可，就滿足 §1.2。
 
 多機情境（site.yml、FreeIPA primary+replica+client 這類跨 host playbook）用
 **`vm-target topology test`**（2026-07-18 新增，同日以 site.yml + 2-node smoke
@@ -233,8 +247,8 @@ evidence link，不累積歷次輸出；完整 snapshot 留在對應 evidence ar
 | **A. 改 inventory** | vm-target：`down` + `up --hosts <包括 spec 提到的全部 alias>`；真實主機：編輯你的 inventory 檔，把該 group / host 補上（或加到既有 group） | 願意動環境讓它符合 spec（測試 VM 是 reprovision，真實主機是改 inventory 定義） |
 | **B. 改 spec** | 把 spec §1 目標系統表對齊 inventory 當下 host 集合 | 不想動環境，spec 跟現實妥協 |
 
-> **不準**「假裝對齊」 — 兩邊都寫一點、看起來一致但其實沒跑過。regression test
-> `TestRegression_SpecAndInventoryAgree` 會 fail。
+> **不準**「假裝對齊」 — 兩邊都寫一點、看起來一致但其實沒跑過。沒有測試會抓出來
+> （見 §1.3），所以 A/B 決定與當時讀到的 inventory 事實一定要寫進 §2 事實快照。
 
 ---
 
@@ -262,19 +276,19 @@ evidence link，不累積歷次輸出；完整 snapshot 留在對應 evidence ar
 3. **regression test**：`internal/spec/<feature>_regression_test.go` 至少鎖：
    - row ID 連號、無 vague expected
    - cross-row invariant（哪個 row 必含 `$KEYCLOAK_ISSUER` 之類）
-   - **若 spec §1 有 Targets table：spec 跟目標 inventory 對齊**（抄 `TestRegression_SpecAndInventoryAgree`；該範本以 vm-target 作參考環境，真實主機部署時對齊責任在執行前的 `ansible-inventory` 確認）
+   - **若 spec §1 有 Targets table**：spec 跟目標 inventory 的對齊無法用測試鎖住（見 §1.3）；執行前讀 inventory（vm-target：`show-inventory`；真實主機：`ansible-inventory`），並在事實快照記下 §2.1 的對齊決定
 
 > **例外（單一 host + `target_group` 型 spec）**：若這份 spec 的 §1 宣告的 group（如
 > `freeipa-server` / `freeipa-client`）刻意**不等於** vm-target 參考環境的 group（測試時 host
-> 落在 `all`，靠 `-e target_group=all` override），就**不要**套 `TestRegression_SpecAndInventoryAgree`
-> ——那個範本假設「spec 宣告的 group == inventory 的 group」，在這種 spec 會恆假。改在 regression
+> 落在 `all`，靠 `-e target_group=all` override），就**不要**把 §1 的 group 拿去跟參考 inventory
+> 的 group 比對——「spec 宣告的 group == inventory 的 group」在這種 spec 會恆假。改在 regression
 > test 註解寫清楚「對齊責任在 `-e target_group=` override」，並把其餘結構鎖好（row 連號、lint、
 > apply playbook 的 row-ID tags 覆蓋每個 row、AAA/cross-row invariant）。範本見
 > `freeipa_client_regression_test.go`。
 
-範本已存在：`core-infra-provider-db_regression_test.go`（含 `TestRegression_SpecAndInventoryAgree`，
-group == inventory 的一般情形）與 `freeipa_client_regression_test.go`（單一 host + `target_group`
-的例外情形）。新 spec 照對應的結構抄。
+範本：`core_infra_provider_db_regression_test.go`（一般情形：row 連號、無 vague expected、
+cross-row invariant）與 `freeipa_client_regression_test.go`（單一 host + `target_group` 的例外
+情形）。新 spec 照對應的結構抄。
 
 ---
 
@@ -588,7 +602,8 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   `fail` 卻沒有,rescue 會「成功」,整個 run 反而回報成功。規則:block 裡有帶
   tag 的 task,rescue 每個 task 都標 `always`;rescue 讀的 snapshot/fact(備份檔、
   `*_is_upgrade` 這類升級判斷、備份目錄)也要標 `always`(上面第一點,
-  `AlwaysTagPrerequisite` lint 會抓)。只還原「這次 run 改過的東西」的 rescue
+  `AlwaysTagPrerequisite` lint 會抓;備份/升級偵測本身是例外,見本節最後一點)。
+  只還原「這次 run 改過的東西」的 rescue
   可以改用 `x is defined` 檢查 setter 有沒有跑(audit-log-forwarding 的
   audit.rules 還原),lint 接受這種寫法,但不接受單純的 `| default`。
   block 的 `always:` 區段同理。
@@ -644,6 +659,32 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
   關係無法從 YAML 推導,逐一用測試鎖住
   (`internal/spec/pilot_access_gateway_ag82_regression_test.go::TestRegression_GatewayWritesFollowTheirChecks`,
   另有對每個 tag 實際跑一次的行為測試)。
+- 備份/快照/升級偵測要跟著「真正換掉東西」的 task 的 tag,不是 `always`;
+  `always` 的 task 也不准每次 run 都回報 changed。`pilot deploy --limit` 把只因
+  依賴展開才進來的主機也交給每個被 import 的 play,沒選到的元件的 `always`
+  task 在那台主機上照樣會跑,第二次 apply 的 `changed=0` 檢查就永遠過不了。
+  detection-engine 的 Step 3–5(state.db 備份、舊 binary 快照、
+  `detection_engine_is_upgrade`)曾標 `always`(v1.41,為了讓 rescue 讀得到):
+  it-core 只是 provider host,Step 6 沒被選到、binary 沒換,`is_upgrade` 永遠為真,
+  Step 4 的 `changed_when: true` 讓每一次 apply 都 changed(kjelly/pilot#189,
+  #190 修正)。現在 Step 3–5e 與 Step 6 帶同一組 tag(`detection-engine-C1`),
+  備份恰好在 Step 6 會跑的 run 才跑。`always` 的 rescue 不靠備份 task 的 tag
+  決定能不能還原:授權還原的 fact(`detection_engine_rollback`)由 `always` 的
+  Step 0e 先重設(fact 會活過 play,不准繼承上一個 play 的授權),帶 Step 6 tag
+  的 Step 4f/5d/5e 在快照驗證過之後才授予,rescue 以 `is defined` 讀它(#203)。
+  規則:`always` 的 command/shell/raw/script 必須有不是 `true` 的 `changed_when`
+  (沒寫也算違規:預設每次都 changed),tempfile 必須 `changed_when: false`;
+  block 的 `always:` 區段要檢查,`rescue:` 不用(只在失敗後才跑)。這條 lint 只涵蓋
+  上面這幾個模組:`file`/`copy`/`service`/`systemd`/`docker_container` 等其他模組若每次
+  run 都 changed,它不檢查(審查掃過 882 個 always 的 task,沒有現成的案例)。
+  `internal/spec/always_tag_convergence_regression_test.go::TestRegression_AlwaysTaggedTasksConverge`
+  對全部 `playbooks/apply/*.yml` 與它們 include 的 task 檔鎖住。#190 之前的 tag
+  放回去時,前面幾條 `always`/tag lint 全部仍然通過,因為沒有一條看 `always` task
+  回報什麼。ratchet allowlist 兩筆,不再違規的 task 會讓測試要求刪掉那一筆:
+  agent-controller 的 Step 4(跟 #190 之前的 detection-engine 同型,待
+  kjelly/pilot#195)、freeipa-realm-replacement 的 trust snapshot(一次性遷移,
+  prior-state 檔存在就拒絕重跑,也不在 `site.yml`)。這一點原本由 #190 寫進本節,
+  #203 合併時被刪掉,v1.58 補回並改寫成 class 層級的規則。
 
 ### 4.5 Ansible 語意陷阱:語法合法、執行不報錯,結果卻是錯的
 
@@ -915,9 +956,19 @@ from-scratch install 之後。
 
 ## 5. 寫 / 改 Go code 時
 
-- 凍結 candidate 前先跑 `go build ./...` 跟 `go test ./...`；正式 evidence run
-  依 §1.5 對不可變 candidate 執行
-- **`go test -race ./...` 也必須綠**（CI 就是跑這個）。不要在測試裡對共用
+- 凍結 candidate 前先跑 `go build ./...`，以及 diff 觸及的 package（含 import
+  到被改 shared helper 的 package）與新增 regression 的 `go test`；**完整的
+  `go test ./...` 交給 CI 的 `Go test` job**，不要在本機重跑，除非使用者要求或
+  CI 不可用（2026-11-01 起：本機全套在同機多個 agent session 下要 35–60 分鐘，
+  每個 HEAD 重跑一次是 pr-ready 一輪要半天的主因，見
+  `.agents/skills/pr-ready/SKILL.md`「Pilot: cycle-time rules」）。`tmp/go.mod`
+  把 gitignored 的 `tmp/` 隔成另一個 module，`./...` 不會掃到裡面的 scratch
+  checkout 與零散測試程式（會 import pilot 套件的 scratch 程式要放在
+  `tmp/<repo 複本>/` 裡，`TestTmpScratchIsNotPartOfTheModule` 鎖住）；`make lint`
+  要 golangci-lint v2（CI 釘 v2.12.1）。
+  正式 evidence run 依 §1.5 對不可變 candidate 執行
+- **`go test -race ./...` 也必須綠**（CI 就是跑這個；本機只在懷疑 race 時對
+  相關 package 跑 `-race`）。不要在測試裡對共用
   slice / map 做「goroutine 寫 + 主 goroutine 讀」而沒有同步——用 channel
   關閉或 `sync` 建立 happens-before。race gate 紅掉，等於後面每個 agent 都
   失去「測試綠 = 安全」這個判準。
@@ -1080,7 +1131,7 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 | log-server 的 `siem_log_root`/`siem_receiver_tcp_port` ↔ log-shipping 的 `siem_log_root`、audit-log-forwarding/wazuh-manager 的 `siem_forward_port` | `internal/spec/siem_shared_inputs_regression_test.go::TestRegression_SIEMSharedInputsResolveTheSameOnEverySide` |
 | audit-log-forwarding client 的 `siem_forward_port` ↔ inventory log-server 的 `siem_receiver_tcp_port`(apply 時的 gate) | `internal/spec/siem_shared_inputs_regression_test.go::TestRegression_AuditForwardPortMatchesTheLogServerReceiver` |
 | `pilot deploy` preflight ↔ `pilot repair` 對 contract input 型別的判斷(單一來源 `contract.ValueMatchesType`) | `internal/repair/reapply_plan_test.go::TestBuildReapplyPlan_IntegerInputFormsMatchPreflight`、`cmd/pilot/cmd/deploy_input_types_test.go::TestDeployPreflightAcceptsInventoryNumbers` |
-| ci.yml 每個 job 的 `timeout-minutes` ↔ 該 job `run: make <target>` 各步驟的 Makefile target 內 Go `-timeout`(`-test.timeout`)總和(這些 `-timeout` 是單步的卡死上限,加總超過 job 預算時,卡住的步驟會被沒有名字的 job 取消打斷,看不到 go test 點名測試的 stack dump;沒有明確 `-timeout` 的 target 不計) | `cmd/pilot/cmd/ci_timeout_consistency_test.go::TestCIJobTimeoutCoversMakeTargetCaps`(`playbook-lint` 目前 44m 對 50m);`Go test` job 的單一 `-timeout` 另要求 job 預算至少高出 10m(setup 與編譯 -race binary):`TestCIGoTestTimeoutFiresBeforeJobLimit`(目前 `-timeout 45m` 對 job 60m) |
+| ci.yml 每個 job 的 `timeout-minutes` ↔ 該 job `run: make <target>` 各步驟的 Makefile target 內 Go `-timeout`(`-test.timeout`)總和(這些 `-timeout` 是單步的卡死上限,加總超過 job 預算時,卡住的步驟會被沒有名字的 job 取消打斷,看不到 go test 點名測試的 stack dump;沒有明確 `-timeout` 的 target 不計) | `cmd/pilot/cmd/ci_timeout_consistency_test.go::TestCIJobTimeoutCoversMakeTargetCaps`(`playbook-lint` 目前 53m 對 60m);`Go test` job 的單一 `-timeout` 另要求 job 預算至少高出 10m(setup 與編譯 -race binary):`TestCIGoTestTimeoutFiresBeforeJobLimit`(目前 `-timeout 45m` 對 job 60m) |
 | canonical roster 的 `freeipa.admin.password` ↔ vault 的 `ipa_admin_password`(操作者資料;只載入名冊的 `roster remove-*`、capability probe、`--repair-managed` 需要前者,所以不能改成參照;`identity drift`/`access drift`/`access health` 以 vault 為先、名冊為備援) | `pilot edit` 改後者時同步前者:`cmd/pilot/cmd/edit_tui_vault_roster_sync_test.go::TestEditAutomationDriverVaultAdminPasswordSyncsRosters`(只認 `.vault/main.yaml`:`::TestEditAutomationDriverSecondaryVaultLeavesRostersAlone`);preflight warning:`::TestWarnFreeIPARosterAdminDrift`;apply gate:`internal/spec/freeipa_nfs_admin_password_regression_test.go::TestRegression_FreeIPANFSServerAdminPasswordDriftGate`;已不一致時的修正(手動改名冊):`cmd/pilot/cmd/edit_tui_vault_roster_guidance_test.go::TestFreeIPARosterDriftRecoveryIsAHandEdit`;名冊要跟著改卻被鎖住時整次存檔拒絕,終端機、`--actions`、plan、apply 的結果與 warnings 一致:`cmd/pilot/cmd/edit_vault_save_parity_test.go::TestVaultSaveRosterSyncParity`;兩邊對密碼值的判斷(單一來源 `inventory.ansibleScalarKind`,含 `!unsafe`、`!vault`、模板、沒加引號的非字串):`internal/inventory/roster_admin_password_test.go::TestAdminPasswordFormsAreJudgedAlikeOnBothSides`,對真實 Ansible loader 驗證:`internal/inventory/roster_yaml_types_test.go::TestAnsibleTagsMatchTheClassifier`(`make identity-secret-test`) |
 
 規則:
@@ -1100,8 +1151,8 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
    catalog 項目數),要依 registry 長度計算,不要寫死。已知欠債:
    `cmd/pilot/cmd/edit_tui_role_presets_test.go` 的 teatest 終端高度仍寫死
    52 列;下次新增 role 又被擠出畫面時,改成依 role 數量計算,不要再手動加大。
-4. 新增 component、spec 或 role 後,凍結 candidate 前一定要跑**完整的**
-   `go test ./...`,不能只跑自己的 package。`e238964`(新 spec 沒登記進
+4. 新增 component、spec 或 role 後,一定要讓**完整的** `go test ./...` 跑過（CI 的 `Go test` job；本機至少跑 `cmd/pilot/cmd`
+   與 `internal/spec`，全 repo 的一致性 lint 都放在這兩個 package），不能只看自己的 package。`e238964`(新 spec 沒登記進
    `tagCheckExemptSpecs`)與 `c58d63a` 都只在全量測試時才現形。
 5. 元件的 `site.include` 從 `false` 改成 `true` 時,要對 vm-target/docker-target
    跑一次真實的全站 deploy。`a52e32a`:`pilot-access-gateway` 改成
@@ -1603,7 +1654,7 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 - ❌ 不要把中間產物、原始測試輸出、臨時檔或 scratch data 放到 repo 其他路徑；
   原始輸出只准進 gitignored `.verification/`、pilot evidence store、`./tmp`、`/tmp`
   或系統暫存目錄。唯一可提交的例外是刻意產出的 sanitized
-  `docs/evidence/<feature>/<date>-<tested-revision>.md` 短摘要。
+  `docs/evidence/<feature>/<change>.md` record 與 `LATEST.md`。
 - ❌ 不要從「spec 設計意圖」推「inventory 應該有的 host」 — 從**你實際要執行的那份 inventory** 讀事實（vm-target：`show-inventory`；真實主機：`ansible-inventory -i <inv> --graph`，見 §0.1）
 - ❌ 不要在 runbook 寫「預期 PASS 11/11」沒實際跑過；只可寫真實 verdict 摘要與
   evidence link，完整 transcript 不得持續追加到 runbook/spec
@@ -1792,7 +1843,7 @@ git status --short
 | 2026-10-01 | v1.38 | §4.3 新增第 7 點：pilot 呼叫 playbook 時，stage 要依每次 run 的目標主機的環境 group 決定，staging/prod 要帶操作者的確認。修正 `pilot host decommission` 完全不帶 stage、staging/prod 主機無法下架的問題（`StageScope`、`apply`/`resume` 的 `--confirm-staging`/`--confirm-prod`/`--staging-attested-within-hours`、TUI 確認畫面） | pilot |
 | 2026-10-01 | v1.39 | §4.5 新增第 11 點：loop 累加的 fact 在空 loop 時不會被設定。修正 `internal-endpoint-apply.yml` 的 `internal_endpoint_normalized`（`endpoints: []` 時 decommission verify 查詢報 undefined），新增全 repo lint `TestRegression_LoopAccumulatorsAreInitializedOrGuarded` | pilot |
 | 2026-10-01 | v1.40 | §4.4 補一點：assert/fail 檢查本身也要能在 `--tags` run 執行——輸入檢查標 `always`，流程中間的驗證標所屬步驟的 row tag。修正 10 支 playbook 共 20 個沒有 tag 的檢查，新增全 repo lint `TestRegression_NoUntaggedChecksInTaggedPlays`；`preTaskGateNotAlwaysAllowlist` 清空 | pilot |
-| 2026-10-01 | v1.41 | §4.4 補兩點：(1) rescue 與 block `always:` 區段在 `--tags` 下一樣會被篩選，帶 tag 的 run 失敗時不會回滾。8 支 playbook 的 rescue 改標 `always`，連同它們讀的 snapshot/升級判斷（pam-oidc-sshd Step 1、agent-controller/detection-engine Step 3–5 與新增的 Step 3d 備份目錄）；新增全 repo lint `TestRegression_RescueRunsWheneverItsBlockDoes`，其餘 12 支列入 ratchet allowlist。(2) 帶 row tag 的 task 讀的 register/set_fact，setter 也要在同樣的 `--tags` 下執行，否則用 default 讀；修正其中 6 支的 17 處（container `restart:` 判斷、pam-oidc-sshd Step 4、agent-controller listen address），新增 lint `TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet`，其餘 15 支列入 allowlist | pilot |
+| 2026-10-01 | v1.41 | §4.4 補兩點：(1) rescue 與 block `always:` 區段在 `--tags` 下一樣會被篩選，帶 tag 的 run 失敗時不會回滾。8 支 playbook 的 rescue 改標 `always`，連同它們讀的 snapshot/升級判斷（pam-oidc-sshd Step 1、agent-controller/detection-engine Step 3–5 與新增的 Step 3d 備份目錄；其中 detection-engine 的 Step 3–5 已在 #190 改標 Step 6 的 tag、agent-controller 的待 #195，見 v1.58）；新增全 repo lint `TestRegression_RescueRunsWheneverItsBlockDoes`，其餘 12 支列入 ratchet allowlist。(2) 帶 row tag 的 task 讀的 register/set_fact，setter 也要在同樣的 `--tags` 下執行，否則用 default 讀；修正其中 6 支的 17 處（container `restart:` 判斷、pam-oidc-sshd Step 4、agent-controller listen address），新增 lint `TestRegression_TaggedTasksReadOnlyWhatTheirTagsSet`，其餘 15 支列入 allowlist | pilot |
 | 2026-10-01 | v1.42 | §4.4：其餘 12 支 playbook 的 rescue 改標 `always`，連同 rescue 讀的 snapshot/inspect（freeipa-nfs-server 的 exports 快照、freeipa-realm-replacement 的 tar 快照、pilot-access-target-policy 讀現有 drop-in），`rescueTagGapAllowlist` 清空；其中 8 支的 32 處 row-tag 前置讀取一起修（`restart:`/`when:` 的 `is changed` 改讀 default、只讀的偵測 task 標 `always` 或 reader 的 tag），`taggedPrerequisiteAllowlist` 剩 7 支；`AlwaysTagPrerequisite` lint 接受 `x is defined` 檢查；兩支前置 lint 都會展開 `include_tasks`/`import_tasks` 檔案裡設的 fact，抓到並修正 5 支 playbook 的 `/etc/hosts` pin 讀未標 tag 的 resolver include（wazuh-manager C10、wazuh-fim C7、audit-log-forwarding C15、log-shipping C5、restic-backup C10） | pilot |
 | 2026-10-01 | v1.43 | §4.4：修正其餘 7 支 playbook 的 17 處 row-tag 前置讀取（`is changed`/`.changed` 改讀 default；freeipa-identity 的 HBAC/sudo lookup 補 C14/C17；gateway-scope 的計算與 kinit 標 `always`；pilot-access-gateway 的 Step 13 與 admin kinit 補 AG12/AG_service），`taggedPrerequisiteAllowlist` 清空；freeipa-identity 的 admin kinit/kdestroy 改 `always`、pilot-access-directory/pilot-session-store 的 kinit/kdestroy 補 AD_service/SS_service，新增 lint `TestRegression_IpaCommandsHaveAKinitForTheirTags` | pilot |
 | 2026-10-01 | v1.44 | 新增第 40 支 apply playbook `dns-apply.yml`:`dns` role 從 `core-infra-provider-apply.yml -e infra_role=dns` 拆出,改成 FreeIPA 前的第一層 unbound 快取 DNS(inventory 有 FreeIPA DNS 時內部網域自動送到 FreeIPA,其餘送到使用者設定的 upstream;spec `docs/verification/dns.md`);`site.yml` 順序移到 freeipa-server 之後;`core-infra-provider` 只剩 NTP(row 重新編號 C1–C3)。同時修掉三個既有 bug:play `vars:` 的 `dns_zones: []` 蓋掉 group_vars、`group_vars/dns/` 目錄讓 `group_vars/dns.yml` 整個失效、scaffold 把範例的假 zone 複製成真設定;`pilot inventory lint`/`generate`/`pilot edit` 加上 group_vars/host_vars 遮蔽偵測;§4.3 清點更新為 40 支;§4.2 不需新增 restic 範例(只寫 `/etc`) | pilot |
@@ -1808,3 +1859,7 @@ git status --short
 | 2026-10-15 | v1.54 | §4.5 新增第 16 點:`ipa` 的長選項接受唯一前綴,不存在的選項會被靜默當成另一個選項。修正 host decommission 的 HBAC/sudo 直接引用查詢(`--host=` 被當成 `--hostcat`,永遠 0 筆,issue #104),新增全 repo lint `TestRegression_PlaybookIPAOptionsExistInIPAHelp` | pilot |
 | 2026-10-28 | v1.55 | §4.5 第 2 點：fact 也會活過 play。`site.yml` 對同時在 `dns`、`freeipa-client` 的主機 include `tasks/freeipa-server-pool.yml` 兩次，replica 清單重複、duplicate-FQDN gate 失敗（issue #157）；該檔開頭重置 `freeipa_server_pool_replicas`。新增全 repo lint `TestRegression_LoopAccumulatorsAreResetBeforeTheirLoop`（既有 20 處列入 ratchet allowlist）、runtime 測試 `make freeipa-server-pool-test`（CI Playbook lint job） | pilot |
 | 2026-10-27 | v1.56 | §5.7 一致性表新增「名冊 `freeipa.admin.password` ↔ vault `ipa_admin_password`」(issue #146):只改 vault 會讓 freeipa-nfs-server 的 no_log gate 失敗且看不出原因。`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步 workspace 名冊(只認 deploy 預設載入的這份、只寫這個 workspace `.vault/` 目錄裡的名冊,plan 不碰真實檔且與 apply 預覽相同的寫入、失敗的 apply 會一併 rollback、原子寫入)、未同步的名冊列在 banner 與 plan/apply 的 warnings、deploy/reconcile preflight 對不一致發 warning、nfs-server 的密碼一致性拆成不加 no_log、排在 stage gate 之後的獨立 gate;三者都指向唯一有效的修正:手動改名冊(pilot edit 只在密碼改變的那次存檔同步,再存不會補)。名冊不能改成 `{{ ipa_admin_password }}`:`pilot access`/`identity drift`/`roster remove-*` 只載入名冊。同一 PR 的 review 修正:§5.11 新增第 5 點,所有名冊 writer 改用 `lockRosterFile` 鎖 canonical 檔案(`secretpath.Canonical`),修掉 symlink 繞過鎖、migrate/remove 互不排斥、migrate 把 symlink 換成一般檔案、十幾個 writer 沒鎖的問題,新增全 package lint `TestRegression_RosterWritersLockCanonicalTarget`。Re-review 第二輪:lock 檔以 `O_NOFOLLOW` 開啟並對 fd chown(root 執行時不會截斷或 chown symlink 指向的檔案)、只能讀的 lock 檔照樣上鎖、打不開時回傳說明修法的 `ErrRosterLockFile`、不需寫入時不取鎖,`pilot edit` 對被持有的名冊顯示 banner 而不結束 session;名冊密碼只認 YAML 字串(沒加引號的數字跟 Ansible 一樣視為不一致);plan 透過被複製的 workspace 辨識名冊;apply rollback 只還原仍是本 session 寫入內容的名冊;guard 涵蓋 `os.OpenFile`/`os.Create` 寫入、method 與真正的 lock target,`ansible-vault edit` 執行期間持有名冊鎖。第三輪:自動化／MCP 遇到被持有或 lock 檔不能用的名冊時該步失敗並 rollback(MCP 回傳錯誤),終端機仍只顯示 banner;`ansible-vault edit` 的鎖只在 editor 執行期間持有;名冊寫入改為原子替換;lock 檔以 `O_NONBLOCK` 開啟;rollback 對同一檔案只還原一次、不把別人改過的名冊算成失敗;沒加引號、YAML 1.1 或 1.2 可能讀成非字串的密碼(名冊與 vault 兩邊)一律提示加引號,YAML 1.1 的判斷以 `make identity-secret-test` 對真實 Ansible loader 驗證。第四輪:名冊寫入只剩一套寫法 `writeLockedRoster`(拒寫不可寫的名冊;hard link、ACL、給不了擁有者時原地覆寫,否則同目錄暫存檔 rename;root 執行時新名冊與 migration 備份的擁有者正確;取鎖後清殘留暫存檔);密碼值的判斷收斂成 `ansibleScalarKind`(`!unsafe` 視為字串並在同步時保留,`vaultfile.Set` 寫入時改成字串 tag,沿用 vault 密碼建立名冊時不沿用模板、`!vault` 或非字串);vault 存檔改為 Prepare → 寫 vault → Commit,要跟著改的名冊被鎖住時整次存檔拒絕(每個入口一致,plan 以 `ProbeRosterWrite` 檢查真實名冊),`Run` 回傳 warnings、`--actions` 印到 stderr;plan/MCP apply 不寫 `.vault/` 以外的名冊(`errRosterOutsideEditScope`),plan 啟用 freeipa-nfs-server 時改寫複本並記錄真實路徑;busy lint 涵蓋所有綁定形式與 `cmd/pilot/cmd` 全部檔案;gateway 測試 harness 一併掃 stderr;新增 `make root-test` 與 CI job "Root-only ownership tests"。第五輪:plan/MCP apply 對 `.vault/` 以外的名冊先在副本上試做,只在真的要改時拒絕(啟用 freeipa-nfs-server 而外部名冊已有 `nfs.servers` 時不再失敗,與 main 相同);Prepare 與 plan 的探測(`ProbeRosterWrite`)檢查 `writeLockedRoster` 會拒絕的名冊(`openRosterForWrite`/`ErrRosterNotWritable`:不能寫、不是一般檔案、symlink),不能寫的名冊也讓存檔拒絕、plan 失敗;writer 碰到被持有的 lock 重試最多 250ms,plan 的探測不會害它失敗;暫存檔只在權限錯誤時改走原地覆寫;vault 舊值或新值是 inline `!vault`、舊值是模板時提示手動確認,preflight 一致。第六輪(獨立 review 對照 main 的回歸;兩條平行修正合併成同一套機制):`lockRosterFile` 在建立 lock 檔之前先確認能寫名冊(不能寫的不留 lock 檔),lock 檔以 `O_EXCL` 建立並依名冊的 group/other/ACL/擁有者給讀取權(既有的 `0600` 會補上);lock 檔任何非「被持有」的開啟/fstat/flock 失敗都是 `ErrRosterLockFile`(`EROFS` 跟 `EACCES` 一樣改以唯讀開啟既有 lock 檔),罕見的 open/flock/路徑解析錯誤以測試用的 `InjectFileFault` 注入(其他測試接縫見 §5.11 第 5 點);probe 與 writer 同順序(先名冊、再 lock 檔),dry-run migration 不取鎖;Prepare 只把讀取/判斷的錯誤(`ErrRosterNeedsHandEdit`)列為「未同步」,其他錯誤一律拒絕存檔(四個入口一致,以每個拒絕原因 × 入口的矩陣測試鎖住);換名遇 `EBUSY`/`EXDEV`/`EPERM`/`EACCES`(單一檔案 bind mount)改原地覆寫,原地變大前先 `fallocate`;暫存檔先 fchown、fchmod、比對延伸屬性才寫入內容,屬性不同(目錄 default ACL、SELinux label、`user.*`)改原地覆寫;跨行的 admin 密碼拒絕同步;plan 對相對路徑的 `freeipa_roster_file` 依真實 workspace 解讀,指進 `.vault/` 的 symlink 算 session 的檔案(寫法 × 名冊狀態 × 入口的矩陣測試),plan 的錯誤與 warnings 用真實路徑;含 secret 的暫存副本(plan 的暫存 workspace、試做副本、加密名冊解密後的明文)都放在 `secretpath.PrivateTempDir` 建的 pid 命名 `0700` 目錄(migration 的明文候選檔不在其中,仍是名冊旁的暫存檔),下次建立時清掉已結束 pilot 留下的;「請加引號」只看新存的值;`RemoveRosterFile` 刪 `lk.target`,guard 涵蓋刪檔、`renameRosterTemp`、`rosterLock` 字面值;已知限制:hard link 各自有 lock 檔、單一檔案 bind mount 的容器內外不互斥。第七輪:apply 的 rollback 不再以步驟前後的檔案差異推斷誰寫了名冊(別人在快照之後、session 寫入之前存的修改會被還原掉並回報成功),改由 `inventory.RosterJournal` 在 `writeLockedRoster` 記錄每次寫入前後的內容,rollback 只還原 session 自己的寫入蓋掉的內容,無法歸屬、寫入不成鏈或中途失敗的名冊留給人工檢查(§5.14 第 7 點),新增全 package lint `TestRegression_RosterBytesAreWrittenOnlyByWriteLockedRoster`;rollback 結果的 `After` 改為 rollback 後的實際狀態;寫入失敗時只有原地覆寫寫到一半可能改到名冊,錯誤包 `errRosterPartlyWritten`(journal 的 `Failed` 也以它判斷);schema 升級在建立備份之前拒絕不能寫的名冊(原本留下 `.bak` 並回報「rollback failed」),只在原地覆寫寫到一半時經 `writeLockedRoster` rollback(journal 一併記下);預查以讀到的內容判斷空檔;plan 讀子目錄裡 vars 檔的 `freeipa_roster_file`;plan 拒絕存 vault 時的錯誤與 banner 不再列出暫存複本的路徑;`freeipa_roster_file: ~/…` 展開 `~`(§5.11 第 1 點);`ansible-vault edit` 只對名冊取鎖;freeipa-nfs-server 的 no_log gate 訊息列出檢查條件,並註明 Ansible 無法展開的密碼值會在錯誤的 Origin 段落印出。第八輪(review of 3a4d4a3,兩個 P2、兩個 P3):(1) hard link 不再繞過鎖:`lockRosterFile` 在兩組 sidecar 之後,名冊有其他 hard link 時再 flock 名冊自己的 inode(`rosterLock.identity`;被持有 `ErrMutationLocked`、其他失敗 `ErrRosterLockFile`,`ProbeRosterWrite` 取 shared;只有一個名字的名冊不取;取鎖後才多出 hard link 的寫入被拒絕),新增 `inventory.RosterFileKey`(canonical path 或 `inode:<dev>:<ino>`)作為鎖、journal(記錄與 `ErrRosterJournalBusy`)、apply rollback 分組與 `rosterCandidates` 去重共用的唯一檔案身分,§5.11 第 5 點「已知限制」只剩 bind mount;(2) plan 的暫存複本保留 `.vault/` 名字之間的別名結構(複本內的相對 symlink),`.vault/ipa-identity.yaml` 與 `.vault/group-roster.yaml` 都連到 `.vault/actual.yaml` 時 plan 與 apply 的 `AffectedFiles`/diff/warnings 一致;(3) rollback 判斷哪些 `.vault/` 檔案是名冊只看執行前狀態與 journal,不看 session 留下的內容,plain 的 `main.yaml` 被加上 `groups` 等 key 不再被當成名冊(runbook §4.5「非名冊 `.vault/` 檔一律還原」因此成立),加密的非名冊檔留給人工但不印密碼提示;(4) apply 的 journal 在 rollback 前 `Stop`(不再記錄、保留 claim)、rollback 後才 `Close`,另一個 workspace 的 apply 在 rollback 期間註冊不進來(`workspace_locked`),不會把還原寫入記成自己的;第九輪(review of bb3d18e,P3):`PrivateTempDir` 清掃「已結束」的 pilot 時不再以 pid 判斷(別的 PID namespace 共用 `/tmp` 的 pilot 看不到 pid,刪掉還在用的 plan 暫存目錄,`label "nexus" not found` 的 flake):每個目錄有 `.pilot-alive` 標記檔,建立者持有它的 flock 直到結束,清理者只在拿得到鎖時刪(§5.14 第 5 點);沒有標記檔的舊目錄要超過 10 分鐘且 pid 不在自己的 namespace 才刪;`InjectFileFault` 與 `PrivateTempDir` 的涵蓋範圍改寫成實際範圍(§5.11 第 5 點);`RemoveRosterFile` 不經 journal,呼叫端要先 `Stop`/`Close` journal(§5.14 第 7 點)。實跑狀況:candidate `3b4bdb1` 曾對兩台全新 VM 實跑(`docs/evidence/freeipa-nfs-server/2026-10-28-3b4bdb1.md`);之後併入的 Go 程式碼與 `freeipa-nfs-server-apply.yml` 的 gate 訊息文字都變了,所以對 candidate `22cad092` 重跑了一次(`docs/evidence/freeipa-nfs-server/2026-10-28-22cad09.md`:L1–L6 通過、gate 的通過/失敗/復原、`pilot edit --actions` 輪替、名冊被持有時拒絕、hard link 名冊被持有時拒絕、secret scan 0 筆)。第十一輪的程式碼(循環 YAML 守衛、CI 接線、併入較新的 main)之後又對 candidate `09119dd` 重跑一次(`docs/evidence/freeipa-nfs-server/2026-10-29-09119dd.md`:同樣的 L1–L6、gate、輪替、busy 與 hard link 檢查,另加循環與 40 層 fan-out 名冊:`pilot edit --actions` 不當機不卡住、vault 照存、名冊原樣;有環時警告指名「alias 或 merge key 指向自己」,fan-out 時警告是 YAML 函式庫的 `excessive aliasing` 上限、名冊沒有 admin 密碼則沒有警告;secret scan 470 個檔案 0 筆,過程中的一次歸檔錯誤〔第一次掃描命中的是操作者存在 log 目錄的四份「前」副本〕與重跑都記在紀錄裡)。實機只走了 `pilot edit --actions` 的存檔路徑、hard link 名冊的 inode 鎖、循環/fan-out YAML 守衛(`pilot edit` 同步與 `pilot deploy --preview-only` 的 migration 步驟)與 playbook chain;apply rollback 的還原路徑、plan 的探測(`ProbeRosterWrite`)、MCP plan/apply 與暫存目錄的 flock 清掃沒有實機觸發,只有本機單元與整合測試。第十輪(review of 374a7ca):(1) rollback 不再移除別的 process 在 apply 期間建立的名冊:快照沒有、journal 也沒記錄的 `.vault/` 檔案依現在的內容分類(加密、名冊 key 是 mapping/list、或 workspace 指定的名冊就保留並列入 warnings;在某一步執行期間出現的留給人工),只有 scalar-only 的新檔案才移除(§5.14 第 7 點);(2) `PrivateTempDir` 測試的 held-marker 計數不再依賴測試順序,sweep 測試涵蓋 marker 是 symlink/目錄/mode 0000/他人擁有的情況;(3) `ProbeRosterWrite` 的 shared inode 鎖改用可讀的 fd(以 fcntl 模擬 flock 的 NFS 對 write-only fd 的 shared lock 回 EBADF;可寫不可讀的名冊仍用 write-only fd)。第十輪的程式碼只有 `--actions` 存檔路徑走到的部分經過實機驗證,其餘(見上)只有本機測試。第十一輪(review of 8a5062a9,兩個 P2):(1) 名冊/vault 的 YAML alias 圖有環(`freeipa: &f {<<: *f}`)讓 `mappingValue` 遞迴到 stack overflow(fatal),無環的 40 層 merge fan-out 要 2^40 步而卡住,`pilot deploy`/`reconcile` preflight 與 `pilot edit` 同步都會碰到;改以 `parseYAMLDocument`/`checkAliasGraph` 在走訪前驗證一次、`mappingValue` 帶 visited、`resolveAlias` 設上限,循環的名冊回報為需手動修改(§5.11 第 6 點);(2) CI 的 `image` job 沒有 `needs: root-tests`,main push 可在 root 測試紅燈時發佈 image 並移動 `latest`,補上並新增 `TestCIImageWaitsForEveryValidationJob`(§5.11 第 5 點);已併入 main。這輪的程式碼已對 candidate `09119dd` 實跑(見上)。第十二輪(review of 09119dd7,三個 P3,只改測試、`ci.yml` 與文件,正式程式碼與實機驗證的 `09119dd` 相同):(1) `resolveAlias` 的 16 層上限(`maxAliasHops`)新增 `TestResolveAliasHopBound`(自己指向自己的 alias、17 層與剛好 16 層的手建 alias 鏈,每個案例在 `runIsolated` 子行程跑,拿掉上限會卡住而失敗);(2) `TestVaultSaveRosterSyncParity` 的 `notEditable` 分支除了錯誤指名 `main.yaml`,也斷言拒絕原因(`複雜 YAML`),別的錯誤不再冒充編輯器的拒絕;(3) `playbook-lint` job 的 `timeout-minutes` 從 30 改 40:它跑的 Makefile target 的 Go `-timeout`(identity-noop 5m、identity-ssh-cache 10m、identity-secret 10m+5m、freeipa-server-pool 5m)加總 35m,這個 PR 多加的 5 分鐘讓總和超過原本的 30(main 上剛好 30);這些 `-timeout` 是單步卡死上限,job 平常約 20 分鐘,新增 `TestCIJobTimeoutCoversMakeTargetCaps`(§5.7 一致性表),job 預算低於所跑 target 的 `-timeout` 總和就失敗。alert-rules-test 的 go test 沒有明確 `-timeout`(沿用預設 10m/package),不計入這個總和。第十三輪(只改 CI 預算,沒有正式程式碼、playbook、spec 變更):`Go test` job 的 go test per-package `-timeout` 由 30m 改 45m(`make test` 與 `make test-race`)、job `timeout-minutes` 由 45 改 60,因為 `internal/spec` 已長到超過 30 分鐘:CI 在 `panic: test timed out after 30m0s` 失敗,`main` 最近三次 push 也一模一樣(runs 40802511042、40802136845、40793595116),所以這與本 PR 的內容無關,只是這個 PR 要能顯示綠燈就得一起修。餘裕:`448cf330` 上 `internal/spec` 本機約 1760 s(29.3 分鐘),45m 約為其 1.5 倍,CI runner 與 `-race` 更慢,餘裕比這個數字小,套件再成長時要重新評估(拆套件或平行化)。`TestCIGoTestTimeoutCheckCatchesDrift` 的案例改用 45m/60m,並新增剛好等於 45m+10m 通過、舊的 45m job 預算(對 45m go timeout 不足)與少一分鐘會失敗的案例 | pilot |
+| 2026-10-31 | v1.57 | §1.3、§2.1、§3：移除 `TestRegression_SpecAndInventoryAgree` 的引用。這個測試在 Git 歷史裡從未存在（名字只出現在文件與測試註解），§1.3「spec 與 inventory 不一致 CI 會 fail」並不成立；vm-target 的參考 inventory 要有 VM 在跑才讀得到，CI 也無法比對。改為寫明沒有測試會抓這件事，對齊靠執行前讀 inventory 與事實快照裡的 A/B 決定；範本檔名更正為 `core_infra_provider_db_regression_test.go`；`internal/spec` 七個測試的註解、`core-infra-provider-db` runbook 與 freeipa-client HA 設計文件一併更正 | pilot |
+| 2026-11-01 | v1.58 | §5：凍結 candidate 前本機只跑 diff 觸及的 package 與新增 regression，完整 `go test ./...` 與 `-race` 交給 CI 的 `Go test` job；§5.7 第 4 點同步改寫。起因：回顧 10-28～11-01 的 13 個 pr-ready session，一輪約半天，時間花在每個 HEAD（含 evidence-only commit 與 merge main）重跑本機全套（同機 3–17 個 session 時 35–60 分鐘）、CI（30–47 分鐘）與 reviewer，以及 P3/P4 polish 輪與過夜等待的提問；pr-ready skill 新增「Pilot: cycle-time rules」，`pr_gate.py` 比照 `issue_gate.py` 接受 evidence-only delta 上的 receipt 與 review（`receipt_reuse`），`tmp/go.mod` 把 gitignored `tmp/` 隔成另一個 module 讓 `./...` 不再編譯 scratch checkout，`make lint` 拒絕 golangci-lint v1 | pilot |
+| 2026-11-01 | v1.59 | §1.2、§1.4、§6：evidence record 改為 pilot 產生機器部分——`pilot vm-target test`／`topology test` 加 `--evidence-record`，寫出 tested commit/tree、執行閉包（playbook、include、template/copy/script、vars、spec、contract、repo 內 `-e @file`）的 Git blob id 與 SHA-256、target 與 rendered inventory、每步 PLAY RECAP、verify verdict、secret 掃描；操作者只補「失敗路徑」與「未涵蓋」兩段。record 改成一個變更一份（`docs/evidence/<feature>/<change>.md`）、每個 candidate 就地覆寫，手寫段落自動帶到新 candidate；pilot 同步改寫 `LATEST.md`，spec/runbook 改連 `LATEST.md`（evidence-only），重新驗證不再動 spec/runbook。新增 `pilot evidence closure` 單獨印閉包；`internal/evidence` 套件。起因：10-28～11-01 的 record 全部手寫（7–38KB、一支 PR 3–4 份），reviewer 要對 raw artifact 核數字，PR 204 為修 record 數字多兩個 commit。v1.58 是 PR #223 的列 | pilot |
+| 2026-11-01 | v1.60 | §4.4 補回 #190 寫進來、在 #203 合併時連同它的 changelog 列(當時編號 v1.57)一起被刪掉的規則:備份/快照/升級偵測要跟著替換 task 的 tag,不是 `always`,而且 `always` 的 task 不准每次 run 都回報 changed;改寫成 class 層級(kjelly/pilot#189),並依 #203 之後的現況說明 rescue 靠 `always` 的 Step 0e 重設、Step 6 tag 的 Step 4f/5d/5e 授予的 `detection_engine_rollback` fact 還原。新增全 repo lint `TestRegression_AlwaysTaggedTasksConverge`(`internal/spec/always_tag_convergence_regression_test.go`):`playbooks/apply/*.yml` 與 include 的 task 檔裡,`always` 的 command/shell/raw/script 要有不是 `true` 的 `changed_when`、tempfile 要 `changed_when: false`,rescue 除外;ratchet allowlist 兩筆:agent-controller 的 Step 4(待 #195)與 freeipa-realm-replacement 的 trust snapshot(一次性遷移)。既有五個 `always`/tag lint 在 #190 之前的 tag 放回去時都仍通過。順手修 `detection_engine_rollback_tags_test.go` 三處測不到問題的地方:沒選到 Step 6 的 run 沒有斷言 `changed=0`、備份檢查找舊路徑 `backups/pre-upgrade.db`(Step 4 現在寫在 `backups/apply-*/`)、Step 3–6 的 regex 漏掉 3e/4e/4f/5e。agent-controller 的同型寫法仍待 #195,沒有改 playbook | pilot |

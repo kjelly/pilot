@@ -11,16 +11,24 @@ playbooks:
   apply: playbooks/apply/gateway-scope-apply.yml
 regressionTests:
   - cmd/pilot/cmd/gateway_scope_test.go
+  - cmd/pilot/cmd/gateway_scope_adoption_test.go
+  - internal/decommission/providers/freeipa_gateway_scope_test.go
+  - internal/spec/freeipa_gateway_scope_regression_test.go
+  - scripts/test-freeipa-gateway-scope.py
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:
   - {component: freeipa-server, required: true, relation: sameHosts}
 hostCardinality: exactly-one
 resources: {minCPU: 1, minRAMMiB: 512, minDiskGiB: 5}
 groupVars:
+  - {name: freeipa_server_fqdn, type: string, required: false, secret: false}
+  - {name: freeipa_domain, type: string, required: false, secret: false}
   - {name: gateway_scope, type: string, required: true, secret: false}
   - {name: gateway_scope_hosts, type: stringList, required: true, secret: false}
   - {name: ipa_admin_password, type: string, required: true, secret: true}
   - {name: gateway_scope_plan_only, type: boolean, required: false, default: false, secret: false}
+  - {name: gateway_scope_adopt_id, type: string, required: false, secret: false}
+  - {name: gateway_scope_adopt_automember_id, type: string, required: false, secret: false}
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: vm, idempotency: required}
 traceability:

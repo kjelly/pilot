@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -36,10 +35,6 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	fingerprint, err := profile.Fingerprint()
-	if err != nil {
-		return ClientConfig{}, err
-	}
 	host := bindIP.String()
 	pulpBase := "http://" + net.JoinHostPort(host, "8080") + "/pulp/api/v3"
 	harborBase := "http://" + net.JoinHostPort(host, strconv.Itoa(profile.Harbor.HTTPPort)) + "/api/v2.0"
@@ -52,7 +47,6 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 		return ClientConfig{}, err
 	}
 
-	rpmURLs := make(map[string]string, len(profile.RPM.Repos))
 	for _, repo := range profile.RPM.Repos {
 		remote, err := reconcilePulpRemote(ctx, client, pulpBase, profile.Name, repo, pulpPassword)
 		if err != nil {
@@ -68,10 +62,8 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 		if _, err := reconcilePulpDistribution(ctx, client, pulpBase, profile.Name, repo, repository, pulpPassword); err != nil {
 			return ClientConfig{}, err
 		}
-		rpmURLs[repo.Name] = fmt.Sprintf("http://%s:8080/pulp/content/%s/%s", serviceHostname, profile.Name, repo.Name)
 	}
 
-	projects := make(map[string]string, len(profile.OCI.Registries))
 	for _, registry := range profile.OCI.Registries {
 		registryID, err := reconcileHarborRegistry(ctx, client, harborBase, registry, adminPassword)
 		if err != nil {
@@ -80,53 +72,28 @@ func seedServices(ctx context.Context, profile Profile, root string, bindIP net.
 		if err := reconcileHarborProject(ctx, client, harborBase, registry, registryID, profile.Storage.MaxBytes, adminPassword); err != nil {
 			return ClientConfig{}, err
 		}
-		projects[registry.Name] = fmt.Sprintf("http://%s:%d/%s", serviceHostname, profile.Harbor.HTTPPort, registry.ProxyProject)
-	}
-	baseURL := ""
-	for _, repo := range profile.RPM.Repos {
-		baseURL = rpmURLs[repo.Name]
-		break
 	}
 	caPEM, err := readCAPEM(root)
 	if err != nil {
 		return ClientConfig{}, fmt.Errorf("read service CA: %w", err)
 	}
-	return ClientConfig{
-		Profile:           profile.Name,
-		Fingerprint:       fingerprint,
-		HostIP:            host,
-		Hostname:          serviceHostname,
-		AptProxyURL:       fmt.Sprintf("http://%s:%d", serviceHostname, profile.Apt.Port),
-		RPMBaseURL:        baseURL,
-		RPMRepositories:   rpmURLs,
-		RegistryMirrorURL: fmt.Sprintf("http://%s:%d", serviceHostname, profile.Harbor.HTTPPort),
-		RegistryProjects:  projects,
-		CAPEM:             caPEM,
-	}, nil
+	return profile.ClientContract(bindIP, caPEM)
 }
 
 func readHarborAdminPassword(root string) (string, error) {
-	b, err := os.ReadFile(path.Join(root, "harbor", "secrets", "admin-password"))
+	value, err := readSecret(filepath.Join(root, "harbor", "secrets", "admin-password"))
 	if err != nil {
 		return "", fmt.Errorf("read Harbor admin password: %w", err)
 	}
-	password := strings.TrimSpace(string(b))
-	if password == "" {
-		return "", errors.New("read Harbor admin password: admin password is empty")
-	}
-	return password, nil
+	return value, nil
 }
 
 func readPulpAdminPassword(root string) (string, error) {
-	b, err := os.ReadFile(path.Join(root, "pulp", "secrets", "admin-password"))
+	value, err := readSecret(filepath.Join(root, "pulp", "secrets", "admin-password"))
 	if err != nil {
 		return "", fmt.Errorf("read Pulp admin password: %w", err)
 	}
-	password := strings.TrimSpace(string(b))
-	if password == "" {
-		return "", errors.New("read Pulp admin password: admin password is empty")
-	}
-	return password, nil
+	return value, nil
 }
 
 func readCAPEM(root string) (string, error) {
@@ -458,23 +425,25 @@ func apiJSONResponse(ctx context.Context, client *http.Client, method, rawURL st
 	if password != "" {
 		req.SetBasicAuth("admin", password)
 	}
-	resp, err := client.Do(req)
+	safeClient := *client
+	safeClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := safeClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("API endpoint unreachable")
 	}
 	defer resp.Body.Close()
 	b, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if readErr != nil {
-		return nil, readErr
+		return nil, errors.New("API response read failed")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %s", resp.Status)
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	if output == nil || len(b) == 0 {
 		return resp.Header, nil
 	}
 	if err := json.Unmarshal(b, output); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+		return nil, errors.New("decode response failed")
 	}
 	return resp.Header, nil
 }

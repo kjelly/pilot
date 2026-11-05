@@ -11,7 +11,7 @@ import (
 
 // TestRegression_FreeipaIdentitySpec locks the single-host + target_group
 // contract. The spec names freeipa-server while vm-target evidence uses an
-// explicit target_group override, so SpecAndInventoryAgree does not apply.
+// explicit target_group override, so its group is not compared with an inventory.
 func TestRegression_FreeipaIdentitySpec(t *testing.T) {
 	const specPath = "../../docs/verification/freeipa-identity.md"
 	s, err := Parse(specPath)
@@ -182,10 +182,16 @@ func TestRegression_FreeipaIdentityRefreshesClientSSSDCache(t *testing.T) {
 	for _, want := range []string{
 		"ipa_identity_refresh_sssd_cache: true",
 		`name: "Refresh SSSD caches on enrolled FreeIPA clients"`,
-		"ansible.builtin.command: sss_cache -E",
+		`- "{{ ipa_sudo_refresh_program }}"`,
+		`name: "Gate: every enrolled client finished a sudo full refresh"`,
+		"ignore_unreachable: true",
+		"ansible_connect_timeout: 5",
 		`delegate_to: "{{ item }}"`,
 		"pilot_deferred_hosts",
-		"reject('in', pilot_deferred_hosts | default([]))",
+		`name: "Resolve the enrolled clients for the sudo full refresh"`,
+		"reject('in', ipa_sudo_deferred_hosts)",
+		"from_json)",
+		`loop: "{{ ipa_sudo_refresh_clients | default([]) }}"`,
 		"become: true",
 		"become_method: ansible.builtin.sudo",
 		"- not ansible_check_mode",

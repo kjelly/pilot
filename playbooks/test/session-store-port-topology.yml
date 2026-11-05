@@ -1,0 +1,16 @@
+---
+# Focused site-order coexistence fixture: server/client prerequisites, Docker,
+# then the session store before Wazuh, as in site.yml. The test controller
+# supplies IPA address/realm, binary paths and secrets through external vars.
+- name: FreeIPA server
+  ansible.builtin.import_playbook: ../apply/freeipa-server-apply.yml
+- name: Client verification fixtures
+  ansible.builtin.import_playbook: fixtures/freeipa-client-fixtures.yml
+- name: FreeIPA client
+  ansible.builtin.import_playbook: ../apply/freeipa-client-apply.yml
+- name: Docker
+  ansible.builtin.import_playbook: ../apply/docker-apply.yml
+- name: Session store
+  ansible.builtin.import_playbook: ../apply/pilot-session-store-apply.yml
+- name: Wazuh manager
+  ansible.builtin.import_playbook: ../apply/wazuh-manager-apply.yml

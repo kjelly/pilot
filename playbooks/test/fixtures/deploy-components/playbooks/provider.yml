@@ -1,0 +1,17 @@
+- name: Fixture managed provider on host B
+  hosts: "{{ target_group | default('fixture-provider') }}"
+  gather_facts: false
+  tasks:
+    - name: Require the same-host leaf before the provider
+      ansible.builtin.stat:
+        path: /var/tmp/pilot-issue-251-leaf
+      register: issue251_leaf
+    - name: Check effective dependency state
+      ansible.builtin.assert:
+        that: issue251_leaf.stat.exists
+      when: not ansible_check_mode
+    - name: Write the managed provider's observable marker
+      ansible.builtin.copy:
+        dest: /var/tmp/pilot-issue-251-provider
+        content: "provider\n"
+        mode: '0600'

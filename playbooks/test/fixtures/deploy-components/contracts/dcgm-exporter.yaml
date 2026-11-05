@@ -1,0 +1,13 @@
+schemaVersion: 1
+id: dcgm-exporter
+role: fixture-support
+specs: [{path: acceptance.md, rows: {all: true}}]
+playbooks: {apply: playbooks/support.yml}
+dependencies: []
+endpoints: [{name: api, scheme: http, port: 8081}]
+hostCardinality: exactly-one
+resources: {minCPU: 1, minRAMMiB: 1, minDiskGiB: 1}
+stagePolicy: {variable: stage, default: sandbox}
+evidenceRequirement: {targetTest: topology, idempotency: required}
+verification: {autoDeploy: false}
+site: {include: false, order: 4, vars: {}, tags: [], optIn: true}

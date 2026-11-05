@@ -1,0 +1,79 @@
+{
+  "tested_revision": "2ddb5a513e5acb2b7600c4b6f48990cbf5ae5af2",
+  "tested_tree": "093be26e9d7f5ea93d6e6d2bf406142ef824315e",
+  "binary_sha256": "1ece5889379c87b6dc2aaa153ea78653c2f346ba01e350f7ede493b69658e609",
+  "native_harness_sha256": "dadc3ec739b0716a3805678fc864dc454c64fccfb0ab0723dbfe3dc3c3f2eae1",
+  "maintenance_harness_sha256": "0fe1ab2c0b3165cbbf2f4e6ae164c98e7e7bd8ec19ab8908ef211f0ac01d1f08",
+  "sources": [
+    {
+      "path": "cmd/pilot/cmd/data_dir_state.go",
+      "sha256": "015d2cccc1cf6ad1115a2e6f0b58aae9abcfbf3a72c58feeff09c03ef842e712"
+    },
+    {
+      "path": "cmd/pilot/cmd/services.go",
+      "sha256": "77c8956de208fe7daaddaae7854c4b9996e640afc51b256193970b432dfc4a88"
+    },
+    {
+      "path": "cmd/pilot/cmd/services_signal_test.go",
+      "sha256": "8622bf77109317d79b9f3bde6eef688ef8976eb02af3e1f7788a5cc0a7e9b397"
+    },
+    {
+      "path": "cmd/pilot/cmd/services_test.go",
+      "sha256": "e44d6594ce7d0b51d567918516b51d16204db0cd919127e2485361f35056a591"
+    },
+    {
+      "path": "cmd/pilot/cmd/vm_target.go",
+      "sha256": "e86b4c55d0cd657a9fc8f3b6cf780983dee5a2072af1174c904be056ac2d3bd9"
+    },
+    {
+      "path": "cmd/pilot/cmd/vm_target_topology.go",
+      "sha256": "4a51175fbcaa0da81a0414bbe3fd5b8bda1b928d05916c02c6a1a8ac0c7c270c"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-11-03-shared-cache-lifecycle-spec.md",
+      "sha256": "099d9108b7accfc4420d85b3615abc70f041b7815748d7a3ca903dd41a4781e3"
+    },
+    {
+      "path": "internal/services/consumers.go",
+      "sha256": "2071a9f57d2923ead3a8f6d1584a0e3af8c904457b3dc430f2b50faa55a6c727"
+    },
+    {
+      "path": "internal/services/discovery.go",
+      "sha256": "efbc9753bbf76738a447a4d8894aa643f409b7030b37c413a576c0e7f90afbf5"
+    },
+    {
+      "path": "internal/services/discovery_test.go",
+      "sha256": "3563011078417a0c277365a6fe61f0399fad40a7344bf5f951c6f9f898863290"
+    },
+    {
+      "path": "internal/services/lifecycle_test.go",
+      "sha256": "b0f280d84b8feacd0dcb3e32851058329a3b23ccdd068d364908e1e7b62bb9d6"
+    },
+    {
+      "path": "internal/services/manager.go",
+      "sha256": "419c029906eb1398834f2cfba897d3925473c46c4a4c141b59ca16a5ffd5be42"
+    },
+    {
+      "path": "internal/vmtarget/domainxml.go",
+      "sha256": "6d31d2d287164f24de027c4bb0effe459529e87388d134fd2ae622240d8c168d"
+    },
+    {
+      "path": "internal/vmtarget/service_bootstrap.go",
+      "sha256": "6eb44410e808f352add9537775840adb524af399c133c6ff961ca458781e7cbc"
+    },
+    {
+      "path": "internal/vmtarget/service_consumer.go",
+      "sha256": "08ed005a644e7957b5cb29854c35dc127a07d8d542bc25432aa30f1704e1a0ec"
+    },
+    {
+      "path": "internal/vmtarget/service_consumer_test.go",
+      "sha256": "2f45f8b56ae4a2373006b90aa0fd883e7ab9077a5ad56e5e9b1c0827bb86aa4e"
+    },
+    {
+      "path": "internal/vmtarget/vmtarget.go",
+      "sha256": "58fc15c33a91308f1817fd06e1ef5be896671c280088887d86df73c9900ce1c1"
+    }
+  ],
+  "local_receipts": "/var/tmp/issue236-coder-evidence/2ddb5a51/",
+  "raw_native_artifacts": ".git/issue-to-pr-236/native-strengthened-artifacts/"
+}

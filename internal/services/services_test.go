@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -38,6 +39,18 @@ func (f *fakeRunner) Run(_ context.Context, dir, name string, args ...string) (C
 		return result, nil
 	}
 	return CommandResult{Stdout: "Docker Compose version v2.30\n", ExitCode: f.code}, nil
+}
+
+func (f *fakeRunner) RunInput(_ context.Context, dir, input, _ string, _ ...string) (CommandResult, error) {
+	return fixtureDatabaseResult(dir, input), nil
+}
+
+func fixtureDatabaseResult(root, input string) CommandResult {
+	password, _ := readSecret(filepath.Join(root, "harbor/secrets/database-password"))
+	if strings.TrimSuffix(input, "\n") == password && password != "" {
+		return CommandResult{Stdout: "1\n"}
+	}
+	return CommandResult{ExitCode: 2, Stderr: "password authentication failed"}
 }
 
 func TestManagerCreatesPersistentRootBeforeComposePreflight(t *testing.T) {
@@ -286,10 +299,15 @@ func TestClientConfigFailsClosedWhenServiceProbeFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	bundle, e := RenderBundle(BuiltInDevLite(), m.root, net.ParseIP("192.168.122.1"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	bundle.Client.DataProbes = fixtureDescriptors()
 	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{{
-			Profile: "dev-lite", Fingerprint: "fp", BindIP: "192.168.122.1", Running: true,
-			Client: ClientConfig{AptProxyURL: "http://cache.pilot.internal:3142", RPMBaseURL: "http://cache.pilot.internal:8080/pulp/content", RegistryMirrorURL: "http://cache.pilot.internal:8081"}, UpdatedAt: time.Now(),
+			Root: m.root, ComposePath: bundle.ComposePath, Profile: "dev-lite", Fingerprint: bundle.Client.Fingerprint, BindIP: "192.168.122.1", Running: true,
+			Client: bundle.Client, UpdatedAt: time.Now(),
 		}}, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -297,7 +315,7 @@ func TestClientConfigFailsClosedWhenServiceProbeFails(t *testing.T) {
 	m.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return nil, errors.New("connection refused")
 	})}
-	if _, err := m.ClientConfig(context.Background()); err == nil || !strings.Contains(err.Error(), "unreachable") {
+	if _, err := m.ClientConfig(context.Background()); err == nil || !strings.Contains(err.Error(), "transport-or-timeout") {
 		t.Fatalf("expected fail-closed probe error, got %v", err)
 	}
 }
@@ -307,23 +325,31 @@ func TestClientConfigProbesAllServices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	bundle, e := RenderBundle(BuiltInDevLite(), m.root, net.ParseIP("192.168.122.1"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	bundle.Client.DataProbes = fixtureDescriptors()
 	if err := m.store.Mutate(func(states []ServiceState) ([]ServiceState, error) {
 		return []ServiceState{{
-			Profile: "dev-lite", Fingerprint: "fp", BindIP: "192.168.122.1", Running: true,
-			Client: ClientConfig{AptProxyURL: "http://cache.pilot.internal:3142", RPMBaseURL: "http://cache.pilot.internal:8080/pulp/content", RegistryMirrorURL: "http://cache.pilot.internal:8081"}, UpdatedAt: time.Now(),
+			Root: m.root, ComposePath: bundle.ComposePath, Profile: "dev-lite", Fingerprint: bundle.Client.Fingerprint, BindIP: "192.168.122.1", Running: true,
+			Client: bundle.Client, UpdatedAt: time.Now(),
 		}}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	var paths []string
+	var pathsMu sync.Mutex
 	m.client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		pathsMu.Lock()
 		paths = append(paths, req.URL.Path)
-		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader("ok")), Header: make(http.Header), Request: req}, nil
+		pathsMu.Unlock()
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(fixtureBody(req.URL.Path))), Header: make(http.Header), Request: req}, nil
 	})}
 	if _, err := m.ClientConfig(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"/acng-report.html", "/pulp/api/v3/status/", "/api/v2.0/health"} {
+	for _, want := range []string{"/acng-report.html", "/pulp/api/v3/status/", "/api/v2.0/health", "/api/v2.0/users/current"} {
 		if !slices.Contains(paths, want) {
 			t.Errorf("missing probe %s in %v", want, paths)
 		}

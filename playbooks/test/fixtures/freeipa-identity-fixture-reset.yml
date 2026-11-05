@@ -1,0 +1,30 @@
+---
+# Fixture imports share host facts within one ansible-playbook process. Clear
+# only derived compatibility/removal state before loading the NEXT canonical
+# roster. Never set_fact freeipa_roster: it would outrank later include_vars.
+# Do not use before the legacy fixture: facts would outrank its play vars.
+- name: Reset derived identity state between canonical fixture imports
+  hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
+  gather_facts: false
+  tasks:
+    - name: Reset prior fixture compatibility and removal facts
+      ansible.builtin.set_fact:
+        ipa_users: []
+        ipa_groups: []
+        ipa_hostgroups: []
+        ipa_netgroups: []
+        ipa_hbac_rules: []
+        ipa_sudo_rules: []
+        ipa_hbac_rules_absent: []
+        ipa_hbac_services: []
+        ipa_sudo_command_groups: []
+        ipa_active_users: []
+        ipa_active_groups: []
+        ipa_active_netgroups: []
+        canonical_group_removals: []
+        ipa_group_membership_removals: []
+        ipa_hostgroup_membership_removals: []
+        ipa_netgroup_membership_removals: []
+        ipa_hbac_removals: []
+        ipa_sudo_removals: []
+      tags: [always]

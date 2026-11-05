@@ -74,7 +74,9 @@ func Apply(ctx context.Context, in ApplyInput) (*FinalizeResult, error) {
 		return &FinalizeResult{Status: "already_completed", Receipt: in.Plan.Receipt, Plan: in.Plan}, nil
 	}
 
-	fresh, err := CheckFreshness(ctx, in.PlanInputForFreshness, in.Plan.PlanHash)
+	planInput := in.PlanInputForFreshness
+	planInput.previousPlan = in.Plan
+	fresh, err := CheckFreshness(ctx, planInput, in.Plan.PlanHash)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +110,8 @@ func Apply(ctx context.Context, in ApplyInput) (*FinalizeResult, error) {
 	// legitimately is right now, post-cleanup — and persist it, so a crash
 	// between here and Finalize still resumes from the post-cleanup state
 	// rather than trying to redo already-completed destructive work.
-	postCleanup, err := PlanHost(ctx, in.PlanInputForFreshness)
+	planInput.previousPlan = fresh
+	postCleanup, err := PlanHost(ctx, planInput)
 	if err != nil {
 		return nil, fmt.Errorf("decommission: re-derive plan after cleanup steps: %w", err)
 	}
@@ -236,7 +239,7 @@ func collectVerifications(ctx context.Context, plan *Plan, provs map[string]prov
 			identities = []string{firstNonEmpty(plan.Host.Name, plan.Host.AnsibleHost)}
 		}
 		for _, identity := range identities {
-			verifs, err := provider.Verify(ctx, providers.VerifyInput{HostName: identity, FQDN: identity})
+			verifs, err := provider.Verify(ctx, providers.VerifyInput{HostName: identity, FQDN: identity, InventoryAlias: plan.Host.Name})
 			if err != nil {
 				return nil, newError(ErrCleanupFailedTerminal, "component %s: verify %s: %v", c.ComponentID, identity, err)
 			}
@@ -255,6 +258,12 @@ func distinctStepIdentities(steps []providers.Step) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, s := range steps {
+		// The FreeIPA local step uses a transport alias; its central Verify
+		// oracle needs the authoritative FQDN from the central steps. Local
+		// unenrollment is independently checked by the local step's Inspect.
+		if s.Action == providers.ActionFreeIPAClientUninstall {
+			continue
+		}
 		if s.TargetIdentity == "" || seen[s.TargetIdentity] {
 			continue
 		}

@@ -1,0 +1,773 @@
+[
+  {
+    "command": "hostgroup_show",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "all": true,
+      "raw": true
+    },
+    "result": {
+      "result": {
+        "objectClass": [
+          "ipaobject",
+          "ipahostgroup",
+          "nestedGroup",
+          "groupOfNames",
+          "top",
+          "mepOriginEntry"
+        ],
+        "ipaUniqueID": [
+          "6b3d399c-d833-11f1-8d71-525400b6d333"
+        ],
+        "mepManagedEntry": [
+          "cn=pilot-target-i227-capture,cn=ng,cn=alt,dc=ipa227,dc=test"
+        ],
+        "member": [
+          "fqdn=cap-b.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "memberof": [
+          "cn=i227-capture-parent,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "description": [
+          "Issue 227 disposable API capture"
+        ],
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "memberofindirect": [
+          "cn=i227-capture-parent,cn=ng,cn=alt,dc=ipa227,dc=test"
+        ],
+        "dn": "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+      },
+      "value": "pilot-target-i227-capture",
+      "summary": null
+    }
+  },
+  {
+    "command": "hostgroup_show",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "all": true
+    },
+    "result": {
+      "result": {
+        "objectclass": [
+          "ipaobject",
+          "ipahostgroup",
+          "nestedGroup",
+          "groupOfNames",
+          "top",
+          "mepOriginEntry"
+        ],
+        "ipauniqueid": [
+          "6b3d399c-d833-11f1-8d71-525400b6d333"
+        ],
+        "mepmanagedentry": [
+          "cn=pilot-target-i227-capture,cn=ng,cn=alt,dc=ipa227,dc=test"
+        ],
+        "description": [
+          "Issue 227 disposable API capture"
+        ],
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "member_host": [
+          "cap-b.ipa227.test"
+        ],
+        "memberof_hostgroup": [
+          "i227-capture-parent"
+        ],
+        "dn": "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+      },
+      "value": "pilot-target-i227-capture",
+      "summary": null
+    }
+  },
+  {
+    "command": "hostgroup_show",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "all": true,
+      "raw": true
+    },
+    "result": {
+      "result": {
+        "objectClass": [
+          "ipaobject",
+          "ipahostgroup",
+          "nestedGroup",
+          "groupOfNames",
+          "top",
+          "mepOriginEntry"
+        ],
+        "ipaUniqueID": [
+          "6b3d399c-d833-11f1-8d71-525400b6d333"
+        ],
+        "mepManagedEntry": [
+          "cn=pilot-target-i227-capture,cn=ng,cn=alt,dc=ipa227,dc=test"
+        ],
+        "description": [
+          "Issue 227 disposable API capture"
+        ],
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "memberof": [
+          "cn=i227-capture-parent,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "member": [
+          "fqdn=cap-b.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test",
+          "fqdn=cap-a.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "memberofindirect": [
+          "cn=i227-capture-parent,cn=ng,cn=alt,dc=ipa227,dc=test"
+        ],
+        "dn": "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+      },
+      "value": "pilot-target-i227-capture",
+      "summary": null
+    }
+  },
+  {
+    "command": "hostgroup_show",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "all": true
+    },
+    "result": {
+      "result": {
+        "objectclass": [
+          "ipaobject",
+          "ipahostgroup",
+          "nestedGroup",
+          "groupOfNames",
+          "top",
+          "mepOriginEntry"
+        ],
+        "ipauniqueid": [
+          "6b3d399c-d833-11f1-8d71-525400b6d333"
+        ],
+        "mepmanagedentry": [
+          "cn=pilot-target-i227-capture,cn=ng,cn=alt,dc=ipa227,dc=test"
+        ],
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "description": [
+          "Issue 227 disposable API capture"
+        ],
+        "member_host": [
+          "cap-b.ipa227.test",
+          "cap-a.ipa227.test"
+        ],
+        "memberof_hostgroup": [
+          "i227-capture-parent"
+        ],
+        "dn": "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+      },
+      "value": "pilot-target-i227-capture",
+      "summary": null
+    }
+  },
+  {
+    "command": "host_show",
+    "args": [
+      "cap-a.ipa227.test"
+    ],
+    "options": {
+      "all": true,
+      "raw": true
+    },
+    "result": {
+      "result": {
+        "objectClass": [
+          "ipaobject",
+          "nshost",
+          "ipahost",
+          "pkiuser",
+          "ipaservice",
+          "krbprincipalaux",
+          "krbprincipal",
+          "ieee802device",
+          "ipasshhost",
+          "top",
+          "ipaSshGroupOfPubKeys"
+        ],
+        "cn": [
+          "cap-a.ipa227.test"
+        ],
+        "serverHostName": [
+          "cap-a"
+        ],
+        "ipaUniqueID": [
+          "6ac11fce-d833-11f1-a57b-525400b6d333"
+        ],
+        "krbPwdPolicyReference": [
+          "cn=Default Host Password Policy,cn=computers,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "memberof": [
+          "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "fqdn": [
+          "cap-a.ipa227.test"
+        ],
+        "krbprincipalname": [
+          "host/cap-a.ipa227.test@IPA227.TEST"
+        ],
+        "krbcanonicalname": [
+          "host/cap-a.ipa227.test@IPA227.TEST"
+        ],
+        "managedby": [
+          "fqdn=cap-a.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "memberofindirect": [
+          "cn=i227-capture-parent,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "has_password": [
+          "FALSE"
+        ],
+        "has_keytab": [
+          "FALSE"
+        ],
+        "managing": [
+          "fqdn=cap-a.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "dn": "fqdn=cap-a.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test"
+      },
+      "value": "cap-a.ipa227.test",
+      "summary": null
+    }
+  },
+  {
+    "command": "host_show",
+    "args": [
+      "cap-a.ipa227.test"
+    ],
+    "options": {
+      "all": true
+    },
+    "result": {
+      "result": {
+        "objectclass": [
+          "ipaobject",
+          "nshost",
+          "ipahost",
+          "pkiuser",
+          "ipaservice",
+          "krbprincipalaux",
+          "krbprincipal",
+          "ieee802device",
+          "ipasshhost",
+          "top",
+          "ipaSshGroupOfPubKeys"
+        ],
+        "cn": [
+          "cap-a.ipa227.test"
+        ],
+        "serverhostname": [
+          "cap-a"
+        ],
+        "ipauniqueid": [
+          "6ac11fce-d833-11f1-a57b-525400b6d333"
+        ],
+        "krbpwdpolicyreference": [
+          "cn=Default Host Password Policy,cn=computers,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "krbprincipalname": [
+          "host/cap-a.ipa227.test@IPA227.TEST"
+        ],
+        "krbcanonicalname": [
+          "host/cap-a.ipa227.test@IPA227.TEST"
+        ],
+        "fqdn": [
+          "cap-a.ipa227.test"
+        ],
+        "has_password": false,
+        "has_keytab": false,
+        "ipakrbrequirespreauth": true,
+        "ipakrbokasdelegate": false,
+        "ipakrboktoauthasdelegate": false,
+        "memberof_hostgroup": [
+          "pilot-target-i227-capture"
+        ],
+        "managedby_host": [
+          "cap-a.ipa227.test"
+        ],
+        "managing_host": [
+          "cap-a.ipa227.test"
+        ],
+        "memberofindirect_hostgroup": [
+          "i227-capture-parent"
+        ],
+        "dn": "fqdn=cap-a.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test"
+      },
+      "value": "cap-a.ipa227.test",
+      "summary": null
+    }
+  },
+  {
+    "command": "automember_show",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "type": "hostgroup",
+      "all": true,
+      "raw": true
+    },
+    "result": {
+      "result": {
+        "objectClass": [
+          "top",
+          "automemberregexrule"
+        ],
+        "automembertargetgroup": [
+          "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "dn": "cn=pilot-target-i227-capture,cn=hostgroup,cn=automember,cn=etc,dc=ipa227,dc=test"
+      },
+      "value": "pilot-target-i227-capture",
+      "summary": null
+    }
+  },
+  {
+    "command": "automember_add_condition",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "type": "hostgroup",
+      "key": "fqdn",
+      "automemberinclusiveregex": [
+        ".*"
+      ]
+    },
+    "result": {
+      "result": {
+        "automemberinclusiveregex": [
+          "fqdn=.*"
+        ],
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "automembertargetgroup": [
+          "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+        ]
+      },
+      "value": "pilot-target-i227-capture",
+      "failed": {
+        "failed": {
+          "automemberinclusiveregex": [],
+          "automemberexclusiveregex": []
+        }
+      },
+      "completed": 1,
+      "summary": "Added condition(s) to \"pilot-target-i227-capture\""
+    }
+  },
+  {
+    "command": "automember_add_condition",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "type": "hostgroup",
+      "key": "fqdn",
+      "automemberexclusiveregex": [
+        "^cap-a\\.ipa227\\.test$"
+      ]
+    },
+    "result": {
+      "result": {
+        "automembertargetgroup": [
+          "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "automemberinclusiveregex": [
+          "fqdn=.*"
+        ],
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "automemberexclusiveregex": [
+          "fqdn=^cap-a\\.ipa227\\.test$"
+        ]
+      },
+      "value": "pilot-target-i227-capture",
+      "failed": {
+        "failed": {
+          "automemberinclusiveregex": [],
+          "automemberexclusiveregex": []
+        }
+      },
+      "completed": 1,
+      "summary": "Added condition(s) to \"pilot-target-i227-capture\""
+    }
+  },
+  {
+    "command": "automember_add_condition",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "type": "hostgroup",
+      "key": "fqdn",
+      "automemberexclusiveregex": [
+        "^cap-a\\.ipa227\\.test$"
+      ]
+    },
+    "result": {
+      "result": {
+        "automemberexclusiveregex": [
+          "fqdn=^cap-a\\.ipa227\\.test$"
+        ]
+      },
+      "value": "pilot-target-i227-capture",
+      "failed": {
+        "failed": {
+          "automemberinclusiveregex": [],
+          "automemberexclusiveregex": []
+        }
+      },
+      "completed": 0,
+      "summary": "Added condition(s) to \"pilot-target-i227-capture\""
+    }
+  },
+  {
+    "command": "automember_show",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "type": "hostgroup",
+      "all": true,
+      "raw": true
+    },
+    "result": {
+      "result": {
+        "objectClass": [
+          "top",
+          "automemberregexrule"
+        ],
+        "automembertargetgroup": [
+          "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "automemberexclusiveregex": [
+          "fqdn=^cap-a\\.ipa227\\.test$"
+        ],
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "automemberinclusiveregex": [
+          "fqdn=.*"
+        ],
+        "dn": "cn=pilot-target-i227-capture,cn=hostgroup,cn=automember,cn=etc,dc=ipa227,dc=test"
+      },
+      "value": "pilot-target-i227-capture",
+      "summary": null
+    }
+  },
+  {
+    "command": "hostgroup_remove_member",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "host": [
+        "cap-a.ipa227.test"
+      ]
+    },
+    "result": {
+      "completed": 1,
+      "failed": {
+        "member": {
+          "host": [],
+          "hostgroup": []
+        }
+      },
+      "result": {
+        "description": [
+          "Issue 227 disposable API capture"
+        ],
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "member_host": [
+          "cap-b.ipa227.test"
+        ],
+        "memberof_hostgroup": [
+          "i227-capture-parent"
+        ],
+        "dn": "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+      }
+    }
+  },
+  {
+    "command": "hostgroup_remove_member",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "host": [
+        "cap-a.ipa227.test"
+      ]
+    },
+    "result": {
+      "completed": 0,
+      "failed": {
+        "member": {
+          "host": [
+            [
+              "cap-a.ipa227.test",
+              "This entry is not a member"
+            ]
+          ],
+          "hostgroup": []
+        }
+      },
+      "result": {
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "description": [
+          "Issue 227 disposable API capture"
+        ],
+        "member_host": [
+          "cap-b.ipa227.test"
+        ],
+        "memberof_hostgroup": [
+          "i227-capture-parent"
+        ],
+        "dn": "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+      }
+    }
+  },
+  {
+    "command": "host_show",
+    "args": [
+      "cap-a.ipa227.test"
+    ],
+    "options": {
+      "all": true,
+      "raw": true
+    },
+    "result": {
+      "result": {
+        "objectClass": [
+          "ipaobject",
+          "nshost",
+          "ipahost",
+          "pkiuser",
+          "ipaservice",
+          "krbprincipalaux",
+          "krbprincipal",
+          "ieee802device",
+          "ipasshhost",
+          "top",
+          "ipaSshGroupOfPubKeys"
+        ],
+        "cn": [
+          "cap-a.ipa227.test"
+        ],
+        "serverHostName": [
+          "cap-a"
+        ],
+        "ipaUniqueID": [
+          "6ac11fce-d833-11f1-a57b-525400b6d333"
+        ],
+        "krbPwdPolicyReference": [
+          "cn=Default Host Password Policy,cn=computers,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "krbcanonicalname": [
+          "host/cap-a.ipa227.test@IPA227.TEST"
+        ],
+        "krbprincipalname": [
+          "host/cap-a.ipa227.test@IPA227.TEST"
+        ],
+        "fqdn": [
+          "cap-a.ipa227.test"
+        ],
+        "managedby": [
+          "fqdn=cap-a.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "memberof": [],
+        "has_password": [
+          "FALSE"
+        ],
+        "has_keytab": [
+          "FALSE"
+        ],
+        "managing": [
+          "fqdn=cap-a.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "dn": "fqdn=cap-a.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test"
+      },
+      "value": "cap-a.ipa227.test",
+      "summary": null
+    }
+  },
+  {
+    "command": "host_show",
+    "args": [
+      "cap-a.ipa227.test"
+    ],
+    "options": {
+      "all": true
+    },
+    "result": {
+      "result": {
+        "objectclass": [
+          "ipaobject",
+          "nshost",
+          "ipahost",
+          "pkiuser",
+          "ipaservice",
+          "krbprincipalaux",
+          "krbprincipal",
+          "ieee802device",
+          "ipasshhost",
+          "top",
+          "ipaSshGroupOfPubKeys"
+        ],
+        "cn": [
+          "cap-a.ipa227.test"
+        ],
+        "serverhostname": [
+          "cap-a"
+        ],
+        "ipauniqueid": [
+          "6ac11fce-d833-11f1-a57b-525400b6d333"
+        ],
+        "krbpwdpolicyreference": [
+          "cn=Default Host Password Policy,cn=computers,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "fqdn": [
+          "cap-a.ipa227.test"
+        ],
+        "krbcanonicalname": [
+          "host/cap-a.ipa227.test@IPA227.TEST"
+        ],
+        "krbprincipalname": [
+          "host/cap-a.ipa227.test@IPA227.TEST"
+        ],
+        "has_password": false,
+        "has_keytab": false,
+        "ipakrbrequirespreauth": true,
+        "ipakrbokasdelegate": false,
+        "ipakrboktoauthasdelegate": false,
+        "managedby_host": [
+          "cap-a.ipa227.test"
+        ],
+        "managing_host": [
+          "cap-a.ipa227.test"
+        ],
+        "dn": "fqdn=cap-a.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test"
+      },
+      "value": "cap-a.ipa227.test",
+      "summary": null
+    }
+  },
+  {
+    "command": "hostgroup_show",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "all": true,
+      "raw": true
+    },
+    "result": {
+      "result": {
+        "objectClass": [
+          "ipaobject",
+          "ipahostgroup",
+          "nestedGroup",
+          "groupOfNames",
+          "top",
+          "mepOriginEntry"
+        ],
+        "ipaUniqueID": [
+          "6b3d399c-d833-11f1-8d71-525400b6d333"
+        ],
+        "mepManagedEntry": [
+          "cn=pilot-target-i227-capture,cn=ng,cn=alt,dc=ipa227,dc=test"
+        ],
+        "memberof": [
+          "cn=i227-capture-parent,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "member": [
+          "fqdn=cap-b.ipa227.test,cn=computers,cn=accounts,dc=ipa227,dc=test"
+        ],
+        "description": [
+          "Issue 227 disposable API capture"
+        ],
+        "memberofindirect": [
+          "cn=i227-capture-parent,cn=ng,cn=alt,dc=ipa227,dc=test"
+        ],
+        "dn": "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+      },
+      "value": "pilot-target-i227-capture",
+      "summary": null
+    }
+  },
+  {
+    "command": "hostgroup_show",
+    "args": [
+      "pilot-target-i227-capture"
+    ],
+    "options": {
+      "all": true
+    },
+    "result": {
+      "result": {
+        "objectclass": [
+          "ipaobject",
+          "ipahostgroup",
+          "nestedGroup",
+          "groupOfNames",
+          "top",
+          "mepOriginEntry"
+        ],
+        "ipauniqueid": [
+          "6b3d399c-d833-11f1-8d71-525400b6d333"
+        ],
+        "mepmanagedentry": [
+          "cn=pilot-target-i227-capture,cn=ng,cn=alt,dc=ipa227,dc=test"
+        ],
+        "description": [
+          "Issue 227 disposable API capture"
+        ],
+        "cn": [
+          "pilot-target-i227-capture"
+        ],
+        "member_host": [
+          "cap-b.ipa227.test"
+        ],
+        "memberof_hostgroup": [
+          "i227-capture-parent"
+        ],
+        "dn": "cn=pilot-target-i227-capture,cn=hostgroups,cn=accounts,dc=ipa227,dc=test"
+      },
+      "value": "pilot-target-i227-capture",
+      "summary": null
+    }
+  },
+  {
+    "native_ldap_operation": "automember_operational_identity",
+    "socket": "/run/slapd-IPA227-TEST.socket",
+    "result": "[('cn=pilot-target-i227-capture,cn=hostgroup,cn=automember,cn=etc,dc=ipa227,dc=test', {'nsUniqueId': [b'66832b07-d83311f1-9b83d4d4-9066e35c'], 'entryUUID': [b'863b583a-b4ec-4870-8fe2-f0743606c31a']})]"
+  }
+]
