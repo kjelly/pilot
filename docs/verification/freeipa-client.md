@@ -91,14 +91,18 @@ SSH key（或 GSSAPI）登入、但 FreeIPA 密碼已過期的人在拿到 shell
   修改前拒絕或由 rescue 還原，sssd.conf 位元組不變；hand-edit 後不重啟再跑 `--tags C14` /
   `--tags sssd_hardening` 會重啟 SSSD。
 - 目前有效 evidence（`renew`，Ubuntu 24.04 client + AlmaLinux 9 server，兩台全新 VM）：candidate
-  `be035352ab6ba186ea378077dbf61e7ed4673004`（tree `6074e9e501888c1117427869d03fc98e7b973ab0`）的
+  `6556db0c0403ac127f813e36f64a8df11741373f`（tree `e5b594f087efa77ec9b6078fed46a75a9966785c`）的
   `vm-target topology test` 全部通過——L3 `--check --diff`、L4 apply、L5 verify（`freeipa-server.md` 20/0/0、
-  本 spec 18/0/0）、L6 `changed=0`；之後在同一組 VM 實跑 A01–A05、A08、A09、A11、A13、A14、A17
-  （真實 SSH key + 過期密碼：sshd 改跑 `passwd`、改完斷線、重新登入進 shell 且 sudo 正常，FreeIPA 到期日 +90 天）。
-  逐項結果與限制見 [evidence LATEST](../evidence/freeipa-client-password-renewal/LATEST.md)。
-- 尚未實跑：A06（停用帳號／HBAC deny）、A07（login-probe canary）、A10（gateway／directory／target-policy
-  主機，階段 3b）、A12（HA／offline）、A16（sudo cache 交叉）。密碼改完後約 3 秒內重新登入可能還會被拒絕一次
-  （evidence 有記錄）。
+  本 spec 18/0/0、`login-probe.md` 14/0/0）、L6 `changed=0`；之後在同一組 VM 實跑 A01–A09、A11、A13、A14、A17
+  （真實 SSH key + 過期密碼：sshd 改跑 `passwd`、改完斷線、重新登入進 shell 且 sudo 正常，FreeIPA 到期日 +90 天；
+  login-probe 的 canary 有 2099 到期的密碼時維持 `ok`，密碼被管理員 reset 成過期後約 42 秒內轉成 `session`，
+  恢復到期日後約 52 秒回到 `ok`）。逐項結果與限制見
+  [evidence LATEST](../evidence/freeipa-client-password-renewal/LATEST.md)。
+- A06 的結果要知道：停用的帳號與 HBAC 拒絕的帳號在 `renew` 下沒有 `passwd` 提示、被直接拒絕；`krbPrincipalExpiration`
+  已過期的帳號會走到 `passwd` 提示，但 FreeIPA 拒絕改密碼（即使舊密碼正確），所以沒有 shell、密碼不變。
+  同一個帳號在 `off`（原本行為）下用 key 登入會拿到 shell，所以 `renew` 比原本嚴格，但不是在提示之前拒絕。
+- 尚未實跑：A10（gateway／directory／target-policy 主機，階段 3b）、A12（HA／offline）、A16（sudo cache 交叉）。
+  密碼改完後約 3 秒內重新登入可能還會被拒絕一次（evidence 有記錄）。
 
 **這台 client 從 FreeIPA 拿到什麼（AAA）**：
 - **Authentication（認證）**：帳號與 Kerberos 身分來自 FreeIPA，經 SSSD 提供給 NSS/PAM
