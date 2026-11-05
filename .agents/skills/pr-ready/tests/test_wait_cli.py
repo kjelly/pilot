@@ -1,5 +1,7 @@
 """Native CLI wait/Ready contract: real Git, fake gh, no GitHub mutation."""
+import hashlib
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -91,6 +93,11 @@ elif args[0] == "api" and "/compare/" in args[-1]:
     print(json.dumps(plan.get("ancestry", {"status": "identical" if base == head else "ahead",
         "behind_by": 0, "merge_base_commit": {"sha": base}})))
 elif args[0] == "api" and "/contents/" in args[-1]:
+    path = args[-1].split("/contents/", 1)[1].split("?", 1)[0]
+    if path in plan.get("files", {}):
+        print(json.dumps({"type": "file", "path": path, "encoding": "base64",
+                          "content": base64.b64encode(plan["files"][path].encode()).decode()}))
+        sys.exit(0)
     if "manifest" in plan:
         print(json.dumps({"type": "file", "path": ".github/pr-evidence.json", "encoding": "base64",
                           "content": base64.b64encode(json.dumps(plan["manifest"]).encode()).decode()}))
@@ -113,6 +120,10 @@ else:
 
 def plan(*checks, **kwargs):
     return {"checks": list(checks), **kwargs}
+
+
+def git(repo, *args):
+    return subprocess.check_output(["git", *args], cwd=repo, text=True).strip()
 
 
 def comment(body="Reviewed feedback"):
@@ -599,6 +610,196 @@ class WaitCLITests(unittest.TestCase):
                 "--pr", "7", "--evidence", "unused.json", *extra], capture_output=True, text=True)
             self.assertEqual(2, proc.returncode)
             self.assertIn("error:", proc.stderr)
+
+
+RECORD = "docs/evidence/x/y.md"
+RUN_LOG = "docs/evidence/x/run.log"
+HOOK_HEADER = "import os, pathlib, subprocess\nr=pathlib.Path(os.environ['WAIT_REPO'])\n"
+
+
+class TrackedArtifactPinTests(unittest.TestCase):
+    """Evidence the PR commits keeps verifying after the checkout is restored to a starting branch.
+
+    The PR commits a target-validation record and a test log. `main` (the starting branch) lacks
+    them, or holds other bytes of the record, so any check that reads the worktree after the
+    restore sees the wrong file. Real Git, fake gh.
+    """
+    prepare = WaitCLITests.prepare
+    make_pr = cli_mock.CLIMockTests.make_pr
+    evidence_only_pr = cli_mock.CLIMockTests.evidence_only_pr
+
+    @staticmethod
+    def write(repo, files):
+        for rel, text in files.items():
+            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (repo / rel).write_text(text)
+
+    def pr_with_committed_files(self, t, plans, *, extra_files=None, links=None, start_files=None,
+                                target=True, report=None):
+        """prepare(), then commit RECORD, RUN_LOG, `extra_files` and symlinks `links` on fix-one.
+
+        `main`, the starting branch, is the initial commit C plus `start_files`. C is also the PR
+        base and the tested revision. The PR head, FAKE_GH_SHA and every head_sha in the evidence
+        move to the new commit; with `target` the record is the base manifest's required
+        target_validation artifact. Returns (repo, env, cli, start_sha, head).
+        """
+        repo, evidence, env, cli = self.prepare(t, plans)
+        base = env["FAKE_GH_SHA"]
+        git(repo, "branch", "main")
+        if start_files:
+            git(repo, "switch", "--quiet", "main")
+            self.write(repo, start_files)
+            git(repo, "add", "-A")
+            git(repo, "commit", "--quiet", "-m", "starting branch")
+            git(repo, "switch", "--quiet", "fix-one")
+        record = f"# tested {base}\n"
+        self.write(repo, {RECORD: record, RUN_LOG: "pass\n", **(extra_files or {})})
+        for rel, destination in (links or {}).items():
+            os.symlink(destination, repo / rel)
+        git(repo, "add", "-A")
+        git(repo, "commit", "--quiet", "-m", "evidence")
+        head = git(repo, "rev-parse", "HEAD")
+        env["FAKE_GH_SHA"] = head
+        evidence["head_sha"] = evidence["independent_review"]["head_sha"] = head
+        for category in ("tests", "lint", "static_analysis"):
+            evidence["local_validation"][category][0]["head_sha"] = head
+        evidence["local_validation"]["tests"][0]["log"] = RUN_LOG
+        if report:
+            evidence["independent_review"]["report"] = report
+        changed = git(repo, "diff", "--name-only", base, head).splitlines()
+        scenario = json.loads((t / "scenario.json").read_text())
+        for item in scenario:
+            item["pr"] = {**item.get("pr", {}), "baseRefOid": base}
+            if target:
+                item.update(manifest=cli_mock.TARGET_MANIFEST, files={RECORD: record},
+                            ancestry=cli_mock.compare("ahead", 0, base, changed))
+        if target:
+            evidence["target_validation"] = {
+                "decision": "required", "tested_revision": base, "artifact": RECORD,
+                "reason": "Record committed in the PR names the tested base revision."}
+        (t / "scenario.json").write_text(json.dumps(scenario))
+        (repo / ".pr-ready/evidence.json").write_text(json.dumps(evidence))
+        return repo, env, cli, git(repo, "rev-parse", "refs/heads/main"), head
+
+    @staticmethod
+    def restore(start_sha):
+        return ["--restore-sha", start_sha, "--restore-branch=main"]
+
+    def run_cli(self, cli, env, *extra):
+        proc = subprocess.run(cli + list(extra), env=env, capture_output=True, text=True, timeout=30)
+        events = [json.loads(line) for line in proc.stdout.splitlines()]
+        self.assertTrue(events, proc.stderr)
+        return proc, events
+
+    def assert_ready_on_main(self, t, repo, proc, events):
+        self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+        self.assertEqual("READY", events[-1]["status"], events[-1])
+        self.assertEqual("main", (t / "ready-branch").read_text())
+        self.assertEqual(1, len((t / "ready.log").read_text().splitlines()))
+        self.assertEqual("main", git(repo, "branch", "--show-current"))
+
+    def assert_blocked_on_pr_branch(self, t, repo, proc, events, *needles):
+        self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+        self.assertEqual("DRAFT-BLOCKED", events[-1]["status"])
+        message = " ".join(events[-1]["errors"])
+        for needle in needles:
+            self.assertIn(needle, message)
+        self.assertFalse((t / "ready").exists())
+        self.assertEqual("fix-one", git(repo, "branch", "--show-current"))
+
+    def test_committed_record_and_log_survive_the_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, env, cli, start, head = self.pr_with_committed_files(t, [plan(PENDING), plan(PASS)])
+            self.assertNotEqual(git(repo, "rev-parse", "HEAD"), start)
+            self.assertFalse(git(repo, "ls-tree", start, "--", "docs"), "main must not have the record")
+            proc, events = self.run_cli(cli, env, *self.restore(start))
+            self.assert_ready_on_main(t, repo, proc, events)
+            self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
+            pins = json.loads((repo / ".pr-ready/7/wait-status.json").read_text())["pinned_artifacts"]
+            for rel in (RECORD, RUN_LOG):
+                blob = git(repo, "rev-parse", f"{head}:{rel}")
+                self.assertEqual([f"git:{rel}", f"100644 {blob}"], pins[str(repo / rel)])
+            # Files Git does not track keep the path + SHA-256 pin.
+            report = repo / ".pr-ready/review.md"
+            self.assertEqual([str(report), hashlib.sha256(report.read_bytes()).hexdigest()], pins[str(report)])
+
+    def test_record_with_other_bytes_on_the_starting_branch_is_not_a_changed_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, env, cli, start, head = self.pr_with_committed_files(
+                t, [plan(PASS)], start_files={RECORD: "the starting branch has other bytes\n", RUN_LOG: "pass\n"})
+            self.assertEqual(git(repo, "rev-parse", f"{start}:{RUN_LOG}"), git(repo, "rev-parse", f"{head}:{RUN_LOG}"))
+            self.assertNotEqual(git(repo, "rev-parse", f"{start}:{RECORD}"), git(repo, "rev-parse", f"{head}:{RECORD}"))
+            proc, events = self.run_cli(cli, env, *self.restore(start))
+            self.assert_ready_on_main(t, repo, proc, events)
+
+    def test_restore_without_wait_pins_committed_files_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, env, cli, start, _ = self.pr_with_committed_files(t, [plan(PASS)])
+            cli.remove("--wait")
+            proc, events = self.run_cli(cli, env, *self.restore(start))
+            self.assert_ready_on_main(t, repo, proc, events)
+
+    def test_bare_tracked_report_is_pinned_whatever_is_checked_out(self):
+        # A name without a directory or a known suffix is path-shaped only because it is a file:
+        # the classification must be the same on the PR branch and on the starting branch.
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, env, cli, start, head = self.pr_with_committed_files(
+                t, [plan(PASS)], extra_files={"REVIEW-REPORT": "Independent review PASS.\n"},
+                report="REVIEW-REPORT", target=False)
+            proc, events = self.run_cli(cli, env, *self.restore(start))
+            self.assert_ready_on_main(t, repo, proc, events)
+            pins = json.loads((repo / ".pr-ready/7/wait-status.json").read_text())["pinned_artifacts"]
+            self.assertEqual("git:REVIEW-REPORT", pins[str(repo / "REVIEW-REPORT")][0])
+
+    def test_untracked_report_changed_after_restore_still_blocks(self):
+        # Negative control: after the restore the ignored reports and logs are still compared
+        # byte for byte, so the restore did not simply switch pin verification off.
+        for operation, needle in (("write_text('changed after the restore')", "artifact bytes or paths"),
+                                  ("unlink()", "missing/unreadable")):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                repo, env, cli, start, _ = self.pr_with_committed_files(
+                    t, [plan(PASS)], start_files={"file": "starting branch source"})
+                # View 0 and 1 are the PR-branch preflights; view 2 is the first read after the restore.
+                (t / "hook-2.py").write_text(
+                    HOOK_HEADER + "(r.parent/'hook-branch').write_text(subprocess.check_output("
+                    "['git','-C',str(r),'branch','--show-current'],text=True).strip())\n"
+                    "(r/'.pr-ready/review.md')." + operation + "\n")
+                proc, events = self.run_cli(cli, env, *self.restore(start))
+                self.assertEqual("main", (t / "hook-branch").read_text(), "the edit must follow the restore")
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                message = " ".join(events[-1]["errors"])
+                for expected in ("Post-restore preflight blocked Ready", ".pr-ready/review.md", needle):
+                    self.assertIn(expected, message)
+                self.assertFalse((t / "ready").exists())
+                self.assertEqual("main", git(repo, "branch", "--show-current"))
+
+    def test_tracked_artifact_edited_behind_git_status_blocks(self):
+        # skip-worktree hides the edit from `git status`; the blob at the PR head still decides.
+        for restore in (False, True):
+            with self.subTest(restore=restore), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                repo, env, cli, start, _ = self.pr_with_committed_files(t, [plan(PASS)])
+                git(repo, "update-index", "--skip-worktree", RECORD)
+                (repo / RECORD).write_text("edited after the receipts were taken\n")
+                self.assertEqual("", git(repo, "status", "--porcelain"))
+                proc, events = self.run_cli(cli, env, *(self.restore(start) if restore else ()))
+                self.assert_blocked_on_pr_branch(t, repo, proc, events, "differs from PR head", RECORD)
+
+    def test_tracked_artifact_that_is_not_a_regular_file_is_refused(self):
+        cases = {"symlink": ({"docs/evidence/latest.md": "x/y.md"}, "docs/evidence/latest.md"),
+                 "directory": (None, "docs/evidence/x")}
+        for name, (links, report) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                repo, env, cli, start, _ = self.pr_with_committed_files(
+                    t, [plan(PASS)], links=links, report=report, target=False)
+                proc, events = self.run_cli(cli, env, *self.restore(start))
+                self.assert_blocked_on_pr_branch(t, repo, proc, events, "not a regular file", report)
 
 
 if __name__ == "__main__":
