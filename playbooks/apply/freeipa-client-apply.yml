@@ -314,6 +314,12 @@
               'renew': 'expire, pwd_expire_policy_renew',
               'off': 'expire'}[freeipa_client_pwexpiry_policy] | default('', true) }}
         freeipa_client_pwexpiry_warning_days: "{{ freeipa_client_pwexpiry_warning_days_raw | int }}"
+        # [pam] pam_initgroups_scheme is `always` exactly when the policy is renew
+        # (spec C19/C20, #262/#263): with SSSD's default `no_session` the PAM
+        # responder keeps using the cached, expired password state while the
+        # user has a session or a 5 s window is armed, so a changed or reset
+        # password is not seen. warn/off remove a line that holds `always`.
+        freeipa_client_pwexpiry_initgr_scheme: "{{ 'always' if freeipa_client_pwexpiry_policy == 'renew' else '' }}"
       when: freeipa_client_pwexpiry_policy != ''
       tags: [always]
 
@@ -903,7 +909,7 @@
       when:
         - not ansible_check_mode
         - freeipa_client_pwexpiry_policy != ''
-      tags: [freeipa-client, C13, sssd_hardening]
+      tags: [freeipa-client, C13, C19, sssd_hardening]
       block:
         - name: "FreeIPA client — snapshot sssd.conf before the password-expiry policy"
           ansible.builtin.slurp:
@@ -914,6 +920,7 @@
           vars:
             pwexpiry_conf: "{{ ipa_pwexpiry_conf_before.content | b64decode }}"
             pwexpiry_orders: "{{ pwexpiry_conf | regex_findall('(?m)^ipa_access_order\\s*=\\s*(.*?)\\s*$') }}"
+            pwexpiry_schemes: "{{ pwexpiry_conf | regex_findall('(?m)^pam_initgroups_scheme\\s*=\\s*(.*?)\\s*$') }}"
           ansible.builtin.assert:
             that:
               - pwexpiry_conf | regex_findall('(?m)^\[domain/') | length == 1
@@ -921,11 +928,17 @@
               - pwexpiry_orders | length <= 1
               - pwexpiry_orders | difference(['expire', 'expire, pwd_expire_policy_warn', 'expire, pwd_expire_policy_renew', 'expire, pwd_expire_policy_reject']) | length == 0
               - pwexpiry_conf | regex_findall('(?m)^pwd_expiration_warning\s*=') | length <= 1
+              - pwexpiry_schemes | length <= 1
+              - pwexpiry_schemes | difference(['always', 'no_session']) | length == 0
+              - >-
+                freeipa_client_pwexpiry_policy != 'renew' or
+                (pwexpiry_conf | regex_findall('(?m)^\[pam\]\s*$') | length == 1)
             fail_msg: >-
               /etc/sssd/sssd.conf is not in a shape this playbook edits safely: it needs exactly one
               [domain/...] section, access_provider = ipa, at most one ipa_access_order line (one of
-              expire / expire, pwd_expire_policy_{warn,renew,reject}) and at most one
-              pwd_expiration_warning line. Nothing was changed.
+              expire / expire, pwd_expire_policy_{warn,renew,reject}), at most one
+              pwd_expiration_warning line, at most one pam_initgroups_scheme line (always or
+              no_session) and, for renew, exactly one [pam] section. Nothing was changed.
 
         - name: "FreeIPA client — set SSSD ipa_access_order ({{ freeipa_client_pwexpiry_policy }})"
           ansible.builtin.lineinfile:
@@ -947,6 +960,26 @@
             create: false
           register: ipa_pwexpiry_warning
           when: freeipa_client_pwexpiry_policy in ['warn', 'renew']
+
+        - name: "FreeIPA client — set SSSD [pam] pam_initgroups_scheme = always (renew only, spec C19)"
+          ansible.builtin.lineinfile:
+            path: /etc/sssd/sssd.conf
+            regexp: '^pam_initgroups_scheme\s*='
+            line: "pam_initgroups_scheme = always"
+            insertafter: '^\[pam\]\s*$'
+            state: present
+            create: false
+          register: ipa_pwexpiry_scheme_set
+          when: freeipa_client_pwexpiry_policy == 'renew'
+
+        - name: "FreeIPA client — remove the pam_initgroups_scheme = always line this policy wrote (warn/off, spec C19)"
+          ansible.builtin.lineinfile:
+            path: /etc/sssd/sssd.conf
+            regexp: '^pam_initgroups_scheme\s*=\s*always\s*$'
+            state: absent
+            create: false
+          register: ipa_pwexpiry_scheme_unset
+          when: freeipa_client_pwexpiry_policy in ['warn', 'off']
 
         - name: "FreeIPA client — sssctl config-check after the password-expiry policy"
           ansible.builtin.command:
@@ -976,11 +1009,13 @@
     # previous run that died before the restart (or by hand) shows up here
     # and triggers the restart below - this is also what makes
     # `--tags C13`/`--tags C14`/`--tags sssd_hardening` converge on their own.
-    - name: "FreeIPA client — does the running SSSD hold the file's ipa_access_order?"
+    - name: "FreeIPA client — does the running SSSD hold the file's ipa_access_order and pam_initgroups_scheme?"
       ansible.builtin.shell: |
         f=$(sed -n 's/^ipa_access_order *= *//p' /etc/sssd/sssd.conf)
         c=$(ldbsearch -H /var/lib/sss/db/config.ldb -b cn=domain,cn=config -s one ipa_access_order 2>/dev/null | sed -n 's/^ipa_access_order: //p')
-        [ "$f" = "$c" ]
+        f2=$(sed -n 's/^pam_initgroups_scheme *= *//p' /etc/sssd/sssd.conf)
+        c2=$(ldbsearch -H /var/lib/sss/db/config.ldb -b cn=pam,cn=config -s base pam_initgroups_scheme 2>/dev/null | sed -n 's/^pam_initgroups_scheme: //p')
+        [ "$f" = "$c" ] && [ "$f2" = "$c2" ]
       register: ipa_pwexpiry_confdb
       changed_when: false
       failed_when: ipa_pwexpiry_confdb.rc not in [0, 1]
@@ -988,7 +1023,7 @@
       when:
         - not ansible_check_mode
         - freeipa_client_pwexpiry_policy != ''
-      tags: [freeipa-client, C13, C14, sssd_hardening]
+      tags: [freeipa-client, C13, C14, C19, C20, sssd_hardening]
 
     - name: "FreeIPA client — restart SSSD after wiring responders"
       ansible.builtin.systemd:
@@ -1003,6 +1038,8 @@
           (ipa_sssd_offline_credentials_expiration | default({})) is changed or
           (ipa_pwexpiry_access_order | default({})) is changed or
           (ipa_pwexpiry_warning | default({})) is changed or
+          (ipa_pwexpiry_scheme_set | default({})) is changed or
+          (ipa_pwexpiry_scheme_unset | default({})) is changed or
           ((ipa_pwexpiry_confdb | default({})).rc | default(0)) == 1 or
           (ipa_sssd_explicit_responder_sockets.results | default([]) |
            selectattr('changed', 'defined') | selectattr('changed') | list | length > 0)
@@ -1010,7 +1047,7 @@
       # tasks edit sssd.conf but SSSD only reads it at start: with the tag
       # missing here, `--tags sssd_hardening` wrote the file and never
       # restarted (docs/verification/freeipa-client.md C14).
-      tags: [freeipa-client, C8, C13, C14, sssd_hardening]
+      tags: [freeipa-client, C8, C13, C14, C19, C20, sssd_hardening]
 
     - name: "FreeIPA client — enable + start SSSD (survives reboot)"
       ansible.builtin.systemd:
@@ -1027,7 +1064,7 @@
       when:
         - not ansible_check_mode
         - freeipa_client_pwexpiry_policy != ''
-      tags: [freeipa-client, C13, C14, sssd_hardening]
+      tags: [freeipa-client, C13, C14, C19, C20, sssd_hardening]
       block:
         - name: "FreeIPA client — SSSD is active after the password-expiry policy"
           ansible.builtin.command:
@@ -1039,11 +1076,19 @@
             argv: [sssctl, config-check]
           changed_when: false
 
-        - name: "FreeIPA client — running SSSD now holds the file's ipa_access_order"
+        # SSSD fills confdb as it starts, so the first comparison right after
+        # the restart can still see the old values: retry for a few seconds.
+        - name: "FreeIPA client — running SSSD now holds the file's ipa_access_order and pam_initgroups_scheme"
           ansible.builtin.shell: |
             f=$(sed -n 's/^ipa_access_order *= *//p' /etc/sssd/sssd.conf)
             c=$(ldbsearch -H /var/lib/sss/db/config.ldb -b cn=domain,cn=config -s one ipa_access_order 2>/dev/null | sed -n 's/^ipa_access_order: //p')
-            [ "$f" = "$c" ]
+            f2=$(sed -n 's/^pam_initgroups_scheme *= *//p' /etc/sssd/sssd.conf)
+            c2=$(ldbsearch -H /var/lib/sss/db/config.ldb -b cn=pam,cn=config -s base pam_initgroups_scheme 2>/dev/null | sed -n 's/^pam_initgroups_scheme: //p')
+            [ "$f" = "$c" ] && [ "$f2" = "$c2" ]
+          register: ipa_pwexpiry_confdb_after
+          until: ipa_pwexpiry_confdb_after.rc == 0
+          retries: 5
+          delay: 2
           changed_when: false
       rescue:
         - name: "FreeIPA client — put back the pre-policy sssd.conf after the running SSSD rejected the policy"

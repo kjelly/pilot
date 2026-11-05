@@ -1,16 +1,21 @@
 package spec
 
 import (
+	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
 
 // TestRegression_FreeipaClientSpec locks the structural contract of
-// docs/verification/freeipa-client.md: 18 rows C1..C18, lint-clean, and a
+// docs/verification/freeipa-client.md: 20 rows C1..C20, lint-clean, and a
 // generated verify playbook that covers every row.
 //
 // Note on inventory alignment: like freeipa-server.md, this spec's §1 Targets
@@ -26,14 +31,14 @@ func TestRegression_FreeipaClientSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	// 1. Row count is locked at 18.
-	if len(s.Rows) != 18 {
-		t.Fatalf("rows=%d want=18 (spec must cover C1..C18 inclusive)", len(s.Rows))
+	// 1. Row count is locked at 20.
+	if len(s.Rows) != 20 {
+		t.Fatalf("rows=%d want=20 (spec must cover C1..C20 inclusive)", len(s.Rows))
 	}
 
-	// 2. IDs are C1..C18 with no gaps and no duplicates.
+	// 2. IDs are C1..C20 with no gaps and no duplicates.
 	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12",
-		"C13", "C14", "C15", "C16", "C17", "C18"}
+		"C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20"}
 	gotIDs := make([]string, 0, len(s.Rows))
 	seen := map[string]bool{}
 	for _, r := range s.Rows {
@@ -161,7 +166,7 @@ func TestRegression_FreeipaClientSpec_PasswordExpiryRowsFollowTheHost(t *testing
 		cmd[r.ID] = r.Command
 		exp[r.ID] = r.Expected
 	}
-	for _, id := range []string{"C13", "C14", "C15", "C16", "C17", "C18"} {
+	for _, id := range []string{"C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20"} {
 		if strings.TrimSpace(exp[id]) != "0" {
 			t.Errorf("%s Expected = %q, want 0 (rc of the row's own check)", id, exp[id])
 		}
@@ -170,6 +175,19 @@ func TestRegression_FreeipaClientSpec_PasswordExpiryRowsFollowTheHost(t *testing
 		if !strings.Contains(cmd[id], "ipa_access_order") {
 			t.Errorf("%s must read the host's ipa_access_order (the policy is opt-in), got %q", id, cmd[id])
 		}
+	}
+	// C19 is judged by the host's policy (renew <=> always), C20 reads the PAM
+	// section of the running SSSD (confdb), both about pam_initgroups_scheme.
+	for _, id := range []string{"C19", "C20"} {
+		if !strings.Contains(cmd[id], "pam_initgroups_scheme") {
+			t.Errorf("%s must read pam_initgroups_scheme, got %q", id, cmd[id])
+		}
+	}
+	if !strings.Contains(cmd["C19"], "ipa_access_order") || !strings.Contains(cmd["C19"], "*pwd_expire_policy_renew*") || !strings.Contains(cmd["C19"], "always") {
+		t.Errorf("C19 must expect `always` exactly under renew, got %q", cmd["C19"])
+	}
+	if !strings.Contains(cmd["C20"], "cn=pam,cn=config") || !strings.Contains(cmd["C20"], "/var/lib/sss/db/config.ldb") {
+		t.Errorf("C20 must compare against the PAM section of SSSD's loaded config (confdb), got %q", cmd["C20"])
 	}
 	if !strings.Contains(cmd["C14"], "/var/lib/sss/db/config.ldb") {
 		t.Errorf("C14 must compare against SSSD's loaded config (confdb), got %q", cmd["C14"])
@@ -1045,13 +1063,13 @@ func TestRegression_FreeipaClientApplyPlaybook_PasswordExpiryPolicy(t *testing.T
 	if restart == nil {
 		t.Fatal("restart SSSD task not found")
 	}
-	for _, tag := range []string{"C8", "C13", "C14", "sssd_hardening"} {
+	for _, tag := range []string{"C8", "C13", "C14", "C19", "C20", "sssd_hardening"} {
 		if !restart.hasTag(tag) {
 			t.Errorf("SSSD restart task must carry tag %q (the lineinfile tasks edit sssd.conf under it; SSSD reads the file only at start)", tag)
 		}
 	}
 	cond := strings.Join(toStrings(restart.Raw["when"]), "\n")
-	for _, reg := range []string{"ipa_sssd_services", "ipa_sssd_sudo_provider", "ipa_pwexpiry_access_order", "ipa_pwexpiry_warning", "ipa_pwexpiry_confdb"} {
+	for _, reg := range []string{"ipa_sssd_services", "ipa_sssd_sudo_provider", "ipa_pwexpiry_access_order", "ipa_pwexpiry_warning", "ipa_pwexpiry_scheme_set", "ipa_pwexpiry_scheme_unset", "ipa_pwexpiry_confdb"} {
 		if !strings.Contains(cond, reg) {
 			t.Errorf("restart condition must read %s", reg)
 		}
@@ -1072,7 +1090,7 @@ func TestRegression_FreeipaClientApplyPlaybook_PasswordExpiryPolicy(t *testing.T
 			continue
 		}
 		blocks++
-		for _, tag := range []string{"C13", "sssd_hardening"} {
+		for _, tag := range []string{"C13", "C19", "sssd_hardening"} {
 			if !tk.hasTag(tag) {
 				t.Errorf("block %q must carry %s", tk.Name, tag)
 			}
@@ -1103,6 +1121,201 @@ func TestRegression_FreeipaClientApplyPlaybook_PasswordExpiryPolicy(t *testing.T
 	lif := write.Raw["ansible.builtin.lineinfile"].(map[string]any)
 	if lif["regexp"] != `^ipa_access_order\s*=` || lif["insertafter"] != `^ipa_domain\s*=` {
 		t.Errorf("ipa_access_order must be replaced as a whole line (regexp+insertafter), got %v", lif)
+	}
+}
+
+// TestRegression_FreeipaClientPamInitgroupsSchemeRuns runs the real policy
+// tasks (the input fact, the preflight and the lineinfile writes) with
+// ansible on a temporary sssd.conf. `renew` writes `pam_initgroups_scheme =
+// always` right after [pam], `warn`/`off` remove only a line whose value is
+// `always`, a second run changes nothing, and a conf the playbook cannot edit
+// safely is refused before any change (spec C19, AGENTS.md section 5.12: both
+// the passing and the refusing cases).
+func TestRegression_FreeipaClientPamInitgroupsSchemeRuns(t *testing.T) {
+	ansible, err := exec.LookPath("ansible-playbook")
+	if err != nil {
+		t.Skip("ansible-playbook unavailable")
+	}
+	pre, tasks := loadPwexpiryPlay(t)
+	compute := pwexpiryFind(pre, "FreeIPA client — compute the SSSD ipa_access_order value for the policy")
+	preflight := pwexpiryFind(tasks, "FreeIPA client — preflight sssd.conf shape for the password-expiry policy")
+	setOrder := pwexpiryFind(tasks, "FreeIPA client — set SSSD ipa_access_order")
+	setWarn := pwexpiryFind(tasks, "FreeIPA client — set SSSD pwd_expiration_warning")
+	setScheme := pwexpiryFind(tasks, "FreeIPA client — set SSSD [pam] pam_initgroups_scheme = always")
+	unsetScheme := pwexpiryFind(tasks, "FreeIPA client — remove the pam_initgroups_scheme = always line")
+	for name, tk := range map[string]*pwexpiryTask{"compute": compute, "preflight": preflight, "order": setOrder,
+		"warning": setWarn, "set scheme": setScheme, "unset scheme": unsetScheme} {
+		if tk == nil {
+			t.Fatalf("policy task %q not found", name)
+		}
+	}
+
+	const base = "[sssd]\nservices = nss, pam, ssh\n\n[domain/ipa.example.test]\nid_provider = ipa\nipa_domain = ipa.example.test\naccess_provider = ipa\n\n[nss]\n\n"
+	const pamEmpty = "[pam]\n\n[sudo]\n"
+	cases := []struct {
+		name, policy, conf string
+		wantFail           bool
+		wantScheme         []string // pam_initgroups_scheme lines expected afterwards
+	}{
+		{name: "renew-adds-always", policy: "renew", conf: base + pamEmpty, wantScheme: []string{"pam_initgroups_scheme = always"}},
+		{name: "renew-replaces-no_session", policy: "renew", conf: base + "[pam]\npam_initgroups_scheme = no_session\n\n[sudo]\n", wantScheme: []string{"pam_initgroups_scheme = always"}},
+		{name: "renew-keeps-always", policy: "renew", conf: base + "[pam]\npam_initgroups_scheme = always\n\n[sudo]\n", wantScheme: []string{"pam_initgroups_scheme = always"}},
+		{name: "warn-removes-always", policy: "warn", conf: base + "[pam]\npam_initgroups_scheme = always\n\n[sudo]\n"},
+		{name: "off-removes-always", policy: "off", conf: base + "[pam]\npam_initgroups_scheme = always\n\n[sudo]\n"},
+		{name: "off-keeps-no_session", policy: "off", conf: base + "[pam]\npam_initgroups_scheme = no_session\n\n[sudo]\n", wantScheme: []string{"pam_initgroups_scheme = no_session"}},
+		{name: "off-without-line", policy: "off", conf: base + pamEmpty},
+		{name: "refuse-operator-never", policy: "renew", conf: base + "[pam]\npam_initgroups_scheme = never\n\n[sudo]\n", wantFail: true, wantScheme: []string{"pam_initgroups_scheme = never"}},
+		{name: "refuse-two-lines", policy: "renew", conf: base + "[pam]\npam_initgroups_scheme = always\npam_initgroups_scheme = no_session\n\n[sudo]\n", wantFail: true, wantScheme: []string{"pam_initgroups_scheme = always", "pam_initgroups_scheme = no_session"}},
+		{name: "refuse-renew-without-pam-section", policy: "renew", conf: base + "[sudo]\n", wantFail: true},
+		{name: "refuse-two-pam-sections", policy: "renew", conf: base + pamEmpty + "[pam]\n", wantFail: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			conf := filepath.Join(dir, "sssd.conf")
+			if err := os.WriteFile(conf, []byte(tc.conf), 0600); err != nil {
+				t.Fatal(err)
+			}
+			withPath := func(tk *pwexpiryTask) map[string]any {
+				cp := map[string]any{}
+				for k, v := range tk.Raw {
+					cp[k] = v
+				}
+				delete(cp, "tags")
+				if m, ok := cp["ansible.builtin.lineinfile"].(map[string]any); ok {
+					m2 := map[string]any{}
+					for k, v := range m {
+						m2[k] = v
+					}
+					m2["path"] = conf
+					cp["ansible.builtin.lineinfile"] = m2
+				}
+				return cp
+			}
+			plain := func(tk *pwexpiryTask) map[string]any {
+				cp := map[string]any{}
+				for k, v := range tk.Raw {
+					cp[k] = v
+				}
+				delete(cp, "tags")
+				return cp
+			}
+			// the real preflight reads the slurp register; it is not in the
+			// block's own task list as a separate dependency, so build it here
+			snapshot := map[string]any{
+				"name":                  "snapshot",
+				"ansible.builtin.slurp": map[string]any{"src": conf},
+				"register":              "ipa_pwexpiry_conf_before",
+			}
+			play := map[string]any{
+				"hosts": "localhost", "connection": "local", "gather_facts": false,
+				"tasks": []any{plain(compute), snapshot, plain(preflight), withPath(setOrder), withPath(setWarn), withPath(setScheme), withPath(unsetScheme)},
+			}
+			data, err := yaml.Marshal([]any{play})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pb := filepath.Join(dir, "play.yml")
+			if err := os.WriteFile(pb, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			vars, _ := json.Marshal(map[string]any{"freeipa_client_pwexpiry_policy": tc.policy, "freeipa_client_pwexpiry_warning_days_raw": "14"})
+			run := func() (string, error) {
+				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, ansible, "-i", "localhost,", pb, "-e", string(vars))
+				cmd.Env = append(os.Environ(), "ANSIBLE_LOCAL_TEMP="+dir, "ANSIBLE_REMOTE_TEMP="+dir, "ANSIBLE_CACHE_PLUGIN=memory", "ANSIBLE_RETRY_FILES_ENABLED=0")
+				out, err := cmd.CombinedOutput()
+				return string(out), err
+			}
+			out, err := run()
+			after, rerr := os.ReadFile(conf)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			var got []string
+			for _, l := range strings.Split(string(after), "\n") {
+				if strings.HasPrefix(l, "pam_initgroups_scheme") {
+					got = append(got, l)
+				}
+			}
+			if tc.wantFail {
+				if err == nil || !strings.Contains(out, "not in a shape this playbook edits safely") {
+					t.Fatalf("the preflight must refuse this conf before any change: err=%v\n%s", err, out)
+				}
+				if string(after) != tc.conf {
+					t.Errorf("a refused run changed sssd.conf:\n%s", after)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("policy tasks failed: %v\n%s", err, out)
+			}
+			if strings.Join(got, "|") != strings.Join(tc.wantScheme, "|") {
+				t.Errorf("pam_initgroups_scheme lines = %q, want %q\n%s", got, tc.wantScheme, after)
+			}
+			if tc.policy == "renew" {
+				// directly after [pam], inside that section
+				pam := regexp.MustCompile(`(?m)^\[pam\]\npam_initgroups_scheme = always\n`)
+				if !pam.Match(after) {
+					t.Errorf("the line must sit right after [pam]:\n%s", after)
+				}
+			}
+			// a second run must change nothing
+			first := string(after)
+			out2, err := run()
+			if err != nil {
+				t.Fatalf("second run failed: %v\n%s", err, out2)
+			}
+			if !strings.Contains(out2, "changed=0") {
+				t.Errorf("second run must report changed=0:\n%s", out2)
+			}
+			again, _ := os.ReadFile(conf)
+			if string(again) != first {
+				t.Errorf("second run changed sssd.conf:\n%s", again)
+			}
+		})
+	}
+}
+
+// A12: the HA evidence chain needs the primary, then the replica, then the
+// fixture accounts, then the client; the topology must use the production
+// role-group names (the client reads its server pool from them) and the chain
+// must not pin the SSSD policy.
+func TestRegression_FreeipaClientPwexpiryHAChain(t *testing.T) {
+	topo, err := os.ReadFile("../../docs/topologies/freeipa-client-pwexpiry-ha-topology.yaml")
+	if err != nil {
+		t.Fatalf("read topology: %v", err)
+	}
+	for _, g := range []string{"[freeipa-server]", "[freeipa-server-replica]", "[freeipa-client]"} {
+		if !strings.Contains(string(topo), g) {
+			t.Errorf("topology must declare groups: %s", g)
+		}
+	}
+	raw, err := os.ReadFile("../../playbooks/test/freeipa-client-pwexpiry-ha-chain.yml")
+	if err != nil {
+		t.Fatalf("read chain: %v", err)
+	}
+	src := string(raw)
+	last := -1
+	for _, want := range []string{
+		"../apply/freeipa-server-apply.yml",
+		"../apply/freeipa-server-replica-apply.yml",
+		"fixtures/freeipa-client-fixtures.yml",
+		"fixtures/freeipa-client-pwexpiry-fixtures.yml",
+		"../apply/freeipa-client-apply.yml",
+	} {
+		i := strings.Index(src, "import_playbook: "+want)
+		if i < 0 {
+			t.Fatalf("chain must import %s", want)
+		}
+		if i < last {
+			t.Errorf("%s is imported out of order", want)
+		}
+		last = i
+	}
+	if strings.Contains(src, "password_expiry_policy:") {
+		t.Error("the chain must not pin the SSSD policy")
 	}
 }
 

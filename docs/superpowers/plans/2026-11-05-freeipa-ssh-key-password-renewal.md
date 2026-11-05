@@ -174,6 +174,7 @@ sssctl user-checks -a acct -s sudo <interactive-ipa-user>
 | A15 | 支援 OS：只有 Ubuntu 24.04 | vm-target 與實際主機都是 Ubuntu 24.04，只在 24.04 實測並宣告支援。**不支援** Ubuntu 22.04（其 SSSD 沒有 `ipa_access_order`）；其他 OS（含 EL9、Ubuntu 26.04）不在範圍內。非 24.04 主機設定本功能時由 preflight 在修改前拒絕。 |
 | A16 | sudo cache fresh/stale 與密碼過期交叉案例 | 分開診斷 PAM expiry 與 sudo rule refresh；不透過 `sss_cache -E` 當永久修法。 |
 | A17 | 沒有密碼的帳號（純金鑰） | 未設定／`off`：照常登入。`warn`／`renew`：依 §1.3 被拒絕（PAM system error，SSSD log 有「No Kerberos password expiration attributes found」）。記錄實際結果，作為「啟用前所有帳號都要有密碼」的依據。 |
+| A18 | 改密碼後重新登入、管理員 reset 偵測（`renew`，spec C19／C20） | 同一帳號在 `renew` 下完成 `passwd` 後：只用 TTY 的重試（每次停在 `Current Password` 再中斷）與非互動式重試都在 30 秒內重新登入成功；使用者有一個開著的 session 時，管理員 reset 在 10 秒內被發現。比較預設 `no_session`（#262／#263 的失敗行為）與 `always`。同時量代價（每個 PAM 請求多一次後端查詢：sudo／登入延遲、LDAP 請求數）。 |
 
 **重要：** A04 必須是正規的 **活體端到端測試**（真實 FreeIPA KDC/LDAP + 真實 SSSD/PAM + 真實 sshd + user SSH Key + 密碼更新），單純 `grep ipa_access_order`、`sssctl config-check` 或 mock PAM 均不足以宣告已實現需求。使用可拋棄測試帳號，**不得修改正式人員密碼到期狀態**。
 

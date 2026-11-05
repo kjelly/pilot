@@ -1,0 +1,18 @@
+# Apply chain for docs/verification/freeipa-client.md A12 against
+# docs/topologies/freeipa-client-pwexpiry-ha-topology.yaml. Order matters:
+#   1. FreeIPA primary
+#   2. FreeIPA replica (joins the realm; the client needs both in its pool)
+#   3. canonical demo user + the password-state fixture accounts, created on the
+#      primary before the client first asks SSSD about them
+#   4. freeipa-client, with -e freeipa_client_sssd_password_expiry_policy=<policy>
+---
+- name: Install the FreeIPA primary
+  ansible.builtin.import_playbook: ../apply/freeipa-server-apply.yml
+- name: Join the FreeIPA replica
+  ansible.builtin.import_playbook: ../apply/freeipa-server-replica-apply.yml
+- name: Ensure the demo user and sudo rule exist
+  ansible.builtin.import_playbook: fixtures/freeipa-client-fixtures.yml
+- name: Ensure the password-state fixture accounts exist
+  ansible.builtin.import_playbook: fixtures/freeipa-client-pwexpiry-fixtures.yml
+- name: Enroll and configure the client against both servers
+  ansible.builtin.import_playbook: ../apply/freeipa-client-apply.yml

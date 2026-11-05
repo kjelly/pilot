@@ -72,6 +72,9 @@ groupVars:
   # policy for an expired FreeIPA password at a non-password (SSH key, GSSAPI)
   # login. Unset leaves sssd.conf untouched; off writes `expire` back. Ubuntu
   # 24.04 only. warn/renew deny accounts that never had a password (C17).
+  # renew also writes [pam] pam_initgroups_scheme = always (C19/C20, v1.16): with
+  # SSSD's default a changed or reset password is not seen while the user has a
+  # session or the 5 s PAM window is armed (#262/#263). warn/off remove that line.
   - {name: freeipa_client_sssd_password_expiry_policy, type: string, required: false, secret: false, validation: "^(warn|renew|off)$"}
   - {name: freeipa_client_sssd_password_expiry_warning_days, type: integer, required: false, secret: false}
 stagePolicy: {variable: stage, default: sandbox}
