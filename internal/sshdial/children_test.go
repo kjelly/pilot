@@ -536,7 +536,15 @@ func TestDialerCloseRacingDials(t *testing.T) {
 	}
 	bounded(t, "Close", func() { d.Close() })
 	bounded(t, "the dialers", wg.Wait)
-	files, _ := filepath.Glob(filepath.Join(pids, "ssh.*"))
+	all, _ := filepath.Glob(filepath.Join(pids, "ssh.*"))
+	var files []string
+	for _, f := range all {
+		// record writes name.tmp and renames it: a process killed in between
+		// leaves the .tmp behind, and has not recorded itself.
+		if !strings.HasSuffix(f, ".tmp") {
+			files = append(files, f)
+		}
+	}
 	if len(files) < dialers {
 		t.Fatalf("recorded %d ssh, want at least %d", len(files), dialers)
 	}
