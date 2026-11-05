@@ -1,0 +1,37 @@
+# Disposable Issue #244 (part A) version-contract topology. Root must claim the
+# unique names before provisioning. No fixed IPs: agents use the sole manager group.
+# The manager host also carries the agent role, so one physical host exercises
+# the central gate and the agent contract side by side; the other agents observe
+# its native release over SSH. This descriptor uses direct upstream services:none,
+# not inherited cache consumers; native evidence must bind the actual
+# inventory/proxy state.
+services: none
+nodes:
+  - name: wf244-manager
+    base_image: ubuntu-24.04
+    # Guest-visible RAM must exceed the central contract's 8192 MiB.
+    memory: 9216
+    vcpus: 4
+    disk: 100
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [sandbox, docker, wazuh-manager, wazuh-fim]
+  - name: wf244-deb
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [sandbox, wazuh-fim]
+  - name: wf244-el
+    base_image: almalinux-9
+    memory: 2048
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [sandbox, wazuh-fim]

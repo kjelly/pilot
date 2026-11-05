@@ -1,0 +1,14 @@
+---
+# Immutable candidate wrapper for the real manager -> agent ordering of the Wazuh
+# version contract. Selectors remain inherited from the actual component imports.
+- name: Install the fresh manager's Docker prerequisite first
+  ansible.builtin.import_playbook: ../../apply/docker-apply.yml
+  tags: [docker]
+
+- name: Deploy the central Wazuh stack first
+  ansible.builtin.import_playbook: ../../apply/wazuh-manager-apply.yml
+  tags: [wazuh-manager]
+
+- name: Deploy compatible Wazuh agents second
+  ansible.builtin.import_playbook: ../../apply/wazuh-fim-apply.yml
+  tags: [wazuh-fim]
