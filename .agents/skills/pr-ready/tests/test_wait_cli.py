@@ -802,5 +802,105 @@ class TrackedArtifactPinTests(unittest.TestCase):
                 self.assert_blocked_on_pr_branch(t, repo, proc, events, "not a regular file", report)
 
 
+class RestoreGuardTests(unittest.TestCase):
+    """The checks between the restore and `gh pr ready`, and the one after it, must fire.
+
+    Each case changes the checkout or the CI state inside the first `pr view` after the restore
+    (hook-2) or after Ready (hook-3). `main`, the starting branch, has another tree, so the
+    restore really switches. Real Git, fake gh.
+    """
+    prepare = WaitCLITests.prepare
+    make_pr = cli_mock.CLIMockTests.make_pr
+    evidence_only_pr = cli_mock.CLIMockTests.evidence_only_pr
+
+    def restoring_pr(self, t, plans):
+        """prepare() plus a starting branch `main` with another tree; returns (repo, env, cli)."""
+        repo, _, env, cli = self.prepare(t, plans)
+        git(repo, "branch", "main", env["FAKE_GH_SHA"])
+        git(repo, "switch", "--quiet", "main")
+        (repo / "file").write_text("starting branch has different source")
+        git(repo, "commit", "--quiet", "-am", "starting branch source")
+        start = git(repo, "rev-parse", "HEAD")
+        git(repo, "switch", "--quiet", "fix-one")
+        return repo, env, cli + ["--restore-sha", start, "--restore-branch=main"]
+
+    @staticmethod
+    def hook(t, index, body):
+        """Run `body` inside view `index`; hook-branch records where the checkout was before it."""
+        (t / f"hook-{index}.py").write_text(
+            HOOK_HEADER + "(r.parent/'hook-branch').write_text(subprocess.check_output("
+            "['git','-C',str(r),'branch','--show-current'],text=True).strip())\n" + body + "\n")
+
+    def run_cli(self, cli, env):
+        proc = subprocess.run(cli, env=env, capture_output=True, text=True, timeout=30)
+        events = [json.loads(line) for line in proc.stdout.splitlines()]
+        self.assertTrue(events, proc.stderr)
+        return proc, events
+
+    MOVES = (("untracked file", "(r/'stray.txt').write_text('left by something else')", "main"),
+             ("detached HEAD", "subprocess.run(['git','-C',str(r),'switch','--quiet','--detach'],check=True)", ""),
+             ("new commit", "subprocess.run(['git','-C',str(r),'commit','--allow-empty','-qm','moved'],check=True)", "main"))
+
+    def test_checkout_moved_after_the_restore_blocks_ready(self):
+        for name, move, branch_after in self.MOVES:
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                repo, env, cli = self.restoring_pr(t, [plan(PASS)])
+                self.hook(t, 2, move)  # views 0 and 1 are the PR-branch preflights
+                proc, events = self.run_cli(cli, env)
+                self.assertEqual("main", (t / "hook-branch").read_text(), "the move must follow the restore")
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual("DRAFT-BLOCKED", events[-1]["status"])
+                self.assertFalse(events[-1]["ready_invoked"], "gh pr ready ran: " + proc.stdout)
+                message = " ".join(events[-1]["errors"])
+                self.assertIn("Post-restore preflight blocked Ready", message)
+                self.assertIn("Restored checkout changed before Ready transition", message)
+                self.assertFalse((t / "ready.log").exists(), "gh pr ready must not run")
+                self.assertFalse((t / "ready").exists())
+                self.assertEqual(branch_after, git(repo, "branch", "--show-current"))
+
+    def test_ci_pending_only_after_the_restore_blocks_ready(self):
+        # Pending is not an error in wait mode, so only the explicit `errors or pending` check
+        # stops Ready here; without it gh pr ready runs while CI is still running.
+        pending = {"check": plan(PASS, {**PENDING, "name": "lint"}),
+                   "workflow": plan(PASS, runs=[workflow()])}
+        for name, third in pending.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                repo, env, cli = self.restoring_pr(t, [plan(PASS), plan(PASS), third])
+                proc, events = self.run_cli(cli, env)
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual("DRAFT-BLOCKED", events[-1]["status"])
+                self.assertFalse(events[-1]["ready_invoked"], "gh pr ready ran: " + proc.stdout)
+                message = " ".join(events[-1]["errors"])
+                self.assertIn("Post-restore preflight blocked Ready", message)
+                self.assertIn("pending" if name == "check" else "Active GitHub workflow run", message)
+                self.assertFalse((t / "ready.log").exists(), "gh pr ready must not run while CI is pending")
+                self.assertFalse((t / "ready").exists())
+                self.assertEqual("main", git(repo, "branch", "--show-current"))
+
+    def test_checkout_moved_after_ready_is_never_reported_ready(self):
+        moves = (("untracked file", "(r/'stray.txt').write_text('after Ready')", "main"),
+                 ("switched back to the PR branch",
+                  "subprocess.run(['git','-C',str(r),'switch','--quiet','fix-one'],check=True)", "fix-one"),
+                 self.MOVES[1], self.MOVES[2])
+        for name, move, branch_after in moves:
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                repo, env, cli = self.restoring_pr(t, [plan(PASS)])
+                self.hook(t, 3, move)  # view 3 is the post-Ready read
+                proc, events = self.run_cli(cli, env)
+                self.assertEqual("main", (t / "hook-branch").read_text(), "the move must follow Ready")
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual("DRAFT-BLOCKED", events[-1]["status"])
+                self.assertTrue(events[-1]["ready_invoked"])
+                message = " ".join(events[-1]["errors"])
+                self.assertIn("Ready invoked but post-action verification failed", message)
+                self.assertIn("Local worktree changed during Ready transition", message)
+                self.assertEqual(1, len((t / "ready.log").read_text().splitlines()))
+                self.assertEqual("main", (t / "ready-branch").read_text(), "Ready ran on the restored branch")
+                self.assertEqual(branch_after, git(repo, "branch", "--show-current"))
+
+
 if __name__ == "__main__":
     unittest.main()
