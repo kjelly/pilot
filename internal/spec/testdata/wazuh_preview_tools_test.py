@@ -259,6 +259,10 @@ class PreviewCapabilityTests(unittest.TestCase):
                 self.assertIn('forbidden for this operation',output.getvalue())
 
     def test_unknown_failed_or_foreign_foreground_result_retains_scope(self):
+        # Delivery-side contract: cleanup releases only on a response whose
+        # preview_children_settled is literally true for this owner/operation/source.
+        # The coordinator no longer reports false after an in-process refusal; this
+        # still proves a missing, unparsable, false or foreign response is retained.
         for failure in ('unknown','failed','foreign-op','foreign-source',None):
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as temporary:
                 cls,value,scope,ledger,proc=setup(Path(temporary));env=cls.__init__.__globals__
@@ -274,7 +278,13 @@ class PreviewCapabilityTests(unittest.TestCase):
                 self.assertEqual(scope.exists(),failure is not None)
                 self.assertTrue((ledger/'writer-active.json').exists())
 
-    def test_failed_observer_or_local_child_latches_unsettled_without_mutating_capability(self):
+    def test_failed_observer_or_local_child_is_reaped_not_latched_unsettled(self):
+        # Runner.run reaps its direct child on success, failure and timeout, and a
+        # descendant still naming/holding the scope is refused by cleanup's own
+        # /proc census (test_cleanup_refuses_foreign_replacement_open_child_and_unknown_bytes).
+        # A refusal or failed child therefore must not latch the foreground unsettled
+        # (it used to, which retained the host-wide writer and the /run scope after
+        # every refusal, including the central version gate).
         for operation in ('observe','local'):
             with self.subTest(operation=operation),tempfile.TemporaryDirectory() as temporary:
                 cls,value,scope,ledger,proc=setup(Path(temporary));before=copy.deepcopy(value)
@@ -286,7 +296,17 @@ class PreviewCapabilityTests(unittest.TestCase):
                     reader=w.Reader(central,value['tools']['pilot-wazuh-heartbeat'],{'tools':{k:v for k,v in value['tools'].items() if k!='pilot-wazuh-heartbeat'}},preview=assets)
                     with self.assertRaisesRegex(w.Refused,'modeled child'):
                         reader.observe() if operation=='observe' else reader.local('preview')
-                    self.assertFalse(assets.settled);self.assertEqual(value,before)
+                    self.assertTrue(assets.settled);self.assertEqual(value,before)
+
+    def test_in_process_refusal_attests_settled_and_a_failed_response_still_retains(self):
+        # The attestation is built by the same helper for success and every refusal.
+        args=types.SimpleNamespace(owner=OWNER,operation=OP)
+        for assets in (None,types.SimpleNamespace(settled=True)):
+            attestation=w.preview_attestation(args,assets)
+            self.assertIs(attestation['preview_children_settled'],True)
+            self.assertEqual((attestation['preview_owner'],attestation['preview_operation']),(OWNER,OP))
+        # Cleanup still honours an explicit unsettled report: only a literal True releases.
+        self.assertIs(w.preview_attestation(args,types.SimpleNamespace(settled=False))['preview_children_settled'],False)
 
     def test_delivery_context_is_rejected_before_every_nonlocal_mode_effect(self):
         loaded=runpy.run_path(str(REPO/'playbooks/files/pilot-wazuh-delivery'));env=loaded['main'].__globals__
@@ -339,17 +359,26 @@ if '--preview-tools-json' in args:
  index=args.index('--preview-tools-json')+1;value=json.loads(args[index]);value['identity'][2:4]=[0,0];args[index]=json.dumps(value)
 with fixture.native_metadata(),fixture.product_paths(w,Path(SETTINGS['run']),Path(SETTINGS['ledger']),Path(SETTINGS['proc']),Path(SETTINGS['installed'])):
  central=w.Central(root=Path(SETTINGS['ledger']))
- central.discover=lambda:{'version':'4.14.9','directory':SETTINGS['project']}
+ central.discover=lambda:{'version':SETTINGS.get('discovered','4.14.9'),'directory':SETTINGS['project']}
  central.check_agents=lambda _:{}
  if SETTINGS.get('observer_failure') and args[0]=='central':
   def observe_failure(*argv,**kwargs):
    assets=argv[-1]
+   if SETTINGS.get('surviving_child'):
+    # Modeled: the failed tool's descendant still names the transient scope.
+    child=Path(SETTINGS['proc'])/'4242';child.mkdir(exist_ok=True)
+    (child/'cmdline').write_bytes((str(assets.value['path'])+'/pilot-wazuh-heartbeat').encode()+b'\0')
    reader=w.Reader(central,assets.value['tools']['pilot-wazuh-heartbeat'],preview=assets)
    class Native:
     def json(self,*args,**kwargs):raise w.Refused('MODELED_OBSERVER_FAILURE_UNSETTLED')
    reader.r=Native()
    return reader.observe()
   central.execute=observe_failure
+ if SETTINGS.get('sentinel'):
+  def sentinel_failure(*argv,**kwargs):
+   # A real native child that prints the secret on stdout and stderr and fails.
+   central.r.run([sys.executable,'-c','import sys;print(sys.argv[1]);print(sys.argv[1],file=sys.stderr);sys.exit(1)',SETTINGS['sentinel']],operation='native sentinel probe')
+  central.execute=sentinel_failure
  with fixture.mock.patch.object(w,'Central',lambda:central),fixture.mock.patch.object(sys,'argv',['desired-coordinator',*args]):
   with Path(SETTINGS['events']).open('a') as out:out.write(args[0]+'\n')
   result=w.main()
@@ -362,8 +391,82 @@ import wazuh_preview_tools_test as fixture
 loaded=runpy.run_path(SETTINGS['delivery']);env=loaded['main'].__globals__;cls=env['PreviewTools']
 cls.RUN=Path(SETTINGS['run']);cls.WRITER=Path(SETTINGS['ledger'])/'writer-active.json';cls.PROC=Path(SETTINGS['proc'])
 value=json.loads(sys.argv[2]);value['identity'][2:4]=[0,0]
-with fixture.native_metadata(),fixture.mock.patch.object(sys,'argv',[SETTINGS['delivery'],sys.argv[1],json.dumps(value),*sys.argv[3:]]):env['main']()
+with fixture.native_metadata(),fixture.mock.patch.object(sys,'argv',[SETTINGS['delivery'],sys.argv[1],json.dumps(value),*sys.argv[3:]]):env['entry']()
 """
+
+
+class TypedRefusalDisclosureTests(unittest.TestCase):
+    """The real rescue extraction, over the exact JSON main() prints, for every coordinator source."""
+    SECRET='PILOT_SYNTHETIC_SECRET_258_D3_EXTRA'
+
+    def printed(self,kind,text,**extra):
+        value=w.typed_error(kind,text);value.update(extra)
+        return json.dumps(value)
+
+    class Unsafe(str):
+        """Registered task output is untrusted data; Ansible must never template it."""
+
+    @classmethod
+    def untrusted(cls,variables):
+        return {name:({key:(cls.Unsafe(value) if key=='stdout' else value) for key,value in result.items()}
+                      if isinstance(result,dict) else result) for name,result in variables.items()}
+
+    def disclosed(self,variables):
+        source=yaml.safe_load((REPO/'playbooks/apply/wazuh-manager-apply.yml').read_text())[0]
+        extract=picked(source,'Extract only the bounded typed refusal from each coordinator result hidden by no_log')
+        dumper=type('UnsafeDumper',(yaml.SafeDumper,),{})
+        dumper.add_representer(self.Unsafe,lambda d,v:d.represent_scalar('!unsafe',str(v)))
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);play=root/'play.yml'
+            play.write_text(yaml.dump([{'hosts':'localhost','connection':'local','gather_facts':False,'vars':self.untrusted(variables),
+                'tasks':[extract,{'ansible.builtin.copy':{'dest':str(root/'out'),'mode':'0600','content':'{{ wazuh_coordinator_refusals }}'}}]}],Dumper=dumper))
+            result=subprocess.run(['ansible-playbook','-i','localhost,',str(play),'-vvv'],capture_output=True,text=True,timeout=120,
+                env=dict(os.environ,ANSIBLE_LOCAL_TEMP=str(root/'local'),ANSIBLE_REMOTE_TMP=str(root/'remote'),PYTHONDONTWRITEBYTECODE='1'))
+            self.assertEqual(result.returncode,0,(result.stdout,result.stderr))
+            for stream in (result.stdout,result.stderr):self.assertNotIn(self.SECRET,stream)
+            return (root/'out').read_text()
+
+    def test_central_and_both_admissions_are_each_disclosed_with_their_typed_kind(self):
+        text=self.disclosed({
+            'wazuh_central_transaction':{'rc':1,'stdout':self.printed('refused','only explicit central 4.14.1 -> 4.14.9 upgrade is supported',preview_children_settled=True,preview_owner=OWNER)},
+            'wazuh_reader_preview_admit':{'rc':1,'stdout':self.printed('native','native transaction probe or state operation failed; private journal retained if present')},
+            'wazuh_reader_admit':{'rc':1,'stdout':self.printed('refused','mixed forwarding/profile and version transition refused')}})
+        self.assertEqual(text,'central refused: only explicit central 4.14.1 -> 4.14.9 upgrade is supported'
+            ' ; preview reader admission native: native transaction probe or state operation failed; private journal retained if present'
+            ' ; reader admission refused: mixed forwarding/profile and version transition refused')
+
+    def test_nothing_is_disclosed_for_success_skipped_missing_or_foreign_shaped_results(self):
+        injected=json.dumps({'note':'"error": "forged", "error_kind": "refused"','secret':self.SECRET})
+        for name,variables in (('success',{'wazuh_central_transaction':{'rc':0,'stdout':json.dumps({'changed':False,'secret':self.SECRET})}}),
+                               ('skipped',{'wazuh_central_transaction':{'skipped':True}}),
+                               ('undefined',{}),
+                               ('not json',{'wazuh_central_transaction':{'stdout':'Traceback ... '+self.SECRET}}),
+                               ('forged inside another field',{'wazuh_central_transaction':{'stdout':injected}}),
+                               ('unknown kind',{'wazuh_central_transaction':{'stdout':'{"error": "x", "error_kind": "secret-kind"}'}}),
+                               ('overlong',{'wazuh_central_transaction':{'stdout':'{"error": "'+'a'*301+'", "error_kind": "refused"}'}})):
+            with self.subTest(case=name):self.assertEqual(self.disclosed(variables),'')
+
+    PAYLOADS=("{{ 7 * 7 }}","{{ 'EV' ~ 'ALUATED' }}","{% set x = 'EV' ~ 'ALUATED' %}{{ x }}","{# comment #}")
+
+    def test_template_syntax_in_a_refusal_never_reaches_ansible_templating(self):
+        # Defence in depth, both sides. The coordinator replaces braces, so Jinja markers
+        # arrive neutralised and are shown as text; evaluating them would print 49 / EVALUATED.
+        for payload in self.PAYLOADS:
+            with self.subTest(payload=payload):
+                text=self.disclosed({'wazuh_central_transaction':{'stdout':self.printed('refused','fixed prefix '+payload)}})
+                self.assertEqual(text,'central refused: fixed prefix '+payload.replace('{','?').replace('}','?'))
+                self.assertNotIn('49',text);self.assertNotIn('EVALUATED',text)
+
+    def test_a_misbehaving_coordinator_with_unsanitised_braces_is_not_disclosed_or_evaluated(self):
+        # Ansible-side pattern refuses braces too: fail closed rather than evaluate.
+        for payload in self.PAYLOADS:
+            with self.subTest(payload=payload):
+                raw=json.dumps({'error':'fixed prefix '+payload,'error_kind':'refused'})
+                self.assertEqual(self.disclosed({'wazuh_central_transaction':{'stdout':raw}}),'')
+
+    def test_only_the_typed_pair_is_taken_from_a_result_that_also_carries_secrets(self):
+        stdout=json.dumps({'secret':self.SECRET,'error':'fixed refusal','error_kind':'refused','tool_stderr':self.SECRET})
+        self.assertEqual(self.disclosed({'wazuh_central_transaction':{'stdout':stdout}}),'central refused: fixed refusal')
 
 
 class NoexecPreviewTests(unittest.TestCase):
@@ -392,7 +495,9 @@ class NoexecPreviewTests(unittest.TestCase):
                     if exit_code:
                         with self.assertRaises(subprocess.CalledProcessError):
                             reader.observe(loaded=family!='cold') if family!='local' else reader.local('bounded outer local')
-                        self.assertFalse(assets.settled,'FAILED_CHILD_MUST_RETAIN_UNKNOWN_SETTLEMENT')
+                        # The child exited and was reaped by subprocess.run: nothing is in
+                        # flight. (A descendant naming the scope is cleanup's census job.)
+                        self.assertTrue(assets.settled,'REAPED_CHILD_MUST_NOT_LATCH_UNSETTLED')
                     elif family!='local':self.assertTrue(reader.observe(loaded=family!='cold')['executed'])
                     else:reader.local('bounded outer local')
                 event=json.loads(events.read_text());self.assertEqual(event['name'],'pilot-wazuh-heartbeat' if family!='local' else 'pilot-wazuh-delivery')
@@ -452,6 +557,8 @@ with tempfile.TemporaryDirectory(prefix='pilot-rv20-system-') as temporary:
 
 
 class PreviewModuleTests(unittest.TestCase):
+    SENTINEL='PILOT_SYNTHETIC_SECRET_258_D3'
+
     def run_case(self,root,check=True,tag='all',fresh=False,failure=None):
         run=root/'run';run.mkdir(mode=0o755);ledger=root/'ledger';ledger.mkdir(mode=0o700)
         proc=root/'proc';(proc/'self').mkdir(parents=True)
@@ -477,7 +584,9 @@ class PreviewModuleTests(unittest.TestCase):
             (ledger/'writer-active.json').write_text(json.dumps({'owner':'c'*32,'component':'central','mode':'apply'}));(ledger/'writer-active.json').chmod(0o600)
         settings={'testdata':str(Path(__file__).parent),'run':str(run),'ledger':str(ledger),
             'proc':str(proc),'installed':str(installed),'project':str(root/'project'),'events':str(root/'events'),
-            'delivery':str(REPO/'playbooks/files/pilot-wazuh-delivery'),'observer_failure':failure=='observer'}
+            'delivery':str(REPO/'playbooks/files/pilot-wazuh-delivery'),'observer_failure':failure in ('observer','observer-reaped'),
+            'surviving_child':failure=='observer','discovered':'4.14.1' if failure=='version-gate' else '4.14.9',
+            'sentinel':self.SENTINEL if failure=='sentinel' else ''}
         worker=root/'worker.py';worker.write_text('SETTINGS='+repr(settings)+'\n'+WORKER)
         cleanup=root/'cleanup.py';cleanup.write_text('SETTINGS='+repr(settings)+'\n'+CLEANUP)
         source=yaml.safe_load((REPO/'playbooks/apply/wazuh-manager-apply.yml').read_text())[0]
@@ -589,7 +698,10 @@ class PreviewModuleTests(unittest.TestCase):
             'wazuh_docker_version':'4.14.9','docker_pre':{'rc':0},'pilot_wazuh_manager_preview_fresh':False,
             'siem_forwarding_enabled':True,'siem_forward_transport':'tcp','siem_forward_port':'514','siem_relp_port':20514,
             'siem_forward_host':'receiver.example','wazuh_receiver_bound_address':'192.0.2.15','wazuh_upgrade':False,
-            'pilot_wazuh_manager_install_planned':True}
+            'pilot_wazuh_manager_install_planned':True,'wazuh_reader_admit':{}}
+        if failure=='sentinel':
+            # Operator secrets reach the play as inputs; only their hashes may enter the request.
+            values.update(siem_relp_ca_pem=self.SENTINEL+'-ca',siem_relp_cert_pem=self.SENTINEL+'-cert',siem_relp_key_pem=self.SENTINEL+'-key')
         if failure in ('replacement','original-and-replacement'):
             program="from pathlib import Path; import sys; p=Path(sys.argv[1]); p.rename(p.with_name(p.name+'-original')); p.mkdir(mode=0o700); (p/'FOREIGN').write_text('retain foreign replacement')"
             selected.append({'ansible.builtin.command':{'argv':['python3','-c',program,'{{ wazuh_preview_assets.path }}']},'check_mode':False,'tags':['always']})
@@ -598,9 +710,9 @@ class PreviewModuleTests(unittest.TestCase):
         probe=root/'desired-api.json'
         record={'ansible.builtin.copy':{'dest':str(probe),'mode':'0600','content':"{{ {'desired_api': (wazuh_reader_preview_admit.rc | default(0)) == 0, 'stale_api': 'unrecognized arguments' in (wazuh_reader_preview_admit.stderr | default(''))} | to_json }}"},'check_mode':False,'no_log':True,'tags':['always']}
         play=[{'hosts':'localhost','connection':'local','gather_facts':False,'vars':values,
-            'tasks':[claim,{'block':selected,'rescue':[picked(source,"Retain the original Wazuh failure while settling transient preview ownership"),picked(source,"Surface the original Wazuh failure after its recorded task diagnostics")],'always':[record,clean,release,picked(source,'Disclose retained preview scope and owner after an uncertain cleanup'),final]}]}]
+            'tasks':[claim,{'block':selected,'rescue':[picked(source,"Retain the original Wazuh failure while settling transient preview ownership"),picked(source,"Extract only the bounded typed refusal from each coordinator result hidden by no_log"),picked(source,"Disclose the typed coordinator refusal that no_log hid from its failed task"),picked(source,"Surface the original Wazuh failure after its recorded task diagnostics")],'always':[record,clean,release,picked(source,'Disclose retained preview scope and owner after an uncertain cleanup'),final]}]}]
         path=root/'play.yml';path.write_text(yaml.safe_dump(play,sort_keys=False))
-        result=subprocess.run(['ansible-playbook','-i','localhost,',str(path),*(['--check'] if check else []),*(['--tags',tag] if tag!='all' else [])],
+        result=subprocess.run(['ansible-playbook','-i','localhost,',str(path),*(['--check'] if check else []),*(['--tags',tag] if tag!='all' else []),*(['-vvv'] if failure=='sentinel' else [])],
             cwd=REPO,capture_output=True,text=True,timeout=90,env=dict(os.environ,ANSIBLE_CONFIG=str(REPO/'ansible.cfg'),
                 ANSIBLE_LOCAL_TEMP=str(root/'local'),ANSIBLE_REMOTE_TMP=str(root/'remote'),ANSIBLE_REMOTE_TEMP=str(root/'remote'),PYTHONDONTWRITEBYTECODE='1'))
         if probe.exists():self.assertFalse(json.loads(probe.read_text())['stale_api'],'DESIRED_PREVIEW_ADMIT_STALE_API')
@@ -609,6 +721,14 @@ class PreviewModuleTests(unittest.TestCase):
         else:
             for name in NAMES:self.assertEqual((installed/name).read_bytes(),(REPO/'playbooks/files'/name).read_bytes())
         self.assertEqual(installed.exists(),not fresh or not check)
+        if failure=='sentinel':
+            # Secret-safety oracle over everything a user, log shipper or callback sees.
+            for stream in (result.stdout,result.stderr):self.assertNotIn(self.SENTINEL,stream,'SECRET_LEAKED_TO_ANSIBLE_OUTPUT')
+            self.assertIn('Wazuh coordinator refusal: central refused: operation failed: native sentinel probe rc=1',result.stdout)
+        if failure=='version-gate':
+            self.assertIn('Wazuh coordinator refusal: central refused: only explicit central 4.14.1 -> 4.14.9 upgrade is supported',result.stdout)
+            self.assertNotIn('Preview cleanup retained',result.stdout)
+            self.assertIn('writer-release',(root/'events').read_text())
         if failure in ('observer','allocation-lost','cleanup-lost') or shape:
             self.assertEqual(len(list(run.iterdir())),0 if failure=='cleanup-lost' or shape_stage=='cleanup' else 1)
             self.assertTrue((ledger/'writer-active.json').exists(),'UNSETTLED_PREVIEW_WRITER_RELEASED')
@@ -652,8 +772,25 @@ class PreviewModuleTests(unittest.TestCase):
         for failure in ('replacement','original-and-replacement'):
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as temporary:self.run_case(Path(temporary),failure=failure)
 
-    def test_failed_dispatched_observer_retains_real_scope_and_writer(self):
-        with tempfile.TemporaryDirectory() as temporary:self.run_case(Path(temporary),failure='observer')
+    def test_failed_dispatched_observer_with_a_surviving_scope_child_retains_real_scope_and_writer(self):
+        # Control: a descendant whose argv names the scope is the one thing that must
+        # still be retained; cleanup says why (typed reason), not just that it refused.
+        with tempfile.TemporaryDirectory() as temporary:
+            result=self.run_case(Path(temporary),failure='observer')
+            self.assertIn('reason=preview child has not exited',result.stdout)
+
+    def test_failed_dispatched_observer_with_a_reaped_child_settles_scope_and_releases_writer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result=self.run_case(Path(temporary),failure='observer-reaped')
+            self.assertIn('MODELED_OBSERVER_FAILURE_UNSETTLED',result.stdout)
+
+    def test_in_process_version_gate_refusal_cleans_scope_releases_writer_and_discloses_why(self):
+        # Real Central.execute reaches the real version gate (discovered 4.14.1, no upgrade
+        # authorization) with no child in flight: certificate, writer release, no marker.
+        with tempfile.TemporaryDirectory() as temporary:self.run_case(Path(temporary),failure='version-gate')
+
+    def test_typed_refusal_is_disclosed_and_secret_sentinel_never_reaches_output(self):
+        with tempfile.TemporaryDirectory() as temporary:self.run_case(Path(temporary),failure='sentinel')
 
     def test_actual_allocation_reply_loss_retains_unknown_scope_and_writer(self):
         with tempfile.TemporaryDirectory() as temporary:self.run_case(Path(temporary),failure='allocation-lost')

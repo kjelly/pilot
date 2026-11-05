@@ -4,11 +4,14 @@ Native command harnesses are explicitly separate from VM/systemd evidence.
 Cold-backup recovery tests use real GNU tar and actual changed filesystem data.
 """
 import wazuh_hermetic  # noqa: F401  (tripwire first: no harness may touch real host state)
+import ast
 import importlib.util
 import contextlib
 import json
 import os
 from pathlib import Path
+import re
+import runpy
 import subprocess
 import tempfile
 import threading
@@ -79,6 +82,85 @@ class HermeticHarnessTests(unittest.TestCase):
                 Path('/var/spool/rsyslog/pilot-wazuh').stat()
         with self.assertRaises(wazuh_hermetic.HostStateTouched):
             Path('/var/spool/rsyslog/pilot-wazuh').stat()
+
+
+class TypedErrorContractTests(unittest.TestCase):
+    """The no_log-hidden coordinator failure is disclosed from a typed field only.
+
+    That is safe only while every Refused() message is a fixed literal. A single
+    f-string or concatenation of tool output would put it on the user's screen.
+    """
+    DELIVERY = REPO / 'playbooks/files/pilot-wazuh-delivery'
+
+    @staticmethod
+    def enclosing(tree):
+        owner = {}
+        def visit(node, name):
+            for child in ast.iter_child_nodes(node):
+                scope = name
+                if isinstance(child, (ast.FunctionDef, ast.ClassDef)):
+                    scope = child.name if not name else name + '.' + child.name
+                owner[child] = scope
+                visit(child, scope)
+        visit(tree, '')
+        return owner
+
+    def test_every_refused_message_is_a_fixed_literal_or_a_reviewed_composition(self):
+        source = (REPO / 'playbooks/apply/files/wazuh-transaction.py').read_text()
+        tree = ast.parse(source)
+        owner = self.enclosing(tree)
+        dynamic = set()
+        literal = 0
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'Refused':
+                self.assertEqual(len(node.args), 1, 'Refused takes exactly one message (line %d)' % node.lineno)
+                if isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                    literal += 1
+                else:
+                    dynamic.add((owner[node], ast.unparse(node.args[0])))
+        self.assertGreater(literal, 500, 'the scan must actually see the coordinator refusals')
+        permitted = r'^[ !#-\[\]-z|~]*$'
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, 'id', '') == 'Refused' and isinstance(node.args[0], ast.Constant):
+                self.assertRegex(node.args[0].value, permitted,
+                                 'line %d: a fixed refusal must already be typed_error-clean' % node.lineno)
+        self.assertEqual(dynamic, {
+            # label is a fixed operation name or argv[0]; the child's output is never appended.
+            ('Runner.run', "'operation unavailable or timed out: ' + label"),
+            ('Runner.run', "'operation failed: ' + label + ' rc=' + str(result.returncode)"),
+            # Fixed ValueError literals of pilot-wazuh-delivery (TypedErrorContractTests below).
+            ('preview_tools', 'str(exc)'), ('preview_tool', 'str(exc)'), ('preview_argv', 'str(exc)'),
+        }, 'a new non-literal Refused message can carry tool output or secrets onto the screen')
+
+    def test_every_delivery_value_error_is_a_fixed_literal(self):
+        tree = ast.parse(self.DELIVERY.read_text())
+        count = 0
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) and getattr(node.exc.func, 'id', '') == 'ValueError':
+                count += 1
+                self.assertTrue(len(node.exc.args) == 1 and isinstance(node.exc.args[0], ast.Constant)
+                                and isinstance(node.exc.args[0].value, str),
+                                'ValueError at line %d is not a fixed literal' % node.lineno)
+        self.assertGreater(count, 30)
+
+    def test_coordinator_and_delivery_typed_errors_agree_and_never_need_escaping(self):
+        delivery = runpy.run_path(str(self.DELIVERY))['typed_error']
+        pattern = re.compile('(?<="error": ")[^"]{1,300}(?=", "error_kind")')
+        for text in ('plain text', 'quote " and backslash \\ end', 'unicode \u00e9\u4e2d', 'new\nline\ttab', 'x' * 500,
+                     "apostrophe ' ok", 'braces {} [] ok'):
+            for kind in ('refused', 'native'):
+                value = w.typed_error(kind, text)
+                self.assertEqual(value, delivery(kind, text))
+                self.assertEqual(set(value), {'error', 'error_kind'})
+                self.assertLessEqual(len(value['error']), 300)
+                encoded = json.dumps(value)
+                self.assertEqual(json.loads(encoded), value)
+                # json.dumps() adds no escape sequence, so the strict pattern recovers it exactly.
+                self.assertNotIn('\\', value['error'])
+                self.assertFalse(set(value['error']) & set('{}"'), 'braces would reach Jinja')
+                self.assertEqual(pattern.search(encoded).group(0), value['error'])
+        with self.assertRaises(AssertionError):
+            w.typed_error('anything-else', 'x')
 
 
 class PolicyTests(unittest.TestCase):

@@ -177,6 +177,15 @@ packages／pins、service 與 reader data。configured preview 仍以 desired co
 retained receipt 的原 fingerprints 不可改成 desired hashes；不相容必須明確拒絕。
 暫存須在 outer always、writer release 前，驗明仍屬本 invocation 且 children 已結束後清理；
 foreign replacement 或不確定狀態保留證據並回報，不刪除未知內容，亦不掩蓋原失敗。
+「children 已結束」指沒有 tool child 仍在執行：coordinator 只經 `subprocess.run` 啟動 child，
+它在成功、失敗與逾時時都會回收直接 child，所以 preview 自己的 in-process 拒絕（例如版本 gate）
+或已回收的失敗 child 都不是 in-flight，仍須發出清理憑證並釋放 writer、不留 scope／marker。
+只有名稱或持有暫存 scope 的存活 descendant（cleanup 的 `/proc` census 判定）、缺少／非 true／
+foreign 的回應與 foreign replacement 才保留 scope 與 writer，並以 typed reason 揭露原因。
+coordinator 與 cleanup 的 task 因 `no_log` 隱藏失敗原因；只揭露 typed、有界（可列印 ASCII、
+不含引號、反斜線與大括號，至多 300 字元）且無秘密的 `error_kind`（refused／native）與固定訊息，
+不輸出 tool stdout／stderr／argv。每個 `Refused()` 訊息必須是固定字面值，唯一例外是 Runner 的
+`operation … rc=N` 與 delivery 固定 ValueError 的轉述，由測試逐一列出並鎖住。
 
 停機前以唯讀 admission 資格化同 effective version 的目前 owned forwarding baseline：
 profile、transport／TLS、input／ruleset／action、exclusive cursor namespace、queue 與
@@ -403,4 +412,5 @@ The current procedure and evidence link are in [wazuh-manager](../runbooks/wazuh
 | 2026-11-05 | Issue #244 | Preview 不部署控制工具；單次 root-private desired-code closure 保持 installed assets／reader data 不變，retained provenance 不遷移。 |
 | 2026-11-05 | Issue #244 | 封閉 inode FD 身分區分 deleted dentry 與 orphan；精確 native logical cursor barrier 加 StopProof 後 CURRENT handoff，取消時 resume-only custody 不授予冷回復。 |
 | 2026-11-05 | Issue #244 | Source admission 只忽略所選 stack producer container 持有、`alerts/` 之外的 nlink=0／新建 inode（Wazuh 每日輪替留下的 `api.log.<date> (deleted)`）；reader、主機 process、非所選 container 持有的 orphan，以及任何 `alerts/` 內的 orphan／未知 inode 仍拒絕。原因：舊規則在每次 00:00 UTC 輪替後把 Wazuh 自己的 API process 當成未授權 source user 拒絕 admission；未放寬任何 custody 相關 Expected。 |
+| 2026-11-05 | Issue #244 | Preview 清理語意：in-process 拒絕或已回收的失敗 child 不再造成「未 settled」（原本任何拒絕都讓 host-wide writer 與 `/run` scope 留住，連版本 gate 也是）；仍保留存活 scope descendant、未知／偽造回應與 foreign replacement。被 `no_log` 隱藏的 coordinator／cleanup 失敗改以 typed、無秘密的 `error_kind` 與固定訊息揭露。未放寬任何 Expected。 |
 | 2026-11-04 | Issue #244 | 原生中央版本一致與 retained-agent 上界；明示版本交易保留完整冷資料/images，回復區分原始 skew；host reader 採 CURRENT queue custody、cursor generation 及本機 replay ACK，實際 receiver delivery 另驗。 |

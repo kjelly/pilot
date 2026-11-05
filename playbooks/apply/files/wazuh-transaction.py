@@ -56,6 +56,21 @@ class Refused(RuntimeError):
     pass
 
 
+def typed_error(kind, text):
+    """Bounded, secret-free failure field for Ansible output.
+
+    The coordinator's tasks run under no_log, so without this the operator sees
+    only a censored failure. kind is a closed set. text is only ever a fixed
+    Refused literal or the generic native message (a regression test scans every
+    Refused() call site for non-literal arguments); it is still reduced to
+    printable ASCII without quote, backslash or brace, so it needs no JSON escaping,
+    cannot carry Jinja markers into Ansible's templating, and can be extracted by a
+    strict pattern. Tool stdout/stderr/argv never reach it.
+    """
+    assert kind in ('refused', 'native')
+    return {'error': re.sub(r'[^ !#-\[\]-z|~]', '?', str(text))[:300], 'error_kind': kind}
+
+
 def version(value):
     if not isinstance(value, str) or not VERSION.fullmatch(value):
         raise Refused('unsupported Wazuh release; expected stable 4.14.x')
@@ -2764,14 +2779,14 @@ class Reader:
             raise Refused('reader inspection helper has untrusted ancestors')
         if info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022 or digest(checker) != self.checker_hash:
             raise Refused('reader inspection helper differs from tracked source')
-        try:
-            arguments=['inspect-reader'] + ([] if loaded else ['--cold'])
-            argv=preview_argv(self.preview_tools,'pilot-wazuh-heartbeat',self.checker_hash,*arguments) if self.preview_tools else [checker,*arguments]
-            return self.r.json(argv, timeout=40,
-                               operation='inspect effective owned reader baseline')
-        except BaseException:
-            if self.preview_tools:self.preview_tools.settled=False
-            raise
+        # A failed or timed-out tool child does NOT latch the preview unsettled:
+        # Runner.run reaps its direct child on every path, and a descendant that
+        # still names/holds the transient scope is refused by cleanup's own
+        # /proc census (PreviewTools.remove), which retains scope and writer.
+        arguments=['inspect-reader'] + ([] if loaded else ['--cold'])
+        argv=preview_argv(self.preview_tools,'pilot-wazuh-heartbeat',self.checker_hash,*arguments) if self.preview_tools else [checker,*arguments]
+        return self.r.json(argv, timeout=40,
+                           operation='inspect effective owned reader baseline')
 
     def inspect(self, state=None, loaded=True):
         # Discovery has no registry-bound C12 gate: original version skew may
@@ -3073,10 +3088,7 @@ class Reader:
         if self.preview_tools:
             argv=preview_argv(self.preview_tools,'pilot-wazuh-delivery',self.request.get('tools',{}).get('pilot-wazuh-delivery'),
                   'local','--preview-tools-json',json.dumps(self.preview_tools.value,sort_keys=True))
-        try:self.r.run(argv,timeout=50,operation=operation)
-        except BaseException:
-            if self.preview_tools:self.preview_tools.settled=False
-            raise
+        self.r.run(argv,timeout=50,operation=operation)
 
     def use(self, item):
         value = item['reader']
@@ -5418,6 +5430,23 @@ class Agent(Transaction):
             return dict(result, **{'pass': True})
 
 
+def preview_attestation(args, assets):
+    """Positive cleanup attestation for a desired-code preview foreground.
+
+    "Settled" means no tool child of this invocation is in flight. Runner.run is
+    the only child-spawn site and subprocess.run reaps its direct child on
+    success, failure and timeout, so that holds whenever this process reports,
+    including after an in-process refusal such as the central version gate. A
+    descendant that still names or holds the transient scope is refused by
+    cleanup's own /proc census (PreviewTools.remove), which retains scope and
+    writer. Cleanup still requires this field to be literally true: a missing,
+    false or foreign attestation leaves the scope and the writer retained.
+    """
+    return {'preview_children_settled': assets.settled if assets else True,
+            'preview_owner': args.owner, 'preview_operation': args.operation,
+            'preview_source_sha256': digest(Path(__file__))}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['writer-inspect', 'writer-claim', 'writer-resume', 'writer-release',
@@ -5484,20 +5513,16 @@ def main():
             else:
                 value = Central().verify(args.canary, args.owner or None)
         elif args.action == 'central':
-            if assets:assets.settled=False
             value = Central().execute(desired(args.version, args.legacy), args.upgrade, args.preview, args.recover, args.owner,
                                       json.loads(args.reader_desired_json), args.reader_checker_sha256,
                                       args.ack_rsyslog_downtime_and_replay,assets)
-            if assets:assets.settled=True
         elif args.action == 'reader-tools-check':
             with HostWriter().guard(args.owner, 'central'):
                 value = Reader.check_tool_destinations()
         elif args.action.startswith('reader-enable-'):
-            if assets:assets.settled=False
             value = ReplayReceipt(Central(),assets).operation(args.owner, args.operation,
                         args.action.removeprefix('reader-enable-'),
                         args.ack_rsyslog_downtime_and_replay, args.preview)
-            if assets:assets.settled=True
         elif args.action in ('agent-config-save', 'agent-config-restore'):
             snapshot = ConfigSnapshots(args.owner, args.operation)
             value = snapshot.save(args.resource, args.path) if args.action == 'agent-config-save' else snapshot.restore(json.loads(args.resources))
@@ -5532,21 +5557,21 @@ def main():
                           'agent-recovery-commit': agent.finish_recovery}[args.action]
                 value = method(args.owner)
         if args.preview_tools_json:
-            value=dict(value,preview_children_settled=assets.settled,preview_owner=args.owner,preview_operation=args.operation,preview_source_sha256=digest(Path(__file__)))
+            value=dict(value,**preview_attestation(args,assets))
         print(json.dumps(value, sort_keys=True))
         return 0 if value.get('overall_success', True) else 2
     except Refused as exc:
-        value={'error':str(exc)}
+        value=typed_error('refused',exc)
         if args.preview_tools_json and args.preview and args.action in ('central','reader-enable-admit') and not args.recover:
-            value.update(preview_children_settled=assets.settled if assets else True,preview_owner=args.owner,preview_operation=args.operation,preview_source_sha256=digest(Path(__file__)))
+            value.update(preview_attestation(args,assets))
         print(json.dumps(value))
         return 1
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         # Native JSON/config/tool failures may carry private values. Do not
         # expose tool stderr, argv, parsed documents or exception repr here.
-        value={'error':'native transaction probe or state operation failed; private journal retained if present'}
+        value=typed_error('native','native transaction probe or state operation failed; private journal retained if present')
         if args.preview_tools_json and args.preview and args.action in ('central','reader-enable-admit') and not args.recover:
-            value.update(preview_children_settled=assets.settled if assets else True,preview_owner=args.owner,preview_operation=args.operation,preview_source_sha256=digest(Path(__file__)))
+            value.update(preview_attestation(args,assets))
         print(json.dumps(value))
         return 1
 

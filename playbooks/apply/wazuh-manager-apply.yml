@@ -180,6 +180,7 @@
         wazuh_preview_admit_dispatched: false
         wazuh_central_transaction: {}
         wazuh_reader_preview_admit: {}
+        wazuh_reader_admit: {}
       tags: [always]
   tasks:
     - name: "Own all Wazuh mutations on this host through their final proofs"
@@ -569,6 +570,7 @@
                      + (['--ack-rsyslog-downtime-and-replay']
                         if (wazuh_ack_rsyslog_downtime_and_replay | default(false) | bool) else [])
                      + (['--preview'] if ansible_check_mode else []) }}
+              register: wazuh_reader_admit
               changed_when: false
               check_mode: false
               when:
@@ -1116,6 +1118,28 @@
           ansible.builtin.set_fact:
             wazuh_preview_failed: true
           tags: [always]
+        # The coordinator tasks run under no_log because their arguments carry
+        # operator inputs, which also censors why they failed. Their stdout holds a
+        # bounded typed refusal (error_kind refused|native plus a fixed message,
+        # never tool output); extract only that pair with a strict pattern.
+        - name: "Extract only the bounded typed refusal from each coordinator result hidden by no_log"
+          ansible.builtin.set_fact:
+            wazuh_coordinator_refusals: >-
+              {%- set ns = namespace(found=[]) -%}
+              {%- for label, result in {'central': wazuh_central_transaction | default({}), 'preview reader admission': wazuh_reader_preview_admit | default({}), 'reader admission': wazuh_reader_admit | default({})}.items() -%}
+              {%- set text = ((result.stdout | default('')) if result is mapping else '') | string -%}
+              {%- set kind = text | regex_search('(?<="error_kind": ")(refused|native)(?=")') -%}
+              {%- set error = text | regex_search('(?<="error": ")[^"{}]{1,300}(?=", "error_kind")') -%}
+              {%- if kind and error -%}{%- set ns.found = ns.found + [label ~ ' ' ~ kind ~ ': ' ~ error] -%}{%- endif -%}
+              {%- endfor -%}
+              {{ ns.found | join(' ; ') }}
+          no_log: true
+          tags: [always]
+        - name: "Disclose the typed coordinator refusal that no_log hid from its failed task"
+          ansible.builtin.debug:
+            msg: "Wazuh coordinator refusal: {{ wazuh_coordinator_refusals }}"
+          when: wazuh_coordinator_refusals | default('') | length > 0
+          tags: [always]
         - name: "Surface the original Wazuh failure after its recorded task diagnostics"
           ansible.builtin.fail:
             msg: "Wazuh operation failed; the original task failure remains authoritative. Transient cleanup and exact writer settlement follow."
@@ -1197,7 +1221,11 @@
 
         - name: "Disclose retained preview scope and owner after an uncertain cleanup"
           ansible.builtin.debug:
-            msg: "Preview cleanup retained owner={{ wazuh_writer_owner }} operation={{ wazuh_reader_operation.stdout | default('unknown') }} allocation={{ wazuh_preview_allocation }} prefix={{ wazuh_preview_prefix | default('not-dispatched') }} scope={{ wazuh_preview_assets.path | default(wazuh_preview_directory.path | default('unknown')) }} status=foreground-or-scope-unsettled. Original task failure remains authoritative."
+            msg: "Preview cleanup retained owner={{ wazuh_writer_owner }} operation={{ wazuh_reader_operation.stdout | default('unknown') }} allocation={{ wazuh_preview_allocation }} prefix={{ wazuh_preview_prefix | default('not-dispatched') }} scope={{ wazuh_preview_assets.path | default(wazuh_preview_directory.path | default('unknown')) }} status=foreground-or-scope-unsettled reason={{ wazuh_cleanup_reason }}. Original task failure remains authoritative."
+          vars:
+            wazuh_cleanup_text: "{{ ((wazuh_preview_cleanup.stdout | default('')) if wazuh_preview_cleanup is mapping else '') | string }}"
+            wazuh_cleanup_reason: >-
+              {{ (wazuh_cleanup_text | regex_search('(?<="error": ")[^"{}]{1,300}(?=", "error_kind")')) | default('not reported by the cleanup helper', true) }}
           when: not (wazuh_preview_settled | bool)
           tags: [always]
 

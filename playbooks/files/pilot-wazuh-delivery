@@ -466,9 +466,30 @@ def main():
         raise ValueError('unknown mode')
 
 
-if __name__ == '__main__':
+def typed_error(kind, text):
+    """Bounded, secret-free failure field; same contract as the coordinator's.
+
+    The Ansible cleanup task runs under no_log, which hides why it was refused.
+    kind is a closed set; text is a fixed ValueError literal of this file (or a
+    generic message), reduced to printable ASCII without quote, backslash or brace.
+    """
+    assert kind in ('refused', 'native')
+    return {'error': re.sub(r'[^ !#-\[\]-z|~]', '?', str(text))[:300], 'error_kind': kind}
+
+
+def entry():
     try:
         main()
     except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as error:
         print('Wazuh verification failed: ' + str(error), file=sys.stderr)
+        if sys.argv[1:2] in (['preview-pin'], ['preview-cleanup']):
+            # Preview scope settlement: only a plain ValueError (this file's own
+            # fixed-literal gates) is shown; OS/JSON/other errors stay generic so
+            # paths, descriptors and parsed documents never reach the output.
+            print(json.dumps(typed_error('refused', error) if type(error) is ValueError else
+                             typed_error('native', 'preview scope operation failed; scope and writer retained')))
         sys.exit(1)
+
+
+if __name__ == '__main__':
+    entry()
