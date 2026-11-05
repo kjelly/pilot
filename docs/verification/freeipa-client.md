@@ -115,7 +115,10 @@ SSH key（或 GSSAPI）登入、但 FreeIPA 密碼已過期的人在拿到 shell
   （#262）。管理員 reset 後 gateway 主機要約 52–59 秒才發現密碼過期，directory／target 約 0.2–4 秒（#263）。
   原因都還不明，沒有試過任何 SSSD 設定。
 - 尚未實跑：A12（HA／offline）、A16（sudo cache 交叉，#267）。`krbPrincipalExpiration` 已過期的帳號是否該在提示前
-  被拒絕尚待決定（#266）。密碼改完後約 3 秒內重新登入可能還會被拒絕一次（evidence 有記錄）。
+  被拒絕尚待決定（#266）。密碼改完後重新登入的等待時間不是固定的，取決於重試方式（#262）：非互動式重試（無 TTY）在一般 client 上約 3–4 秒就恢復；
+  「只用 TTY 重試」（每次登入都停在 `Current Password` 提示再中斷）在一般 client 上 3 輪全都超過 240 秒沒有恢復，
+  gateway／directory 主機上曾持續到 18 分鐘以上；原因未明。在 gateway／directory 主機的 SSSD debug log 看到 PAM 帳號檢查只讀快取（`bypass the data provider`）；
+  一般 client 沒有在卡住時檢查快取。不要把「約 3 秒」當成保證；在這個問題查清楚之前，這是啟用 `renew` 的已知限制
 
 **這台 client 從 FreeIPA 拿到什麼（AAA）**：
 - **Authentication（認證）**：帳號與 Kerberos 身分來自 FreeIPA，經 SSSD 提供給 NSS/PAM
