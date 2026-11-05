@@ -21,7 +21,9 @@ Before each dispatch the contract's role check applies: PASS dispatches, DRIFT (
 target branch carries a different role file) dispatches with the snapshot as the
 binding contract and a reported pin difference, STOP is `BLOCKED`. At the end, whatever
 the outcome, the contract's restore step switches back to the starting branch when that
-is safe, and otherwise stays and reports why.
+is safe, and otherwise stays and reports why. Complete restoration before changing
+GitHub PR state; restoration failure blocks the state change. Recheck the live
+gate after restoration using saved PR identities, then change state last.
 
 For target evidence after integrating an advanced base, read
 `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` from the verified snapshot,
@@ -153,7 +155,12 @@ python3 "$SNAP/.agents/skills/pr-review-merge/scripts/review_gate.py" --repo OWN
   --evidence /safe/state/123/review.json
 ```
 
-This command reads GitHub state and outputs structured JSON, no mutation. If the result is `MERGE` or `DRAFT`, run the guarded actor:
+This command reads GitHub state and outputs structured JSON, no mutation. If the
+result is `MERGE` or `DRAFT`, first complete the shared contract's safe restore
+and verify the starting branch/SHA. Restore failure leaves the PR unchanged
+(WAITING). After restoration, rerun this live gate with the saved PR HEAD/Base
+and external evidence; do not use the restored local HEAD as the PR candidate.
+Only then run the guarded actor from the snapshot:
 
 ```bash
 python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 \
