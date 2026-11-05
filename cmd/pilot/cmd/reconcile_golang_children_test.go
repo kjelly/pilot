@@ -230,6 +230,30 @@ func (w *childWorld) fakeSSH(h sshHooks) {
 	fakeTool(t, "ssh", body)
 }
 
+// lateCloseDialer is the real dialer whose connections close after a delay.
+type lateCloseDialer struct {
+	*sshdial.Dialer
+	delay time.Duration
+}
+
+func (d *lateCloseDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	c, err := d.Dialer.DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	return &lateCloseConn{Conn: c, delay: d.delay}, nil
+}
+
+type lateCloseConn struct {
+	net.Conn
+	delay time.Duration
+}
+
+func (c *lateCloseConn) Close() error {
+	time.Sleep(c.delay)
+	return c.Conn.Close()
+}
+
 // childRow is one child process stalling (or misbehaving) and what the preview
 // must do about it.
 type childRow struct {
@@ -240,7 +264,14 @@ type childRow struct {
 	// realDialer runs the real sshdial.Dialer against a fake ssh on PATH, as
 	// the operator's pilot does; otherwise the dialer is the in-process fake.
 	realDialer bool
-	setup      func(t *testing.T, w *childWorld)
+	// lateClose, with realDialer, makes closing a tunnel connection take this
+	// long before ssh is killed: the end of a connection that net/http leaves
+	// to a goroutine of its own then comes after the preview returned, which
+	// is what pilot's os.Exit does to it. Without the delay that goroutine and
+	// the return race, and a row about it passes on code that has the defect
+	// about one run in four.
+	lateClose time.Duration
+	setup     func(t *testing.T, w *childWorld)
 	// signal, when set, is sent to the process once pid.<signalAt> exists, and
 	// the elapsed time is measured from then.
 	signal   syscall.Signal
@@ -297,6 +328,7 @@ func childRows() []childRow {
 		}
 	}
 	deadline := []error{context.DeadlineExceeded}
+	const lateClose = 500 * time.Millisecond
 	// The Ansible tools the preview has run by the time it reads over ssh.
 	inventoryAndHosts := []string{"ansible-inventory", "ansible"}
 	var rows []childRow
@@ -431,7 +463,7 @@ func childRows() []childRow {
 			// preview returns, not later by that goroutine (or never, once
 			// pilot exits).
 			name: "C13_a_logout_handshake_that_never_completes_leaves_no_tunnel",
-			gate: "check-server", timeout: "4s", realDialer: true, extra: time.Second,
+			gate: "check-server", timeout: "4s", realDialer: true, lateClose: lateClose, extra: time.Second,
 			setup: func(t *testing.T, w *childWorld) {
 				w.f.hang = map[string]bool{"ping": true}
 				shortLogout(t)
@@ -444,7 +476,7 @@ func childRows() []childRow {
 			// The same with Ctrl-C once the server has the ping (live arm L2:
 			// httpd stopped after the login, one Ctrl-C).
 			name: "C13b_ctrl-c_then_a_logout_handshake_that_never_completes",
-			gate: "check-server", timeout: "10m", realDialer: true, extra: time.Second,
+			gate: "check-server", timeout: "10m", realDialer: true, lateClose: lateClose, extra: time.Second + lateClose,
 			signal: syscall.SIGINT, signalAt: "pinged",
 			setup: func(t *testing.T, w *childWorld) {
 				w.f.hang = map[string]bool{"ping": true}
@@ -467,7 +499,7 @@ func childRows() []childRow {
 			// The login's own handshake never completes: the deadline ends the
 			// login while net/http still dials.
 			name: "C14_a_login_handshake_that_never_completes_leaves_no_tunnel",
-			gate: "login", timeout: "4s", realDialer: true,
+			gate: "login", timeout: "4s", realDialer: true, lateClose: lateClose,
 			setup: func(t *testing.T, w *childWorld) {
 				w.fakeSSH(sshHooks{tunnel: w.frozenTunnel(1)})
 			},
@@ -544,6 +576,12 @@ func runChildRow(t *testing.T, row childRow, pids string) {
 	var targets *[]sshdial.Target
 	if !row.realDialer {
 		targets = withFakeDialer(t, f)
+	} else if row.lateClose > 0 {
+		prev := newGolangDialer
+		newGolangDialer = func(target sshdial.Target) golangDialer {
+			return &lateCloseDialer{Dialer: &sshdial.Dialer{Target: target}, delay: row.lateClose}
+		}
+		t.Cleanup(func() { newGolangDialer = prev })
 	}
 	dir := golangWorkspace(t, strings.Replace(captureRoster, "%s", "/bin/sh", 1), nil)
 	row.setup(t, &childWorld{t: t, pids: pids, f: f})
