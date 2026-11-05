@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest import mock
+import wazuh_hermetic as hermetic
 import wazuh_transaction_test as existing
 import wazuh_reader_model as native_model
 
@@ -755,6 +756,10 @@ class ReaderInspectionTests(unittest.TestCase):
             attributes['st_uid']=0;attributes['st_mode']=info.st_mode & ~0o022
             return types.SimpleNamespace(**attributes)
         env['OWNER']=owner;env['pathlib']=types.SimpleNamespace(Path=path,PurePath=__import__('pathlib').PurePath)
+        # The helper's owned-action profile hard-codes the default spool path in the
+        # rendered config text; the coordinator canonicalizes every path a config names.
+        # Model that default host tree (the path and its ancestors) as absent instead of probing the real host.
+        self.enterContext(hermetic.absent('/var/spool/rsyslog'))
         self.enterContext(mock.patch.object(Path,'stat',trusted_metadata))
         self.enterContext(mock.patch.object(env['subprocess'],'run',native))
         state={'paths':[str(source)],'images':{},'docker_root':str(docker)}

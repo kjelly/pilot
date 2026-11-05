@@ -457,13 +457,18 @@ class PreviewModuleTests(unittest.TestCase):
         proc=root/'proc';(proc/'self').mkdir(parents=True)
         info=root.stat();(proc/'self/mountinfo').write_text(f'1 0 {os.major(info.st_dev)}:{os.minor(info.st_dev)} / / rw - ext4 model rw\n')
         installed=root/'libexec';sbin=root/'sbin';sbin.mkdir()
-        old=subprocess.check_output(['git','show','f37f37d8dd2813597352f0e574e4d2ab97c4ef7f:playbooks/apply/files/wazuh-transaction.py'],cwd=REPO)
-        (sbin/'coordinator').write_bytes(old);(sbin/'coordinator').chmod(0o700)
+        # Stale installed assets from before the preview-tools API. Their bytes are
+        # synthetic and self-contained: a Git revision of this branch is not reachable
+        # from a shallow or squashed history, so the test may not read one. The stale
+        # coordinator would reject the desired CLI exactly as the old one did.
+        def stale(name):
+            return ('#!/usr/bin/python3\n# stale installed '+name+': must survive check mode byte-for-byte\n'
+                    'raise SystemExit("error: unrecognized arguments: --preview-tools-json")\n').encode()
+        (sbin/'coordinator').write_bytes(stale('coordinator'));(sbin/'coordinator').chmod(0o700)
         if not fresh:
             installed.mkdir(mode=0o755)
             for name in NAMES:
-                data=subprocess.check_output(['git','show','f37f37d8dd2813597352f0e574e4d2ab97c4ef7f:playbooks/files/'+name],cwd=REPO)
-                (installed/name).write_bytes(data);(installed/name).chmod(0o755)
+                (installed/name).write_bytes(stale(name));(installed/name).chmod(0o755)
         def snapshot():
             return {str(path.relative_to(root)):{'sha':hashlib.sha256(path.read_bytes()).hexdigest(),'inode':path.stat().st_ino,
                 'uid':path.stat().st_uid,'gid':path.stat().st_gid,'mode':path.stat().st_mode} for path in [sbin/'coordinator',*(installed.iterdir() if installed.exists() else [])]}

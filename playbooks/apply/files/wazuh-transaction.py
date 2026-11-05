@@ -2550,7 +2550,7 @@ class ReaderUnits:
             if info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022:
                 raise Refused('unsafe reader unit fragment')
             files[str(filename)] = digest(filename)
-        for policy in (Path('/etc/apparmor.d/usr.sbin.rsyslogd'), Path('/etc/apparmor.d/local/usr.sbin.rsyslogd')):
+        for policy in (ReaderPrestart.POLICY / 'usr.sbin.rsyslogd', ReaderPrestart.POLICY / 'local/usr.sbin.rsyslogd'):
             if policy.exists() or policy.is_symlink():
                 path_shape(policy, 'file')
                 if policy.stat().st_uid != 0 or policy.stat().st_mode & 0o022:
@@ -2726,6 +2726,7 @@ class Reader:
     PROFILE = Path('/etc/rsyslog.d/pilot-wazuh/profile.json')
     CONFIG = Path('/etc/rsyslog.d/31-pilot-wazuh.conf')
     CHECKER = Path('/usr/local/libexec/pilot-wazuh-heartbeat')
+    RSYSLOG = Path('/etc/rsyslog.conf')
     def __init__(self, central, checker_hash='', request=None, ack=False, preview=None):
         self.preview_tools=preview
         self.t, self.r = central, central.r
@@ -2750,7 +2751,7 @@ class Reader:
     def observe(self, loaded=True):
         # Old journals and fresh unmanaged hosts need no adjacent helper.
         resources = any(path.exists() or path.is_symlink() for path in
-                        (self.PROFILE, self.CONFIG, self.SPOOL, Path('/etc/rsyslog.conf')))
+                        (self.PROFILE, self.CONFIG, self.SPOOL, self.RSYSLOG))
         if not self.checker_hash:
             if resources:
                 raise Refused('configured reader requires the pinned inspection helper')

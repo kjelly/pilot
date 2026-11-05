@@ -3,9 +3,11 @@
 Native command harnesses are explicitly separate from VM/systemd evidence.
 Cold-backup recovery tests use real GNU tar and actual changed filesystem data.
 """
+import wazuh_hermetic  # noqa: F401  (tripwire first: no harness may touch real host state)
 import importlib.util
 import contextlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -26,6 +28,7 @@ def load(name, filename):
 
 
 w = load('wazuh_transaction', 'playbooks/apply/files/wazuh-transaction.py')
+HERMETIC_ROOT = wazuh_hermetic.sandbox(w)
 apt = load('apt_exact_stage', 'playbooks/apply/files/apt-exact-stage.py')
 
 # No test creates host mounts. Feed the real mountinfo decoder an explicit
@@ -34,6 +37,48 @@ apt = load('apt_exact_stage', 'playbooks/apply/files/apt-exact-stage.py')
 RealMountTable = w.MountTable
 MOUNT_NAMESPACE = {'text': '1 0 8:1 / / rw - ext4 /dev/synthetic rw\n'}
 w.MountTable = lambda text=None: RealMountTable(MOUNT_NAMESPACE['text'] if text is None else text)
+
+
+class HermeticHarnessTests(unittest.TestCase):
+    """The harnesses never reach real host state, even when run as root (D5 of PR #258)."""
+
+    def test_the_tripwire_is_enforcing(self):
+        self.assertEqual(wazuh_hermetic.MODE, 'enforce', 'PILOT_WAZUH_HERMETIC=record is for surveys only')
+
+    def test_every_host_state_access_is_refused_before_it_reaches_the_host(self):
+        for operation in (lambda: Path('/var/spool/rsyslog/pilot-wazuh').exists(),
+                          lambda: open('/etc/hosts').read(),
+                          lambda: os.stat('/var/ossec/etc/client.keys'),
+                          lambda: os.listdir('/etc/rsyslog.d'),
+                          lambda: Path('/etc/apparmor.d/usr.sbin.rsyslogd').read_bytes(),
+                          # Mutations of host state are refused too: as root they would succeed.
+                          lambda: os.mkdir('/var/backups/pilot/hermetic-probe'),
+                          lambda: Path('/usr/local/libexec/pilot-wazuh-heartbeat').write_text('x'),
+                          lambda: os.rename('/tmp/definitely-absent', '/opt/pilot/probe')):
+            with self.assertRaises(wazuh_hermetic.HostStateTouched):
+                operation()
+        # Control: ordinary temporary files are not host state.
+        with tempfile.TemporaryDirectory() as temporary:
+            (Path(temporary) / 'x').write_text('ok')
+            self.assertEqual((Path(temporary) / 'x').read_text(), 'ok')
+
+    def test_default_coordinator_paths_are_redirected_to_a_private_tree(self):
+        redirected = {'ROOT': w.ROOT, 'Reader.SPOOL': w.Reader.SPOOL, 'Reader.PROFILE': w.Reader.PROFILE,
+                      'Reader.CONFIG': w.Reader.CONFIG, 'Reader.CHECKER': w.Reader.CHECKER,
+                      'Reader.RSYSLOG': w.Reader.RSYSLOG}
+        for name in ('POLICY', 'CONFIG', 'FEATURES', 'CACHE'):
+            redirected['ReaderPrestart.' + name] = getattr(w.ReaderPrestart, name)
+        for name, value in redirected.items():
+            self.assertIsNone(wazuh_hermetic.offending(value), name + ' still names real host state')
+            self.assertTrue(str(value).startswith(str(HERMETIC_ROOT)), name)
+            self.assertFalse(Path(value).exists(), name + ' must start absent like a bare host')
+
+    def test_modeled_absent_paths_never_reach_the_host(self):
+        with wazuh_hermetic.absent('/var/spool/rsyslog'):
+            with self.assertRaises(FileNotFoundError):
+                Path('/var/spool/rsyslog/pilot-wazuh').stat()
+        with self.assertRaises(wazuh_hermetic.HostStateTouched):
+            Path('/var/spool/rsyslog/pilot-wazuh').stat()
 
 
 class PolicyTests(unittest.TestCase):
@@ -651,10 +696,11 @@ class BackendTests(unittest.TestCase):
         class Native(Commands):
             def run(self, argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 0, 'hold ok installed\t4.14.1-1\tamd64', '')
-        agent = w.Agent('Debian', runner=Native())
-        self.assertEqual(agent.installed(), '4.14.1-1')
         with tempfile.TemporaryDirectory() as temporary:
-            agent.root = Path(temporary) / 'private'
+            # The journal path is fixed at construction: assigning agent.root
+            # afterwards left it on the real host ledger.
+            agent = w.Agent('Debian', runner=Native(), root=Path(temporary) / 'private')
+            self.assertEqual(agent.installed(), '4.14.1-1')
             self.assertFalse(agent.check('4.14.9')['change'])
 
     def test_known_absent_and_unknown_query_failure_are_distinct(self):
