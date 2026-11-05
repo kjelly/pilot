@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"math/big"
 	"net"
@@ -242,6 +243,7 @@ type fakeIPA struct {
 	t        *testing.T
 	srv      *httptest.Server
 	ca       *x509.CertPool
+	caPEM    []byte // the CA certificate, as sshdial.Dialer.CA reads it from /etc/ipa/ca.crt
 	mu       sync.Mutex
 	methods  []string
 	bodies   []string
@@ -295,7 +297,7 @@ func newFakeIPA(t *testing.T, reader string) *fakeIPA {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeIPA{t: t, ca: x509.NewCertPool(), reader: reader, dir: dir, stop: make(chan struct{})}
+	f := &fakeIPA{t: t, ca: x509.NewCertPool(), caPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), reader: reader, dir: dir, stop: make(chan struct{})}
 	f.ca.AddCert(caCert)
 	f.srv = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
 	f.srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}

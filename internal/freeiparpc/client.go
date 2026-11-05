@@ -178,6 +178,11 @@ func (t *originTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
+// CloseIdleConnections closes the connections the client keeps open between
+// requests: with the SSH dialer, the ssh process of each. Call it when the
+// client is done; a request in flight is not touched.
+func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
+
 // Stats returns the counters so far.
 func (c *Client) Stats() Stats {
 	c.mu.Lock()

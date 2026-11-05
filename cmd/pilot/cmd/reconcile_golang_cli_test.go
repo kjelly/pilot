@@ -666,7 +666,7 @@ func TestReconcileGolangExitCodes(t *testing.T) {
 // so (the Ansible engine's is per ansible-playbook call).
 func TestReconcileTimeoutHelpNamesBothMeanings(t *testing.T) {
 	usage := reconcileCmd.Flags().Lookup("timeout").Usage
-	for _, want := range []string{"ansible-playbook", "--engine golang", "ansible-vault", "FreeIPA"} {
+	for _, want := range []string{"ansible-playbook", "--engine golang", "ansible-inventory", "--list-hosts", "ansible-vault", "FreeIPA"} {
 		if !strings.Contains(usage, want) {
 			t.Errorf("--timeout help %q does not mention %q", usage, want)
 		}

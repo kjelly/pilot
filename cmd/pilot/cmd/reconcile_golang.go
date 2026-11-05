@@ -139,12 +139,20 @@ func golangPreview(cmd *cobra.Command) error {
 	if err != nil {
 		return err // gate: runtime-prepare
 	}
-	// Ctrl-C and SIGTERM end the preview like --timeout does: the vault read
-	// is killed and the session logged out. The first signal cancels; the
-	// second, with the default action restored, ends pilot at once. Only the
-	// Go preview: the Ansible engine's handlers do not all observe their
-	// context (see withServiceCommandSignals).
-	sigCtx, stop := signal.NotifyContext(withDeployAnsibleRuntime(cmd.Context(), runtime), os.Interrupt, syscall.SIGTERM)
+	// Ctrl-C, SIGTERM and SIGHUP end the preview like --timeout does: every
+	// child process is killed with what it started and the session logged
+	// out (spec §2.5). The first signal cancels; the second, with the default
+	// action restored, ends pilot at once. Only the Go preview: the Ansible
+	// engine's handlers do not all observe their context (see
+	// withServiceCommandSignals). The children run in their own session
+	// (withIsolatedChildren), so the terminal's signals reach only pilot,
+	// which is why SIGHUP is handled too, unless it was ignored at start
+	// (nohup): Notify would turn that ignore off.
+	signals := []os.Signal{os.Interrupt, syscall.SIGTERM}
+	if !signal.Ignored(syscall.SIGHUP) {
+		signals = append(signals, syscall.SIGHUP)
+	}
+	sigCtx, stop := signal.NotifyContext(withIsolatedChildren(withDeployAnsibleRuntime(cmd.Context(), runtime)), signals...)
 	defer stop()
 	context.AfterFunc(sigCtx, stop)
 	ctx, cancel := context.WithTimeout(sigCtx, timeout)
@@ -234,6 +242,9 @@ func golangPreview(cmd *cobra.Command) error {
 	if err != nil {
 		return err // gate: client-new
 	}
+	// Last of the deferred calls, so after the logout: no ssh -W is left when
+	// the preview returns (spec §2.2 step 9).
+	defer client.CloseIdleConnections()
 	if err := client.Login(ctx, desired.Principal, password); err != nil {
 		return fmt.Errorf("登入 FreeIPA: %w", err) // gate: login
 	}

@@ -3,6 +3,13 @@
 // remote commands read the server's FQDN and CA certificate and hold an
 // exclusive lock. Nothing caller-supplied ever reaches a remote command, and
 // no local port is opened (docs/superpowers/plans/2026-10-15-freeipa-go-ssh-reconcile.md §3).
+//
+// Every ssh runs through childproc.Isolate (the only place one starts is
+// start): in its own session, so with no controlling terminal and no stdin
+// but the tunnel's, which also holds for the ProxyJump hops it starts, and
+// killed together with them. A hop that needs a password or a host key
+// confirmation fails instead of prompting (OpenSSH does not pass BatchMode to
+// a hop).
 package sshdial
 
 import (
@@ -22,6 +29,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kjelly/pilot/internal/childproc"
 )
 
 // DefaultDestination is where the server side of the tunnel connects: the
@@ -189,9 +198,14 @@ type process struct {
 	err    error
 }
 
+// start is the only place an ssh process is started (a lint of this package
+// holds it to that): through childproc.Isolate, so ssh and the processes it
+// starts end together and a process that kept ssh's stderr cannot hold Wait
+// for more than childproc.WaitDelay.
 func start(cmd *exec.Cmd) (*process, error) {
 	p := &process{cmd: cmd, stderr: &boundedBuffer{n: 4096}, done: make(chan struct{})}
 	cmd.Stderr = p.stderr
+	childproc.Isolate(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("sshdial: start ssh: %w", err)
 	}
@@ -209,6 +223,11 @@ func (p *process) failure() error {
 	if p.err == nil {
 		return nil
 	}
+	if errors.Is(p.err, exec.ErrWaitDelay) {
+		// ssh exited 0, but a process it started (a ProxyJump hop, a
+		// ProxyCommand) kept its stderr open: Wait gave up on the pipe.
+		return fmt.Errorf("sshdial: ssh exited, but %w for more than %s (a ProxyJump hop or a ProxyCommand?): %w", childproc.ErrHelperKeptOutput, childproc.WaitDelay, p.err)
+	}
 	code := -1
 	var ee *exec.ExitError
 	if errors.As(p.err, &ee) {
@@ -217,9 +236,14 @@ func (p *process) failure() error {
 	return classify(code, p.stderr.String())
 }
 
+// kill ends ssh and everything it started that stayed in its process group,
+// and waits until Wait has returned. Once Wait has reaped ssh nothing is
+// signalled: the group id may have been given to an unrelated process.
 func (p *process) kill() {
-	if p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
+	select {
+	case <-p.done:
+	default:
+		_ = childproc.KillGroup(p.cmd)
 	}
 	<-p.done
 }
@@ -318,7 +342,10 @@ func (c *conn) Read(b []byte) (int, error) {
 		case <-time.After(5 * time.Second):
 			return n, err
 		}
-		if f := c.p.failure(); f != nil {
+		// A process the tunnel's ssh started that still holds ssh's stderr is
+		// not a failure of the data stream, which is a direct pipe and has
+		// ended: the server closed the connection.
+		if f := c.p.failure(); f != nil && !errors.Is(f, childproc.ErrHelperKeptOutput) {
 			return n, f
 		}
 	}
@@ -369,7 +396,7 @@ func (d *Dialer) run(ctx context.Context, command string) ([]byte, error) {
 	}
 	if f := p.failure(); f != nil {
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("sshdial: %s: %w", command, ctx.Err())
+			return nil, fmt.Errorf("sshdial: %s: %w (%w)", command, ctx.Err(), f)
 		}
 		return nil, fmt.Errorf("sshdial: %s: %w", command, f)
 	}

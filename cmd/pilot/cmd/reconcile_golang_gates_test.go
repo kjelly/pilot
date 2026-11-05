@@ -391,7 +391,8 @@ func TestReconcileGolangPreviewEntryGates(t *testing.T) {
 
 // --timeout bounds the whole preview (spec §2.1), so also an
 // ansible-vault that never ends: the read fails with the deadline, the
-// fake ansible-vault is gone, and nothing is dialed. The margins are wide on
+// fake ansible-vault and the helper it started (a vault password client script
+// holding stderr) are gone, and nothing is dialed. The margins are wide on
 // purpose: a loaded CI runner must not turn a slow start into a failure, while
 // a read that nothing stops still outlasts the bound by half a minute.
 func TestReconcileGolangPreviewVaultReadStopsAtTheTimeout(t *testing.T) {
@@ -405,9 +406,10 @@ func TestReconcileGolangPreviewVaultReadStopsAtTheTimeout(t *testing.T) {
 			golangWorkspace(t, strings.Replace(captureRoster, "%s", "/bin/sh", 1), nil)
 			writeEncrypted(t, filepath.Join(".vault", tc.file))
 			started := filepath.Join(t.TempDir(), "started")
+			helperPID := filepath.Join(t.TempDir(), "helper")
 			// Long enough that a read nothing stops would finish after
 			// the assertion on elapsed time below.
-			golangFakeVault(t, "echo $$ > '"+started+"'\nexec sleep 60")
+			golangFakeVault(t, "sleep 60 >/dev/null </dev/null &\necho $! > '"+helperPID+"'\necho $$ > '"+started+"'\nexec sleep 60")
 			begin := time.Now()
 			out, err := runGolangPreview(t, "--timeout", "5s")
 			elapsed := time.Since(begin)
@@ -427,6 +429,20 @@ func TestReconcileGolangPreviewVaultReadStopsAtTheTimeout(t *testing.T) {
 			}
 			if err := syscall.Kill(n, 0); !errors.Is(err, syscall.ESRCH) {
 				t.Fatalf("ansible-vault (pid %d) outlived the preview: kill 0 = %v", n, err)
+			}
+			helper, err := os.ReadFile(helperPID)
+			if err != nil {
+				t.Fatalf("the helper never started: %v", err)
+			}
+			hn, err := strconv.Atoi(strings.TrimSpace(string(helper)))
+			if err != nil {
+				t.Fatalf("helper pid file: %q: %v", helper, err)
+			}
+			t.Cleanup(func() { _ = syscall.Kill(hn, syscall.SIGKILL) })
+			for deadline := time.Now().Add(time.Second); childAlive(hn); time.Sleep(10 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					t.Fatalf("the helper of ansible-vault (pid %d) outlived the preview", hn)
+				}
 			}
 			if len(*targets) != 0 {
 				t.Fatalf("built a tunnel to %+v", *targets)

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+
+	"github.com/kjelly/pilot/internal/childproc"
 )
 
 // fakeVaultPrompt stands in for ansible-vault with no vault secret: like
@@ -356,11 +358,11 @@ func TestViewVaultFileAmbientNamesAHelperHoldingTheOutput(t *testing.T) {
 		})
 		start := time.Now()
 		out, err := ViewVaultFileAmbient(context.Background(), vault, nil)
-		if !errors.Is(err, exec.ErrWaitDelay) || !strings.Contains(err.Error(), "kept its output open") || out != nil {
+		if !errors.Is(err, exec.ErrWaitDelay) || !errors.Is(err, childproc.ErrHelperKeptOutput) || !strings.Contains(err.Error(), "kept its output open") || out != nil {
 			t.Fatalf("out = %q, err = %v after %s", out, err, time.Since(start))
 		}
-		if elapsed := time.Since(start); elapsed < vaultViewWaitDelay-500*time.Millisecond || elapsed > 10*time.Second {
-			t.Fatalf("failed after %s, want about the %s wait delay", elapsed, vaultViewWaitDelay)
+		if elapsed := time.Since(start); elapsed < childproc.WaitDelay-500*time.Millisecond || elapsed > 10*time.Second {
+			t.Fatalf("failed after %s, want about the %s wait delay", elapsed, childproc.WaitDelay)
 		}
 		if strings.Contains(err.Error(), "Sample-Vault-Secret-1") {
 			t.Fatalf("the error shows the output: %v", err)

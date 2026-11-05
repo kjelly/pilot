@@ -14,10 +14,10 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
-	"time"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/kjelly/pilot/internal/childproc"
 )
 
 // ansibleVaultView decrypts path's ansible-vault-encrypted content into
@@ -206,12 +206,6 @@ var ErrNoVaultSecret = errors.New("no vault secret is configured: set ANSIBLE_VA
 // file.
 var ErrVaultDecryptFailed = errors.New("the configured vault secret does not decrypt the file")
 
-// vaultViewWaitDelay bounds how long ViewVaultFileAmbient waits for
-// ansible-vault's pipes to drain after it has exited or been killed: a
-// helper it started (a vault password client script) may have inherited
-// them and outlived it.
-const vaultViewWaitDelay = 2 * time.Second
-
 // ViewVaultFileAmbient decrypts the ansible-vault file at path into memory,
 // finding the secret the way ansible-playbook does when pilot passes no
 // --vault-password-file: ANSIBLE_VAULT_PASSWORD_FILE or ansible.cfg's
@@ -229,16 +223,17 @@ const vaultViewWaitDelay = 2 * time.Second
 // script that needs a terminal is unsupported and fails the same closed
 // way.
 //
-// The read is bounded by ctx: when ctx ends, ansible-vault and every
+// The read is bounded by ctx the way every child of the Go preview is
+// (childproc.Isolate, spec §2.5): when ctx ends, ansible-vault and every
 // helper in its process group are killed and the error wraps ctx.Err().
 //
 // ansible-vault can also end well while a process it started (a vault
 // password client script) still holds its output open: after
-// vaultViewWaitDelay the read fails with an error wrapping exec.ErrWaitDelay
-// and returns nothing, since what arrived so far may be partial. Known limit:
-// that helper is not killed. Wait has already reaped ansible-vault, so
-// signalling its process group could reach an unrelated process that was
-// given the same id.
+// childproc.WaitDelay the read fails with an error wrapping
+// childproc.ErrHelperKeptOutput and exec.ErrWaitDelay and returns nothing,
+// since what arrived so far may be partial. Known limit: that helper is not
+// killed. Wait has already reaped ansible-vault, so signalling its process
+// group could reach an unrelated process that was given the same id.
 func ViewVaultFileAmbient(ctx context.Context, path string, env []string) ([]byte, error) {
 	if err := validateSecretSourceFile(path); err != nil {
 		return nil, err
@@ -253,20 +248,17 @@ func ViewVaultFileAmbient(ctx context.Context, path string, env []string) ([]byt
 	}
 	// A new session: no controlling terminal to prompt on, and the process
 	// group (the session's) holds ansible-vault and everything it starts.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = vaultViewWaitDelay
+	childproc.Isolate(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, fmt.Errorf("ansible-vault view %s: %w", path, ctxErr)
-		}
-		if errors.Is(err, exec.ErrWaitDelay) {
-			// Not classified from stderr and never the output: ansible-vault
-			// exited 0, so its stderr says nothing about the failure.
-			return nil, fmt.Errorf("ansible-vault view %s exited, but a process it started (a vault password client script?) kept its output open for more than %s: %w", path, vaultViewWaitDelay, err)
+		if cause := childproc.Cause(ctx, err); ctx.Err() != nil || errors.Is(err, exec.ErrWaitDelay) {
+			// Not classified from stderr and never the output: after the
+			// deadline the stderr is a killed process's, and when the wait for
+			// the pipes ran out ansible-vault exited 0, so its stderr says
+			// nothing about the failure.
+			return nil, fmt.Errorf("ansible-vault view %s: %w", path, cause)
 		}
 		return nil, classifyVaultView(path, err, stderr.String())
 	}
