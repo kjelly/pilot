@@ -1,0 +1,281 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "top",
+          "person",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "inetuser",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "ipaNTUserAttrs"
+        ],
+        "cn": [
+          "Administrator"
+        ],
+        "gecos": [
+          "Administrator"
+        ],
+        "ipauniqueid": [
+          "4b8ce61e-c862-11f1-aaf9-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-500"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261105023537Z"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20270203023537Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261105023537Z"
+          }
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AAJ56+tqcm9vdC9hZG1pbkBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "krblastfailedauth": [
+          {
+            "__datetime__": "20261016052101Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "gidnumber": [
+          "1927600000"
+        ],
+        "loginshell": [
+          "/bin/bash"
+        ],
+        "homedirectory": [
+          "/home/admin"
+        ],
+        "krbprincipalname": [
+          "admin@IPA.PILOT.INTERNAL",
+          "root@IPA.PILOT.INTERNAL"
+        ],
+        "uidnumber": [
+          "1927600000"
+        ],
+        "uid": [
+          "admin"
+        ],
+        "sn": [
+          "Administrator"
+        ],
+        "krbcanonicalname": [
+          "admin@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "admins",
+          "trust admins"
+        ],
+        "dn": "uid=admin,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "No Key"
+        ],
+        "displayname": [
+          "No Key"
+        ],
+        "initials": [
+          "NK"
+        ],
+        "gecos": [
+          "No Key"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "0e08f2f0-c863-11f1-8f95-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=pw-nokey,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1003"
+        ],
+        "gidnumber": [
+          "1927600003"
+        ],
+        "givenname": [
+          "No"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "homedirectory": [
+          "/home/pw-nokey"
+        ],
+        "krbprincipalname": [
+          "pw-nokey@IPA.PILOT.INTERNAL"
+        ],
+        "uidnumber": [
+          "1927600003"
+        ],
+        "uid": [
+          "pw-nokey"
+        ],
+        "sn": [
+          "Key"
+        ],
+        "krbcanonicalname": [
+          "pw-nokey@IPA.PILOT.INTERNAL"
+        ],
+        "mail": [
+          "pw-nokey@ipa.pilot.internal"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=pw-nokey,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "Reset Pending"
+        ],
+        "displayname": [
+          "Reset Pending"
+        ],
+        "initials": [
+          "RP"
+        ],
+        "gecos": [
+          "Reset Pending"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "0fad1082-c863-11f1-872b-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=pw-pending,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1004"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261015063841Z"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20261015063841Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261015063841Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AALxdNBqcm9vdC9hZG1pbkBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "gidnumber": [
+          "1927600004"
+        ],
+        "givenname": [
+          "Reset"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "homedirectory": [
+          "/home/pw-pending"
+        ],
+        "krbprincipalname": [
+          "pw-pending@IPA.PILOT.INTERNAL"
+        ],
+        "uidnumber": [
+          "1927600004"
+        ],
+        "uid": [
+          "pw-pending"
+        ],
+        "sn": [
+          "Pending"
+        ],
+        "krbcanonicalname": [
+          "pw-pending@IPA.PILOT.INTERNAL"
+        ],
+        "mail": [
+          "pw-pending@ipa.pilot.internal"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=pw-pending,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 3,
+    "truncated": true,
+    "messages": [
+      {
+        "type": "warning",
+        "name": "SearchResultTruncated",
+        "message": "Search result has been truncated: Configured administrative server limit exceeded",
+        "code": 13017,
+        "data": {
+          "reason": "Configured administrative server limit exceeded"
+        }
+      }
+    ],
+    "summary": "3 users matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

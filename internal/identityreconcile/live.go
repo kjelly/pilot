@@ -47,7 +47,8 @@ type LiveGroup struct {
 
 // nonPosixClasses is the captured object class set of a non-POSIX group;
 // a POSIX group adds posixgroup and may add ipantgroupattrs. Anything
-// else (external groups among them, not yet captured) is unrecognized.
+// else is unrecognized, external groups among them (non-POSIX plus
+// ipaexternalgroup, captured as K2): Phase 1 blocks them either way.
 var (
 	nonPosixClasses = []string{"top", "groupofnames", "nestedgroup", "ipausergroup", "ipaobject"}
 	posixExtra      = map[string]bool{"posixgroup": true, "ipantgroupattrs": true}

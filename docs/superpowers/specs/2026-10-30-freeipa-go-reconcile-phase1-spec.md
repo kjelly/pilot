@@ -2,7 +2,7 @@
 
 日期：2026-10-30。對應計畫：`docs/superpowers/plans/2026-10-15-freeipa-go-ssh-reconcile.md` Phase 1。前一階段：`docs/superpowers/specs/2026-10-16-freeipa-go-reconcile-phase0-contract.md`（下稱 P0）。
 
-狀態：實作中（2026-10-30）。已實作：入口與旗標、vault 與憑證、SSH 目標推導、stage gate、adapter、observer、planner、plan JSON、spec row 對應檢查，以及 §10.3 driver 的程式碼（尚未實跑）。未完成：§9 的 K1、K3、K4 擷取（observer 中依賴它們的判讀先依本文件實作，擷取後以 fixture 鎖住或修正），以及 §10.3 的實跑與 evidence。擷取結果若推翻本文件的任何決定，先改本文件再改程式。
+狀態：實作中（2026-11-05）。已實作：入口與旗標、vault 與憑證、SSH 目標推導、stage gate、adapter、observer、planner、plan JSON、spec row 對應檢查，以及 §10.3 driver 的程式碼（尚未實跑）。§9 的 K1–K5 已擷取並以 fixture 鎖住（2026-11-05 擷取 K1–K4，結果沒有推翻本文件的決定）。未完成：§10.3 的實跑與 evidence。
 
 本文件不提供操作 SOP。文中的指令與旗標是要實作的介面，不是已實跑的步驟。
 
@@ -188,17 +188,17 @@ Go 比 playbook 嚴格的輸入檢查（在建立 tunnel 前失敗）：
 | 讀取 | 用途 |
 |---|---|
 | `user_find`，`all: true` | 使用者屬性、`nsaccountlock`、密碼狀態、SSH key、讀取者檢查（`memberof_group`） |
-| `user_find`，`all: true`、`preserved: true` | 找出與 roster 同名的 preserved 使用者（§9 K1 擷取後定案） |
+| `user_find`，`all: true`、`preserved: true` | 找出與 roster 同名的 preserved 使用者。K1：預設讀取不列 preserved 使用者，這次讀取只列 preserved 使用者，每筆 `preserved: true`、`nsaccountlock: true`、沒有 `memberof_group` |
 | `group_find`，`all: true` | 群組屬性、type、直接成員、history marker |
 
-`Find` 已帶 `sizelimit=0`、`timelimit=0`，`truncated` 或 count 不符即失敗（P0 §2）。observer 一律帶 `all: true`；測試的 fake server 要斷言收到的選項，不只依 method 回 fixture（計畫 Phase 1 find 讀取契約）。
+`Find` 已帶 `sizelimit=0`、`timelimit=0`，`truncated` 或 count 不符即失敗（P0 §2）。K3：`sizelimit=0` 不受 FreeIPA 的 `ipasearchrecordslimit` 限制；389-ds 的 `nsslapd-sizelimit` 或 `nsslapd-lookthroughlimit` 低於資料量時，`user_find` 回 `truncated: true`，`group_find` 回 `SizeLimitExceeded`／`AdminLimitExceeded` 錯誤，都不會靜默少回，所以不需要分段讀取。observer 一律帶 `all: true`；測試的 fake server 要斷言收到的選項，不只依 method 回 fixture（計畫 Phase 1 find 讀取契約）。
 
 ### 6.3 判讀規則
 
 - 直接成員只讀 `group_find` 的 `member_user`、`member_group`；不讀 `user_find` 的 `memberof_group`（遞移，2026-10-27 擷取）。
 - 缺少成員屬性代表空集合，前提是讀取完整且讀取者已通過 D7；否則失敗（計畫 §4「未知欄位不可當成空值」）。
-- 群組 type：`objectclass` 含 `posixgroup` 為 posix；與擷取到的 nonposix 集合（`top`、`groupofnames`、`nestedgroup`、`ipausergroup`、`ipaobject`）相同為 nonposix；其他組合為「未辨識」。roster 宣告的群組 live type 未辨識時 `blocked`。external 群組尚未擷取（§9 K2），在擷取前一律落在「未辨識」。
-- 讀取者（D7）：以登入帳號名稱在 `user_find` 結果中找到該使用者，`memberof_group` 必須含 `admins`；找不到或不含即失敗。這需要 §9 K4 的擷取確認 admin 帳號在 `user_find` 的形態。
+- 群組 type：`objectclass` 含 `posixgroup` 為 posix；與擷取到的 nonposix 集合（`top`、`groupofnames`、`nestedgroup`、`ipausergroup`、`ipaobject`）相同為 nonposix；其他組合為「未辨識」。roster 宣告的群組 live type 未辨識時 `blocked`。external 群組（K2：nonposix 集合加 `ipaexternalgroup`）在 Phase 1 也落在「未辨識」。
+- 讀取者（D7）：以登入帳號名稱在 `user_find` 結果中找到該使用者，`memberof_group` 必須含 `admins`；找不到或不含即失敗。K4：不加篩選的讀取中 admin 的 `memberof_group` 含 `admins`（admin 沒有 `givenname`）。
 - history marker：`group_find` 的結果中，名稱為 `pilot-internal-history-g-<sha256>` 的群組。名稱的 hash 輸入與 `tasks/freeipa-group-history-marker.yml` 相同（roster 中的 `name` 原字串，不轉小寫），以 Jinja `hash('sha256')` 的實際輸出鎖住大小寫混合名稱的案例。
 - 只有 roster 列出的使用者與群組是 managed 物件；其他物件不出現在操作中（membership 撤銷除外，見 §5.2）。
 
@@ -249,7 +249,7 @@ Go 比 playbook 嚴格的輸入檢查（在建立 tunnel 前失敗）：
 | `uid_or_gid_change` | 使用者 `uidnumber`／`gidnumber`、群組 `gidnumber` 與宣告不同。會改變檔案擁有者；playbook 會直接送出，Go 先擋（P0 已定 Phase 2 先拒絕） |
 | `group_type_mismatch` | live type 與宣告不同。FreeIPA 不能就地轉換；playbook 不比較 type，會靜默保留 |
 | `group_type_unrecognized` | live `objectclass` 未辨識（§6.3） |
-| `external_group` | roster 宣告 `type: external`。尚未擷取（§9 K2） |
+| `external_group` | roster 宣告 `type: external`（live 形態見 §9 K2） |
 | `preserved_user` | roster 使用者與 preserved 使用者同名（§9 K1） |
 | `marker_collision` | marker 存在但描述不是 `pilot.group-history/v1 name=<name>`（與 playbook 的 marker 檢查相同，playbook 在此失敗） |
 | `case_collision` | 兩個 roster 群組或使用者名稱只差大小寫（validator 以原字串判斷唯一，FreeIPA 以小寫儲存） |
@@ -303,10 +303,10 @@ P0 §3 有三處與 playbook 不符，本文件以 playbook 為準（D8），並
 
 | # | 擷取 | 決定什麼 | 何時 |
 |---|---|---|---|
-| K1 | 一位 preserved 使用者：預設 `user_find --all` 是否列出；`preserved: true` 的結果與 `preserved` 欄位 | §6.2 第二次讀取的選項與 `preserved_user` 的判斷 | observer 實作前 |
-| K2 | 一個 external 群組的 `group_find --all` | 是否能從「未辨識」改為明確的 external | Phase 2 前（Phase 1 以未辨識處理即可） |
-| K3 | 在拋棄式 VM 上把 FreeIPA 的 `ipasearchrecordslimit` 與 389-ds 的 size／lookthrough limit 調低到資料量以下，`sizelimit=0` 的 `user_find`／`group_find` 回什麼 | 完整性規則：server 端限制是否一定反映成 `truncated: true` 或錯誤；若會靜默少回，observer 要改成分段讀取 | observer 實作前 |
-| K4 | 不加篩選的 `user_find --all`，包含 admin 帳號 | D7 的 `admins` 判斷，以及完整讀取時出現的系統帳號形態 | observer 實作前 |
+| K1 | 一位 preserved 使用者：預設 `user_find --all` 是否列出；`preserved: true` 的結果與 `preserved` 欄位 | §6.2 第二次讀取的選項與 `preserved_user` 的判斷 | **已擷取（2026-11-05）**：預設讀取不列；`preserved: true` 只列 preserved 使用者（不含 active），每筆 `preserved: true`。`TestPreservedUsersNeedTheirOwnRead` |
+| K2 | 一個 external 群組的 `group_find --all` | 是否能從「未辨識」改為明確的 external | **已擷取（2026-11-05）**：objectclass 為 nonposix 集合加 `ipaexternalgroup`，沒有 `gidnumber`。Phase 1 仍視為未辨識（`TestExternalGroupClasses`、`TestCapturedExternalGroupIsBlocked`）；Phase 2 可據此辨識 |
+| K3 | 在拋棄式 VM 上把 FreeIPA 的 `ipasearchrecordslimit` 與 389-ds 的 size／lookthrough limit 調低到資料量以下，`sizelimit=0` 的 `user_find`／`group_find` 回什麼 | 完整性規則：server 端限制是否一定反映成 `truncated: true` 或錯誤；若會靜默少回，observer 要改成分段讀取 | **已擷取（2026-11-05）**：151 users、101 groups 下，`ipasearchrecordslimit=10`（FreeIPA 最低值）不影響 `sizelimit=0`；`nsslapd-sizelimit=3` 與 `nsslapd-lookthroughlimit=3` 各自讓 `user_find` 回 `truncated: true`、`group_find` 回錯誤。不會靜默少回（`TestServerLimitsNeverShortenAReadSilently`）。三個限制都已還原並讀回確認 |
+| K4 | 不加篩選的 `user_find --all`，包含 admin 帳號 | D7 的 `admins` 判斷，以及完整讀取時出現的系統帳號形態 | **已擷取（2026-11-05）**：138 users，admin 的 `memberof_group` 為 `admins`、`trust admins`，沒有 `givenname`；所有 entry 都能解析（`TestUnfilteredReadShowsTheAdminsMember`、`TestObserveReadsEverythingWithAllAndChecksTheReader`） |
 | K5 | 本機 `ansible-vault view` 在環境密碼來源模式下：有 `ANSIBLE_VAULT_PASSWORD_FILE`、只有 ansible.cfg、兩者都沒有時的結束碼與 stderr | §3 的錯誤分類 | **已擷取（2026-10-30，ansible-core 2.19.2）**：前兩者解密成功；兩者都沒有時提示輸入密碼，stdin 關閉時 rc 1、stderr 含 `EOFError`；密碼錯誤時 rc 1、stderr 含 `Decryption failed`。stderr 存在 `internal/inventory/testdata/ansible-vault-view-*.stderr` |
 
 非 admin 讀取者的欄位不在 Phase 1 擷取：D7 直接不支援。
@@ -364,7 +364,7 @@ apply 與第二輪零 mutation 在 Phase 2 接上。
 
 ### 10.4 退出條件
 
-- §9 的 K1、K3、K4、K5 已擷取並以 fixture 鎖住（K5 已完成）。
+- §9 的 K1、K3、K4、K5 已擷取並以 fixture 鎖住（2026-11-05 完成）。
 - §10.1、§10.2 通過；`go test -race ./...` 綠。
 - §10.3 在全新 vm-target 上從不可變 candidate 實跑通過，證據依 AGENTS.md §1.5 記錄。
 - 計畫的 Phase 1 退出條件：讀取無 mutation（§6.1、§10.3 步驟 6）；plan 能解釋每個操作（§7.5 的欄位與依賴）；不支援的內容明確阻擋（§7.3）或列為不在範圍（§5.3）。

@@ -131,30 +131,33 @@ func (f *fakeFinder) Find(_ context.Context, method string, _ []any, opts map[st
 	return a, nil
 }
 
-// admins adds admins to a captured user's memberof_group. A real admin
-// entry (spec §9 K4) replaces this once captured.
-func admins(t *testing.T, name string) []map[string]any {
-	users := captured(t, "user-find-states")
-	for _, u := range users {
-		if uid := u["uid"].([]any); uid[0] == name {
-			u["memberof_group"] = append(u["memberof_group"].([]any), "admins")
+// The reads are real (spec §9 K1, K4): the unfiltered user_find with admin
+// in admins, the preserved users, and a full group_find of the same server.
+func TestObserveReadsEverythingWithAllAndChecksTheReader(t *testing.T) {
+	answers := func() map[string][]map[string]any {
+		return map[string][]map[string]any{
+			"user_find":           captured(t, "user-find-all-k4"),
+			"user_find/preserved": captured(t, "user-find-k1-preserved-all"),
+			"group_find":          captured(t, "k3-records10-sizelimit0-groups"),
 		}
 	}
-	return users
-}
-
-func TestObserveReadsEverythingWithAllAndChecksTheReader(t *testing.T) {
-	f := &fakeFinder{answers: map[string][]map[string]any{
-		"user_find":           admins(t, "p1-self"),
-		"user_find/preserved": captured(t, "user-find-no-match"),
-		"group_find":          captured(t, "group-find-states"),
-	}}
-	obs, err := Observe(context.Background(), f, "P1-Self")
+	f := &fakeFinder{answers: answers()}
+	obs, err := Observe(context.Background(), f, "Admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(obs.Users) != 6 || len(obs.Groups) != 3 {
+	active, preserved := len(f.answers["user_find"]), len(f.answers["user_find/preserved"])
+	if len(obs.Users) != active+preserved || len(obs.Groups) != len(f.answers["group_find"]) {
 		t.Fatalf("observed %d users, %d groups", len(obs.Users), len(obs.Groups))
+	}
+	var gotPreserved []string
+	for _, u := range obs.Users {
+		if u.Preserved {
+			gotPreserved = append(gotPreserved, u.Name)
+		}
+	}
+	if !slices.Equal(gotPreserved, []string{"p1-pres", "pwi-pres"}) {
+		t.Fatalf("preserved users = %v", gotPreserved)
 	}
 	if len(f.calls) != 3 {
 		t.Fatalf("calls = %v", f.calls)
@@ -168,8 +171,8 @@ func TestObserveReadsEverythingWithAllAndChecksTheReader(t *testing.T) {
 		t.Fatalf("second read = %v, want the preserved users", f.calls[1])
 	}
 
-	for _, principal := range []string{"p1-keys", "nobody"} {
-		f := &fakeFinder{answers: map[string][]map[string]any{"user_find": admins(t, "p1-self")}}
+	for _, principal := range []string{"pw-nokey", "nobody"} {
+		f := &fakeFinder{answers: answers()}
 		if _, err := Observe(context.Background(), f, principal); err == nil || !strings.Contains(err.Error(), "admins") {
 			t.Fatalf("reader %s: err = %v, want the admins refusal", principal, err)
 		}
@@ -181,10 +184,10 @@ func TestObserveReadsEverythingWithAllAndChecksTheReader(t *testing.T) {
 
 func TestObserveFailsOnAFailedRead(t *testing.T) {
 	f := &fakeFinder{answers: map[string][]map[string]any{
-		"user_find":           admins(t, "p1-self"),
-		"user_find/preserved": captured(t, "user-find-no-match"),
+		"user_find":           captured(t, "user-find-all-k4"),
+		"user_find/preserved": captured(t, "user-find-k1-preserved-all"),
 	}}
-	if _, err := Observe(context.Background(), f, "p1-self"); err == nil {
+	if _, err := Observe(context.Background(), f, "admin"); err == nil {
 		t.Fatal("a failed group read did not fail the observation")
 	}
 }

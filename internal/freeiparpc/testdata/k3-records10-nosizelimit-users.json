@@ -1,0 +1,997 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "top",
+          "person",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "inetuser",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "ipaNTUserAttrs"
+        ],
+        "cn": [
+          "Administrator"
+        ],
+        "gecos": [
+          "Administrator"
+        ],
+        "ipauniqueid": [
+          "4b8ce61e-c862-11f1-aaf9-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-500"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261105023537Z"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20270203023537Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261105023537Z"
+          }
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AAJ56+tqcm9vdC9hZG1pbkBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "krblastfailedauth": [
+          {
+            "__datetime__": "20261016052101Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "loginshell": [
+          "/bin/bash"
+        ],
+        "uid": [
+          "admin"
+        ],
+        "krbcanonicalname": [
+          "admin@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "homedirectory": [
+          "/home/admin"
+        ],
+        "krbprincipalname": [
+          "admin@IPA.PILOT.INTERNAL",
+          "root@IPA.PILOT.INTERNAL"
+        ],
+        "gidnumber": [
+          "1927600000"
+        ],
+        "uidnumber": [
+          "1927600000"
+        ],
+        "sn": [
+          "Administrator"
+        ],
+        "preserved": false,
+        "memberof_group": [
+          "admins",
+          "trust admins"
+        ],
+        "dn": "uid=admin,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "No Key"
+        ],
+        "displayname": [
+          "No Key"
+        ],
+        "initials": [
+          "NK"
+        ],
+        "gecos": [
+          "No Key"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "0e08f2f0-c863-11f1-8f95-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=pw-nokey,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1003"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "uid": [
+          "pw-nokey"
+        ],
+        "krbcanonicalname": [
+          "pw-nokey@IPA.PILOT.INTERNAL"
+        ],
+        "homedirectory": [
+          "/home/pw-nokey"
+        ],
+        "givenname": [
+          "No"
+        ],
+        "krbprincipalname": [
+          "pw-nokey@IPA.PILOT.INTERNAL"
+        ],
+        "gidnumber": [
+          "1927600003"
+        ],
+        "uidnumber": [
+          "1927600003"
+        ],
+        "sn": [
+          "Key"
+        ],
+        "mail": [
+          "pw-nokey@ipa.pilot.internal"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=pw-nokey,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "Reset Pending"
+        ],
+        "displayname": [
+          "Reset Pending"
+        ],
+        "initials": [
+          "RP"
+        ],
+        "gecos": [
+          "Reset Pending"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "0fad1082-c863-11f1-872b-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=pw-pending,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1004"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261015063841Z"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20261015063841Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261015063841Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AALxdNBqcm9vdC9hZG1pbkBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "uid": [
+          "pw-pending"
+        ],
+        "krbcanonicalname": [
+          "pw-pending@IPA.PILOT.INTERNAL"
+        ],
+        "homedirectory": [
+          "/home/pw-pending"
+        ],
+        "givenname": [
+          "Reset"
+        ],
+        "krbprincipalname": [
+          "pw-pending@IPA.PILOT.INTERNAL"
+        ],
+        "gidnumber": [
+          "1927600004"
+        ],
+        "uidnumber": [
+          "1927600004"
+        ],
+        "sn": [
+          "Pending"
+        ],
+        "mail": [
+          "pw-pending@ipa.pilot.internal"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=pw-pending,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "Self Changed"
+        ],
+        "displayname": [
+          "Self Changed"
+        ],
+        "initials": [
+          "SC"
+        ],
+        "gecos": [
+          "Self Changed"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "119a4996-c863-11f1-9178-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=pw-self,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1005"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261015063846Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261015063844Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AAL2dNBqa2FkbWluZEBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20270113063846Z"
+          }
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "uid": [
+          "pw-self"
+        ],
+        "krbcanonicalname": [
+          "pw-self@IPA.PILOT.INTERNAL"
+        ],
+        "homedirectory": [
+          "/home/pw-self"
+        ],
+        "givenname": [
+          "Self"
+        ],
+        "krbprincipalname": [
+          "pw-self@IPA.PILOT.INTERNAL"
+        ],
+        "gidnumber": [
+          "1927600005"
+        ],
+        "uidnumber": [
+          "1927600005"
+        ],
+        "sn": [
+          "Changed"
+        ],
+        "mail": [
+          "pw-self@ipa.pilot.internal"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=pw-self,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "Bench U001"
+        ],
+        "displayname": [
+          "Bench U001"
+        ],
+        "initials": [
+          "BU"
+        ],
+        "gecos": [
+          "Bench U001"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "a45b423a-c877-11f1-a2ca-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=pwb-u001,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1063"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261015114221Z"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20261015114221Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261015114221Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AAIdvNBqcm9vdC9hZG1pbkBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "ipasshpubkey": [
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDjFHhzoS/HcELIDcBZMKRVf+pYUKQBISwboRiZFwUqG pwb-u001@bench"
+        ],
+        "loginshell": [
+          "/bin/bash"
+        ],
+        "uid": [
+          "pwb-u001"
+        ],
+        "krbcanonicalname": [
+          "pwb-u001@IPA.PILOT.INTERNAL"
+        ],
+        "nsaccountlock": false,
+        "homedirectory": [
+          "/home/pwb-u001"
+        ],
+        "givenname": [
+          "Bench"
+        ],
+        "krbprincipalname": [
+          "pwb-u001@IPA.PILOT.INTERNAL"
+        ],
+        "gidnumber": [
+          "1927600063"
+        ],
+        "uidnumber": [
+          "1927600063"
+        ],
+        "sn": [
+          "U001"
+        ],
+        "mail": [
+          "pwb-u001@ipa.pilot.internal"
+        ],
+        "sshpubkeyfp": [
+          "SHA256:2euH/XQipDGV7FBxsbnN7J0mXumGF8tP2WRyTFNvFkI pwb-u001@bench (ssh-ed25519)"
+        ],
+        "preserved": false,
+        "memberof_group": [
+          "ipausers",
+          "team-pwb-01",
+          "access-pwb-01",
+          "data-pwb-01",
+          "role-pwb-01"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-01"
+        ],
+        "memberof_sudorule": [
+          "sudo-pwb-01"
+        ],
+        "dn": "uid=pwb-u001,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "Bench U002"
+        ],
+        "displayname": [
+          "Bench U002"
+        ],
+        "initials": [
+          "BU"
+        ],
+        "gecos": [
+          "Bench U002"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "a4c460e4-c877-11f1-9158-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=pwb-u002,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1064"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261015114222Z"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20261015114222Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261015114222Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AAIevNBqcm9vdC9hZG1pbkBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "ipasshpubkey": [
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOclZX4gu981K98LNKvqzAc678UmYQ9hCgUTM1Zdzm06 pwb-u002@bench"
+        ],
+        "loginshell": [
+          "/bin/bash"
+        ],
+        "uid": [
+          "pwb-u002"
+        ],
+        "krbcanonicalname": [
+          "pwb-u002@IPA.PILOT.INTERNAL"
+        ],
+        "homedirectory": [
+          "/home/pwb-u002"
+        ],
+        "givenname": [
+          "Bench"
+        ],
+        "krbprincipalname": [
+          "pwb-u002@IPA.PILOT.INTERNAL"
+        ],
+        "gidnumber": [
+          "1927600064"
+        ],
+        "uidnumber": [
+          "1927600064"
+        ],
+        "sn": [
+          "U002"
+        ],
+        "mail": [
+          "pwb-u002@ipa.pilot.internal"
+        ],
+        "nsaccountlock": false,
+        "sshpubkeyfp": [
+          "SHA256:38P7jnpS3OZvM6xSmvzVLfCEFm/ufy2EttKlNi6sTO4 pwb-u002@bench (ssh-ed25519)"
+        ],
+        "preserved": false,
+        "memberof_group": [
+          "ipausers",
+          "team-pwb-02",
+          "access-pwb-02",
+          "data-pwb-02",
+          "role-pwb-02"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-02"
+        ],
+        "memberof_sudorule": [
+          "sudo-pwb-02"
+        ],
+        "dn": "uid=pwb-u002,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "Ev pwenew"
+        ],
+        "displayname": [
+          "Ev pwenew"
+        ],
+        "initials": [
+          "Ep"
+        ],
+        "gecos": [
+          "Ev pwenew"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "723811a6-c869-11f1-9178-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=pwi-short,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1017"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261015072435Z"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20261015072435Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261015072435Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AAKzf9Bqcm9vdC9hZG1pbkBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "loginshell": [
+          "/bin/bash"
+        ],
+        "uid": [
+          "pwi-short"
+        ],
+        "krbcanonicalname": [
+          "pwi-short@IPA.PILOT.INTERNAL"
+        ],
+        "homedirectory": [
+          "/home/pwi-short"
+        ],
+        "givenname": [
+          "Ev"
+        ],
+        "krbprincipalname": [
+          "pwi-short@IPA.PILOT.INTERNAL"
+        ],
+        "gidnumber": [
+          "1927600017"
+        ],
+        "uidnumber": [
+          "1927600017"
+        ],
+        "sn": [
+          "pwenew"
+        ],
+        "mail": [
+          "pwi-short@ipa.pilot.internal"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=pwi-short,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "Keep Test"
+        ],
+        "displayname": [
+          "Keep Test"
+        ],
+        "initials": [
+          "KT"
+        ],
+        "gecos": [
+          "Keep Test"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "a44384d8-c863-11f1-b282-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=pwt-keep,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1007"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261015064403Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261015064259Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AAIzdtBqa2FkbWluZEBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20270113064403Z"
+          }
+        ],
+        "loginshell": [
+          "/bin/bash"
+        ],
+        "uid": [
+          "pwt-keep"
+        ],
+        "krbcanonicalname": [
+          "pwt-keep@IPA.PILOT.INTERNAL"
+        ],
+        "homedirectory": [
+          "/home/pwt-keep"
+        ],
+        "givenname": [
+          "Keep"
+        ],
+        "krbprincipalname": [
+          "pwt-keep@IPA.PILOT.INTERNAL"
+        ],
+        "gidnumber": [
+          "1927600007"
+        ],
+        "uidnumber": [
+          "1927600007"
+        ],
+        "sn": [
+          "Test"
+        ],
+        "mail": [
+          "pwt-keep@ipa.pilot.internal"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=pwt-keep,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "Plain Test"
+        ],
+        "displayname": [
+          "Plain Test"
+        ],
+        "initials": [
+          "PT"
+        ],
+        "gecos": [
+          "Plain Test"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "a5cf5674-c863-11f1-9178-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=pwt-plain,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1009"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261015064406Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261015064301Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "0"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AAI2dtBqa2FkbWluZEBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20270113064406Z"
+          }
+        ],
+        "loginshell": [
+          "/bin/bash"
+        ],
+        "uid": [
+          "pwt-plain"
+        ],
+        "krbcanonicalname": [
+          "pwt-plain@IPA.PILOT.INTERNAL"
+        ],
+        "homedirectory": [
+          "/home/pwt-plain"
+        ],
+        "givenname": [
+          "Plain"
+        ],
+        "krbprincipalname": [
+          "pwt-plain@IPA.PILOT.INTERNAL"
+        ],
+        "gidnumber": [
+          "1927600009"
+        ],
+        "uidnumber": [
+          "1927600009"
+        ],
+        "sn": [
+          "Test"
+        ],
+        "mail": [
+          "pwt-plain@ipa.pilot.internal"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=pwt-plain,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "cn": [
+          "Reset Test"
+        ],
+        "displayname": [
+          "Reset Test"
+        ],
+        "initials": [
+          "RT"
+        ],
+        "gecos": [
+          "Reset Test"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "a514c336-c863-11f1-8f95-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=pwt-reset,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1008"
+        ],
+        "krblastpwdchange": [
+          {
+            "__datetime__": "20261015064452Z"
+          }
+        ],
+        "krblastadminunlock": [
+          {
+            "__datetime__": "20261015064452Z"
+          }
+        ],
+        "krbloginfailedcount": [
+          "1"
+        ],
+        "krbextradata": [
+          {
+            "__base64__": "AAJkdtBqcm9vdC9hZG1pbkBJUEEuUElMT1QuSU5URVJOQUwA"
+          }
+        ],
+        "krbpasswordexpiration": [
+          {
+            "__datetime__": "20261015064452Z"
+          }
+        ],
+        "krblastfailedauth": [
+          {
+            "__datetime__": "20261015064508Z"
+          }
+        ],
+        "loginshell": [
+          "/bin/bash"
+        ],
+        "uid": [
+          "pwt-reset"
+        ],
+        "krbcanonicalname": [
+          "pwt-reset@IPA.PILOT.INTERNAL"
+        ],
+        "homedirectory": [
+          "/home/pwt-reset"
+        ],
+        "givenname": [
+          "Reset"
+        ],
+        "krbprincipalname": [
+          "pwt-reset@IPA.PILOT.INTERNAL"
+        ],
+        "gidnumber": [
+          "1927600008"
+        ],
+        "uidnumber": [
+          "1927600008"
+        ],
+        "sn": [
+          "Test"
+        ],
+        "mail": [
+          "pwt-reset@ipa.pilot.internal"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=pwt-reset,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 10,
+    "truncated": true,
+    "messages": [
+      {
+        "type": "warning",
+        "name": "SearchResultTruncated",
+        "message": "Search result has been truncated: Configured size limit exceeded",
+        "code": 13017,
+        "data": {
+          "reason": "Configured size limit exceeded"
+        }
+      }
+    ],
+    "summary": "10 users matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

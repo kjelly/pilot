@@ -157,3 +157,17 @@ func TestNormalizeSSHKeyMatchesTheHelper(t *testing.T) {
 		}
 	}
 }
+
+// K2: the captured external group is not one this engine recognizes, so a
+// roster group of that name is blocked, not planned against.
+func TestCapturedExternalGroupIsBlocked(t *testing.T) {
+	live := liveGroups(t, "group-find-k2-external")
+	if len(live) != 1 || live[0].Type != TypeUnrecognized {
+		t.Fatalf("external group parsed as %+v", live)
+	}
+	d := Desired{SchemaVersion: 3, Principal: "admin", Groups: []DesiredGroup{{Name: "p1-ext", Description: "P1 external", Type: TypePosix, Authoritative: true}}}
+	plan := Build(d, nil, live)
+	if len(plan.Operations) != 0 || len(plan.Blocked) != 1 || plan.Blocked[0].Reason != BlockedTypeUnrecognized {
+		t.Fatalf("plan = %+v", plan)
+	}
+}

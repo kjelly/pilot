@@ -293,7 +293,7 @@ FreeIPA 多物件更新不是交易。run journal 記錄 operation ID、前置�
 
 `pwpolicy_show` 不在 `internal/freeiparpc` 的 allowlist；兩次擷取時的 policy 只用來記錄擷取條件，由測試直接讀檔確認（`maxlife` 90 與 0）。
 
-尚未擷取（Phase 1 spec 前要補，或明確列為不支援）：external 群組、`preserved`（stage／preserved）使用者、`uid`／`gid` 變更、非 admin 讀取者看到的欄位（權限造成的缺欄位）、大量資料下的完整性（§5 Phase 0 初步量測只記錄一次 `user_find --all` 回傳 138 筆、197 KiB，沒有記錄請求的 `sizelimit` 與回應的 `truncated`，所以任何資料量下的完整讀取都還沒有可追溯的證據；389-ds 後端的 size／lookthrough 上限是否生效也未測試，見 §6 的 1,000 users 情境）。
+尚未擷取（Phase 1 spec 前要補，或明確列為不支援；2026-11-05 已擷取 external 群組、preserved 使用者與大量資料下的完整性，結果見 Phase 1 spec §9 K1–K3，uid／gid 變更在 Phase 1 一律 blocked，非 admin 讀取者不支援）：external 群組、`preserved`（stage／preserved）使用者、`uid`／`gid` 變更、非 admin 讀取者看到的欄位（權限造成的缺欄位）、大量資料下的完整性（§5 Phase 0 初步量測只記錄一次 `user_find --all` 回傳 138 筆、197 KiB，沒有記錄請求的 `sizelimit` 與回應的 `truncated`，所以任何資料量下的完整讀取都還沒有可追溯的證據；389-ds 後端的 size／lookthrough 上限是否生效也未測試，見 §6 的 1,000 users 情境）。
 
 #### 與 PR #138 的關係：SSH key 範圍（2026-10-27 已決定）與授權快取刷新（2026-10-28 已決定）
 
@@ -382,8 +382,8 @@ SSH key 範圍的決定：
 client 不被刷新，只發生在 Go 沒有寫入、journal 沒有未完成的義務、且 playbook 其餘 section 也沒有變更時（`auth_settle` 以「前一次的 `auth_pending` 或本輪有變更」判定）；上述序列化前提成立時才適用。
 
 #### Phase 1 工作項
-- [x] 實作完整性判斷、正規化、差異與依賴排序，先僅提供 preview/shadow comparison。（2026-11-05：`internal/identityreconcile`、`pilot reconcile --engine golang --preview-only`；observer 依賴 K1、K4 的判讀擷取後再鎖住，見 Phase 1 spec 狀態列）
-- [ ] 測試 no-op、單人變更、外部 drift、nested membership、空集合、保留外部資料、逾期 grants 及大量資料截斷。（2026-11-05：除大量資料截斷外都已有測試；截斷待 K3 擷取）
+- [x] 實作完整性判斷、正規化、差異與依賴排序，先僅提供 preview/shadow comparison。（2026-11-05：`internal/identityreconcile`、`pilot reconcile --engine golang --preview-only`；observer 的判讀已由 K1–K4 擷取鎖住，見 Phase 1 spec §9）
+- [x] 測試 no-op、單人變更、外部 drift、nested membership、空集合、保留外部資料、逾期 grants 及大量資料截斷。（2026-11-05：截斷由 K3 擷取鎖住：server 端限制只會變成 `truncated: true` 或錯誤，`Find` 兩者都視為失敗）
 - [x] plan 綁定 desired revision、target 與能力範圍；live state 變更時必須重新評估。（2026-11-05：plan JSON 帶 `desired_revision`、`target`、`scope` 與 observation fingerprint；apply 時重新讀取與規劃屬 Phase 2）
 - [ ] （2026-11-05：driver 程式碼 `TestLiveGoPreviewDriver` 已寫好，尚未實跑）建立 Go reconcile test driver：在 vm-target 上 snapshot → preview → apply → verify → 第二輪零 mutation，失敗時 rollback，輸出可放進 evidence 的摘要（tested revision/tree、PASS/FAIL、API 計數）。driver 經 pilot 正式入口執行，不直接呼叫內部函式。本階段先完成 snapshot、preview、verify 與 rollback，apply 與第二輪檢查在 Phase 2 接上。`pilot reconcile --component <key> --preview-only --stage <stage>` 與 `--force` 已可非互動執行（PR #139、#140，promptAutomation 預設值驅動），driver 沿用它，不再另寫 wizard 驅動；但現有的預覽走 Ansible `--check --diff`，Go engine 需要自己的明確入口（名稱與旗標由 Phase 1 spec 決定，擬議為唯讀的 engine 選擇），且不得讓 `--preview-only` 在不經 Go engine 的情況下被當成 Go 預覽通過。
 - [x] （2026-11-05：`TestSpecRowsMapToPlannerOperations`，以 `TestSpecRowMappingCheckFires` 證明會 fail）建立 spec row 對應檢查：每個 users/groups 相關 row 對應到 planner 的 operation 種類與 verifier 檢查，雙向鎖住（row 沒有對應，或程式宣告的對應不在 spec，都要 fail），比照 `TestSpecPlaybookTagAlignment`。相容期內舊 playbook 仍受 `TestSpecPlaybookTagAlignment` 約束，兩個檢查都要通過。新檢查要先把一個 regression 放回去，確認它會 fail（AGENTS.md §5.7）。
