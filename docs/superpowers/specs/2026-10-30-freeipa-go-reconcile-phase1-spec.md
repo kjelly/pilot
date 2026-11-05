@@ -50,7 +50,7 @@ Phase 1 交付 users／groups 範圍的**唯讀預覽**：
 | 有 `--actions` | D2 |
 | `--plan-out` 但 engine 不是 `golang` | 旗標無效 |
 
-`--stage`、`--staging-attested-within-hours`、`--limit`、`--timeout`、`--dir`、`-i` 沿用現有語意。`--timeout` 是 Go 預覽整輪的期限（`ansible-inventory`、`ansible --list-hosts`、`ansible-vault`、SSH 與 FreeIPA 讀取合計）；Ansible engine 的 `--timeout` 則是每次 `ansible-playbook` 呼叫各自的上限，`--help` 兩種都寫明。
+`--stage`、`--staging-attested-within-hours`、`--limit`、`--timeout`、`--dir`、`-i` 沿用現有語意。`--timeout` 是 Go 預覽整輪的期限（`ansible-inventory`、`ansible --list-hosts`、`ansible-vault`、SSH 與 FreeIPA 讀取合計）；Ansible engine 的 `--timeout` 則是每次 `ansible-playbook` 呼叫各自的上限，`--help` 兩種都寫明。子行程在期限或訊號時如何結束見 §2.5。
 
 ### 2.2 執行順序
 
@@ -82,6 +82,24 @@ Phase 1 交付 users／groups 範圍的**唯讀預覽**：
 - `--plan-out`：§7.5 的 JSON，只在 `ok` 或 `blocked` 時寫出。失敗的預覽不印預覽、不寫 plan；包含預覽送出了任何寫入（`stats.writes` 不為 0，內部錯誤）的情形：這個檢查在印出與寫檔之前。
 - 密碼、session cookie、vault 密碼不出現在任何輸出、錯誤訊息、log 或 plan（P0 §4「秘密不外洩」）。
 
+### 2.5 子行程
+
+Go 預覽只啟動 `ansible-inventory --list`、`ansible <pattern> --list-hosts`、`ansible-vault view`（每個加密檔一次）、`ssh … hostname -f`、`ssh … cat /etc/ipa/ca.crt`、每條連線一個 `ssh -W 127.0.0.1:443`（登入後的 session_logout 在取消後也會用一條新的）。它們都由 `internal/childproc.Isolate` 在新的 session（沒有 controlling terminal，stdin 是 `/dev/null`）執行。`exec.CommandContext` 只殺直接的子行程，`Wait` 再讀輸出管線直到 EOF：子行程啟動的行程只要繼承了管線，就能讓 `Wait` 等到它自己結束為止；下面的規則就是為了不讓這件事發生。
+
+- 子行程啟動的行程留在同一個 process group：`ANSIBLE_VAULT_PASSWORD_FILE` 的 vault password client script（`ansible-inventory`、`ansible`、`ansible-vault` 三種指令啟動時都會執行它，並讓它繼承 stderr）、ProxyJump 的跳板 ssh、ssh_config 的 ProxyCommand。
+- `--timeout` 到期，或收到 SIGINT／SIGTERM／SIGHUP（SIGHUP 在啟動時已被忽略，例如 nohup，就不接）時：對每個執行中子行程的 process group 送 SIGKILL，輸出管線最多再等 2 秒（`childproc.WaitDelay`）。錯誤包著 `context.DeadlineExceeded`／`context.Canceled`（並保留子行程的 `*exec.ExitError`），結束碼 1，不產生 plan，不建立任何連線（步驟 7 之前）。`ansible --list-hosts` 被取消時不會被當成「沒有主機」：context 結束先於 §2.2 步驟 2 對「leaves us with no hosts to target」的正規化。
+- 子行程以 0 結束，但它啟動的行程握著輸出管線超過 2 秒：該步驟失敗（`childproc.ErrHelperKeptOutput`、`exec.ErrWaitDelay`），不使用已讀到的輸出，那可能只是一部分。例外：tunnel 的資料走直接的 fd，只有 stderr 被握著，`ssh -W` 以 0 結束時視為連線結束（server 關閉連線）。
+- 離開 process group 的行程（`setsid`、daemon）殺不到；它握著管線時，等待由 2 秒的 `WaitDelay` 界定，行程本身留下。
+- 預覽結束時關閉 idle 的 tunnel（`client.CloseIdleConnections()`，排在登出之後）：函式回傳時沒有 `ssh -W` 留下。
+- 範圍：只有 Go 預覽這樣執行。`deployAnsibleCommand` 只在 context 帶有 Go 預覽設的標記（`withIsolatedChildren`，與 SIGINT／SIGTERM／SIGHUP 的處理放在同一個 `signal.NotifyContext`）時才套用 `childproc.Isolate`；Ansible engine、`pilot deploy` 與其他指令的命令不變，仍留在 pilot 的 process group，終端機的訊號照樣送到它們的子行程。這些路徑有同類的風險（子行程啟動的行程握著管線時 `Wait` 不返回），不在這份規格的範圍，另案處理。
+
+已知限制：
+
+1. 上面第三點的行程不會被殺：子行程已被回收，對它的 process group 送訊號可能打到重用同一個 id 的無關行程（`kill()` 對已回收的 ssh 也不送訊號）。
+2. 子行程收不到終端機送給 pilot 的訊號，由 pilot 殺掉它們。SIGKILL、SIGQUIT（Ctrl-\）或殺掉 pilot 的 process group 時 pilot 來不及殺，它們留到自己結束：`ansible` 到它的 vault script 結束，`ssh` 到 stdin 關閉且 server 回應。
+3. 第二次 Ctrl-C 立即結束 pilot（第一次訊號後預設處理已恢復），這時還在進行的登出用的 `ssh -W` 等伺服器回應或關閉才結束。
+4. 需要 terminal 輸入的 vault password client script，以及需要輸入密碼或確認 host key 的 ProxyJump 跳板（OpenSSH 不把 BatchMode 傳給跳板），在沒有 terminal 的 session 裡 fail closed：在 `ansible-inventory` 或 `ssh` 這一步失敗，不提示。
+
 ## 3 憑證與 vault
 
 admin 帳號與密碼的來源與 playbook 的「Normalize canonical FreeIPA settings」相同：
@@ -95,7 +113,7 @@ vars 檔沿用 `promptVault` 在預設值模式下的選擇：`<inventory 目錄
 |---|---|---|
 | 明文 vars 檔 | `.vault/main.yaml` 未加密 | 直接解析 YAML |
 | 指定密碼檔 | Phase 1 不可達（預設值模式不會填密碼檔路徑），保留給 Phase 4 | `inventory.ViewEncryptedRoster`，只在記憶體 |
-| 環境密碼來源 | `.vault/main.yaml` 已加密；預設值模式選「密碼檔」但路徑為空，現有入口因此不傳 `--vault-password-file` | 執行 `ansible-vault view` 且**不帶** `--vault-password-file`，讓 Ansible 自己讀 `ANSIBLE_VAULT_PASSWORD_FILE` 或 ansible.cfg；env 與工作目錄要和同一次 reconcile 執行 ansible-playbook 時相同（`prepareDeployAnsibleRuntime` 的 env），密碼來源的解析才一致。新增明確的 ambient 模式函式 `inventory.ViewVaultFileAmbient`，不改 `ViewEncryptedRoster` 對既有呼叫者的語意。沒有任何密碼來源時 `ansible-vault view` 會**提示輸入密碼**（K5 擷取），與 ansible-playbook 直接失敗不同。提示走 Python getpass：有 controlling terminal 時它直接開 `/dev/tty` 提示並等人輸入，沒有 terminal 才讀 stdin，所以只關閉 stdin 不夠（在終端機上執行會卡在提示）。`ViewVaultFileAmbient` 因此在**新的 session**（`Setsid`，沒有 controlling terminal）執行 `ansible-vault`，stdin 是 `/dev/null`：提示讀到 EOF，以 EOFError 結束，分類為「沒有設定 vault 密碼來源」。整段讀取受 preview 的 context 約束（`--timeout`，以及下一句的 Ctrl-C）：取消時殺掉 `ansible-vault` 的整個 process group（含它啟動的 helper），等待輸出管線最多 2 秒，錯誤包著 `context.DeadlineExceeded` 或 `context.Canceled`。`ansible-vault` 正常結束（0）但它啟動的 helper 仍握著輸出管線超過 2 秒時，讀取失敗並指名原因（錯誤包著 `exec.ErrWaitDelay`），不回傳已讀到的部分輸出；已知限制：這個 helper 不會被殺（`ansible-vault` 已被回收，對它的 process group 送訊號可能打到重用同一個 id 的無關行程）。需要 terminal 才能取得密碼的 vault password client script 在 Go preview 不支援，同樣 fail closed。pilot 的 root context（`rootCmd.Execute()` 用 `context.Background()`）沒有接 SIGINT／SIGTERM，Go preview 在執行期間自己接：`signal.NotifyContext(SIGINT, SIGTERM)`，只在 `--engine golang`（Ansible engine 與其他指令不變，因為它們的 handler 不全部看 context，見 `withServiceCommandSignals`）。第一次訊號與 `--timeout` 一樣取消 context：`ansible-vault` 被殺掉、不再建立連線，已登入的 session 以不被取消、最多 10 秒的 context 送出 `session_logout`；取消後立即恢復預設處理，所以第二次 Ctrl-C 直接結束 pilot，不等 logout。`ansible-vault` 在自己的 session，收不到終端機對 pilot 的訊號，是由 pilot 殺掉的 |
+| 環境密碼來源 | `.vault/main.yaml` 已加密；預設值模式選「密碼檔」但路徑為空，現有入口因此不傳 `--vault-password-file` | 執行 `ansible-vault view` 且**不帶** `--vault-password-file`，讓 Ansible 自己讀 `ANSIBLE_VAULT_PASSWORD_FILE` 或 ansible.cfg；env 與工作目錄要和同一次 reconcile 執行 ansible-playbook 時相同（`prepareDeployAnsibleRuntime` 的 env），密碼來源的解析才一致。新增明確的 ambient 模式函式 `inventory.ViewVaultFileAmbient`，不改 `ViewEncryptedRoster` 對既有呼叫者的語意。沒有任何密碼來源時 `ansible-vault view` 會**提示輸入密碼**（K5 擷取），與 ansible-playbook 直接失敗不同。提示走 Python getpass：有 controlling terminal 時它直接開 `/dev/tty` 提示並等人輸入，沒有 terminal 才讀 stdin，所以只關閉 stdin 不夠（在終端機上執行會卡在提示）。`ViewVaultFileAmbient` 因此在**新的 session**（`Setsid`，沒有 controlling terminal）執行 `ansible-vault`，stdin 是 `/dev/null`：提示讀到 EOF，以 EOFError 結束，分類為「沒有設定 vault 密碼來源」。`ansible-vault` 與其他子行程一樣依 §2.5 執行與結束。需要 terminal 才能取得密碼的 vault password client script 在 Go preview 不支援，同樣 fail closed（`ansible-inventory`、`ansible` 執行它時也一樣，§2.5）。pilot 的 root context（`rootCmd.Execute()` 用 `context.Background()`）沒有接 SIGINT／SIGTERM，Go preview 在執行期間自己接：`signal.NotifyContext(SIGINT, SIGTERM, SIGHUP)`（SIGHUP 在啟動時已被忽略就不接），只在 `--engine golang`（Ansible engine 與其他指令不變，因為它們的 handler 不全部看 context，見 `withServiceCommandSignals`）。第一次訊號與 `--timeout` 一樣取消 context：執行中的子行程連同它們啟動的行程被殺掉（§2.5）、不再建立連線，已登入的 session 以不被取消、最多 10 秒的 context 送出 `session_logout`；取消後立即恢復預設處理，所以第二次 Ctrl-C 直接結束 pilot，不等 logout（§2.5 已知限制 3）。每個子行程都在自己的 session，收不到終端機對 pilot 的訊號（Ctrl-C、終端機關閉），由 pilot 殺掉；所以 Go preview 也接 SIGHUP |
 | `--ask-vault-pass` | Phase 1 不可達 | Phase 4 加互動入口時再定；要求不變：在建立 tunnel 前完成，vault 密碼不進 argv、環境或暫存檔 |
 
 加密的 roster 用同一個模式解密。
@@ -318,6 +336,7 @@ P0 §3 有三處與 playbook 不符，本文件以 playbook 為準（D8），並
 - 入口：§2.1 拒絕矩陣每一列；從 cobra 指令走到 observer（AGENTS.md §5.15），以假的 `ssh` 與 `httptest` TLS server 回放 fixture。
 - 每個拒絕（§2.2 步驟 1–8、§6.3、D7、D10）各有一個會觸發它的 test row，行為以同一組不變量檢查：該 gate 自己的訊息或 sentinel；結束碼 1（只有 blocked plan 是 3，§2.3）；送出的請求不超過該步驟允許的（§2.1 的拒絕之前不執行 `ansible-inventory`、`ansible`、`ansible-vault`；步驟 7 之前沒有 tunnel；登入被拒之後沒有 JSON-RPC；登入之後的任何失敗都有 `session_logout`；讀取失敗之後不再讀）；沒有 plan 檔；密碼、cookie 與 vault 內容不在錯誤、輸出、plan 與 pilot data 目錄任何檔案中。伺服器端的答案取自真實擷取（§9，登入被拒、無 session、`truncated`、`SizeLimitExceeded`）。
 - 這個清單由結構鎖住（AGENTS.md §5.10、§5.12）：預覽入口各函式（`runReconcile`、`validateReconcileEngineFlags`、`runReconcileGolangPreview`、`golangPreview`、`inventoryCurrentWithHosts`、`golangPreviewStage`、`rosterServer`、`sshTargetFromHostVars`、`sshOptionArgs`、`splitShellWords`、`writeGolangPlan`）與 `identityreconcile.Observe` 中每個不是 `nil` 的 return 都以 `// gate: <id>` 命名；每個 id 唯一，且有 test row（row 的 `gate` 欄位）或附理由的豁免，豁免被 row 取代、row 指向不存在的 gate、有 return 沒有名字，都會讓測試失敗（`TestReconcileGolangEveryGateHasARow`、`TestObserveEveryGateHasARow`；掃描器是 `internal/gateledger`，它自己的測試證明每一種漂移都會被報告）。新增 gate 沒有 row 時 CI 失敗。row 是否真的讓該 gate 觸發，由變異驗證確認（刪掉該 gate，對應 row 必須失敗），不由掃描器推定。
+- 子行程（§2.5）：每種子行程（`ansible-inventory`、`ansible --list-hosts`、`ansible-vault`、`ssh` 讀 FQDN、讀 CA、tunnel）各有 row：卡住且它啟動的行程握著管線時，`--timeout`、SIGINT、SIGHUP 都在期限後結束，結束碼 1，錯誤包著 context 錯誤，子行程與 helper 都不在（查 pid，不靠 sleep）；0 結束但 helper 握著管線時以 `ErrHelperKeptOutput` 失敗；離開 group 的 helper 不讓等待超過 2 秒；SIGHUP 在啟動時已被忽略時不被接走；成功的預覽之後沒有 `ssh -W` 留下；每個子行程是 session leader，Ansible engine 共用的 builder 對沒有標記的 context 不是（變異驗證：每個機制各拿掉一次，對應的 row 必須失敗）。`internal/sshdial` 只有 `start` 啟動 ssh、且先 `childproc.Isolate`，由 AST lint 鎖住；`internal/childproc` 自己的測試涵蓋 session、group kill、`WaitDelay`、pty 下沒有 controlling terminal、`Cause`。
 - 憑證：§3 每種模式；模板、inline `!vault`、非字串、長度不足各自在建立 tunnel 前失敗；錯誤訊息不含密碼。
 - 目標推導：§4 每一列，含 `ansible_connection: docker` 與不支援的 ssh 參數。
 - stage gate：與 playbook assert 的一致性測試。

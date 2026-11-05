@@ -58,7 +58,7 @@ FreeIPA 官方描述了 batch 呼叫；batch 可合併 RPC 往返，本計畫不
 
 ### SSH tunnel
 
-- Go 呼叫系統 OpenSSH，保留已驗證的 known_hosts、ssh-agent 與 ProxyJump 行為，不自行重做 SSH 設定語意。ssh 參數以 argv 傳遞，不經 shell。
+- Go 呼叫系統 OpenSSH，保留已驗證的 known_hosts、ssh-agent 與 ProxyJump 行為，不自行重做 SSH 設定語意。ssh 參數以 argv 傳遞，不經 shell。ssh 與 ProxyJump 跳板在沒有 terminal 的 session 執行，不提示輸入。
 - 目標必須由本次 effective inventory 解析成唯一 host、address、port、user、環境及寫入 FreeIPA server。列出支援的 SSH 選項；不支援的設定在 mutation 前明確拒絕，不默默忽略。SSH 目標預設為寫入 server 本身。
 - `http.Transport` 的 DialContext 不使用本機 DNS 或本機 port：每條連線啟動 `ssh -W <目的地>`，把子程序 stdin/stdout 包成 `net.Conn`。不用 `-L` 開本機 listening port，避免同機其他使用者共用轉送。Transport 不讀 `HTTP(S)_PROXY` 環境變數。
 - request URL、TLS ServerName、Host 與 Referer 一律使用寫入 server 的 FQDN；轉送目的地預設為 `127.0.0.1:443`，可設定為 `<fqdn>:443` 由 SSH 端解析。Phase 0 實測確認 FreeIPA httpd 在 loopback 接受此組合。
@@ -388,7 +388,7 @@ client 不被刷新，只發生在 Go 沒有寫入、journal 沒有未完成的�
 - [x] （`TestLiveGoPreviewDriver` 已對拋棄式 vm-target 實跑，目前驗收紀錄見 [LATEST](../../evidence/freeipa-go-reconcile/LATEST.md)）建立 Go reconcile test driver：在 vm-target 上 snapshot → preview → apply → verify → 第二輪零 mutation，失敗時 rollback，輸出可放進 evidence 的摘要（tested revision/tree、PASS/FAIL、API 計數）。driver 經 pilot 正式入口執行，不直接呼叫內部函式。本階段先完成 snapshot、preview、verify 與 rollback，apply 與第二輪檢查在 Phase 2 接上。`pilot reconcile --component <key> --preview-only --stage <stage>` 與 `--force` 已可非互動執行（PR #139、#140，promptAutomation 預設值驅動），driver 沿用它，不再另寫 wizard 驅動；但現有的預覽走 Ansible `--check --diff`，Go engine 需要自己的明確入口（名稱與旗標由 Phase 1 spec 決定，擬議為唯讀的 engine 選擇），且不得讓 `--preview-only` 在不經 Go engine 的情況下被當成 Go 預覽通過。
 - [x] （2026-11-05：`TestSpecRowsMapToPlannerOperations`，以 `TestSpecRowMappingCheckFires` 證明會 fail）建立 spec row 對應檢查：每個 users/groups 相關 row 對應到 planner 的 operation 種類與 verifier 檢查，雙向鎖住（row 沒有對應，或程式宣告的對應不在 spec，都要 fail），比照 `TestSpecPlaybookTagAlignment`。相容期內舊 playbook 仍受 `TestSpecPlaybookTagAlignment` 約束，兩個檢查都要通過。新檢查要先把一個 regression 放回去，確認它會 fail（AGENTS.md §5.7）。
 
-- [x] （2026-11-05，第二輪 review）預覽入口的每個 fail-closed gate 都有會觸發它的 test row，由程式碼中的 `// gate:` 標註與 `TestReconcileGolangEveryGateHasARow`、`TestObserveEveryGateHasARow`（掃描器 `internal/gateledger`）雙向鎖住；失敗一律以結束碼 1 結束，子行程的結束碼不傳遞，只有產生出的 blocked plan 是 3；Ctrl-C／SIGTERM 與 `--timeout` 一樣取消預覽並殺掉 `ansible-vault`，登入後的 session 仍會登出（Phase 1 spec §2.3、§3、§10.1；AGENTS.md §5.10、§5.12）。
+- [x] （2026-11-05，第二輪 review）預覽入口的每個 fail-closed gate 都有會觸發它的 test row，由程式碼中的 `// gate:` 標註與 `TestReconcileGolangEveryGateHasARow`、`TestObserveEveryGateHasARow`（掃描器 `internal/gateledger`）雙向鎖住；失敗一律以結束碼 1 結束，子行程的結束碼不傳遞，只有產生出的 blocked plan 是 3；Ctrl-C／SIGTERM／SIGHUP 與 `--timeout` 一樣取消預覽並殺掉預覽啟動的每個子行程與它們啟動的行程（ansible-inventory、ansible --list-hosts、ansible-vault、ssh；Phase 1 spec §2.5），登入後的 session 仍會登出（Phase 1 spec §2.3、§3、§10.1；AGENTS.md §5.10、§5.12）。
 
 退出條件：讀取無 mutation，計畫能解釋每個操作；不支援的 roster section 明確阻擋對應範圍。
 
