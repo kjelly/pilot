@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -56,6 +57,25 @@ func TestReconcileGolangLogoutAfterTheDeadlineIsBounded(t *testing.T) {
 	}
 }
 
+// sigintIgnored reports whether this process started with SIGINT ignored, as
+// a background job of a non-interactive shell does. Go then restores "ignored"
+// when it stops handling the signal, so a second SIGINT could not end such a
+// process whatever the code does; SIGTERM, never inherited as ignored, tests
+// the same restoration there.
+func sigintIgnored() bool {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if mask, ok := strings.CutPrefix(line, "SigIgn:"); ok {
+			v, err := strconv.ParseUint(strings.TrimSpace(mask), 16, 64)
+			return err == nil && v&(1<<(uint(syscall.SIGINT)-1)) != 0
+		}
+	}
+	return false
+}
+
 // secondInterruptChildEnv, set to 1, makes TestReconcileGolangSecondInterruptEndsPilot
 // run its body (the preview) instead of starting the child that runs it.
 const secondInterruptChildEnv = "PILOT_TEST_SECOND_INTERRUPT_CHILD"
@@ -75,6 +95,10 @@ func TestReconcileGolangSecondInterruptEndsPilot(t *testing.T) {
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
+	}
+	sig := syscall.SIGINT
+	if sigintIgnored() {
+		sig = syscall.SIGTERM
 	}
 	marks := t.TempDir()
 	cmd := exec.Command(exe, "-test.run=^TestReconcileGolangSecondInterruptEndsPilot$", "-test.count=1")
@@ -105,12 +129,12 @@ func TestReconcileGolangSecondInterruptEndsPilot(t *testing.T) {
 		}
 	}
 	waitMark("ping")
-	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+	if err := cmd.Process.Signal(sig); err != nil {
 		t.Fatal(err)
 	}
 	waitMark("logout") // the first Ctrl-C ended the preview; the logout is under way
 	begin := time.Now()
-	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+	if err := cmd.Process.Signal(sig); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -120,11 +144,11 @@ func TestReconcileGolangSecondInterruptEndsPilot(t *testing.T) {
 			t.Fatalf("the child ended with %v, want it killed by the second SIGINT\n%s", err, out.String())
 		}
 		status, ok := exit.Sys().(syscall.WaitStatus)
-		if !ok || !status.Signaled() || status.Signal() != syscall.SIGINT {
-			t.Fatalf("the child ended with %v after %s, want it killed by SIGINT\n%s", err, time.Since(begin), out.String())
+		if !ok || !status.Signaled() || status.Signal() != sig {
+			t.Fatalf("the child ended with %v after %s, want it killed by %v\n%s", err, time.Since(begin), sig, out.String())
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatalf("the second Ctrl-C did not end pilot (the child was still in its logout after %s)", time.Since(begin))
+		t.Fatalf("the second %v did not end pilot (the child was still in its logout after %s)", sig, time.Since(begin))
 	}
 }
 
