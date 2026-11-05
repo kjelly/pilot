@@ -388,6 +388,8 @@ client 不被刷新，只發生在 Go 沒有寫入、journal 沒有未完成的�
 - [x] （`TestLiveGoPreviewDriver` 已對拋棄式 vm-target 實跑，目前驗收紀錄見 [LATEST](../../evidence/freeipa-go-reconcile/LATEST.md)）建立 Go reconcile test driver：在 vm-target 上 snapshot → preview → apply → verify → 第二輪零 mutation，失敗時 rollback，輸出可放進 evidence 的摘要（tested revision/tree、PASS/FAIL、API 計數）。driver 經 pilot 正式入口執行，不直接呼叫內部函式。本階段先完成 snapshot、preview、verify 與 rollback，apply 與第二輪檢查在 Phase 2 接上。`pilot reconcile --component <key> --preview-only --stage <stage>` 與 `--force` 已可非互動執行（PR #139、#140，promptAutomation 預設值驅動），driver 沿用它，不再另寫 wizard 驅動；但現有的預覽走 Ansible `--check --diff`，Go engine 需要自己的明確入口（名稱與旗標由 Phase 1 spec 決定，擬議為唯讀的 engine 選擇），且不得讓 `--preview-only` 在不經 Go engine 的情況下被當成 Go 預覽通過。
 - [x] （2026-11-05：`TestSpecRowsMapToPlannerOperations`，以 `TestSpecRowMappingCheckFires` 證明會 fail）建立 spec row 對應檢查：每個 users/groups 相關 row 對應到 planner 的 operation 種類與 verifier 檢查，雙向鎖住（row 沒有對應，或程式宣告的對應不在 spec，都要 fail），比照 `TestSpecPlaybookTagAlignment`。相容期內舊 playbook 仍受 `TestSpecPlaybookTagAlignment` 約束，兩個檢查都要通過。新檢查要先把一個 regression 放回去，確認它會 fail（AGENTS.md §5.7）。
 
+- [x] （2026-11-05，第二輪 review）預覽入口的每個 fail-closed gate 都有會觸發它的 test row，由程式碼中的 `// gate:` 標註與 `TestReconcileGolangEveryGateHasARow`、`TestObserveEveryGateHasARow`（掃描器 `internal/gateledger`）雙向鎖住；失敗一律以結束碼 1 結束，子行程的結束碼不傳遞，只有產生出的 blocked plan 是 3；Ctrl-C／SIGTERM 與 `--timeout` 一樣取消預覽並殺掉 `ansible-vault`，登入後的 session 仍會登出（Phase 1 spec §2.3、§3、§10.1；AGENTS.md §5.10、§5.12）。
+
 退出條件：讀取無 mutation，計畫能解釋每個操作；不支援的 roster section 明確阻擋對應範圍。
 
 ### Phase 2 使用者與群組 MVP
