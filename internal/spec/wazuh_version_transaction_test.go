@@ -199,6 +199,12 @@ func TestWazuhVersionCoordinatorBehavior(t *testing.T) {
 	runWazuhHarness(t, "testdata/wazuh_transaction_test.py", "Wazuh version coordinator behavioral controls")
 }
 
+// The production manager gate tasks run unchanged under real Ansible; the
+// coordinator's central action runs for real over modeled docker commands.
+func TestWazuhManagerGateGraph(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_manager_gate_test.py", "real Ansible Wazuh manager version-gate graph")
+}
+
 func TestAptExactVersionTaskBehavior(t *testing.T) {
 	runWazuhHarness(t, "testdata/apt_exact_task_test.py", "real Ansible exact APT task controls")
 }
