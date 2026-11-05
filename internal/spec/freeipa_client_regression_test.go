@@ -1241,3 +1241,49 @@ func TestRegression_FreeipaClientPwexpiryCanaryFixture(t *testing.T) {
 		t.Error("canary fixture must not create users, grant sudo, or use a substring changed check")
 	}
 }
+
+// A10: the live test of the password-expiry policy on gateway, directory and
+// transport-target hosts needs one topology with all three plus the session
+// store and the isolated workstation. The topology groups must be the ones the
+// chain's playbooks and the freeipa-client preflight name, and the chain must
+// import the transport chain before the directory (the directory needs the
+// gateway scope hostgroups). The chain must not pin the SSSD policy: the
+// preflight refuses `renew` on these groups, so the live test applies it
+// separately.
+func TestRegression_FreeipaClientPwexpiryA10Chain(t *testing.T) {
+	topo, err := os.ReadFile("../../docs/topologies/freeipa-client-pwexpiry-a10-topology.yaml")
+	if err != nil {
+		t.Fatalf("read topology: %v", err)
+	}
+	for _, g := range []string{
+		"freeipa-server", "freeipa-client", "pilot-access-gateway", "pilot-access-directory",
+		"pilot-access-target-policy", "pilot-session-store", "pilot-transport-workstation",
+	} {
+		if !strings.Contains(string(topo), g) {
+			t.Errorf("topology must declare the group %s", g)
+		}
+	}
+	raw, err := os.ReadFile("../../playbooks/test/freeipa-client-pwexpiry-a10-chain.yml")
+	if err != nil {
+		t.Fatalf("read chain: %v", err)
+	}
+	src := string(raw)
+	first := strings.Index(src, "import_playbook: pilot-access-transport-e2e.yml")
+	second := strings.Index(src, "import_playbook: ../apply/pilot-access-directory-apply.yml")
+	if first < 0 || second < 0 || first > second {
+		t.Errorf("chain must import the transport chain, then the directory (got %d, %d)", first, second)
+	}
+	if strings.Contains(src, "password_expiry_policy:") {
+		t.Error("the chain must not pin the SSSD policy")
+	}
+	// The preflight text must still name the three groups the topology uses.
+	apply, err := os.ReadFile("../../playbooks/apply/freeipa-client-apply.yml")
+	if err != nil {
+		t.Fatalf("read apply: %v", err)
+	}
+	for _, g := range []string{"pilot-access-gateway", "pilot-access-directory", "pilot-access-target-policy"} {
+		if !strings.Contains(string(apply), g) {
+			t.Errorf("freeipa-client preflight no longer names %s", g)
+		}
+	}
+}
