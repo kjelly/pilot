@@ -91,6 +91,73 @@ func TestViewVaultFileAmbientStartsNothingWithAnEndedContext(t *testing.T) {
 	}
 }
 
+// unsetenv removes key from the test process's environment until the test
+// ends.
+func unsetenv(t *testing.T, key string) {
+	t.Helper()
+	old, had := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(key, old)
+		}
+	})
+}
+
+// The real ansible-vault (ansible-core) under ViewVaultFileAmbient's new
+// session: a secret named by the environment decrypts the file, another
+// secret and no secret are the two classified failures. Skipped where
+// ansible-vault is not installed.
+func TestViewVaultFileAmbientRealAnsibleVault(t *testing.T) {
+	if _, err := exec.LookPath("ansible-vault"); err != nil {
+		t.Skipf("ansible-vault not installed: %v", err)
+	}
+	dir := t.TempDir()
+	password := filepath.Join(dir, "pw")
+	other := filepath.Join(dir, "other-pw")
+	vars := filepath.Join(dir, "vars.yml")
+	noConfig := filepath.Join(dir, "ansible.cfg")
+	const content = "ipa_admin_password: not-a-real-secret\n"
+	for path, data := range map[string]string{password: "lab-only-vault-password\n", other: "another-lab-only-password\n", vars: content, noConfig: ""} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("ansible-vault", "encrypt", "--vault-password-file", password, vars).CombinedOutput(); err != nil {
+		t.Fatalf("ansible-vault encrypt (test setup): %v: %s", err, out)
+	}
+	t.Setenv("ANSIBLE_CONFIG", noConfig)
+	for _, key := range []string{"ANSIBLE_VAULT_PASSWORD_FILE", "ANSIBLE_VAULT_IDENTITY_LIST", "ANSIBLE_VAULT_ID_MATCH", "ANSIBLE_ASK_VAULT_PASS"} {
+		unsetenv(t, key)
+	}
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want error
+	}{
+		{name: "secret from the environment", env: []string{"ANSIBLE_VAULT_PASSWORD_FILE=" + password}},
+		{name: "another secret", env: []string{"ANSIBLE_VAULT_PASSWORD_FILE=" + other}, want: ErrVaultDecryptFailed},
+		{name: "no secret", want: ErrNoVaultSecret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			got, err := ViewVaultFileAmbient(ctx, vars, tc.env)
+			if tc.want != nil {
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("err = %v, want %v", err, tc.want)
+				}
+				return
+			}
+			if err != nil || string(got) != content {
+				t.Fatalf("got %q, %v; want the decrypted file", got, err)
+			}
+		})
+	}
+}
+
 // ptyChild runs the named test in a child of this test binary whose
 // controlling terminal is a pty nobody answers on, and returns what the
 // child wrote to the terminal. The child recognizes itself by ptyChildEnv.
