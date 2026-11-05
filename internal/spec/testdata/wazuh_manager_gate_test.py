@@ -9,6 +9,7 @@ stack would now be touched". Not native VM evidence.
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -175,6 +176,66 @@ class ManagerGateTests(unittest.TestCase):
             run, actions, docker, facts = self.run_gate('absent', flags=('--tags', tag))
             self.assertEqual(run.returncode, 0, (tag, run.stdout))
             self.assertEqual(facts['planned'], True)
+
+
+class TopologyReceiverTests(unittest.TestCase):
+    """The chain topology must make the manager's forwarding rows (C10/C11) applicable.
+
+    Native finding D2: with no log receiver in the inventory the manager does not forward, so C10
+    (siem-log-server pin) and C11 (host imfile reader) fail as not-applicable and `topology test --verify`
+    has no row filter. The real manager tasks that decide this run over the inventory the topology renders.
+    """
+    TASKS = ('Gate: siem_forward_port is a TCP port number',
+             'Resolve inventory-overridable defaults without shadowing group_vars/host_vars',
+             "Auto-detect SIEM forward host from this inventory's log-server group",
+             "Gate: siem_forward_port matches the inventory log-server's siem_receiver_tcp_port")
+
+    def run_over(self, topology_text):
+        topology = yaml.safe_load(topology_text)
+        with tempfile.TemporaryDirectory(prefix='wazuh-topology-receiver-') as temporary:
+            root = Path(temporary)
+            hosts, children = {}, {}
+            for number, node in enumerate(topology['nodes'], start=10):
+                hosts[node['name']] = {'ansible_connection': 'local', 'ansible_host': '192.0.2.%d' % number}
+                for group in node['groups']:
+                    children.setdefault(group, {'hosts': {}})['hosts'][node['name']] = {}
+            inventory = root / 'inventory.yml'
+            inventory.write_text(yaml.safe_dump({'all': {'hosts': hosts, 'children': children}}))
+            play = yaml.safe_load((SOURCE / 'wazuh-manager-apply.yml').read_text())[0]
+            facts = root / 'facts.json'
+            tasks = [dict(picked(play, name)) for name in self.TASKS]
+            tasks.append({'name': 'record', 'check_mode': False, 'ansible.builtin.copy': {'dest': str(facts), 'mode': '0600',
+                'content': "{{ {'host': siem_forward_host | default(''), 'enabled': siem_forwarding_enabled | bool} | to_json }}"}})
+            values = dict(play['vars'], stage='sandbox', ansible_distribution='Ubuntu')
+            playbook = root / 'play.yml'
+            playbook.write_text(yaml.safe_dump([{'hosts': 'wazuh-manager', 'gather_facts': False, 'vars': values, 'tasks': tasks}], sort_keys=False))
+            config = root / 'ansible.cfg'
+            config.write_text('[defaults]\nfact_caching=memory\nretry_files_enabled=false\n')
+            run = subprocess.run(['ansible-playbook', '-i', str(inventory), str(playbook)], cwd=root, capture_output=True, text=True, timeout=180,
+                                 env=dict(os.environ, ANSIBLE_CONFIG=str(config), ANSIBLE_LOCAL_TEMP=str(root / 'local'),
+                                          ANSIBLE_REMOTE_TEMP=str(root / 'remote'), ANSIBLE_CACHE_PLUGIN='memory', ANSIBLE_NOCOLOR='1'))
+            return run, json.loads(facts.read_text()) if facts.exists() else None, hosts
+
+    def test_the_receiver_node_is_the_managers_forward_target_so_c10_and_c11_apply(self):
+        text = (REPO / 'docs/topologies/wazuh-version-topology.yaml').read_text()
+        run, facts, hosts = self.run_over(text)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(facts, {'host': hosts['wf244-deb']['ansible_host'], 'enabled': True})
+        # The rows the receiver makes applicable are the manager's own forwarding rows: C10 pins this alias.
+        play = yaml.safe_load((SOURCE / 'wazuh-manager-apply.yml').read_text())[0]
+        spec = (REPO / 'docs/verification/wazuh-manager.md').read_text()
+        rows = {line.split('|')[1].strip(): line for line in spec.splitlines() if re.match(r'\| C1[01] \|', line)}
+        self.assertEqual(sorted(rows), ['C10', 'C11'])
+        self.assertIn(play['vars']['siem_forward_alias'], rows['C10'])
+        self.assertIn('pilot-wazuh-delivery local', rows['C11'])
+
+    def test_a_topology_without_a_receiver_leaves_forwarding_off_which_is_why_the_chain_failed_natively(self):
+        text = (REPO / 'docs/topologies/wazuh-version-topology.yaml').read_text()
+        without = text.replace('groups: [sandbox, log-server, wazuh-fim]', 'groups: [sandbox, wazuh-fim]')
+        self.assertNotEqual(without, text)
+        run, facts, hosts = self.run_over(without)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(facts, {'host': '', 'enabled': False})
 
 
 if __name__ == '__main__':
