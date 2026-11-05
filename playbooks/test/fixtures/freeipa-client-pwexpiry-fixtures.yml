@@ -8,6 +8,9 @@
 #   pilot-pwnear     password valid, expiry in 3 days  -> pwd_expiration_warning
 #   pilot-nopw       never had a password (key-only)   -> denied under warn/renew
 #
+#   pilot-pwdisabled / pilot-pwprincexp / pilot-pwhbacdeny   (A06) keyed, expired
+#                    password; the live test disables the account, expires its
+#                    Kerberos principal or HBAC-denies it before the first login
 #   pilot-pwchange   (A04) keyed, keeps the pilot-all sudo rule; the live test
 #                    resets its password with `ipa passwd`, logs in with the key
 #                    and changes the expired password at the sshd prompt
@@ -86,6 +89,33 @@
     ipa_fixture_manage_sudorule: false
     ipa_fixture_user_ssh_public_key: "{{ pwexpiry_probe_ssh_public_key | default('') }}"
 
+- name: Ensure pilot-pwdisabled exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: pilot-pwdisabled
+    ipa_fixture_user_first: Pw
+    ipa_fixture_user_last: Disabled
+    ipa_fixture_manage_sudorule: false
+    ipa_fixture_user_ssh_public_key: "{{ pwexpiry_probe_ssh_public_key | default('') }}"
+
+- name: Ensure pilot-pwprincexp exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: pilot-pwprincexp
+    ipa_fixture_user_first: Pw
+    ipa_fixture_user_last: PrincExp
+    ipa_fixture_manage_sudorule: false
+    ipa_fixture_user_ssh_public_key: "{{ pwexpiry_probe_ssh_public_key | default('') }}"
+
+- name: Ensure pilot-pwhbacdeny exists (canonical user fixtures)
+  ansible.builtin.import_playbook: freeipa-client-fixtures.yml
+  vars:
+    ipa_fixture_user: pilot-pwhbacdeny
+    ipa_fixture_user_first: Pw
+    ipa_fixture_user_last: HbacDeny
+    ipa_fixture_manage_sudorule: false
+    ipa_fixture_user_ssh_public_key: "{{ pwexpiry_probe_ssh_public_key | default('') }}"
+
 - name: Put the password-expiry fixture accounts into their states (run on the FreeIPA server)
   hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
   become: false
@@ -99,6 +129,11 @@
       - {name: pilot-pwvalid, state: valid}
       - {name: pilot-pwnear, state: near}
       - {name: pilot-nopw, state: nopw}
+      # A06: expired-password accounts that the live test restricts (disabled,
+      # principal expired, HBAC-denied) before their first login
+      - {name: pilot-pwdisabled, state: expired}
+      - {name: pilot-pwprincexp, state: expired}
+      - {name: pilot-pwhbacdeny, state: expired}
 
   pre_tasks:
     - name: "Gate: admin password present (fail before touching the directory)"

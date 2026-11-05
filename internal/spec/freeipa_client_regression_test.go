@@ -1146,20 +1146,20 @@ func TestRegression_FreeipaClientPwexpiryFixtures(t *testing.T) {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	src := string(raw)
-	for _, user := range []string{"pilot-pwexpired", "pilot-pwvalid", "pilot-pwnear", "pilot-nopw", "pilot-pwchange", "pilot-pwrefuse"} {
+	for _, user := range []string{"pilot-pwexpired", "pilot-pwvalid", "pilot-pwnear", "pilot-nopw", "pilot-pwchange", "pilot-pwrefuse", "pilot-pwdisabled", "pilot-pwprincexp", "pilot-pwhbacdeny"} {
 		if strings.Count(src, "ipa_fixture_user: "+user) != 1 {
 			t.Errorf("%s must be created by exactly one import of freeipa-client-fixtures.yml", user)
 		}
 	}
-	if got := strings.Count(src, "import_playbook: freeipa-client-fixtures.yml"); got != 6 {
-		t.Errorf("want 6 imports of the canonical user fixture, got %d", got)
+	if got := strings.Count(src, "import_playbook: freeipa-client-fixtures.yml"); got != 9 {
+		t.Errorf("want 9 imports of the canonical user fixture, got %d", got)
 	}
 	// Only pilot-pwchange (A04, checks sudo after the change) keeps the pilot-all
 	// rule; the pilot-all rule is !authenticate, so no other account may get it.
-	if got := strings.Count(src, "ipa_fixture_manage_sudorule: false"); got != 5 {
-		t.Errorf("five imports must set ipa_fixture_manage_sudorule: false (all but pilot-pwchange), got %d", got)
+	if got := strings.Count(src, "ipa_fixture_manage_sudorule: false"); got != 8 {
+		t.Errorf("eight imports must set ipa_fixture_manage_sudorule: false (all but pilot-pwchange), got %d", got)
 	}
-	if got := strings.Count(src, "ipa_fixture_user_ssh_public_key: \"{{ pwexpiry_probe_ssh_public_key | default('') }}\""); got != 6 {
+	if got := strings.Count(src, "ipa_fixture_user_ssh_public_key: \"{{ pwexpiry_probe_ssh_public_key | default('') }}\""); got != 9 {
 		t.Errorf("every import must take its SSH public key from pwexpiry_probe_ssh_public_key, got %d", got)
 	}
 	// The live-test accounts must stay out of the password-state loop: C15-C17
@@ -1201,6 +1201,10 @@ func TestRegression_FreeipaClientPwexpiryChainOrder(t *testing.T) {
 		"fixtures/freeipa-client-fixtures.yml",
 		"fixtures/freeipa-client-pwexpiry-fixtures.yml",
 		"../apply/freeipa-client-apply.yml",
+		"../apply/host-monitoring-apply.yml",
+		"../apply/login-probe-apply.yml",
+		"fixtures/login-probe-fixtures.yml",
+		"fixtures/freeipa-client-pwexpiry-canary.yml",
 	}
 	last := -1
 	for _, want := range order {
@@ -1215,5 +1219,25 @@ func TestRegression_FreeipaClientPwexpiryChainOrder(t *testing.T) {
 	}
 	if strings.Contains(src, "password_expiry_policy:") {
 		t.Error("the policy is chosen by the caller with -e; the chain must not pin it")
+	}
+}
+
+// A07: under warn/renew an account that never had a password is refused (C17),
+// so the login-probe canary needs a throwaway password whose expiry is far in
+// the future. The password is random, never printed, and set only when absent.
+func TestRegression_FreeipaClientPwexpiryCanaryFixture(t *testing.T) {
+	const path = "../../playbooks/test/fixtures/freeipa-client-pwexpiry-canary.yml"
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	src := string(raw)
+	for _, want := range []string{"user-mod \"$u\" --random", "--password-expiration=", "grep -qi '^ *krblastpwdchange:'", "stdin: \"{{ ipa_admin_password }}\"", "== 'CHANGED'", "login_probe_user | default('pilot-login-canary')", "freeipa-private-ccache-open.yml", "freeipa-private-ccache-close.yml"} {
+		if !strings.Contains(src, want) {
+			t.Errorf("canary fixture must contain %q", want)
+		}
+	}
+	if strings.Contains(src, "'CHANGED' in") || strings.Contains(src, "ipa user-add") || strings.Contains(src, "sudorule") {
+		t.Error("canary fixture must not create users, grant sudo, or use a substring changed check")
 	}
 }

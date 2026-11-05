@@ -1,0 +1,76 @@
+# Gives the login-probe canary a password that stays valid, so it keeps logging
+# in under ipa_access_order = expire, pwd_expire_policy_renew
+# (docs/verification/freeipa-client.md C17: an account that never had a
+# password is refused under warn/renew, so a key-only canary would go dark).
+#
+# The password is a throwaway random one (admin reset, then the expiry moved to
+# 2099-12-31) and is never shown; the canary logs in with its SSH key. This is
+# the test-side equivalent of the operator prerequisite in
+# docs/superpowers/plans/2026-11-05-freeipa-ssh-key-password-renewal.md P3.1.
+# Production does the same with `ipa passwd` + `ipa user-mod --password-expiration`
+# outside the roster.
+#
+# Runs on the FreeIPA SERVER after login-probe-fixtures.yml created the canary.
+# Idempotent: only an account without krbLastPwdChange is touched.
+---
+- name: Give the login-probe canary a password that does not expire
+  hosts: "{{ fixtures_target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+  vars:
+    ipa_domain: ipa.pilot.internal
+    ipa_realm: "{{ ipa_domain | upper }}"
+    pwexpiry_canary_user: "{{ login_probe_user | default('pilot-login-canary') }}"
+    pwexpiry_canary_far_future: "20991231000000Z"
+
+  pre_tasks:
+    - name: "Gate: admin password present (fail before touching the directory)"
+      ansible.builtin.assert:
+        that:
+          - ipa_admin_password is defined and ipa_admin_password | length >= 8
+        fail_msg: Missing ipa_admin_password. Pass a vault file with -e @...
+      tags: [always]
+
+  tasks:
+    - name: "Canary password with a private Kerberos cache for the admin ticket"
+      environment:
+        KRB5CCNAME: "{{ pilot_krb5ccname | default('FILE:/nonexistent/pilot-krb5cc-not-open') }}"
+      block:
+        - name: "Private Kerberos cache for the tickets below (issue #69)"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-open.yml
+            apply:
+              tags: [always]
+          tags: [always]
+
+        - name: "Canary password — kinit admin"
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ ipa_realm }}"]
+            stdin: "{{ ipa_admin_password }}"
+          changed_when: false
+          no_log: true
+          when: not ansible_check_mode
+          tags: [fixtures]
+
+        - name: "Canary password — set a random password that expires in 2099"
+          ansible.builtin.shell:
+            cmd: |
+              set -e
+              u={{ pwexpiry_canary_user }}
+              out=$(ipa user-show "$u" --all --raw)
+              if printf '%s\n' "$out" | grep -qi '^ *krblastpwdchange:'; then echo UNCHANGED; exit 0; fi
+              ipa user-mod "$u" --random >/dev/null
+              ipa user-mod "$u" --password-expiration={{ pwexpiry_canary_far_future }} >/dev/null
+              echo CHANGED
+          register: pwexpiry_canary_state
+          changed_when: "(pwexpiry_canary_state.stdout | default('') | trim) == 'CHANGED'"
+          no_log: true
+          when: not ansible_check_mode
+          tags: [fixtures]
+      always:
+        - name: "Destroy the private Kerberos cache"
+          ansible.builtin.include_tasks:
+            file: ../../apply/tasks/freeipa-private-ccache-close.yml
+            apply:
+              tags: [always]
+          tags: [always]
