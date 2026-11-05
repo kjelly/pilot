@@ -10,6 +10,10 @@
   ansible.builtin.import_playbook: ../apply/freeipa-server-apply.yml
 - name: Join the FreeIPA replica
   ansible.builtin.import_playbook: ../apply/freeipa-server-replica-apply.yml
+  vars:
+    # The replica playbook defaults the primary's address to the host's own
+    # (ansible_host) and then refuses to run; point it at the primary.
+    freeipa_server_ip: "{{ hostvars[groups['freeipa-server'][0]].ansible_host }}"
 - name: Ensure the demo user and sudo rule exist
   ansible.builtin.import_playbook: fixtures/freeipa-client-fixtures.yml
 - name: Ensure the password-state fixture accounts exist
