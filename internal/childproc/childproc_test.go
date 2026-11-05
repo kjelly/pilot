@@ -103,6 +103,18 @@ func readPID(t *testing.T, path string) int {
 	return pid
 }
 
+// mustSurvive fails when pid, which nothing was meant to signal, stops running
+// within half a second: a SIGKILL takes a moment to show, so checking once
+// right away would miss one that was just sent.
+func mustSurvive(t *testing.T, what string, pid int) {
+	t.Helper()
+	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if !alive(pid) {
+			t.Fatalf("%s (pid %d) was killed, but nothing can (or should) reach it", what, pid)
+		}
+	}
+}
+
 // waitGone fails unless pid is gone within within.
 func waitGone(t *testing.T, what string, pid int, within time.Duration) {
 	t.Helper()
@@ -156,10 +168,7 @@ func TestIsolateEscapedHelperIsBoundedByWaitDelay(t *testing.T) {
 	if cause := Cause(ctx, res.err); !errors.Is(cause, context.DeadlineExceeded) {
 		t.Fatalf("Cause = %v, want the deadline", cause)
 	}
-	pid := readPID(t, helperPID)
-	if !alive(pid) {
-		t.Fatalf("the escaped helper (pid %d) is gone: it was in the process group after all", pid)
-	}
+	mustSurvive(t, "the escaped helper (was it in the process group after all?)", readPID(t, helperPID))
 }
 
 // The child ended well but a process it started holds a pipe: Wait gives up
@@ -180,9 +189,7 @@ func TestIsolateExitZeroWithAHelperHoldingTheOutput(t *testing.T) {
 	if !errors.Is(cause, ErrHelperKeptOutput) || !errors.Is(cause, exec.ErrWaitDelay) || errors.Is(cause, context.DeadlineExceeded) || errors.Is(cause, context.Canceled) {
 		t.Fatalf("Cause = %v, want ErrHelperKeptOutput and ErrWaitDelay and no context error", cause)
 	}
-	if pid := readPID(t, helperPID); !alive(pid) {
-		t.Fatalf("the helper (pid %d) is gone, but a reaped child's group is not signalled", pid)
-	}
+	mustSurvive(t, "the helper (a reaped child's group is not signalled)", readPID(t, helperPID))
 }
 
 // A failing child with the same helper reports its own failure.

@@ -157,9 +157,13 @@ func assertSurvives(t *testing.T, dir, glob string) {
 	if len(pids) == 0 {
 		t.Fatalf("no pid.%s was recorded", glob)
 	}
-	for _, pid := range pids {
-		if !childAlive(pid) {
-			t.Fatalf("pid.%s: process %d is gone, but nothing can reach a process that left the group (or a reaped child's group)", glob, pid)
+	// A SIGKILL takes a moment to show: a process that is meant to be left
+	// alone must stay for half a second, not for the instant it is looked at.
+	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		for _, pid := range pids {
+			if !childAlive(pid) {
+				t.Fatalf("pid.%s: process %d is gone, but nothing can reach a process that left the group (or a reaped child's group)", glob, pid)
+			}
 		}
 	}
 }

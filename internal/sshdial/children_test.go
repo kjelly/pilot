@@ -78,6 +78,18 @@ func mustBeGone(t *testing.T, what string, pid int) {
 	}
 }
 
+// mustSurvive fails when pid, which nothing was meant to signal, stops running
+// within half a second: a SIGKILL takes a moment to show, so checking once
+// right away would miss one that was just sent.
+func mustSurvive(t *testing.T, what string, pid int) {
+	t.Helper()
+	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if !alive(pid) {
+			t.Fatalf("%s (pid %d) was killed, but nothing can (or should) reach it", what, pid)
+		}
+	}
+}
+
 // scriptedSSH writes an ssh stand-in running body (sh) and returns its path
 // and the directory it records pids in. The body starts with $PIDS set.
 func scriptedSSH(t *testing.T, body string) (path, pids string) {
@@ -167,9 +179,7 @@ func TestRunFailsClosedWhenAHelperKeepsTheOutput(t *testing.T) {
 				t.Fatalf("failed after %s, want about the 2s wait delay", elapsed)
 			}
 			// The helper is not killed: ssh was reaped, its group id may be reused.
-			if pid := pidFrom(t, filepath.Join(pids, "helper")); !alive(pid) {
-				t.Fatalf("the helper (pid %d) is gone", pid)
-			}
+			mustSurvive(t, "the helper", pidFrom(t, filepath.Join(pids, "helper")))
 		})
 	}
 }
@@ -234,9 +244,7 @@ func TestConnCloseWithAnEscapedHelperIsBounded(t *testing.T) {
 		t.Fatalf("Close took %s, want at most the wait delay", elapsed)
 	}
 	mustBeGone(t, "ssh", pidFrom(t, filepath.Join(pids, "ssh")))
-	if pid := pidFrom(t, filepath.Join(pids, "helper")); !alive(pid) {
-		t.Fatalf("the escaped helper (pid %d) is gone: it was in ssh's group after all", pid)
-	}
+	mustSurvive(t, "the escaped helper (is it in ssh's group after all?)", pidFrom(t, filepath.Join(pids, "helper")))
 }
 
 // The server closes the connection (ssh exits 0 after its output ended) while
@@ -259,9 +267,7 @@ func TestConnReadEndsCleanlyWhenAHelperKeepsStderr(t *testing.T) {
 	// which is in a group that may since have been given to another process,
 	// is left alone.
 	_ = c.Close()
-	if pid := pidFrom(t, filepath.Join(pids, "helper")); !alive(pid) {
-		t.Fatalf("Close signalled the group of a reaped ssh: the helper (pid %d) is gone", pid)
-	}
+	mustSurvive(t, "the helper (Close signalled the group of a reaped ssh)", pidFrom(t, filepath.Join(pids, "helper")))
 }
 
 // AcquireLock gives up with its context, and then ssh and the helper in its
