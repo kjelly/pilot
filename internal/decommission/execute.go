@@ -74,7 +74,9 @@ func Apply(ctx context.Context, in ApplyInput) (*FinalizeResult, error) {
 		return &FinalizeResult{Status: "already_completed", Receipt: in.Plan.Receipt, Plan: in.Plan}, nil
 	}
 
-	fresh, err := CheckFreshness(ctx, in.PlanInputForFreshness, in.Plan.PlanHash)
+	planInput := in.PlanInputForFreshness
+	planInput.previousPlan = in.Plan
+	fresh, err := CheckFreshness(ctx, planInput, in.Plan.PlanHash)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +110,8 @@ func Apply(ctx context.Context, in ApplyInput) (*FinalizeResult, error) {
 	// legitimately is right now, post-cleanup — and persist it, so a crash
 	// between here and Finalize still resumes from the post-cleanup state
 	// rather than trying to redo already-completed destructive work.
-	postCleanup, err := PlanHost(ctx, in.PlanInputForFreshness)
+	planInput.previousPlan = fresh
+	postCleanup, err := PlanHost(ctx, planInput)
 	if err != nil {
 		return nil, fmt.Errorf("decommission: re-derive plan after cleanup steps: %w", err)
 	}

@@ -241,6 +241,16 @@
       no_log: true
       tags: [always]
 
+    # Capture an explicit shared authority before the legacy convenience
+    # below fills freeipa.server from this host's hostname. A replica-local
+    # auto-detected name must never establish a competing lifecycle ledger.
+    - name: "Resolve the explicit shared gateway lifecycle authority"
+      ansible.builtin.set_fact:
+        ipa_gateway_lifecycle_designated_authority: >-
+          {{ (freeipa_roster.freeipa | default({})).server |
+             default(ipa_server_fqdn | default(freeipa_server_fqdn | default('')), true) }}
+      tags: [always]
+
     - name: "Detect FreeIPA server FQDN when roster omits freeipa.server"
       ansible.builtin.command: hostname -f
       register: freeipa_detected_server_fqdn
@@ -893,6 +903,25 @@
           when: ansible_run_tags | intersect(['all', 'tagged', 'sshkeys'] + ipa_identity_cache_recovery_tags) | length > 0
           tags: [always]
 
+        - name: "Validate absent host gateway ownership before managed identity mutations"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-gateway-scope-lifecycle.yml
+            apply:
+              tags: [always]
+          vars:
+            ipa_gateway_lifecycle_operation: inspect
+            ipa_gateway_lifecycle_authority: "{{ ipa_gateway_lifecycle_designated_authority }}"
+            ipa_gateway_lifecycle_readonly: true
+            ipa_gateway_lifecycle_request:
+              retirements: "{{ ipa_ssh_cache_retirements | default([]) }}"
+              absent_hosts: "{{ freeipa_roster.hosts | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | map(attribute='name') | list }}"
+              require_mappings: true
+              managed_hostgroups: "{{ freeipa_roster.hostgroups | default([]) | map(attribute='name') | list }}"
+          when:
+            - pilot_decommission_query | default('') | length == 0
+            - freeipa_roster.hosts | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list | length > 0
+          tags: [always]
+
         - name: "Prepare legacy authorization cache recovery"
           ansible.builtin.command:
             argv:
@@ -909,6 +938,28 @@
             - not ansible_check_mode
             - ansible_run_tags | intersect(['all', 'tagged'] + ipa_identity_cache_recovery_tags) | length > 0
           tags: [always]
+
+        - name: "Inspect gateway ownership for a decommission plan or uninstall (read-only)"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-gateway-scope-lifecycle.yml
+            apply:
+              tags: [freeipa_host_absent_inspect]
+          vars:
+            ipa_gateway_lifecycle_operation: inspect
+            ipa_gateway_lifecycle_authority: "{{ ipa_gateway_lifecycle_designated_authority }}"
+            ipa_gateway_lifecycle_readonly: true
+            ipa_gateway_lifecycle_request:
+              retirements:
+                - fqdn: "{{ pilot_decommission_target_fqdn }}"
+              managed_hostgroups: "{{ freeipa_roster.hostgroups | default([]) | map(attribute='name') | list }}"
+          when: pilot_decommission_query | default('') == 'gateway_scope'
+          tags: [freeipa_host_absent_inspect]
+
+        - name: "Print gateway ownership preflight for external tooling (read-only)"
+          ansible.builtin.debug:
+            msg: "HOST_INSPECT[{{ pilot_decommission_target_fqdn }}]: GATEWAY_SCOPE_READY=true"
+          when: pilot_decommission_query | default('') == 'gateway_scope'
+          tags: [freeipa_host_absent_inspect]
 
         # ── Groups ─────────────────────────────────────────────────────────
         # One listing replaces a `group-add` per group on reruns, the same way
@@ -3492,6 +3543,27 @@
           ansible.builtin.set_fact:
             freeipa_absent_hosts: "{{ freeipa_roster.hosts | default([]) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list }}"
           tags: [identity, hosts, freeipa_host_absent_inspect]
+
+        # The independent gateway controller owns memberships outside the
+        # roster. Remove only proven-owned memberships before the existing
+        # host/service/DNS deletion gates re-probe live state below. This
+        # journal is separate from the SSH cache journal, whose retirement
+        # receipts remain post host/DNS deletion.
+        - name: "Retire proven gateway memberships and persist re-add barriers"
+          ansible.builtin.include_tasks:
+            file: tasks/freeipa-gateway-scope-lifecycle.yml
+            apply:
+              tags: [identity, hosts]
+          vars:
+            ipa_gateway_lifecycle_operation: retire
+            ipa_gateway_lifecycle_authority: "{{ ipa_gateway_lifecycle_designated_authority }}"
+            ipa_gateway_lifecycle_request:
+              retirements: "{{ ipa_ssh_cache_retirements }}"
+              managed_hostgroups: []
+          when:
+            - pilot_decommission_query | default('') | length == 0
+            - ipa_ssh_cache_retirements | default([]) | length > 0
+          tags: [identity, hosts]
 
         # Bug found via Phase 3b live-target testing: `ipa host-show --all
         # --raw` does NOT expose per-service "managedby_service:" or per-group

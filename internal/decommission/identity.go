@@ -1,16 +1,105 @@
 package decommission
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/kjelly/pilot/internal/decommission/providers"
 	"github.com/kjelly/pilot/internal/inventory"
 )
 
+// bindPreviousRetirement runs before any provider probe. The approval hash does
+// not include FQDN or step targets, so identity additionally needs an unchanged
+// host/inventory binding and agreement among every persisted FreeIPA identity.
+// This cannot alter the current provider's authority, runner or configuration.
+func bindPreviousRetirement(previous, current *Plan) (*providers.RetirementIdentity, error) {
+	if previous == nil {
+		return nil, nil
+	}
+	registered := false
+	for _, component := range previous.Components {
+		if component.ComponentID == providers.FreeIPAClientProviderID && component.ProviderRegistered {
+			registered = true
+		}
+	}
+	if !registered {
+		return nil, nil
+	}
+	stale := func(detail string) (*providers.RetirementIdentity, error) {
+		return nil, newError(ErrPlanStale, "cannot recover persisted FreeIPA retirement identity: %s; re-plan required", detail)
+	}
+	if previous.InventoryRevision == "" || previous.InventoryRevision != current.InventoryRevision ||
+		jsonHash(canonicalHostSnapshot(previous.Host)) != jsonHash(canonicalHostSnapshot(current.Host)) ||
+		previous.Environment != current.Environment || previous.Environment != previous.Host.Env {
+		return stale("host alias, snapshot, environment or inventory revision changed")
+	}
+	stage := normalizeStage(previous.Environment)
+	if stage == "" {
+		stage = "sandbox"
+	}
+	identity := ""
+	add := func(value string) error {
+		fqdn, err := providers.CanonicalFreeIPAFQDN(value)
+		if err != nil {
+			return err
+		}
+		if identity != "" && identity != fqdn {
+			return fmt.Errorf("persisted canonical identities disagree")
+		}
+		identity = fqdn
+		return nil
+	}
+	if previous.FQDN != "" {
+		if err := add(previous.FQDN); err != nil {
+			return stale(err.Error())
+		}
+	}
+	for _, component := range previous.Components {
+		if component.ComponentID != providers.FreeIPAClientProviderID {
+			continue
+		}
+		for _, step := range component.Steps {
+			if step.Provider != providers.FreeIPAClientProviderID {
+				continue
+			}
+			if alias := step.Params["inventory_alias"]; alias != "" && alias != current.Host.Name {
+				return stale("step alias differs from the bound host")
+			}
+			if savedStage := step.Params["retirement_stage"]; savedStage != "" && savedStage != stage {
+				return stale("step retirement stage differs from the bound environment")
+			}
+			var target string
+			switch step.Action {
+			case providers.ActionFreeIPARosterHostAbsent, providers.ActionFreeIPAIdentityApplyConverge:
+				target = step.TargetIdentity
+			case providers.ActionFreeIPAClientUninstall:
+				target = step.Params["retirement_fqdn"]
+			default:
+				continue
+			}
+			if target != "" {
+				if err := add(target); err != nil {
+					return stale(err.Error())
+				}
+			}
+		}
+	}
+	if identity == "" {
+		return stale("canonical plan metadata and unambiguous legacy cleanup identity are missing")
+	}
+	if explicit := current.Host.Extra["ipa_client_fqdn"]; explicit != "" {
+		fqdn, err := providers.CanonicalFreeIPAFQDN(explicit)
+		if err != nil || fqdn != identity {
+			return stale("explicit current inventory FQDN differs from the persisted identity")
+		}
+	}
+	return &providers.RetirementIdentity{InventoryAlias: current.Host.Name, Stage: stage, FQDN: identity}, nil
+}
+
 // freeIPAPlanIdentity reads only the FreeIPA host cleanup actions, whose
 // target comes from resolveAuthoritativeFQDN. Other providers may target
-// referenced endpoints rather than the retiring host. After host deletion
-// these actions fall back to the inventory name, which can itself be FQDN.
+// referenced endpoints rather than the retiring host. Lifecycle recovery has
+// already validated any persisted canonical identity before these steps exist.
 func freeIPAPlanIdentity(plan *Plan) (string, providers.HostIdentitySource) {
 	for _, component := range plan.Components {
 		if component.ComponentID != providers.FreeIPAClientProviderID {

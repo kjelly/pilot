@@ -26,6 +26,14 @@
 | `gateway_scope_hosts` | 該 scope 目標主機 FQDN 清單，需以 `-e '{"gateway_scope_hosts": [...]}'` 的 JSON 物件形式傳入（`-e gateway_scope_hosts=[...]` 這種寫法會被 Ansible 當成純字串，不會被解析成 list）；透過 `pilot gateway-scope plan/reconcile` 時也可指定字面值 `all`，由 controller 展開成指定 inventory 的 `freeipa-client` group | 是 |
 | `ipa_admin_password` | kinit admin 用；只能來自 vault (`-e @~/.vault/main.yaml`) | 是 |
 | `gateway_scope_plan_only` | `true` 時只讀 diff、不寫入（對應 `pilot gateway-scope plan`）；預設 `false`（對應 `reconcile`） | 否 |
+| `freeipa_server_fqdn` | inventory 中唯一指定的 FreeIPA authority；發布與 identity retirement 必須使用同一台 server，不能分散 ledger 到 replica | 是 |
+| `freeipa_domain` | 可選的 domain cross-check；未提供時直接讀 authority 的原生 IPA 設定，ledger 綁定同一個實際 domain | 否 |
+| `gateway_scope_adopt_id` | 既有 scope group 的明確接管授權，值必須等於操作者查得的 live `ipauniqueid`；CLI 對應 `--adopt-group-id` | 僅接管既有 group 時 |
+| `gateway_scope_adopt_automember_id` | 既有 automember rule 的明確接管授權，值必須等於 local LDAP 的 live `entryUUID`，並同時指定 group adoption ID；CLI 對應 `--adopt-automember-id` | 僅接管既有 automember 時 |
+
+`ipa_server_fqdn` 保留為單次呼叫的明確 extra-vars override，優先於 canonical 值；
+它不是 inventory contract 的輸入，group_vars/host_vars 請使用 `freeipa_server_fqdn`。
+identity roster 的 authority 仍由 `freeipa.server` 指定。
 
 此驗收文件記錄的具體情境：`gateway_scope=gpu`，`gateway_scope_hosts=["gpu-a.ipa.pilot.internal","gpu-b.ipa.pilot.internal"]`（與 pilot-access-gateway Phase 0-5 evidence 使用的同一組真實 FreeIPA fixture 一致）。
 
@@ -68,6 +76,42 @@ pilot gateway-scope reconcile --scope gpu --hosts all --dir <workspace>
 - automember 的條件只在物件「建立當下」評估一次；對已存在的主機不會回溯生效，而且無法在 enroll 當下就知道「這台主機未來會不會變成 gateway」（gateway 元件通常是之後才另外套用的）。所以 automember 本身**無法**單靠 exclusive 條件排除 gateway 主機——這正是 `pilot-access-gateway-apply.yml` Step 3b 防線存在的原因：即使 automember 一時把即將成為 gateway 的主機也掃進去，只要對它套用過一次 pilot-access-gateway，Step 3b 就會把它清出來，兩個機制互補。
 - `enable-auto` 的回填部分是以 **pilot inventory** 的 `freeipa-client` group 為準（跟 `reconcile --hosts all` 同一份邏輯），不是查 FreeIPA 當下的即時物件清單。如果之後有主機是繞過 pilot 正常流程、直接用 `ipa host-add`／手動 `ipa-client-install` 建立的（不在 pilot 的 `hosts.yml` 裡），automember 會立刻把它加進 hostgroup，但**下次再跑一次 `enable-auto`** 時，reconcile 部分會因為 inventory 裡找不到這台主機而把它判定為 stale 並移除——已活體重現過這個行為。正常透過 `pilot deploy` 流程 enroll 的主機不會有這個問題（enroll 前主機就已經在 `hosts.yml` 裡）。實務上啟用 `enable-auto` 後，日常新增主機應該不需要再重跑它；真的要重跑（例如手動調整過 scope 的期望清單）前，先確認所有該留著的主機都已經在 inventory 裡。
 - `disable-auto` 冪等；`ipa automember-del` 對已經不存在的 rule 回傳 exit code 2（`not found`），已在 `failed_when` 正確處理，不會誤判成失敗。
+
+## 1.7 Scope ownership and host retirement acceptance
+
+- 所有發布入口使用同一份 resolved inventory snapshot；inventory alias 有明確
+  `ipa_client_fqdn` 時先映射並正規化，絕不拿 `ansible_host`/IP 當身分。gateway
+  alias 及其已知 canonical identity 均排除，canonical FQDN 去重。legacy IPA
+  short host 由 native host lookup 解析成唯一 FQDN，缺失或歧義時要求明確 mapping，
+  不猜 domain。整批 identity 在任何 scope mutation 前解析完畢。
+- 明確 canonical/mapped 的 retired FQDN 在 lookup 前即被 durable barrier 阻擋，
+  所以已刪除 host 的 stale inventory 不會破壞安全過濾。short host 則先查權威
+  canonical identity 再比對完整 FQDN；不得只因 basename 相同便排除不同的 live host。
+- `/var/lib/pilot-identity/gateway-scopes.json` 是 root-owned lifecycle ledger，
+  綁定 domain、唯一 authority、scope 與 live hostgroup immutable ID；automember
+  額外綁定 LDAP `entryUUID` 與 exact target group。名稱前綴或 description 不足以證明擁有權。
+- 新建立的資源在成功建立後記錄 ID；舊環境須先檢查 live ID，再明確接管。
+  未知或重建後 ID 改變的 group/rule 必須 actionable fail closed。
+- 正式 host decommission 在 client uninstall 前執行唯讀 ownership preflight，
+  執行 uninstall 時重新檢查；直接 canonical `state: absent` reconcile 也走同一條
+  server-side retirement cleanup。所有 direct memberships 在首次 removal 前完整分類。
+  所有 canonical absent FQDN 都先獨立唯讀探測；若有 scope membership、automember
+  再加入風險或 pending gateway work，卻沒有 inventory identity、明確 retirement
+  mapping 或既有 receipt 產生的精確授權，必須在任何 managed mutation 前拒絕並
+  指出 alias/FQDN/stage mapping 的補法。不得自動猜 alias；無 gateway work 的既有
+  absent 流程維持原有行為。
+- 退役只移除該 FQDN 在 proven-owned scopes 的 membership；scope group、其他成員、
+  共用 HBAC/sudo rule 與其他主機的有效登入/sudo 存取保留。既有 service、其他
+  hostgroup/netgroup、DNS ownership 和 host deletion gates 繼續執行。
+- durable pending barrier 必須先於 IPA mutation。退役會為所有已擁有的 automember
+  scopes 建立 exact escaped-FQDN exclusion，包括當下已不含該 host 的 scope。
+  completed barrier 也持續阻止 stale reconcile、重新 enable-auto 或 automember
+  rebuild 加回該 FQDN；新 scope publication 同樣套用既有 barriers。
+- probe、IPA mutation 與 journal publication 共用實體 lock；中斷後重試可繼續未完成
+  清理。gateway barrier 與 SSH-cache retirement receipt 分開，後者仍須等 host/DNS
+  deletion 成功才 settle。plan 與 check mode 不改 managed state。
+- 驗收包含兩台真實 enrolled clients：退役 A 後，B 的 SSH/HBAC 與 sudo 仍有效；
+  另測未知 membership、partial failure/retry、後續 reconcile 與 automember rebuild。
 
 ## 2. Checklist
 

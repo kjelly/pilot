@@ -517,7 +517,10 @@ func TestRunGatewayScopeDisableAutoNeverExpandsOrPassesHosts(t *testing.T) {
 // reconcile that actually failed.
 func TestRunGatewayScopeSurfacesAnsiblePlaybookFailure(t *testing.T) {
 	binDir := t.TempDir()
-	// No ansible-inventory: an explicit, non-"all" host list never needs one.
+	// Explicit hosts also resolve inventory identity mappings before execution.
+	if err := os.WriteFile(filepath.Join(binDir, "ansible-inventory"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"_meta\":{\"hostvars\":{}},\"all\":{}}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	playbookScript := "#!/bin/sh\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(binDir, "ansible-playbook"), []byte(playbookScript), 0o755); err != nil {
 		t.Fatal(err)
@@ -553,8 +556,8 @@ func TestRunGatewayScopeSurfacesAnsiblePlaybookFailure(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if err := runGatewayScope(cmd, false); err == nil {
-		t.Fatal("runGatewayScope(reconcile) error = nil, want a non-nil error for a failed ansible-playbook run")
+	if err := runGatewayScope(cmd, false); err == nil || !strings.Contains(err.Error(), "reconcile failed (exit=1)") {
+		t.Fatalf("reconcile must report the actual failed playbook, got %v", err)
 	}
 }
 
@@ -595,7 +598,7 @@ func TestRunGatewayScopeAutomemberSurfacesAnsiblePlaybookFailure(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if err := runGatewayScopeAutomember(cmd, false); err == nil {
-		t.Fatal("runGatewayScopeAutomember(disable) error = nil, want a non-nil error for a failed ansible-playbook run")
+	if err := runGatewayScopeAutomember(cmd, false); err == nil || !strings.Contains(err.Error(), "failed (exit=1)") {
+		t.Fatalf("disable must report the actual failed playbook, got %v", err)
 	}
 }

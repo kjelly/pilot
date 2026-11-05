@@ -1,0 +1,28 @@
+{
+  "request": {
+    "command": "host_show",
+    "args": [
+      "keep"
+    ],
+    "options": {
+      "all": true
+    }
+  },
+  "result": {
+    "result": {
+      "fqdn": [
+        "keep.ipa227.test"
+      ]
+    },
+    "value": "keep"
+  },
+  "native_fqdn_type": {
+    "type": "tuple",
+    "items": [
+      {
+        "type": "str"
+      }
+    ]
+  },
+  "provenance": "ipa.ipa227.test actual host_show short request, 2026-11-04, type descriptor captured before JSON; unrelated attributes omitted"
+}
