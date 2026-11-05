@@ -2,7 +2,7 @@
 
 日期：2026-10-30。對應計畫：`docs/superpowers/plans/2026-10-15-freeipa-go-ssh-reconcile.md` Phase 1。前一階段：`docs/superpowers/specs/2026-10-16-freeipa-go-reconcile-phase0-contract.md`（下稱 P0）。
 
-狀態：實作中（2026-11-05）。已實作：入口與旗標、vault 與憑證、SSH 目標推導、stage gate、adapter、observer、planner、plan JSON、spec row 對應檢查，以及 §10.3 driver 的程式碼（尚未實跑）。§9 的 K1–K5 已擷取並以 fixture 鎖住（2026-11-05 擷取 K1–K4，結果沒有推翻本文件的決定）。未完成：§10.3 的實跑與 evidence。
+狀態：已實作並實跑（2026-11-05）。入口與旗標、vault 與憑證、SSH 目標推導、stage gate、adapter、observer、planner、plan JSON、spec row 對應檢查都已實作；§9 的 K1–K5 已擷取並以 fixture 鎖住（K1–K4 於 2026-11-05 擷取，沒有推翻本文件的決定）；§10.3 driver 從 candidate `fc4b2bd` 對拋棄式 `pwfix-ipa` 實跑 8/8 PASS，每次預覽 0 寫入，證據：`docs/evidence/freeipa-go-reconcile/2026-11-05-fc4b2bd.md`。§10.4 剩 CI 的 `go test -race ./...`。
 
 本文件不提供操作 SOP。文中的指令與旗標是要實作的介面，不是已實跑的步驟。
 
@@ -361,6 +361,8 @@ Phase 2 開始寫入前要決定：撤銷、刪除與密碼是否要新增 check
 8. 輸出 evidence 摘要：tested revision／tree、vm、FreeIPA 版本、每一步 PASS／FAIL、`stats`、耗時。
 
 apply 與第二輪零 mutation 在 Phase 2 接上。
+
+目前有效的實跑摘要：2026-11-05，candidate `fc4b2bd`（tree `037e1133`），`pwfix-ipa`（FreeIPA 4.13.4／API 2.257），8/8 步驟 PASS；三次預覽各 5 個 HTTP 請求、0 寫入，drift 後的預覽剛好是 `user.update`、`group.member_user.remove`、`user.enable`。完整紀錄：`docs/evidence/freeipa-go-reconcile/2026-11-05-fc4b2bd.md`。
 
 ### 10.4 退出條件
 
