@@ -121,7 +121,7 @@ vars 檔沿用 `promptVault` 在預設值模式下的選擇：`<inventory 目錄
 | `ansible_ssh_pipelining` 等其他變數 | — | 不影響 SSH 連線本身，忽略 |
 | `ansible_password`、`ansible_ssh_pass` | — | 有設定就拒絕（Go 不做密碼 SSH） |
 
-拒絕在建立任何連線前發生，訊息指出是哪個 hostvar；不默默忽略（計畫 §3）。`ansible_host`、`ansible_user`、`ansible_ssh_private_key_file` 存在時必須是字串，其他型別（整數、布林、清單）一律拒絕，不轉成字串也不忽略：被忽略的 `ansible_user: 1000` 會以本機使用者連線，`ansible_host` 被忽略會連到 inventory 名稱。未設定與 `null` 視為未設定，空字串的 `ansible_host` 沿用 inventory 名稱；`ansible_port` 可為整數或十進位字串。FreeIPA server 的 FQDN 由 `sshdial.Dialer.FQDN`（遠端 `hostname -f`，與 playbook 補 `freeipa.server` 的方式相同）讀取；roster 有 `freeipa.server` 時兩者必須相同（大小寫不敏感），否則失敗。
+拒絕在建立任何連線前發生，訊息指出是哪個 hostvar；不默默忽略（計畫 §3）。`ansible_host`、`ansible_user`、`ansible_ssh_private_key_file` 存在時必須是字串，其他型別（整數、布林、清單）一律拒絕，不轉成字串也不忽略：被忽略的 `ansible_user: 1000` 會以本機使用者連線，`ansible_host` 被忽略會連到 inventory 名稱。未設定與 `null` 視為未設定，空字串的 `ansible_host` 沿用 inventory 名稱；`ansible_port` 可為整數或十進位字串。FreeIPA server 的 FQDN 由 `sshdial.Dialer.FQDN`（遠端 `hostname -f`，與 playbook 補 `freeipa.server` 的方式相同）讀取；roster 有 `freeipa.server` 時兩者必須相同（大小寫不敏感），否則失敗；`freeipa.server` 存在時必須是字串，`freeipa` 與 `freeipa.admin` 存在時必須是 mapping（未設定與 `null` 視為未設定）：roster validator 不檢查這些型別，被忽略的 `freeipa.server: 123` 會略過這道比對，被忽略的 `admin: bob` 會以預設的 `admin` 登入。這些在建立 tunnel 之前拒絕。
 
 ## 5 desired state（roster adapter）
 
@@ -317,7 +317,7 @@ P0 §3 有三處與 playbook 不符，本文件以 playbook 為準（D8），並
 
 - 入口：§2.1 拒絕矩陣每一列；從 cobra 指令走到 observer（AGENTS.md §5.15），以假的 `ssh` 與 `httptest` TLS server 回放 fixture。
 - 每個拒絕（§2.2 步驟 1–8、§6.3、D7、D10）各有一個會觸發它的 test row，行為以同一組不變量檢查：該 gate 自己的訊息或 sentinel；結束碼 1（只有 blocked plan 是 3，§2.3）；送出的請求不超過該步驟允許的（§2.1 的拒絕之前不執行 `ansible-inventory`、`ansible`、`ansible-vault`；步驟 7 之前沒有 tunnel；登入被拒之後沒有 JSON-RPC；登入之後的任何失敗都有 `session_logout`；讀取失敗之後不再讀）；沒有 plan 檔；密碼、cookie 與 vault 內容不在錯誤、輸出、plan 與 pilot data 目錄任何檔案中。伺服器端的答案取自真實擷取（§9，登入被拒、無 session、`truncated`、`SizeLimitExceeded`）。
-- 這個清單由結構鎖住（AGENTS.md §5.10、§5.12）：預覽入口各函式（`runReconcile`、`validateReconcileEngineFlags`、`runReconcileGolangPreview`、`golangPreview`、`inventoryCurrentWithHosts`、`golangPreviewStage`、`sshTargetFromHostVars`、`sshOptionArgs`、`splitShellWords`、`writeGolangPlan`）與 `identityreconcile.Observe` 中每個不是 `nil` 的 return 都以 `// gate: <id>` 命名；每個 id 唯一，且有 test row（row 的 `gate` 欄位）或附理由的豁免，豁免被 row 取代、row 指向不存在的 gate、有 return 沒有名字，都會讓測試失敗（`TestReconcileGolangEveryGateHasARow`、`TestObserveEveryGateHasARow`；掃描器是 `internal/gateledger`，它自己的測試證明每一種漂移都會被報告）。新增 gate 沒有 row 時 CI 失敗。row 是否真的讓該 gate 觸發，由變異驗證確認（刪掉該 gate，對應 row 必須失敗），不由掃描器推定。
+- 這個清單由結構鎖住（AGENTS.md §5.10、§5.12）：預覽入口各函式（`runReconcile`、`validateReconcileEngineFlags`、`runReconcileGolangPreview`、`golangPreview`、`inventoryCurrentWithHosts`、`golangPreviewStage`、`rosterServer`、`sshTargetFromHostVars`、`sshOptionArgs`、`splitShellWords`、`writeGolangPlan`）與 `identityreconcile.Observe` 中每個不是 `nil` 的 return 都以 `// gate: <id>` 命名；每個 id 唯一，且有 test row（row 的 `gate` 欄位）或附理由的豁免，豁免被 row 取代、row 指向不存在的 gate、有 return 沒有名字，都會讓測試失敗（`TestReconcileGolangEveryGateHasARow`、`TestObserveEveryGateHasARow`；掃描器是 `internal/gateledger`，它自己的測試證明每一種漂移都會被報告）。新增 gate 沒有 row 時 CI 失敗。row 是否真的讓該 gate 觸發，由變異驗證確認（刪掉該 gate，對應 row 必須失敗），不由掃描器推定。
 - 憑證：§3 每種模式；模板、inline `!vault`、非字串、長度不足各自在建立 tunnel 前失敗；錯誤訊息不含密碼。
 - 目標推導：§4 每一列，含 `ansible_connection: docker` 與不支援的 ssh 參數。
 - stage gate：與 playbook assert 的一致性測試。

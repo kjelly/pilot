@@ -343,6 +343,12 @@ func TestReconcileGolangWorkspaceFailures(t *testing.T) {
 		{name: "no freeipa_roster_file: completeness refuses first", gate: "completeness", want: "no freeipa_roster_file", setup: func(t *testing.T, _ string) {
 			golangServers(t, golangServer{name: "ipa-1", addr: "192.0.2.10", vars: map[string]any{"freeipa_roster_file": ""}})
 		}},
+		{name: "the roster's freeipa.server is a number", gate: "roster-server-type,roster-server-value", want: "freeipa.server 是 int，不是字串", setup: func(t *testing.T, dir string) {
+			writePrivateFile(t, filepath.Join(dir, ".vault", "ipa-identity.yaml"), withRosterServer("123"))
+		}},
+		{name: "the roster's freeipa.server is a list", gate: "roster-server-type,roster-server-value", want: "freeipa.server 是 []interface {}，不是字串", setup: func(t *testing.T, dir string) {
+			writePrivateFile(t, filepath.Join(dir, ".vault", "ipa-identity.yaml"), withRosterServer("[ipa.example.test]"))
+		}},
 		{name: "hosts.yml is not YAML", gate: "hosts-parse", want: "parse source file", setup: func(t *testing.T, dir string) {
 			writePrivateFile(t, filepath.Join(dir, "hosts.yml"), "hosts: [\n")
 		}},
@@ -379,6 +385,13 @@ func TestReconcileGolangWorkspaceFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withRosterServer is the capture roster declaring freeipa.server as the given
+// YAML value.
+func withRosterServer(value string) string {
+	return strings.Replace(strings.Replace(captureRoster, "%s", "/bin/sh", 1),
+		"  admin: {principal: p1-self}\n", "  server: "+value+"\n  admin: {principal: p1-self}\n", 1)
 }
 
 func writePrivateFile(t *testing.T, path, content string) {

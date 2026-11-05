@@ -102,6 +102,9 @@ func TestFromRosterRefuses(t *testing.T) {
 		{"string preserve_existing", "schema_version: 3\nusers:\n  - {name: a, password: {preserve_existing: \"false\"}}\n", "must be true or false"},
 		{"text uid", "schema_version: 3\nusers:\n  - {name: a, uid: \"12x\"}\n", "non-negative integer"},
 		{"numeric shell", "schema_version: 3\nusers:\n  - {name: a, login_shell: 5}\n", "must be a string"},
+		{"freeipa is a string", "schema_version: 3\nfreeipa: ipa.example.test\nusers:\n  - {name: a}\n", "freeipa must be a mapping, not string"},
+		{"freeipa.admin is a string", "schema_version: 3\nfreeipa:\n  admin: bob\nusers:\n  - {name: a}\n", "freeipa.admin must be a mapping, not string"},
+		{"numeric principal", "schema_version: 3\nfreeipa:\n  admin: {principal: 5}\nusers:\n  - {name: a}\n", "principal must be a string"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := FromRoster(roster(t, tc.doc))
@@ -189,5 +192,23 @@ func TestObserveFailsOnAFailedRead(t *testing.T) {
 	}}
 	if _, err := Observe(context.Background(), f, "admin"); err == nil {
 		t.Fatal("a failed group read did not fail the observation")
+	}
+}
+
+// An absent or null section is the default login; a section of another type
+// is refused (a roster that says `admin: bob` must not log in as admin).
+func TestFromRosterNullSectionsAreTheDefaultLogin(t *testing.T) {
+	for name, doc := range map[string]string{
+		"absent":       "schema_version: 3\nusers:\n  - {name: a}\n",
+		"null freeipa": "schema_version: 3\nfreeipa:\nusers:\n  - {name: a}\n",
+		"null admin":   "schema_version: 3\nfreeipa:\n  admin:\nusers:\n  - {name: a}\n",
+		"no principal": "schema_version: 3\nfreeipa:\n  admin: {}\nusers:\n  - {name: a}\n",
+	} {
+		if d := desired(t, doc); d.Principal != "admin" {
+			t.Errorf("%s: principal = %q, want admin", name, d.Principal)
+		}
+	}
+	if d := desired(t, "schema_version: 3\nfreeipa:\n  admin: {principal: bob}\nusers:\n  - {name: a}\n"); d.Principal != "bob" {
+		t.Errorf("principal = %q, want bob", d.Principal)
 	}
 }

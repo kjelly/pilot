@@ -199,6 +199,10 @@ func golangPreview(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("roster %s: %w", rosterPath, err) // gate: roster-adapter
 	}
+	declaredServer, err := rosterServer(root)
+	if err != nil {
+		return fmt.Errorf("roster %s: %w", rosterPath, err) // gate: roster-server-type
+	}
 	var vaultData []byte
 	if varsFile := defaultVaultFile(inv); varsFile != "" {
 		if vaultData, err = readSecretVarsFile(ctx, varsFile, runtime.Env); err != nil {
@@ -219,8 +223,8 @@ func golangPreview(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("讀取 %s 的 FQDN: %w", host, err) // gate: fqdn-read
 	}
-	if declared := rosterServer(root); declared != "" && !strings.EqualFold(declared, fqdn) {
-		return fmt.Errorf("roster freeipa.server 是 %s，但 %s 的 hostname -f 是 %s", declared, host, fqdn) // gate: roster-server
+	if declaredServer != "" && !strings.EqualFold(declaredServer, fqdn) {
+		return fmt.Errorf("roster freeipa.server 是 %s，但 %s 的 hostname -f 是 %s", declaredServer, host, fqdn) // gate: roster-server
 	}
 	ca, err := dialer.CA(ctx)
 	if err != nil {
@@ -352,10 +356,22 @@ func readSecretVarsFile(ctx context.Context, path string, env []string) ([]byte,
 	return os.ReadFile(path)
 }
 
-func rosterServer(root map[string]any) string {
+// rosterServer is the roster's freeipa.server, which must name the host the
+// preview reads (spec §4). The roster validator does not check its type, and
+// a value of another type that was ignored would skip that check: it is
+// refused instead. Absent and null are unset. (identityreconcile.FromRoster
+// has already refused a freeipa that is not a mapping.)
+func rosterServer(root map[string]any) (string, error) {
 	fi, _ := root["freeipa"].(map[string]any)
-	s, _ := fi["server"].(string)
-	return strings.TrimSpace(s)
+	v, ok := fi["server"]
+	if !ok || v == nil {
+		return "", nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("freeipa.server 是 %T，不是字串", v) // gate: roster-server-value
+	}
+	return strings.TrimSpace(s), nil
 }
 
 // Host variables that change the SSH connection and that the Go engine

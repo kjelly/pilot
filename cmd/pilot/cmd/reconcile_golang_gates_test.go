@@ -249,6 +249,7 @@ func TestReconcileGolangPreviewChecksTheRosterServer(t *testing.T) {
 		{name: "another server", server: "ipa-other.example.test", want: "roster freeipa.server 是 ipa-other.example.test，但 ipa-1 的 hostname -f 是 " + golangTestFQDN, gate: "roster-server"},
 		{name: "case only", server: "IPA.Example.TEST"},
 		{name: "exact", server: golangTestFQDN},
+		{name: "null: unset", server: "~"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Logf("gate: %q", tc.gate)

@@ -51,7 +51,7 @@ func TestReconcileGolangEveryGateHasARow(t *testing.T) {
 		"reconcile.go": {"runReconcile"},
 		"reconcile_golang.go": {
 			"validateReconcileEngineFlags", "runReconcileGolangPreview", "golangPreview", "inventoryCurrentWithHosts",
-			"golangPreviewStage", "sshTargetFromHostVars", "sshOptionArgs", "splitShellWords", "writeGolangPlan",
+			"golangPreviewStage", "rosterServer", "sshTargetFromHostVars", "sshOptionArgs", "splitShellWords", "writeGolangPlan",
 		},
 	}
 	var res gateledger.Result

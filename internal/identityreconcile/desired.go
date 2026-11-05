@@ -96,16 +96,23 @@ func FromRoster(root map[string]any) (Desired, error) {
 	}
 	d.SchemaVersion = int(version)
 	d.Principal = "admin"
-	if fi, ok := root["freeipa"].(map[string]any); ok {
-		if admin, ok := fi["admin"].(map[string]any); ok {
-			if p, present := admin["principal"]; present && p != nil {
-				s, ok := p.(string)
-				if !ok || s == "" {
-					return d, fmt.Errorf("freeipa.admin.principal must be a string")
-				}
-				d.Principal = s
-			}
+	// The sections that name the login are refused when they are not
+	// mappings, not ignored: `admin: bob` read as no admin section would log
+	// in as the default admin instead of the account the roster names.
+	fi, err := optionalMapping(root, "freeipa")
+	if err != nil {
+		return d, err
+	}
+	admin, err := optionalMapping(fi, "admin")
+	if err != nil {
+		return d, fmt.Errorf("freeipa.%w", err)
+	}
+	if p, present := admin["principal"]; present && p != nil {
+		s, ok := p.(string)
+		if !ok || s == "" {
+			return d, fmt.Errorf("freeipa.admin.principal must be a string")
 		}
+		d.Principal = s
 	}
 
 	for i, raw := range listOf(root["users"]) {
@@ -360,4 +367,18 @@ func appendUnique(list []string, s string) []string {
 		}
 	}
 	return append(list, s)
+}
+
+// optionalMapping is parent[key] as a mapping: absent and null are an empty
+// one, any other type is an error.
+func optionalMapping(parent map[string]any, key string) (map[string]any, error) {
+	raw, present := parent[key]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a mapping, not %T", key, raw)
+	}
+	return m, nil
 }
