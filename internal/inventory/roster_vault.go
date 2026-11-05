@@ -231,6 +231,14 @@ const vaultViewWaitDelay = 2 * time.Second
 //
 // The read is bounded by ctx: when ctx ends, ansible-vault and every
 // helper in its process group are killed and the error wraps ctx.Err().
+//
+// ansible-vault can also end well while a process it started (a vault
+// password client script) still holds its output open: after
+// vaultViewWaitDelay the read fails with an error wrapping exec.ErrWaitDelay
+// and returns nothing, since what arrived so far may be partial. Known limit:
+// that helper is not killed. Wait has already reaped ansible-vault, so
+// signalling its process group could reach an unrelated process that was
+// given the same id.
 func ViewVaultFileAmbient(ctx context.Context, path string, env []string) ([]byte, error) {
 	if err := validateSecretSourceFile(path); err != nil {
 		return nil, err
@@ -254,6 +262,11 @@ func ViewVaultFileAmbient(ctx context.Context, path string, env []string) ([]byt
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("ansible-vault view %s: %w", path, ctxErr)
+		}
+		if errors.Is(err, exec.ErrWaitDelay) {
+			// Not classified from stderr and never the output: ansible-vault
+			// exited 0, so its stderr says nothing about the failure.
+			return nil, fmt.Errorf("ansible-vault view %s exited, but a process it started (a vault password client script?) kept its output open for more than %s: %w", path, vaultViewWaitDelay, err)
 		}
 		return nil, classifyVaultView(path, err, stderr.String())
 	}

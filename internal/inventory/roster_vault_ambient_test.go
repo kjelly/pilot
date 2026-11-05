@@ -337,3 +337,56 @@ func TestViewVaultFileAmbientDoesNotWaitForAnEscapedHelper(t *testing.T) {
 		}
 	})
 }
+
+// ansible-vault that exits 0 while a process it started still holds its
+// stdout (a vault password client script): the read fails after the wait
+// delay, names the cause, and does not return what was printed, which may be
+// partial. The helper is not killed, so the test does it.
+func TestViewVaultFileAmbientNamesAHelperHoldingTheOutput(t *testing.T) {
+	runIsolated(t, 20*time.Second, func(t *testing.T) {
+		pidFile := filepath.Join(t.TempDir(), "helper.pid")
+		bin, vault := fakeVaultBin(t, "sleep 30 &\necho $! > '"+pidFile+"'\necho 'ipa_admin_password: Sample-Vault-Secret-1'\nexit 0\n")
+		withVaultPath(t, bin)
+		t.Cleanup(func() {
+			if data, err := os.ReadFile(pidFile); err == nil {
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			}
+		})
+		start := time.Now()
+		out, err := ViewVaultFileAmbient(context.Background(), vault, nil)
+		if !errors.Is(err, exec.ErrWaitDelay) || !strings.Contains(err.Error(), "kept its output open") || out != nil {
+			t.Fatalf("out = %q, err = %v after %s", out, err, time.Since(start))
+		}
+		if elapsed := time.Since(start); elapsed < vaultViewWaitDelay-500*time.Millisecond || elapsed > 10*time.Second {
+			t.Fatalf("failed after %s, want about the %s wait delay", elapsed, vaultViewWaitDelay)
+		}
+		if strings.Contains(err.Error(), "Sample-Vault-Secret-1") {
+			t.Fatalf("the error shows the output: %v", err)
+		}
+		if errors.Is(err, ErrNoVaultSecret) || errors.Is(err, ErrVaultDecryptFailed) {
+			t.Fatalf("misclassified: %v", err)
+		}
+	})
+}
+
+// The same helper behind a failing ansible-vault: the exit status, not the
+// held pipe, is what the read reports, and it is classified as before.
+func TestViewVaultFileAmbientFailureWithAHelperHoldingTheOutputIsStillClassified(t *testing.T) {
+	runIsolated(t, 20*time.Second, func(t *testing.T) {
+		pidFile := filepath.Join(t.TempDir(), "helper.pid")
+		bin, vault := fakeVaultBin(t, "sleep 30 &\necho $! > '"+pidFile+"'\necho 'ERROR: Decryption failed (no vault secrets were found that could decrypt)' >&2\nexit 1\n")
+		withVaultPath(t, bin)
+		t.Cleanup(func() {
+			if data, err := os.ReadFile(pidFile); err == nil {
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			}
+		})
+		if _, err := ViewVaultFileAmbient(context.Background(), vault, nil); !errors.Is(err, ErrVaultDecryptFailed) || errors.Is(err, exec.ErrWaitDelay) {
+			t.Fatalf("err = %v, want ErrVaultDecryptFailed", err)
+		}
+	})
+}
