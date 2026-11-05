@@ -341,7 +341,13 @@ class PreviewCapabilityTests(unittest.TestCase):
                 if argv[0]=='date':return b'9999999999'
                 if argv[:2]==('docker','inspect'):return json.dumps([{'Mounts':[{'Source':str(root/'logs'),'Destination':'/var/ossec/logs'}]}]).encode()
                 return b'no legacy UDP block'
-            with native_metadata(),mock.patch.object(env['pathlib'],'Path',paths):
+            # Rebind `pathlib` inside the delivery script's own namespace only. Patching
+            # env['pathlib'].Path would replace the stdlib's process-global Path with a
+            # function: Path.__new__ and every other stdlib constructor then fail on
+            # Python 3.11 (`type object 'Path' has no attribute '_flavour'`). The script
+            # reads pathlib solely as `pathlib.Path(...)`, so this shim is complete.
+            env['pathlib']=types.SimpleNamespace(Path=paths)
+            with native_metadata():
                 # Patch only native tool/result leaves. Child script selection
                 # and actual subprocess execution remain production code.
                 env['run']=run;w.HostWriter(ledger).claim(OWNER,'central');assets=actual_cls(value,OWNER,OP);env['check_local'](assets)
