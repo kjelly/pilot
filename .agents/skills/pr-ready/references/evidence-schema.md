@@ -67,7 +67,7 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/run_check.py" --category lint --l
 python3 "$SNAP/.agents/skills/pr-ready/scripts/run_check.py" --category static_analysis --log-dir .pr-ready/123/logs --receipt-dir .pr-ready/123/receipts -- go vet ./...
 python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr 123 --evidence .pr-ready/123/evidence.json --worktree .
 # Default after push/review/evidence: keep this session active through CI and Ready:
-python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr 123 --evidence .pr-ready/123/evidence.json --worktree . --wait --ready
+python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr 123 --evidence .pr-ready/123/evidence.json --worktree . --wait --ready --restore-sha "$START_SHA" --restore-branch="$START_BRANCH"
 ```
 
 `run_check.py` prints a JSON receipt on stdout and stores it under `--receipt-dir` (default `.pr-ready/receipts`, so pass the per-PR directory) even on failure, returning the command's exit status. Copy the receipt fields into the matching evidence category. `pr_gate.py --worktree` verifies that all referenced logs exist under that checkout directory.

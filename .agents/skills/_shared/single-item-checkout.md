@@ -145,7 +145,20 @@ to or process another item; the only branch change after the item is the restore
 
 ## Finish: restore the starting branch
 
-At the end, whatever the outcome (success, Draft-blocked, WAITING or BLOCKED), return
+For `pr-ready` and `pr-review-merge`, finish local edits, tests, review,
+commits/pushes and evidence preparation, then complete this restore **before the
+final GitHub PR state change** (Ready, Draft or merge). Keep scripts in the
+snapshot and evidence at stable paths that survive switching branches. A failed
+restore blocks the state change: report it and leave PR state unchanged. After
+restoration, recheck remote HEAD/Base and the full live gate using saved PR
+identities, not the restored checkout's HEAD. Do not rerun candidate tests on the
+starting branch. Change PR state last, verify it remotely, and do no subsequent
+checkout switching. The `pr-ready` gate performs restoration via `--restore-sha`
+and `--restore-branch` after CI settles and before its final remote preflight.
+This ordering does not grant concurrent ownership of the checkout.
+
+For outcomes without a state change (WAITING, BLOCKED or SKIP), and for
+`issue-to-pr`, restore before reporting as usual. Whatever the outcome, return
 to the starting branch recorded in step 1 (or the detached starting SHA) with the same
 landing: `checkout_preflight.py --target "$START_SHA" --branch="$START_BRANCH"
 --safe-sha "$S" [--safe-sha "$S2"] --execute`, where START_SHA is `git rev-parse
@@ -153,7 +166,7 @@ refs/heads/START_BRANCH` (the branch is never recreated from a remote-tracking r
 start branch that no longer exists is a stop, `start_branch_missing`), or the recorded
 detached SHA with no `--branch`. `--safe-sha` lists the commits HEAD may be at without
 stranding local work: the commit the selected branch was checked out at (always the
-case for `pr-review-merge`, even after a merge whose remote branch GitHub deleted) and
+case for `pr-review-merge`, before its remote state change) and
 the remote head verified after the last push (a fork push included). HEAD at any other
 commit has unpushed commits and is a stop (`unpushed_commits`). The switch also needs a
 clean checkout and the same preflight for the way back, so ignored files are guarded

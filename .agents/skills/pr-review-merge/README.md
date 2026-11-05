@@ -64,6 +64,8 @@ python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo 
 python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json --execute
 ```
 
+執行 actor 前，先依 shared checkout 契約完成起始分支/SHA 的安全復原；復原失敗就保持 PR 狀態不變。復原成功後用已保存的 PR HEAD/Base 和 checkout 外的 evidence 重跑 live gate，再執行 actor；不得用復原後的本地 HEAD 取代被審查的 candidate，也不得在 PR 狀態變更後才切回分支。
+
 `apply_decision.py` 不會相信先前的 gate 結果，會在 mutation 前重新檢查 HEAD/Base 與 GitHub API 狀態，並使用同一 repository 的跨程序寫入鎖（POSIX `flock`）。`gh pr merge --match-head-commit` 可防止合併錯誤的 HEAD；結果還要遠端驗證 `state == MERGED`。Draft 先留言具體 blocking findings 才執行 `gh pr ready --undo`。
 
 **重要限制：**程式可強制校對 SHA、CI、threads、規則、PR 狀態與 Evidence Schema，但**無法機械證明 Reviewer 真實獨立、分析完整或程式邏輯完全正確**。Agent 必須確實調用獨立 reviewer 並提供可追溯證據。不可單憑 `Review PASS` 字串進行 Merge。

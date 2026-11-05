@@ -314,7 +314,7 @@ def check_local(worktree: Path) -> tuple[str, str, list[str]]:
         return p.stdout.strip()
 
     sha = git("rev-parse", "HEAD")
-    branch = git("symbolic-ref", "--quiet", "--short", "HEAD")
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
     status = git("status", "--porcelain", "--untracked-files=all")
     # Local validation evidence should live in .pr-ready/ and remain untracked.
     changes = []
@@ -846,6 +846,8 @@ def main() -> int:
     parser.add_argument("--evidence", type=Path, required=True, help="HEAD-specific evidence JSON")
     parser.add_argument("--worktree", type=Path, help="Original PR-branch worktree; verify clean and HEAD")
     parser.add_argument("--ready", action="store_true", help="Execute 'gh pr ready' only after all gates pass")
+    parser.add_argument("--restore-sha", help="Restore this verified starting commit before Ready; abort on restore failure")
+    parser.add_argument("--restore-branch", help="Starting branch to restore (omit for a detached start)")
     parser.add_argument("--wait", action="store_true", help="Keep polling actual pending CI; with --ready transition automatically")
     parser.add_argument("--poll-interval", type=float, default=30, help="Wait poll interval in seconds, >0 and <=60 (default 30)")
     parser.add_argument("--wait-timeout", type=float, help="Explicit optional wait limit in seconds; default waits until settled or cancelled")
@@ -857,6 +859,10 @@ def main() -> int:
         parser.error("--repo must be OWNER/REPO and --pr must be positive")
     if (args.ready or args.wait) and not args.worktree:
         parser.error("--ready/--wait requires --worktree to verify branch/clean tree")
+    if args.restore_branch is not None and not args.restore_sha:
+        parser.error("--restore-branch requires --restore-sha")
+    if args.restore_sha is not None and (not args.ready or not SHA.fullmatch(args.restore_sha)):
+        parser.error("--restore-sha requires --ready and a full commit SHA")
     if not math.isfinite(args.poll_interval) or not 0 < args.poll_interval <= 60:
         parser.error("--poll-interval must be >0 and <=60 seconds")
     if args.wait_timeout is not None and (not args.wait or not math.isfinite(args.wait_timeout) or args.wait_timeout <= 0):
@@ -867,6 +873,7 @@ def main() -> int:
     polls = 0
     pins = None
     ready_invoked = False
+    restored_local = None
     handlers = {}
     workflows = WorkflowHistory() if args.wait else None
 
@@ -905,14 +912,17 @@ def main() -> int:
         evidence = json.loads(evidence_bytes)
         if not isinstance(evidence, dict):
             raise GateError("Evidence JSON must be an object")
-        conversation = args.wait or bool(evidence.get("disputed_review_comments"))
+        conversation = args.wait or bool(args.restore_sha) or bool(evidence.get("disputed_review_comments"))
 
         def inspect(snapshot: Snapshot) -> tuple[list[str], list[str], list[Any]]:
             local = check_local(args.worktree) if args.worktree else None
             ctx = evidence_context(args.worktree, snapshot.pr.get("headRefOid"), snapshot.pr.get("baseRefName"),
                                    args.base_remote)
-            errors = evaluate(snapshot, evidence, repo=args.repo, number=args.pr, local=local,
+            errors = evaluate(snapshot, evidence, repo=args.repo, number=args.pr,
+                              local=None if restored_local is not None else local,
                               log_base=args.worktree, ctx=ctx, allow_pending=args.wait)
+            if restored_local is not None and local != restored_local:
+                errors.append("Restored checkout changed before Ready transition")
             errors.extend(target_evidence_errors(snapshot.pr, evidence, args.repo))
             pending = classify_ci(snapshot, evidence).pending
             if workflows is not None:
@@ -952,12 +962,34 @@ def main() -> int:
                     return 2
                 deadline()
                 if not pending:
+                    if args.restore_sha:
+                        # The final PR-branch preflight above must pass before leaving it.
+                        # Use the immutable workflow snapshot's normal safe landing helper.
+                        if pins is None:
+                            pins = WaitPins.capture(latest, args.evidence, evidence, args.worktree, args.base_remote)
+                        helper = Path(__file__).resolve().parents[2] / "_shared/scripts/checkout_preflight.py"
+                        restore = [sys.executable, str(helper), "--repo", str(args.worktree),
+                                   "--target", args.restore_sha, "--safe-sha", latest.pr["headRefOid"], "--execute"]
+                        if args.restore_branch is not None:
+                            restore.append("--branch=" + args.restore_branch)
+                        result = subprocess.run(restore, capture_output=True, text=True, check=False)
+                        if result.returncode:
+                            raise GateError("Checkout restoration failed; Ready not invoked: " +
+                                            (result.stdout or result.stderr).strip()[:1500])
+                        restored_local = (args.restore_sha, args.restore_branch or "HEAD", [])
+                        # Switching branches must precede the last remote/pin check too.
+                        latest = fetch_snapshot(args.repo, args.pr, conversation=True, workflows=args.wait)
+                        errors, pending, reuse = inspect(latest)
+                        if errors or pending:
+                            raise GateError("Post-restore preflight blocked Ready: " +
+                                            "; ".join(errors + pending))
+                        deadline()
                     ready_invoked = True
                     action = subprocess.run(["gh", "pr", "ready", str(args.pr), "-R", args.repo],
                                             capture_output=True, text=True, check=False)
                     if action.returncode:
                         raise GateError(f"gh pr ready failed: {(action.stderr or action.stdout).strip()[:700]}")
-                    after = fetch_snapshot(args.repo, args.pr, conversation=True, workflows=True) if args.wait else None
+                    after = fetch_snapshot(args.repo, args.pr, conversation=True, workflows=args.wait) if pins is not None else None
                     after_pr = after.pr if after is not None else gh_pr(args.repo, args.pr)
                     if after_pr.get("isDraft") is not False or after_pr.get("headRefOid") != evidence["head_sha"]:
                         raise GateError("PR state/HEAD changed during Ready transition; status requires reevaluation")
@@ -967,12 +999,14 @@ def main() -> int:
                     if pins is not None:
                         errors = pins.verify(after, args.evidence, evidence, args.worktree, args.base_remote)
                         sha, branch, dirty = check_local(args.worktree)
-                        if sha != pins.identity["headRefOid"] or branch != pins.identity["headRefName"] or dirty:
+                        expected_local = restored_local or (pins.identity["headRefOid"], pins.identity["headRefName"], [])
+                        if (sha, branch, dirty) != expected_local:
                             errors.append("Local worktree changed during Ready transition")
                         ci = classify_ci(after, evidence)
                         errors.extend(ci.errors + ci.pending)
-                        lifecycle = workflows.inspect(after, args.repo)
-                        errors.extend(lifecycle.errors + lifecycle.pending)
+                        if workflows is not None:
+                            lifecycle = workflows.inspect(after, args.repo)
+                            errors.extend(lifecycle.errors + lifecycle.pending)
                         if errors:
                             raise GateError("Ready invoked but post-action verification failed: " + "; ".join(errors))
                     emit({"status": "READY", "pr": after_pr.get("url"), "head_sha": after_pr["headRefOid"],

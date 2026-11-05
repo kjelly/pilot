@@ -99,6 +99,9 @@ elif args[0] == "api" and "/contents/" in args[-1]:
     print("gh: Not Found (HTTP 404)", file=sys.stderr)
     sys.exit(1)
 elif args[:2] == ["pr", "ready"]:
+    branch = subprocess.check_output(["git", "-C", os.environ["WAIT_REPO"],
+                                      "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
+    (root / "ready-branch").write_text(branch)
     with (root / "ready.log").open("a") as out:
         out.write(str(index) + "\n")
     (root / "ready").write_text("yes")
@@ -134,6 +137,10 @@ class WaitCLITests(unittest.TestCase):
             repo, _, _, evidence, env = self.evidence_only_pr(t)
         else:
             repo, _, evidence, env = self.make_pr(t)
+        # Match the skill's checkpoint contract; the safe restore helper checks
+        # actual Git cleanliness rather than the gate's evidence-path exception.
+        with (repo / ".git/info/exclude").open("a") as out:
+            out.write("\n/.pr-ready/\n")
         (t / "bin/gh").write_text(WAIT_GH)
         (t / "scenario.json").write_text(json.dumps(plans))
         env["WAIT_REPO"] = str(repo)
@@ -183,6 +190,62 @@ class WaitCLITests(unittest.TestCase):
             self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
             self.assertEqual(["2"], (t / "ready.log").read_text().splitlines())
             self.assertEqual({"reviewThreads", "comments", "reviews"}, set((t / "graphql.log").read_text().split()))
+
+    def test_restore_precedes_ready_and_no_switch_follows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, env, cli = self.prepare(t, [plan(PENDING), plan(PASS)])
+            sha = env["FAKE_GH_SHA"]
+            subprocess.run(["git", "branch", "main", sha], cwd=repo, check=True)
+            subprocess.run(["git", "switch", "--quiet", "main"], cwd=repo, check=True)
+            (repo / "file").write_text("starting branch has different source")
+            subprocess.run(["git", "commit", "--quiet", "-am", "starting branch source"], cwd=repo, check=True)
+            start_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+            subprocess.run(["git", "switch", "--quiet", "fix-one"], cwd=repo, check=True)
+            proc = subprocess.run(cli + ["--restore-sha", start_sha, "--restore-branch=main"],
+                                  env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual("main", (t / "ready-branch").read_text())
+            self.assertEqual("main", subprocess.check_output(
+                ["git", "branch", "--show-current"], cwd=repo, text=True).strip())
+            self.assertEqual(1, len((t / "ready.log").read_text().splitlines()))
+
+    def test_detached_start_is_restored_before_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, env, cli = self.prepare(t, [plan(PASS)])
+            proc = subprocess.run(cli + ["--restore-sha", env["FAKE_GH_SHA"]],
+                                  env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual("HEAD", (t / "ready-branch").read_text())
+
+    def test_restore_failure_prevents_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, env, cli = self.prepare(t, [plan(PASS)])
+            proc = subprocess.run(cli + ["--restore-sha", env["FAKE_GH_SHA"],
+                                         "--restore-branch=missing-start"],
+                                  env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+            self.assertIn("Checkout restoration failed", proc.stdout)
+            self.assertFalse((t / "ready").exists())
+            self.assertEqual("fix-one", subprocess.check_output(
+                ["git", "branch", "--show-current"], cwd=repo, text=True).strip())
+
+    def test_remote_change_after_restore_prevents_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, env, cli = self.prepare(t, [plan(PASS), plan(PASS),
+                plan(PASS, pr={"headRefOid": "d" * 40})])
+            sha = env["FAKE_GH_SHA"]
+            subprocess.run(["git", "branch", "main", sha], cwd=repo, check=True)
+            proc = subprocess.run(cli + ["--restore-sha", sha, "--restore-branch=main"],
+                                  env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+            self.assertIn("Post-restore preflight blocked Ready", proc.stdout)
+            self.assertFalse((t / "ready").exists())
+            self.assertEqual("main", subprocess.check_output(
+                ["git", "branch", "--show-current"], cwd=repo, text=True).strip())
 
     def test_wait_without_ready_returns_gate_pass_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:

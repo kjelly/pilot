@@ -55,7 +55,7 @@ $pr-ready 處理目前 branch 對應的單一 Draft PR
 2. 每則 review 意見（人、bot 或之前的自動審查）都先當成待驗證的主張分類（`valid`/`invalid`/`needs_evidence`/`nonblocking`），只有成立的才交給 Coder。不成立的意見不改 code：獨立 Reviewer 在看不到主 Agent 結論的情況下確認後，主 Agent 在 GitHub 回覆反證，記錄在 evidence 的 `disputed_review_comments`（見 `references/review-comments.md`）。同一主張沒有新證據又被提出時交給人決定，不再來回修改或回覆。
 3. SA 判斷根因與架構；Coder 修復並測試；Reviewer 在**獨立 context** 進行審查。Coder 的本機測試只跑 diff 觸及的 package 與新增的 regression，全套 `go test ./...` 交給 CI 的 `Go test` job（SKILL.md「Pilot: cycle-time rules」）。
 4. 若 Reviewer 提出 P0/P1/P2，回交 Coder 修復；連續 3 次有效修正未收斂則 SA 再評估。Reviewer 只剩 P3/P4 時這一輪就結束：主 Agent 回覆並 resolve thread、記進 PR body 或 follow-up issue，不再派 Coder。
-5. push 與 evidence 準備好後，主 Agent 保持 session 執行 `pr_gate.py --wait --ready` 持續等待 CI；每次重新確認 HEAD、review/evidence 未變與所有 gate。CI 完成後自動 fresh final preflight → Ready → post-action verification。pending 本身不結束 invocation；只有明確 timeout、取消、runtime 限制或真正 blocker 才 checkpoint。僅在同一個最新 commit SHA 上，確認 acceptance criteria、測試、lint、static analysis、required CI、review threads（每個都已 resolve，P3/P4 也一樣，否則 pr-review-merge 會再轉回 Draft）及衝突後，才執行 `gh pr ready`。
+5. push 與 evidence 準備好後，主 Agent 保持 session 執行 `pr_gate.py --wait --ready --restore-sha "$START_SHA" --restore-branch="$START_BRANCH"` 持續等待 CI；每次重新確認 HEAD、review/evidence 未變與所有 gate。CI 完成後自動 final PR-branch preflight → 復原起始 branch/SHA → 重查 remote/pins → Ready → post-action verification；復原失敗不改 PR 狀態，Ready 後不再切分支。START_SHA 使用起始 branch 當下 tip；若起始為 detached HEAD，使用記錄的 SHA 並省略 --restore-branch。pending 本身不結束 invocation；只有明確 timeout、取消、runtime 限制或真正 blocker 才 checkpoint。僅在同一個最新 commit SHA 上，確認 acceptance criteria、測試、lint、static analysis、required CI、review threads（每個都已 resolve，P3/P4 也一樣，否則 pr-review-merge 會再轉回 Draft）及衝突後，才執行 `gh pr ready`。
 6. 不可更新、無法修復或無法驗證的 PR 保持 Draft，輸出 DRAFT-BLOCKED 與 blocker。
 
 ## Quality Gate 腳本（可單獨使用）
@@ -70,7 +70,7 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
 # push、review 與 evidence 準備好後的預設流程；保持 session 等到自動 Ready：
 python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
   --repo OWNER/REPO --pr 123 \
-  --evidence .pr-ready/123/evidence.json --worktree . --wait --ready
+  --evidence .pr-ready/123/evidence.json --worktree . --wait --ready --restore-sha "$START_SHA" --restore-branch="$START_BRANCH"
 ```
 
 - `WAITING-CI`：其他 gate 通過，保持 session 等待 CI；每 30 秒重新驗證 pins 與全部 gate。`--poll-interval` 上限 60 秒。
