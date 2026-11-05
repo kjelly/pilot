@@ -2690,6 +2690,10 @@ def preview_tool(capability,name,required):
     try:return capability.tool(name,required)
     except ValueError as exc:raise Refused(str(exc)) from exc
 
+def preview_argv(capability,name,required,*arguments):
+    try:return capability.argv(name,required,*arguments)
+    except ValueError as exc:raise Refused(str(exc)) from exc
+
 class Reader:
     """Current queue custody. Cursor archives/evidence are never restore input."""
     PROC = Path('/proc')
@@ -2735,7 +2739,9 @@ class Reader:
         if info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022 or digest(checker) != self.checker_hash:
             raise Refused('reader inspection helper differs from tracked source')
         try:
-            return self.r.json([checker, 'inspect-reader'] + ([] if loaded else ['--cold']), timeout=40,
+            arguments=['inspect-reader'] + ([] if loaded else ['--cold'])
+            argv=preview_argv(self.preview_tools,'pilot-wazuh-heartbeat',self.checker_hash,*arguments) if self.preview_tools else [checker,*arguments]
+            return self.r.json(argv, timeout=40,
                                operation='inspect effective owned reader baseline')
         except BaseException:
             if self.preview_tools:self.preview_tools.settled=False
@@ -3036,8 +3042,8 @@ class Reader:
     def local(self, operation):
         argv=['/usr/local/libexec/pilot-wazuh-delivery','local']
         if self.preview_tools:
-            argv=[str(preview_tool(self.preview_tools,'pilot-wazuh-delivery',self.request.get('tools',{}).get('pilot-wazuh-delivery'))),
-                  'local','--preview-tools-json',json.dumps(self.preview_tools.value,sort_keys=True)]
+            argv=preview_argv(self.preview_tools,'pilot-wazuh-delivery',self.request.get('tools',{}).get('pilot-wazuh-delivery'),
+                  'local','--preview-tools-json',json.dumps(self.preview_tools.value,sort_keys=True))
         try:self.r.run(argv,timeout=50,operation=operation)
         except BaseException:
             if self.preview_tools:self.preview_tools.settled=False

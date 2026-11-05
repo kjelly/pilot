@@ -30,9 +30,15 @@ NAMES=('pilot-wazuh-delivery','pilot-wazuh-heartbeat','pilot-siem-relp-check')
 
 
 @contextlib.contextmanager
-def native_metadata(overrides=None):
-    """Native root account leaf ONLY; preserve real shape/identity/time fields."""
+def native_metadata(overrides=None,interpreter=True):
+    """Declared native root-account + running-system-interpreter identity leaves.
+
+    Brew is not a supported production interpreter. The model maps sys.executable
+    and its proc identity to the actual system binary; guards still execute. The
+    separate system-Python kernel control exercises the policy without this model.
+    """
     overrides=overrides or {};stat=Path.stat;lstat=Path.lstat;fstat=os.fstat;osstat=os.stat
+    system=Path('/usr/bin/python3').resolve(strict=True);system_info=stat(system)
     def value(info,path):
         fields={key:getattr(info,key) for key in dir(info) if key.startswith('st_')}
         fields.update(st_uid=0,st_gid=0)
@@ -44,11 +50,12 @@ def native_metadata(overrides=None):
     def native_stat(path,*args,**kwargs):
         actual=path
         if kwargs.get('dir_fd') is not None:actual=Path(os.readlink('/proc/self/fd/'+str(kwargs['dir_fd'])))/path
-        return value(osstat(path,*args,**kwargs),actual)
-    with mock.patch.object(os,'stat',native_stat),mock.patch.object(Path,'stat',lambda p,*a,**kw:value(stat(p,*a,**kw),p)),\
+        return value(system_info if interpreter and str(actual)=='/proc/self/exe' else osstat(path,*args,**kwargs),actual)
+    with mock.patch.object(os,'stat',native_stat),mock.patch.object(Path,'stat',lambda p,*a,**kw:value(system_info if interpreter and str(p)=='/proc/self/exe' else stat(p,*a,**kw),p)),\
          mock.patch.object(Path,'lstat',lambda p,*a,**kw:value(lstat(p,*a,**kw),p)),\
          mock.patch.object(os,'fstat',lambda fd:value(fstat(fd),os.readlink('/proc/self/fd/'+str(fd)))),\
-         mock.patch.object(os,'geteuid',return_value=0):
+         mock.patch.object(os,'geteuid',return_value=0),\
+         mock.patch.object(sys,'executable',str(system) if interpreter else sys.executable):
         yield
 
 
@@ -192,9 +199,9 @@ class PreviewCapabilityTests(unittest.TestCase):
                 assets=cls(value,OWNER,OP)
                 reader=w.Reader(central,value['tools']['pilot-wazuh-heartbeat'],{'tools':tools},preview=assets)
                 self.assertTrue(reader.observe()['typed_native_observation']);reader.verify_tools();reader.local('preview C11')
-                self.assertEqual(native.observed,[scope/'pilot-wazuh-heartbeat','inspect-reader'])
-                self.assertEqual(native.local[:3],[str(scope/'pilot-wazuh-delivery'),'local','--preview-tools-json'])
-                self.assertEqual(json.loads(native.local[3]),value);self.assertEqual(native.timeout,50)
+                self.assertEqual(native.observed,[str(Path('/usr/bin/python3').resolve()),str(scope/'pilot-wazuh-heartbeat'),'inspect-reader'])
+                self.assertEqual(native.local[:4],[str(Path('/usr/bin/python3').resolve()),str(scope/'pilot-wazuh-delivery'),'local','--preview-tools-json'])
+                self.assertEqual(json.loads(native.local[4]),value);self.assertEqual(native.timeout,50)
                 for action in ('expose','verify','complete','failed'):
                     with self.assertRaisesRegex(w.Refused,'preview admission only'):
                         w.ReplayReceipt(central,assets).operation(OWNER,OP,action,preview=True)
@@ -209,12 +216,12 @@ class PreviewCapabilityTests(unittest.TestCase):
                 cls,value,scope,ledger,proc=setup(stage)
                 original_json=reader.r.json;original_run=reader.r.run;calls=[]
                 def native_json(argv,**kwargs):
-                    if Path(argv[0])==scope/'pilot-wazuh-heartbeat':
-                        calls.append('desired-inspector');return original_json([reader.CHECKER,*argv[1:]],**kwargs)
+                    if len(argv)>1 and Path(argv[1])==scope/'pilot-wazuh-heartbeat':
+                        calls.append('desired-inspector');return original_json([reader.CHECKER,*argv[2:]],**kwargs)
                     return original_json(argv,**kwargs)
                 def native_run(argv,**kwargs):
-                    if Path(argv[0])==scope/'pilot-wazuh-delivery':
-                        self.assertEqual(argv[1:3],['local','--preview-tools-json']);calls.append('desired-C11')
+                    if len(argv)>1 and Path(argv[1])==scope/'pilot-wazuh-delivery':
+                        self.assertEqual(argv[2:4],['local','--preview-tools-json']);calls.append('desired-C11')
                         return subprocess.CompletedProcess(argv,0,'declared native local C11 leaf','')
                     return original_run(argv,**kwargs)
                 with native_metadata(),mock.patch.object(w.pwd,'getpwnam',return_value=types.SimpleNamespace(pw_uid=0)),mock.patch.object(w.grp,'getgrnam',return_value=types.SimpleNamespace(gr_gid=0)):
@@ -294,7 +301,7 @@ class PreviewCapabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);events=root/'children'
             def script(name):return ('#!/usr/bin/python3\nfrom pathlib import Path\nwith Path('+repr(str(events))+').open("a") as f:f.write('+repr(name+'\n')+')\n').encode()
-            cls,value,scope,ledger,proc=setup(root,scripts={name:script(name) for name in NAMES if name!='pilot-wazuh-delivery'})
+            cls,value,scope,ledger,proc=setup(root,marker=False,scripts={name:script(name) for name in NAMES if name!='pilot-wazuh-delivery'})
             loaded=runpy.run_path(str(scope/'pilot-wazuh-delivery'));env=loaded['check_local'].__globals__;actual_cls=env['PreviewTools']
             actual_cls.RUN=scope.parent;actual_cls.WRITER=ledger/'writer-active.json';actual_cls.PROC=proc
             profile=root/'profile';profile.write_text(json.dumps({'enabled':True,'source':str(root/'logs'),'transport':'tcp','heartbeat_interval':0}))
@@ -305,7 +312,8 @@ class PreviewCapabilityTests(unittest.TestCase):
             def paths(value,*args):return {'/etc/rsyslog.d/31-pilot-wazuh.conf':conf,'/proc/123/maps':maps}.get(str(original(value,*args)),original(value,*args))
             def run(*argv,**kwargs):
                 native.append(argv)
-                if str(argv[0]).startswith(str(scope)):
+                if str(argv[0]).startswith(str(scope)):raise PermissionError(13,'MODELED_STAGED_NOEXEC')
+                if (str(argv[0]).startswith(str(scope)) or (len(argv)>1 and str(argv[1]).startswith(str(scope)))):
                     return subprocess.run(argv,check=True,capture_output=True,timeout=20).stdout
                 if argv[0] in ('/usr/local/libexec/pilot-siem-relp-check','/usr/local/libexec/pilot-wazuh-heartbeat'):
                     raise AssertionError('STALE_INSTALLED_CHILD_EXECUTED')
@@ -316,9 +324,9 @@ class PreviewCapabilityTests(unittest.TestCase):
             with native_metadata(),mock.patch.object(env['pathlib'],'Path',paths):
                 # Patch only native tool/result leaves. Child script selection
                 # and actual subprocess execution remain production code.
-                env['run']=run;assets=actual_cls(value,OWNER,OP);env['check_local'](assets)
+                env['run']=run;w.HostWriter(ledger).claim(OWNER,'central');assets=actual_cls(value,OWNER,OP);env['check_local'](assets)
             self.assertEqual(events.read_text().splitlines(),['pilot-siem-relp-check','pilot-wazuh-heartbeat'])
-            self.assertTrue(all(str(argv[0]).startswith(str(scope)) for argv in native if 'pilot-' in str(argv[0])))
+            self.assertTrue(all(str(argv[1]).startswith(str(scope)) for argv in native if len(argv)>1 and 'pilot-' in str(argv[1])))
 
 
 WORKER = r"""import json,sys,runpy,contextlib
@@ -356,6 +364,91 @@ cls.RUN=Path(SETTINGS['run']);cls.WRITER=Path(SETTINGS['ledger'])/'writer-active
 value=json.loads(sys.argv[2]);value['identity'][2:4]=[0,0]
 with fixture.native_metadata(),fixture.mock.patch.object(sys,'argv',[SETTINGS['delivery'],sys.argv[1],json.dumps(value),*sys.argv[3:]]):env['main']()
 """
+
+
+class NoexecPreviewTests(unittest.TestCase):
+    def test_reader_observe_and_outer_local_reach_real_interpreter_subprocess(self):
+        for family in ('observe','cold','local'):
+          for exit_code in (0,7):
+            with self.subTest(family=family,exit_code=exit_code),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);events=root/'events'
+                def probe(name):
+                    return ('#!/usr/bin/python3\nimport json,sys\nfrom pathlib import Path\n'
+                        'with Path('+repr(str(events))+').open("a") as f:f.write(json.dumps({"name":'+repr(name)+',"args":sys.argv[1:]})+"\\n")\n'
+                        'print(json.dumps({"executed":True,"mode":sys.argv[1]}))\nraise SystemExit('+str(exit_code)+')\n').encode()
+                scripts={name:probe(name) for name in NAMES}
+                cls,value,scope,ledger,proc=setup(root,marker=False,scripts=scripts)
+                class Native:
+                    def run(self,argv,**kwargs):
+                        # The ONLY modeled execve leaf: a bare staged file is
+                        # noexec. Successful interpreter execution is real.
+                        if str(argv[0]).startswith(str(scope)):raise PermissionError(13,'MODELED_STAGED_NOEXEC')
+                        if len(argv)<2 or not str(argv[1]).startswith(str(scope)):raise AssertionError('UNEXPECTED_EXECUTION')
+                        return subprocess.run(argv,capture_output=True,text=True,check=True,timeout=kwargs['timeout'])
+                    def json(self,argv,**kwargs):return json.loads(self.run(argv,**kwargs).stdout)
+                with native_metadata():
+                    w.HostWriter(ledger).claim(OWNER,'central')
+                    assets=cls(value,OWNER,OP);reader=w.Reader(w.Central(root=ledger,runner=Native()),value['tools']['pilot-wazuh-heartbeat'],{'tools':{k:v for k,v in value['tools'].items() if k!='pilot-wazuh-heartbeat'}},preview=assets)
+                    if exit_code:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            reader.observe(loaded=family!='cold') if family!='local' else reader.local('bounded outer local')
+                        self.assertFalse(assets.settled,'FAILED_CHILD_MUST_RETAIN_UNKNOWN_SETTLEMENT')
+                    elif family!='local':self.assertTrue(reader.observe(loaded=family!='cold')['executed'])
+                    else:reader.local('bounded outer local')
+                event=json.loads(events.read_text());self.assertEqual(event['name'],'pilot-wazuh-heartbeat' if family!='local' else 'pilot-wazuh-delivery')
+                self.assertEqual(event['args'][0],'inspect-reader' if family!='local' else 'local')
+                if family=='cold':self.assertEqual(event['args'][1:],['--cold'])
+
+    def test_actual_system_profile_and_all_fixed_script_clis(self):
+        # Actual system-profile/CLI leaf only. This controller has no writable
+        # regular-file noexec scope; modeled execve controls below remain
+        # separate from mandatory native target /run noexec qualification.
+        program=r"""import errno,json,os,runpy,subprocess,sys,tempfile
+from pathlib import Path
+repo=Path(sys.argv[1]);cls=runpy.run_path(str(repo/'playbooks/files/pilot-wazuh-delivery'))['PreviewTools']
+interpreter=cls.system_python();assert interpreter.samefile('/proc/self/exe')
+with tempfile.TemporaryDirectory(prefix='pilot-rv20-system-') as temporary:
+ root=Path(temporary)
+ records=[]
+ for name in ('pilot-wazuh-heartbeat','pilot-wazuh-delivery','pilot-siem-relp-check'):
+  path=root/name;path.write_bytes((repo/'playbooks/files'/name).read_bytes());path.chmod(0o700)
+  result=subprocess.run([str(interpreter),str(path),'rv20-unsupported-mode'],capture_output=True,timeout=10)
+  assert result.returncode==1 and (b'unknown' in result.stderr or b'ValueError' in result.stderr)
+  records.append({'name':name,'interpreted_rc':result.returncode})
+ print(json.dumps({'kernel_noexec':'NOT_AVAILABLE_LOCALLY','real_system_policy':True,'records':records}))
+"""
+        result=subprocess.run(['/usr/bin/python3','-B','-c',program,str(REPO)],capture_output=True,text=True,timeout=40)
+        self.assertEqual(result.returncode,0,(result.stdout,result.stderr));record=json.loads(result.stdout)
+        self.assertEqual(record['kernel_noexec'],'NOT_AVAILABLE_LOCALLY');self.assertTrue(record['real_system_policy']);self.assertEqual(len(record['records']),3)
+
+    def test_interpreter_and_fixed_script_kind_refuse_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);cls,value,scope,ledger,proc=setup(root);system=Path('/usr/bin/python3').resolve()
+            for failure in ('empty','relative','foreign','writable','parent','proc-mismatch','venv','interpreter-noexec','untrusted-link','multi-hop-writable'):
+                with self.subTest(failure=failure):
+                    override={}
+                    if failure=='foreign':override[str(system)]={'st_uid':77}
+                    if failure=='writable':override[str(system)]={'st_mode':system.stat().st_mode|0o020}
+                    if failure=='parent':override[str(system.parent)]={'st_mode':system.parent.stat().st_mode|0o020}
+                    if failure=='proc-mismatch':override['/proc/self/exe']={'st_ino':system.stat().st_ino+1}
+                    with native_metadata(override),contextlib.ExitStack() as stack:
+                        if failure in ('empty','relative'):stack.enter_context(mock.patch.object(sys,'executable','' if failure=='empty' else 'python3'))
+                        if failure=='venv':stack.enter_context(mock.patch.object(sys,'prefix','/model/venv'))
+                        if failure=='interpreter-noexec':stack.enter_context(mock.patch.object(os,'access',return_value=False))
+                        if failure=='untrusted-link':
+                            fake=root/'fake-python';link=root/'python-link';fake.write_text('not an interpreter');fake.chmod(0o755);link.symlink_to(fake)
+                            stack.enter_context(mock.patch.object(sys,'executable',str(link)))
+                        if failure=='multi-hop-writable':
+                            unsafe=root/'writable-hop';unsafe.mkdir(mode=0o777);unsafe.chmod(0o777);(unsafe/'system-link').symlink_to('/usr/bin/python3');outer=root/'outer-link';outer.symlink_to(unsafe/'system-link')
+                            stack.enter_context(mock.patch.object(sys,'executable',str(outer)))
+                        assets=cls(value,OWNER,OP)
+                        with self.assertRaises(ValueError):assets.argv('pilot-wazuh-heartbeat',value['tools']['pilot-wazuh-heartbeat'],'inspect-reader')
+            for mode in ('bad-shebang','mutating','wrong-hash','member'):
+                with self.subTest(mode=mode),native_metadata():
+                    assets=cls(value,OWNER,OP)
+                    if mode=='bad-shebang':
+                        path=scope/'pilot-wazuh-heartbeat';path.write_bytes(path.read_bytes().replace(b'#!/usr/bin/python3',b'#!/usr/bin/env python3',1));value['tools'][path.name]=hashlib.sha256(path.read_bytes()).hexdigest()
+                    with self.assertRaises(ValueError):assets.argv('unknown' if mode=='member' else 'pilot-wazuh-heartbeat','0'*64 if mode=='wrong-hash' else value['tools']['pilot-wazuh-heartbeat'],'preflight' if mode=='mutating' else 'inspect-reader')
 
 
 class PreviewModuleTests(unittest.TestCase):

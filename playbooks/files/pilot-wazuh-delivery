@@ -160,6 +160,56 @@ class PreviewTools:
             raise ValueError('preview desired code differs from required retained provenance')
         return self.validate()/name
 
+    @classmethod
+    def interpreter_path(cls,path):
+        # Every symlink hop must remain in root-controlled directories, even
+        # when a writable intermediate could resolve back to the system image.
+        for _ in range(16):
+            if not path.is_absolute() or str(path)!=os.path.normpath(str(path)):
+                raise ValueError('preview interpreter path is noncanonical')
+            cls.directory(path.parent);info=path.lstat()
+            if info.st_uid!=0:raise ValueError('preview interpreter alias is untrusted')
+            if not stat.S_ISLNK(info.st_mode):return path
+            target=pathlib.Path(os.readlink(path))
+            path=target if target.is_absolute() else path.parent/target
+        raise ValueError('preview interpreter symlink chain exceeds bound')
+
+    @classmethod
+    def system_python(cls):
+        # No PATH or caller-selected interpreter. The standard distro symlink
+        # is allowed only through root-controlled ancestry to the SAME running
+        # canonical system binary. A venv/user interpreter is not this profile.
+        if not sys.executable or not pathlib.Path(sys.executable).is_absolute() or sys.prefix!=sys.base_prefix:
+            raise ValueError('preview requires the running absolute system Python')
+        requested=pathlib.Path(sys.executable)
+        canonical=cls.interpreter_path(pathlib.Path('/usr/bin/python3'));running=cls.interpreter_path(requested)
+        cls.directory(canonical.parent)
+        info=canonical.stat();identity=(info.st_dev,info.st_ino)
+        if (running!=canonical or not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode & 0o022
+                or identity!=(requested.stat().st_dev,requested.stat().st_ino)
+                or identity!=(pathlib.Path('/proc/self/exe').stat().st_dev,pathlib.Path('/proc/self/exe').stat().st_ino)
+                or not info.st_mode & 0o111 or not os.access(canonical,os.X_OK)):
+            raise ValueError('preview interpreter differs from trusted running system Python')
+        return canonical
+
+    def argv(self,name,required,*arguments):
+        path=self.tool(name,required)
+        allowed=(name=='pilot-wazuh-heartbeat' and list(arguments) in
+                 (['inspect-reader'],['inspect-reader','--cold'],['runtime','tcp'],['runtime','relp'])) or (
+                 name=='pilot-siem-relp-check' and list(arguments)==['sender-config','wazuh-sender'])
+        if name=='pilot-wazuh-delivery' and len(arguments)==3 and arguments[:2]==('local','--preview-tools-json'):
+            try:allowed=json.loads(arguments[2])==self.value
+            except (ValueError,TypeError):allowed=False
+        if not allowed:raise ValueError('preview tool arguments are outside fixed readonly modes')
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try:
+            before=os.fstat(fd);payload=os.read(fd,self.LIMIT+1)
+            if (not payload.startswith(b'#!/usr/bin/python3\n') or hashlib.sha256(payload).hexdigest()!=required
+                    or self.stable(os.fstat(fd))!=self.stable(before) or self.stable(path.lstat())!=self.stable(before)):
+                raise ValueError('preview requires the exact fixed Python script kind and bytes')
+        finally:os.close(fd)
+        return [str(self.system_python()),str(path),*arguments]
+
     def certificate(self,kind):
         return {'schema':1,'kind':kind,'owner':self.owner,'operation':self.operation,
                 'path':self.value['path'],'identity':self.value['identity'],
@@ -354,19 +404,19 @@ def check_local(preview=None):
         raise ValueError('legacy UDP forward is still active')
     # Config/TLS/loaded-state check is intentionally local. Only the receiver
     # delivery mode can establish that a real alert reached disk.
-    relp='/usr/local/libexec/pilot-siem-relp-check'
-    heartbeat='/usr/local/libexec/pilot-wazuh-heartbeat'
+    relp=['/usr/local/libexec/pilot-siem-relp-check','sender-config','wazuh-sender']
+    heartbeat=['/usr/local/libexec/pilot-wazuh-heartbeat','runtime',profile['transport']]
     if preview is not None:
         if type(preview) is not PreviewTools:raise ValueError('unknown local preview capability')
         if pathlib.Path(__file__) != preview.tool('pilot-wazuh-delivery',preview.value['tools']['pilot-wazuh-delivery']):
             raise ValueError('preview delivery must execute its authenticated fixed member')
-        relp=str(preview.tool('pilot-siem-relp-check',preview.value['tools']['pilot-siem-relp-check']))
-        heartbeat=str(preview.tool('pilot-wazuh-heartbeat',preview.value['tools']['pilot-wazuh-heartbeat']))
-    run(relp, 'sender-config', 'wazuh-sender')
+        relp=preview.argv('pilot-siem-relp-check',preview.value['tools']['pilot-siem-relp-check'],'sender-config','wazuh-sender')
+        heartbeat=preview.argv('pilot-wazuh-heartbeat',preview.value['tools']['pilot-wazuh-heartbeat'],'runtime',profile['transport'])
+    run(*relp)
     expected_interval = 5 if profile['transport'] == 'relp' else 0
     if profile.get('heartbeat_interval') != expected_interval:
         raise ValueError('desired transport heartbeat profile is missing or changed')
-    run(heartbeat, 'runtime', profile['transport'])
+    run(*heartbeat)
     check_input(conf.read_text(), profile['source'])
 
 
