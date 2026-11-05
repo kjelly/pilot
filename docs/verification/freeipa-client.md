@@ -91,40 +91,43 @@ SSH key（或 GSSAPI）登入、但 FreeIPA 密碼已過期的人在拿到 shell
   `ipa_access_order` 重複或未知形式、`sssctl config-check` 失敗、SSSD 沒載入政策、`--check`）都在
   修改前拒絕或由 rescue 還原，sssd.conf 位元組不變；hand-edit 後不重啟再跑 `--tags C14` /
   `--tags sssd_hardening` 會重啟 SSSD。
-- 目前有效 evidence（`renew`，Ubuntu 24.04 client + AlmaLinux 9 server，兩台全新 VM）：candidate
-  `6556db0c0403ac127f813e36f64a8df11741373f`（tree `e5b594f087efa77ec9b6078fed46a75a9966785c`）的
-  `vm-target topology test` 全部通過——L3 `--check --diff`、L4 apply、L5 verify（`freeipa-server.md` 20/0/0、
-  本 spec 18/0/0、`login-probe.md` 14/0/0）、L6 `changed=0`；之後在同一組 VM 實跑 A01–A09、A11、A13、A14、A17
-  （真實 SSH key + 過期密碼：sshd 改跑 `passwd`、改完斷線、重新登入進 shell 且 sudo 正常，FreeIPA 到期日 +90 天；
-  login-probe 的 canary 有 2099 到期的密碼時維持 `ok`，密碼被管理員 reset 成過期後約 42 秒內轉成 `session`，
-  恢復到期日後約 52 秒回到 `ok`）。逐項結果與限制見
-  [evidence LATEST](../evidence/freeipa-client-password-renewal/LATEST.md)。
+- 目前有效 evidence（v1.16，`renew` 加 `pam_initgroups_scheme = always`；Ubuntu 24.04 client + AlmaLinux 9 server，全新 VM）：
+  - **一般 client**：candidate `d1b9220beef77a7545e58cc2e5d8794b55fd1031`（tree `8d66316ce8ef29f7d2ebc4fd1535adbce54ea95f`）的
+    `vm-target topology test` 全部通過——L3 `--check --diff`、L4 apply、L5 verify（`freeipa-server.md` 20/0/0、本 spec
+    20/0/0、`login-probe.md` 14/0/0）、L6 `changed=0`；之後在同一組 VM 實跑 A01–A09、A11、A13、A14、A17、A18，負向對照組
+    N1–N11 與 `always` 的代價量測，逐項結果與限制見
+    [evidence LATEST](../evidence/freeipa-client-password-renewal/LATEST.md)。
+  - **A12（FreeIPA primary／replica／全部不可達）**：candidate `49c289dbe9794621dad8f97bfa332c8f4ffceaec`（與上一個只差
+    HA 測試 chain 一個檔案）的 HA 拓樸通過（verify 20/0/0、16/0/0、20/0/0，L6 `changed=0`），結果見
+    [evidence LATEST](../evidence/freeipa-client-password-expiry-ha/LATEST.md)。
+  - **A10（gateway／directory／target-policy 主機）**：同一個 candidate `49c289db` 的六節點拓樸通過（gateway 33/0/0、
+    directory 9/0/0、target-policy 5/0/0，L6 `changed=0`），結果見
+    [evidence LATEST](../evidence/freeipa-client-password-expiry-gateways/LATEST.md)。
+- A04：過期、使用者知道舊密碼時，sshd 改跑 `passwd`、改完斷線、重新登入進 shell 且 sudo 正常，FreeIPA 到期日 +90 天。
+  A18（v1.16）：改完密碼後即使只用 TTY 反覆重試，第二次嘗試（約 10 秒）就成功；非互動式約 4 秒；使用者有開著的 session 時管理員
+  reset 在 0.4 秒內被發現。對照組（拿掉 `always` 行、重啟 SSSD）重現 #262／#263：TTY-only 重試 16 次都沒有成功，reset 要 99.1 秒
+  才被發現。login-probe 的 canary 有 2099 到期的密碼時維持 `ok`，密碼被管理員 reset 成過期後 11 秒內轉成 `session`，恢復到期日後
+  53 秒內回到 `ok`（受 probe 60 秒週期限制）。
 - A06 的結果要知道：停用的帳號與 HBAC 拒絕的帳號在 `renew` 下沒有 `passwd` 提示、被直接拒絕；`krbPrincipalExpiration`
   已過期的帳號會走到 `passwd` 提示，但 FreeIPA 拒絕改密碼（即使舊密碼正確），所以沒有 shell、密碼不變。
-  同一個帳號在 `off`（原本行為）下用 key 登入會拿到 shell，所以 `renew` 比原本嚴格，但不是在提示之前拒絕。
-- A10（gateway／directory／target-policy 主機）已在六節點拓樸實跑，見
-  [evidence LATEST](../evidence/freeipa-client-password-expiry-gateways/LATEST.md)：鏈（L4、L5 gateway 33/0/0、
-  directory 9/0/0、target-policy 5/0/0、L6 `changed=0`）通過；對這三台套用 `renew` 後，密碼有效時 portal、
-  Directory TUI 與 e2e 的 `disabled` 4/4、`strict` 20/20、`recording` 3/3 都通過；密碼過期時 TTY 登入由 `passwd`
-  取代 ForceCommand（沒有 `pilot-session`／`pilot-directory-session` 行程），沒有 TTY 的登入、遠端命令與經 gateway 的
-  ssh／sftp 都 rc 1／255 且帶 "Password change required but no TTY available"，沒有任何 gateway 事件、session store
-  紀錄或 target 登入產生，所以沒有繞過 recording 的 session。沒有密碼的 portal 帳號在 `renew` 下被拒絕（同 A17）。
-  **這個 PR 沒有解除 preflight 對這三個群組的 `renew` 拒絕**：evidence 是用另一份不含這三個群組的 inventory 套用
-  `renew` 取得的，解除拒絕需要新的 candidate 並重做全部證據；另有未解決的觀察，見下一點。
-- A10 的未解決觀察：在 gateway／directory 主機上，改完密碼後若重試是「只用 TTY」的登入，key 登入曾持續被拒
-  （PAM 12）：2/2 次超過 66 秒，一次約 6 分鐘後仍未恢復，一次 18 分 35 秒，一次 181 秒；非互動式重試約 4 秒就恢復
-  （#262）。管理員 reset 後 gateway 主機要約 52–59 秒才發現密碼過期，directory／target 約 0.2–4 秒（#263）。
-  兩者的原因已查出，見下一點。
-- 尚未實跑：A12（HA／offline）、A16（sudo cache 交叉，#267）。`krbPrincipalExpiration` 已過期的帳號是否該在提示前
-  被拒絕尚待決定（#266）。密碼改完後重新登入的等待時間在 v1.16 之前取決於重試方式（#262）：非互動式重試（無 TTY）在一般 client 上約 3–4 秒就恢復；
-  「只用 TTY 重試」（每次登入都停在 `Current Password` 提示再中斷）在一般 client 上 3 輪全都超過 240 秒沒有恢復，
-  gateway／directory 主機上曾持續到 18 分鐘以上。原因（SSSD 2.9.4，已用 debug log 與 A/B 實驗確認）：預設
-  `pam_initgroups_scheme = no_session` 下，PAM responder 只有在「沒有 5 秒的 initgr 快取項目、且使用者沒有 session」時
-  才會向後端重讀使用者；每次 TTY 嘗試結束時的 `CLOSE_SESSION` 又會重新啟動 5 秒的窗口，下一次嘗試落在窗口內，
-  一直讀到快取裡過期的到期時間。同一原因也使得使用者有任何開著的 session 時，管理員 reset 要等到 session 結束才被發現
-  （實測 100.5 秒 vs 無 session 的 5.0 秒；gateway 的 52–59 秒，#263）。**v1.16 起 `renew` 會在 `[pam]` 寫
-  `pam_initgroups_scheme = always`（C19／C20）**；代價（每個 PAM 請求多一次後端使用者與群組查詢）、FreeIPA 不可達時的
-  行為（A12）與新 candidate 上的實測結果見 evidence
+  同一個帳號在 `off`（原本行為）下用 key 登入會拿到 shell，所以 `renew` 比原本嚴格，但不是在提示之前拒絕（#266）。
+- A10 的結果：對 gateway、directory、target 三台套用 `renew` 後，密碼有效時 portal、Directory TUI 與 e2e 的 `disabled` 4/4、
+  `recording` 3/3 通過（`strict` 見下）；密碼過期時 TTY 登入由 `passwd` 取代 ForceCommand（沒有 `pilot-session`／
+  `pilot-directory-session` 行程），沒有 TTY 的登入、遠端命令與經 gateway 的 ssh／sftp 都失敗並帶 "Password change required
+  but no TTY available"，沒有任何 gateway 事件、session store 紀錄或 target 登入產生，所以沒有繞過 recording 的 session；改完密碼
+  後 gateway 約 4–6 秒、directory 約 16 秒重新登入。沒有密碼的 portal 帳號在 `renew` 下被拒絕（同 A17，對照主機可登入）。
+  **這個 PR 沒有解除 preflight 對這三個群組的 `renew` 拒絕**：evidence 是用另一份不含這三個群組的 inventory 套用 `renew` 取得的，
+  解除拒絕要改 execution-affecting 的 playbook，需要新的 candidate 並重做全部證據。e2e `strict` 階段沒有穩定的 20/20：
+  TP07 轉發探針偶發失敗（有、無 `always` 都會，#272），`AG72-pilot-connect` 在使用者留有 Kerberos ticket 時失敗（#272）；
+  已建立的 SSH 連線（ControlPersist）在密碼被 reset 後仍可用到結束（#270）。
+- A12 的結果：兩台 server 都在、primary 停止（replica 提供服務）、replica 停止時，有效密碼的 key 登入分別為 0.45、1.23、1.43 秒；
+  兩台都停止時，已快取的有效密碼使用者仍可用 key 登入（約 0.2–0.6 秒），已快取的過期使用者沒有 shell（有 TTY 時停在
+  `Current Password:`，改密碼回 "System is offline, password change not possible"），沒看過的使用者被拒絕；server 恢復後
+  同一個改密碼在 34.8 秒內成功，沒有任何清快取指令。`sssctl domain-status` 的 Online 欄位會落後實際狀態。
+- `always` 的代價（一台 client 的 A-B-A 量測）：每個「距離使用者上一個 PAM 請求超過 5 秒、而使用者已有 session」的 PAM 請求
+  多一次後端使用者查詢（約 4 個 LDAP 搜尋），每次多約 10 ms，登入時間沒有變長；高負載主機與 FreeIPA 伺服器端的負載沒有量。
+- 未完成：A16（sudo cache 交叉，#267）。SSH 公鑰在使用者被快取後才加入時要等一段時間才可用（#269）。這些不屬於本功能的行為，
+  但會影響測試與操作。
 
 **這台 client 從 FreeIPA 拿到什麼（AAA）**：
 - **Authentication（認證）**：帳號與 Kerberos 身分來自 FreeIPA，經 SSSD 提供給 NSS/PAM
@@ -312,6 +315,21 @@ SSSD 模擬。每一列以 `pilot verify --probe '<command>' --probe-expected 0 
 | `ipa_access_order` 出現兩行 | **FAIL** | — | — | — | — | — |
 | `pilot-pwvalid` 的到期日改到過去（`renew`） | — | — | — | **FAIL** | — | — |
 | `sshd_config.d` 加上 `UsePAM no`（只讀 `sshd -T`，sshd 未 reload） | — | — | — | — | — | **FAIL** |
+
+**v1.16 C19／C20 row 指令實測（2026-11-05，用 `pilot verify --probe` 對真實 Ubuntu 24.04 client，SSSD 2.9.4）**：
+
+| 狀態 | C19 | C20 |
+|---|---|---|
+| 未設定（沒有任何這兩行） | PASS | PASS |
+| `off`（`expire`，沒有 `pam_initgroups_scheme`） | PASS | PASS |
+| `warn`（沒有 `pam_initgroups_scheme`） | PASS | PASS |
+| `renew` + `pam_initgroups_scheme = always`，已重啟 | PASS | PASS |
+| `renew`，沒有 `pam_initgroups_scheme` | **FAIL** | PASS |
+| `renew` + `no_session` | **FAIL** | PASS |
+| `off` + `always`（殘留） | **FAIL** | PASS |
+| `renew` + `always`，檔案改了但 SSSD 沒重啟 | PASS | **FAIL** |
+
+C20 在重啟後約 3 秒內曾失敗兩次，之後同樣狀態的 12 次探測全部通過，所以 playbook 重啟後的比對最多重試 5 次、間隔 2 秒。
 
 FAIL 都是 `rc=2, expected 0`（ad-hoc runner 對非 0 結束碼回報 rc=2）。同一次也確認了 sshd 的實際行為
 （不是 checklist row，供 apply／runbook 使用）：`renew` 下密碼已過期的帳號用 key 登入時，
