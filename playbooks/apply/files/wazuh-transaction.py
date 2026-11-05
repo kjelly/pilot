@@ -232,7 +232,7 @@ class MountTable:
             # root. Keep their mountpoint for descendant rejection, and refuse
             # physical mapping only if a selected path actually uses one.
             root = root if root.is_absolute() else None
-            self.rows.append({'device': fields[2], 'root': root, 'point': point,
+            self.rows.append({'id': fields[0], 'device': fields[2], 'root': root, 'point': point,
                               'writable': 'rw' in fields[5].split(',')})
         if not self.rows:
             raise Refused('empty host mount namespace')
@@ -1593,6 +1593,281 @@ READER_PHASES = {
 }
 
 
+def imfile_id(data):
+    """Exact Ubuntu8.2312 imfile SipHash2-4, key00..0f, output LE bytes.
+
+    Authenticated orig77403200... member plugins/imfile/siphash.c SHA5a26dbc0...
+    and imfile.c SHA7cf15f39... get_file_id_hash/getFileID1315-1348. A short
+    read has NO suffix; this identifier disambiguates, it does not authenticate.
+    """
+    if len(data) < 512:
+        return ''
+    data = data[:512]
+    mask = (1 << 64) - 1
+    key = bytes(range(16))
+    k0, k1 = int.from_bytes(key[:8], 'little'), int.from_bytes(key[8:], 'little')
+    v = [0x736f6d6570736575 ^ k0, 0x646f72616e646f6d ^ k1,
+         0x6c7967656e657261 ^ k0, 0x7465646279746573 ^ k1]
+    def rotate(value, count): return ((value << count) | (value >> (64 - count))) & mask
+    def rounds(count):
+        for _ in range(count):
+            v[0] = (v[0] + v[1]) & mask; v[1] = rotate(v[1], 13) ^ v[0]; v[0] = rotate(v[0], 32)
+            v[2] = (v[2] + v[3]) & mask; v[3] = rotate(v[3], 16) ^ v[2]
+            v[0] = (v[0] + v[3]) & mask; v[3] = rotate(v[3], 21) ^ v[0]
+            v[2] = (v[2] + v[1]) & mask; v[1] = rotate(v[1], 17) ^ v[2]; v[2] = rotate(v[2], 32)
+    for offset in range(0, len(data) // 8 * 8, 8):
+        block = int.from_bytes(data[offset:offset + 8], 'little')
+        v[3] ^= block; rounds(2); v[0] ^= block
+    block = (len(data) & 255) << 56
+    for offset, byte in enumerate(data[len(data) // 8 * 8:]): block |= byte << (8 * offset)
+    v[3] ^= block; rounds(2); v[0] ^= block; v[2] ^= 255; rounds(4)
+    return (v[0] ^ v[1] ^ v[2] ^ v[3]).to_bytes(8, 'little').hex()
+
+
+class ReaderSource:
+    """Fresh Docker-bound source closure; proc names never grant FD authority."""
+    def __init__(self, source, backup, proc=Path('/proc'), missing=()):
+        self.source, self.backup, self.proc = canonical(source), backup, Path(proc)
+        self.layout = ScopeLayout.inspect({str(self.source): 'directory'}, backup, missing=missing)
+        # Explicit host/process mount namespaces: pure projection, not restore
+        # policy or an assumption that container paths use host spelling.
+        self.mounts = MountTable((self.proc / 'self/mountinfo').read_text())
+        self.groups = {}
+        for name, node in self.layout['nodes'].items():
+            if node['type'] == 'file':
+                key = tuple(node['scope_identity'][:2])
+                self.groups.setdefault(key, []).append(name)
+        self.current = None
+        name = str(self.source / 'alerts/alerts.json')
+        node = self.layout['nodes'].get(name)
+        if node and node['type'] == 'symlink': node = self.layout['nodes'].get(node['resolved'])
+        if node and node['type'] == 'file': self.current = tuple(node['scope_identity'][:2])
+
+    @staticmethod
+    def stamp(info):
+        return [info.st_dev, info.st_ino, info.st_nlink, info.st_mode, info.st_uid,
+                info.st_gid, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+    def process(self, pid):
+        text = (self.proc / str(pid) / 'stat').read_text()
+        fields = text.rsplit(') ', 1)[1].split()
+        if fields[0] in ('Z', 'X', 'x'):
+            raise Refused('source FD process is not live')
+        return [pid, fields[19], os.stat(self.proc / str(pid) / 'ns/mnt').st_ino,
+                (self.proc / 'sys/kernel/random/boot_id').read_text().strip()]
+
+    def group(self, key):
+        aliases = self.groups.get(key)
+        if not aliases:
+            raise Refused('source descriptor has no closed inode group')
+        if any(not (Path(name) == self.source / 'alerts/alerts.json'
+                        or self.source / 'alerts' in Path(name).parents) for name in aliases):
+            raise Refused('unknown non-alert native reader source group')
+        return aliases
+
+    def descriptor(self, pid, number, protected_reader=False):
+        folder = self.proc / str(pid)
+        link = folder / 'fd' / number
+        info = link.stat()
+        if not stat.S_ISREG(info.st_mode): return None
+        name = os.readlink(link)
+        key = (info.st_dev, info.st_ino)
+        if (key not in self.groups and str(os.major(info.st_dev)) + ':' + str(os.minor(info.st_dev)) != self.mounts.project(self.source)[0]
+                and not name.startswith(str(self.source) + '/')):
+            return None  # Different backing filesystem cannot alias this source.
+        raw = (folder / 'fdinfo' / number).read_text()
+        fields = dict(line.split(':', 1) for line in raw.splitlines() if ':' in line)
+        if not all(re.fullmatch(r'\s*[0-9]+\s*', fields.get(key, '')) for key in ('pos', 'mnt_id', 'ino')):
+            raise Refused('unknown source FD metadata')
+        if not re.fullmatch(r'\s*[0-7]+\s*', fields.get('flags', '')):
+            raise Refused('unknown source FD flags')
+        position, flags = int(fields['pos']), int(fields['flags'], 8)
+        if position > (1 << 63) - 1 or int(fields['ino']) != info.st_ino:
+            raise Refused('source FD inode/offset metadata differs')
+        table = MountTable((folder / 'mountinfo').read_text())
+        rows = [row for row in table.rows if row['id'] == fields['mnt_id'].strip()]
+        if len(rows) != 1 or rows[0]['root'] is None:
+            raise Refused('source FD mount identity is unknown')
+        row = rows[0]
+        device = str(os.major(info.st_dev)) + ':' + str(os.minor(info.st_dev))
+        if row['device'] != device:
+            raise Refused('source FD mount device differs from fstat')
+        # The diagnostic suffix is used ONLY to reject an unknown protected
+        # orphan. Acceptance always requires the closed live inode group.
+        label = Path(name.removesuffix(' (deleted)'))
+        physical = None
+        if label.is_absolute() and (label == row['point'] or row['point'] in label.parents):
+            physical = row['root'] / label.relative_to(row['point'])
+        source_device, source_location = self.mounts.project(self.source)
+        related = (key in self.groups or (row['device'] == source_device and physical is not None
+                   and (physical == source_location or source_location in physical.parents)))
+        if not related: return None
+        if key not in self.groups or info.st_nlink == 0:
+            raise Refused('orphan or unknown protected source FD')
+        aliases = self.group(key) if protected_reader else self.groups[key]
+        if info.st_nlink != len(aliases):
+            raise Refused('source FD has an outside hardlink alias')
+        if protected_reader and ((flags & os.O_ACCMODE) != os.O_RDONLY
+                                 or flags & getattr(os, 'O_PATH', 0)):
+            raise Refused('native reader has a writable or opaque source FD')
+        # At least one captured alias must be visible through THIS descriptor's
+        # mount; an inode match alone does not bless an unknown bind namespace.
+        visible = False
+        for alias in aliases:
+            alias_device, alias_location = self.mounts.project(Path(alias))
+            if alias_device == row['device'] and (alias_location == row['root'] or row['root'] in alias_location.parents):
+                logical = row['point'] / alias_location.relative_to(row['root'])
+                try:
+                    observed = (folder / 'root' / str(logical).lstrip('/')).stat()
+                    visible |= (observed.st_dev, observed.st_ino, observed.st_nlink) == (info.st_dev, info.st_ino, len(aliases))
+                except FileNotFoundError:
+                    pass
+        if not visible:
+            raise Refused('source FD mount does not expose a closed source alias')
+        after = link.stat()
+        again = dict(line.split(':', 1) for line in (folder / 'fdinfo' / number).read_text().splitlines() if ':' in line)
+        # Appends and normal reads may change size/time/position during live
+        # observation. None is descriptor identity or logical drain authority.
+        if (self.stamp(after)[:6] != self.stamp(info)[:6]
+                or any(again.get(key) != fields.get(key) for key in ('ino', 'flags', 'mnt_id'))):
+            raise Refused('source FD changed during classification')
+        return {'fd': number, 'device': info.st_dev, 'inode': info.st_ino,
+                'links': info.st_nlink, 'size': info.st_size, 'position': position,
+                'flags': flags, 'mount': int(fields['mnt_id']), 'aliases': sorted(aliases)}
+
+    def fds(self, pid, reader=True):
+        if not pid: return []
+        before = self.process(pid)
+        folder = self.proc / str(pid) / 'fd'
+        for attempt in range(3):
+            names = sorted(path.name for path in folder.iterdir())
+            if len(names) > 4096: raise Refused('source FD count exceeds bound')
+            result = []
+            try:
+                for number in names:
+                    if not number.isdecimal(): raise Refused('unknown source FD entry')
+                    value = self.descriptor(pid, number, reader)
+                    if value: result.append(value)
+            except FileNotFoundError:
+                # A closed slot may vanish in a live FD table. A reused or
+                # foreign descriptor is a Refused, never retried into absence.
+                if self.process(pid) != before:
+                    raise Refused('source FD process changed during classification')
+                if attempt == 2: raise
+                continue
+            if self.process(pid) != before:
+                raise Refused('source FD process changed during classification')
+            if sorted(path.name for path in folder.iterdir()) == names:
+                return result
+        raise Refused('source FD set changed during bounded classification')
+
+    def frozen(self, keys):
+        result = {}
+        for key in sorted(keys):
+            aliases = self.group(key)
+            name = aliases[0]
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                before = os.fstat(fd)
+                if (before.st_dev, before.st_ino) != key or before.st_nlink != len(aliases):
+                    raise Refused('source group changed before fingerprint')
+                if before.st_size == 0:
+                    raise Refused('empty native input is not qualified for handoff')
+                prefix = os.pread(fd, min(512, before.st_size), 0)
+                last = os.pread(fd, 1, before.st_size - 1)
+                if self.stamp(os.fstat(fd)) != self.stamp(before):
+                    raise Refused('source changed during endpoint inspection')
+                result[str(key[0]) + ':' + str(key[1])] = {
+                    'identity': self.stamp(before), 'aliases': sorted(aliases),
+                    'fingerprint': imfile_id(prefix), 'complete': last == b'\n'}
+            finally:
+                os.close(fd)
+        return result
+
+
+class NativeCursor:
+    """Qualified native O_TRUNC state reader; live coherence is not durability."""
+    LIMIT = 1024 * 1024
+    @staticmethod
+    def json(data):
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result: raise Refused('duplicate native cursor key')
+                result[key] = value
+            return result
+        try:
+            value = json.loads(data, object_pairs_hook=unique)
+        except (ValueError, UnicodeError) as exc:
+            raise Refused('incoherent native cursor JSON') from exc
+        required = {'filename', 'prev_was_nl', 'curr_offs', 'strt_offs'}
+        if (not isinstance(value, dict) or not required.issubset(value)
+                or set(value) - required - {'prev_line_segment', 'prev_msg_segment'}
+                or not isinstance(value['filename'], str)
+                or type(value['prev_was_nl']) is not int or value['prev_was_nl'] not in (0, 1)
+                or any(type(value[key]) is not int or not 0 <= value[key] <= (1 << 63) - 1
+                       for key in ('curr_offs', 'strt_offs'))
+                or any(not isinstance(value[key], str) for key in ('prev_line_segment', 'prev_msg_segment') if key in value)):
+            raise Refused('unsupported native cursor schema/types')
+        return value
+
+    @classmethod
+    def read(cls, data, source, required, eof=False, frozen=None):
+        with data.directory() as directory:
+            namespace = data.identity(os.fstat(directory))
+            if data.identity(os.stat('state', dir_fd=data.fd, follow_symlinks=False)) != namespace:
+                raise Refused('native cursor directory changed')
+            names = sorted(os.listdir(directory))
+            if not names or len(names) > 2048:
+                raise Refused('missing or excessive native cursor state')
+            records, bound = {}, set()
+            for name in names:
+                match = re.fullmatch(r'imfile-state:([1-9][0-9]*)(?::([a-f0-9]{16}))?', name)
+                if not match: raise Refused('unknown native cursor basename')
+                inode = int(match[1]); candidates = [key for key in source.groups if key[1] == inode]
+                if len(candidates) != 1: raise Refused('native cursor inode is stale or ambiguous')
+                key = candidates[0]
+                endpoint = source.frozen({key})
+                identifier = str(key[0]) + ':' + str(key[1]); group = endpoint[identifier]
+                if (match[2] or '') != group['fingerprint']:
+                    raise Refused('native cursor fingerprint differs from closed source')
+                if key in bound: raise Refused('competing native cursors for one source group')
+                bound.add(key)
+                with data.file(name, directory) as (opened, info):
+                    if info.st_uid != data.stamp[3] or info.st_gid != data.stamp[4] or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > cls.LIMIT:
+                        raise Refused('unsafe native cursor ownership/size')
+                    payload = os.read(opened, cls.LIMIT + 1)
+                    if len(payload) != info.st_size:
+                        raise Refused('native cursor short coherent read')
+                    value = cls.json(payload)
+                    if (ReaderSource.stamp(os.fstat(opened)) != ReaderSource.stamp(info)
+                            or ReaderSource.stamp(os.stat(name, dir_fd=directory, follow_symlinks=False)) != ReaderSource.stamp(info)
+                            or os.pread(opened, cls.LIMIT + 1, 0) != payload):
+                        raise Refused('native cursor changed during coherent read')
+                if value['filename'] not in (str(source.source / 'alerts/alerts.json'), *group['aliases']):
+                    raise Refused('native cursor label has no watched/retained provenance')
+                size = group['identity'][6]
+                if not 0 <= value['strt_offs'] <= value['curr_offs'] <= size:
+                    raise Refused('native cursor logical range differs from source')
+                if (eof or key not in required) and (not group['complete'] or value['curr_offs'] != size or value['strt_offs'] != size
+                            or value['prev_was_nl'] != 0 or value.get('prev_line_segment') or value.get('prev_msg_segment')):
+                    raise Refused('native logical input has not reached a complete EOF')
+                if frozen is not None and frozen.get(identifier) != group:
+                    raise Refused('frozen source changed before native cursor witness')
+                records[name] = {'source': identifier, 'logical': {key: value[key] for key in ('curr_offs','strt_offs','prev_was_nl')},
+                                 'segments': {key: len(value.get(key, '')) for key in ('prev_line_segment','prev_msg_segment')},
+                                 'identity': ReaderSource.stamp(info), 'sha256': hashlib.sha256(payload).hexdigest()}
+            if not set(required).issubset(bound):
+                raise Refused('native cursor is missing a current or retained input group')
+            if (data.identity(os.fstat(directory)) != namespace
+                    or data.identity(os.stat('state', dir_fd=data.fd, follow_symlinks=False)) != namespace):
+                raise Refused('native cursor directory changed')
+            if sorted(os.listdir(directory)) != names:
+                raise Refused('native cursor membership changed during coherent read')
+            data.namespace()
+            return {'schema': 1, 'namespace': namespace, 'records': records, 'groups': source.frozen(bound)}
+
+
 class ReaderData:
     """Pinned service-data capability. Syslog parents are not root controlled."""
     def __init__(self, path):
@@ -1735,6 +2010,25 @@ class ReaderData:
             os.close(fd)
 
 
+class ReaderInputProfile:
+    @staticmethod
+    def qualify(observed, source, spool, owner):
+        inputs, modules = [], []
+        for entry in observed['resources']:
+            attrs = entry['attrs']
+            if entry['file'] == owner and entry['kind'] == 'input' and attrs.get('type', '').lower() == 'imfile': inputs.append(entry)
+            if entry['file'] == owner and entry['kind'] == 'module' and Path(attrs.get('load', '')).name in ('imfile', 'imfile.so'): modules.append(entry)
+        expected = {'type':'imfile', 'file':str(Path(source) / 'alerts/alerts.json'),
+                    'tag':'pilot-wazuh-alert:', 'facility':'local5', 'severity':'info',
+                    'persiststateinterval':'1', 'freshstarttail':'off', 'reopenontruncate':'on',
+                    'addmetadata':'off', 'ruleset':'pilotWazuhForward'}
+        module = {'load':'imfile', 'statefile.directory':str(Path(spool) / 'state')}
+        if (len(inputs) != 1 or len(modules) != 1 or inputs[0]['file'] != owner
+                or modules[0]['file'] != owner or inputs[0]['attrs'] != expected or modules[0]['attrs'] != module):
+            raise Refused('unqualified complete native imfile input/module semantics')
+        return {'schema':1, 'input':expected, 'module':module}
+
+
 class ReaderNamespace:
     """One coordinator authority for live source closure and physical extent."""
     def __init__(self, source, spool, layout, mounts=None, owner_config=Path('/etc/rsyslog.d/31-pilot-wazuh.conf')):
@@ -1857,7 +2151,10 @@ class ReaderNamespace:
                 raise Refused('unowned reader declarations access a protected physical namespace')
             if kind == 'ruleset' and attrs.get('name') == 'pilotWazuhForward' and not owned:
                 raise Refused('unowned reader still declares its reserved ruleset')
-        return dict(observed, mode=mode)
+        result = dict(observed, mode=mode)
+        if mode == 'enabled':
+            result['input_profile'] = ReaderInputProfile.qualify(observed, self.source, self.spool, self.owner_config)
+        return result
 
 
 class ReaderPrestart:
@@ -2452,63 +2749,79 @@ class Reader:
         return str(expected)
 
 
-    def source_users(self, state, source, reader_pid=None, producers=True, reader_fds=True):
-        """Account for actual source inodes across namespaces, not FD spelling."""
+    def source_capability(self, state, source=None):
+        source = source or self.source(state)
         missing = ()
         if not Path(source).exists():
             if state.get('phase') != 'recovering' or self.source(state) != str(source):
                 raise Refused('absent producer source lacks validated cold recovery authority')
             missing = (str(source),)
-        layout = ScopeLayout.inspect({str(source): 'directory'}, self.t.root, missing=missing)
-        inodes = {tuple(node['scope_identity'][:2]) for node in layout['nodes'].values()
-                  if node['type'] == 'file'}
+        return ReaderSource(source, self.t.root, self.PROC, missing)
+
+    def source_users(self, state, source, reader_pid=None, producers=True, reader_fds=True):
+        capability = self.source_capability(state, source)
         containers = {entry['container'] for entry in state['images'].values()} if producers else set()
         for process in self.PROC.iterdir():
-            if not process.name.isdecimal() or int(process.name) == os.getpid():
-                continue
+            if not process.name.isdecimal() or int(process.name) == os.getpid(): continue
             try:
-                executable = os.readlink(process / 'exe')
-                pid = int(process.name)
+                executable = os.readlink(process / 'exe'); pid = int(process.name)
                 if Path(executable.removesuffix(' (deleted)')).name == 'rsyslogd' and pid != reader_pid:
                     raise Refused('unknown additional native reader invocation')
                 cgroups = (process / 'cgroup').read_text()
                 container = any(re.search(r'(?:/docker/' + re.escape(identity) + r'(?:/|$)|/docker-' + re.escape(identity) + r'\.scope(?:/|$))', cgroups)
                                 for identity in containers if re.fullmatch('[a-f0-9]{64}', identity))
-                for link in (process / 'fd').iterdir():
-                    try:
-                        info = link.stat()
-                    except FileNotFoundError:
-                        continue
-                    if (stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) in inodes
-                            and not (reader_fds and pid == reader_pid) and not container):
-                        raise Refused('unowned process retains a Wazuh producer source FD')
+                records = capability.fds(pid, reader=pid == reader_pid)
+                if records and not (reader_fds and pid == reader_pid) and not container:
+                    raise Refused('unowned process retains a Wazuh producer source FD')
             except (FileNotFoundError, ProcessLookupError):
+                if reader_pid and int(process.name) == reader_pid:
+                    raise Refused('native reader disappeared during source exclusion')
                 continue
 
     def fds(self, pid, source, drained=False):
-        if not pid:
-            return []
-        result, source = [], canonical(source)
-        folder = Path('/proc') / str(pid) / 'fd'
-        for link in folder.iterdir():
+        if drained:
+            raise Refused('kernel FD positions cannot grant logical drain authority')
+        # Caller boundary has freshly bound this path to the actual Docker
+        # volume; this shared capability never accepts a profile path instead.
+        return ReaderSource(source, self.t.root, self.PROC).fds(pid)
+
+    def cursor(self, item, pid=0, eof=False, frozen=None, retry=False):
+        value = self.use(item)
+        deadline = time.monotonic() + (30 if retry else 0)
+        while True:
             try:
-                name = os.readlink(link)
-                info = link.stat()
-            except FileNotFoundError:
-                raise Refused('reader FD set changed during classification')
-            if not stat.S_ISREG(info.st_mode):
-                continue
-            if name.startswith(str(source) + '/'):
-                if name.endswith(' (deleted)') or not name.startswith(str(source / 'alerts') + '/'):
-                    raise Refused('unknown or deleted Wazuh reader source FD')
-                fields = dict(line.split(':', 1) for line in
-                              (folder.parent / 'fdinfo' / link.name).read_text().splitlines() if ':' in line)
-                position = int(fields['pos'])
-                if drained and position != info.st_size:
-                    raise Refused('Wazuh input has unread data after producer freeze')
-                result.append({'device': info.st_dev, 'inode': info.st_ino,
-                               'size': info.st_size, 'position': position})
-        return result
+                capability = self.source_capability(item, value['source'])
+                if capability.current is None:
+                    raise Refused('current native input has no closed source group')
+                records = capability.fds(pid) if pid else []
+                required = {(entry['device'], entry['inode']) for entry in records}
+                if pid and capability.current not in required:
+                    raise Refused('native reader has no classified current input FD')
+                required.add(capability.current)
+                if frozen is not None:
+                    required.update(tuple(map(int, key.split(':'))) for key in frozen)
+                data = ReaderData(self.SPOOL)
+                try:
+                    if data.stamp != value['spool_identity']:
+                        raise Refused('native cursor spool identity changed')
+                    result = NativeCursor.read(data, capability, required, eof=eof, frozen=frozen)
+                    expected = value['generation']['new'] if value.get('generation') else value.get('cursor_identity')
+                    if result['namespace'] != expected:
+                        raise Refused('native cursor current generation differs')
+                finally:
+                    data.close()
+                # Refresh namespace after coherent file reads too. Appends are
+                # allowed only in admission; frozen proof is exact thereafter.
+                after = self.source_capability(item, value['source'])
+                if frozen is not None:
+                    keys = {tuple(map(int, key.split(':'))) for key in frozen}
+                    if after.frozen(keys) != frozen:
+                        raise Refused('frozen producer source changed during cursor proof')
+                result['watch'] = [{'device': entry['device'], 'inode': entry['inode']} for entry in records]
+                return result
+            except (Refused, FileNotFoundError, ProcessLookupError):
+                if time.monotonic() >= deadline: raise
+                time.sleep(0.05)
 
     def qualify(self, baseline):
         engine = canonical('/usr/sbin/rsyslogd')
@@ -2576,10 +2889,13 @@ class Reader:
                                 raise Refused('mixed TLS material and version transition refused')
                         if observed['action'].get('tls.permittedpeer') != self.request.get('peer'):
                             raise Refused('mixed TLS peer and version transition refused')
-        result = {'schema': 1, 'mode': mode, 'phase': 'admitted', 'cycle': 0,
+        result = {'schema': 1, 'protocol': 2, 'source_epoch': uuid.uuid4().hex,
+                  'mode': mode, 'phase': 'admitted', 'cycle': 0,
                   'generation': None, 'checkpoints': [], 'checker_sha256': self.checker_hash,
                   'baseline': observed, 'ack': self.ack, 'request': self.request,
                   'source': observed['source_proof']['source']}
+        if mode == 'enabled':
+            result['data_epoch'] = result['source_epoch']
         if mode == 'never':
             source = result['source']
             self.source_users(state, source, observed['pid'] or None, reader_fds=False)
@@ -2634,6 +2950,11 @@ class Reader:
         if not self.ack and not preview:
             raise Refused('configured version upgrade requires rsyslog downtime and replay acknowledgement')
         result['engine'] = self.qualify(observed)
+        if not result.get('spool_identity') or not result.get('cursor_present'):
+            raise Refused('enabled native input lacks a qualified nonempty cursor baseline')
+        native = self.cursor(dict(state, reader=result), pid=observed['pid'], retry=True)
+        if any(not group['complete'] for group in native['groups'].values()):
+            raise Refused('incomplete native input baseline is not qualified before downtime')
         result['units'] = self.units.admit(protected=[*state['paths'], str(ROOT), str(self.SPOOL)])
         self.verify_tools()
         self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
@@ -2709,17 +3030,206 @@ class Reader:
                 raise Refused('native reader software/engine changed before an effect')
 
 
+    @staticmethod
+    def proof_hash(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+    def context(self, item):
+        active = self.t.owned(item.get('owner'))
+        marker = HostWriter(self.t.root).active()
+        if (not marker or marker['owner'] != active['owner'] or marker['component'] != 'central'
+                or marker['mode'] not in ('apply', 'recover') or item.get('backup') != active.get('backup')):
+            raise Refused('reader proof lacks genuine journal/writer ownership')
+        value = self.use(item)
+        if value['mode'] == 'enabled' and (value.get('protocol') != 2
+                or not re.fullmatch('[a-f0-9]{32}', value.get('source_epoch', ''))):
+            raise Refused('old reader journal lacks logical handoff protocol')
+        return active, value
+
+    def input_binding(self, value):
+        return self.proof_hash({'profile':value['baseline']['profile_sha256'],
+                               'files':value['baseline']['files'],
+                               'input':value['baseline']['input_profile'], 'engine':value['engine'],
+                               'checker':value['checker_sha256'],
+                               'static_units':ReaderUnits.static(value['units'])})
+
+    def stopped(self, value):
+        service, socket = self.units.show(ReaderUnits.SERVICE), self.units.show(ReaderUnits.SOCKET)
+        if service['ActiveState'] != 'inactive' or socket['ActiveState'] != 'inactive':
+            raise Refused('reader cold authority requires the original stopped invocation')
+        return self.units.stop(value['units'], requested=True)
+
+    def seal_current(self, item):
+        value = self.use(item)
+        if not value.get('spool_identity'):
+            return {'cursor_identity':None, 'cursor':{}, 'checkpoint':None}
+        ScopeLayout.inspect({str(self.SPOOL): 'directory'}, self.t.root)
+        data = ReaderData(self.SPOOL)
+        try:
+            if data.stamp != value['spool_identity']:
+                raise Refused('reader spool identity changed')
+            cursor_identity, cursor_files = None, {}
+            if 'state' in os.listdir(data.fd):
+                with data.directory() as cursor:
+                    cursor_identity = data.identity(os.fstat(cursor))
+                    cursor_files = data.files(cursor)
+            cycle = value['cycle'] + 1
+            destination = Path(item['backup']) / ('reader-queue-evidence-' + uuid.uuid4().hex)
+            value.setdefault('checkpoint_intents', []).append({'cycle':cycle, 'evidence':str(destination)})
+            self.t.write(item, item['phase'])
+            if destination.exists(): raise Refused('reader evidence name already exists')
+            private_dir(destination)
+            queue = data.queue(destination)
+            checkpoint = {'cycle':cycle, 'kind':'CURRENT_EVIDENCE_ONLY', 'queue':queue, 'evidence':str(destination)}
+            value['cycle'] = cycle; value['checkpoints'].append(checkpoint)
+            return {'cursor_identity':cursor_identity, 'cursor':cursor_files, 'checkpoint':checkpoint}
+        finally:
+            data.close()
+
+    def cursor_custody(self, value, authority, generation=False):
+        ReaderData.custody(self.SPOOL, value['spool_identity'], checkpoint=authority['checkpoint'], cold=True)
+        data = ReaderData(self.SPOOL)
+        try:
+            gen = value.get('generation')
+            if generation and gen and gen.get('data_epoch') == value.get('data_epoch'):
+                # Cursor preparation/reconciliation already has durable intents.
+                # It cannot be replaced or reset here. An exposed but never
+                # actually activated generation still must be exactly empty.
+                names = set(os.listdir(data.fd))
+                def identity(name):
+                    return data.identity(os.stat(name, dir_fd=data.fd, follow_symlinks=False)) if name in names else None
+                current, prepared, retired = (identity(name) for name in ('state', gen['prepared'], gen['retired']))
+                if 'new' not in gen:
+                    # A durable prepare intent grants only the same existing
+                    # cursor plus a private EMPTY creation at its unique name.
+                    # It does not grant adoption of an unknown data generation.
+                    if (gen.get('phase') != 'cursor-prepare-intent' or current != gen.get('old')
+                            or retired is not None):
+                        raise Refused('unfinished cursor creation lost its original arrangement')
+                    if prepared is not None:
+                        fd = os.open(gen['prepared'], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=data.fd)
+                        try:
+                            info = os.fstat(fd)
+                            if (os.listdir(fd) or info.st_uid not in (os.geteuid(),data.stamp[3])
+                                    or stat.S_IMODE(info.st_mode) != 0o700 or info.st_nlink != 2):
+                                raise Refused('unknown unfinished prepared cursor')
+                        finally: os.close(fd)
+                    with data.directory() as directory:
+                        if data.files(directory) != authority['cursor']:
+                            raise Refused('retained original cursor changed')
+                else:
+                    arrangements = ((gen.get('old'), gen['new'], None),
+                                    (None, gen['new'], gen.get('old')),
+                                    (gen['new'], None, gen.get('old')))
+                    if (current,prepared,retired) not in arrangements:
+                        raise Refused('restore intent cursor arrangement is foreign')
+                    for name, observed in (('state',current), (gen['prepared'],prepared), (gen['retired'],retired)):
+                        if observed is None: continue
+                        with data.directory(name) as directory:
+                            files = data.files(directory)
+                            if observed == gen.get('old'):
+                                if files != authority['cursor']: raise Refused('retained original cursor changed')
+                            elif files:
+                                raise Refused('new cursor generation changed before qualified activation')
+            else:
+                with data.directory() as cursor:
+                    if data.identity(os.fstat(cursor)) != authority['cursor_identity'] or data.files(cursor) != authority['cursor']:
+                        raise Refused('CURRENT native cursor changed before cold authority')
+        finally:
+            data.close()
+
+    def certificate(self, item):
+        active, value = self.context(item)
+        proof = value.get('handoff')
+        durable = active.get('reader', {}).get('handoff')
+        if (not isinstance(proof, dict) or proof != durable or proof.get('schema') != 1
+                or proof.get('kind') != 'NATIVE_INPUT_HANDOFF' or proof.get('owner') != item['owner']
+                or proof.get('binding') != self.input_binding(value) or proof.get('cycle') != value['cycle']
+                or proof.get('epoch') != value.get('preliminary', {}).get('epoch')
+                or proof.get('cycle') != proof['checkpoint']['cycle']
+                or proof.get('stop') != value.get('exit') or not proof['stop'].get('graceful')):
+            raise Refused('cold effect lacks a durable native handoff certificate')
+        return value, proof
+
+    def cold_ready(self, item):
+        value = self.use(item)
+        if value['mode'] != 'enabled':
+            self.unchanged_queue(item)
+            return
+        value, proof = self.certificate(item)
+        self.stopped(value)
+        self.source_users(item, value['source'], producers=False, reader_fds=False)
+        self.cursor_custody(value, proof, generation=bool(value.get('restore_intent')))
+        intent = value.get('restore_intent')
+        if intent:
+            active = self.t.owned(item['owner'])
+            if (active.get('reader', {}).get('restore_intent') != intent
+                    or intent.get('schema') != 1 or intent.get('kind') != 'SOURCE_RESTORE_INTENT'
+                    or intent.get('owner') != item['owner'] or intent.get('certificate') != self.proof_hash(proof)
+                    or intent.get('source_data_epoch') != proof['epoch']
+                    or intent.get('restore_epoch') != value.get('restore_plan', {}).get('epoch')
+                    or value.get('data_epoch') != (intent['restore_epoch'] if intent.get('state') == 'restored' else proof['epoch'])):
+                raise Refused('source restore intent differs from its durable handoff')
+            # Source may already be absent/replaced by our recorded restoration.
+            # Never bind its old cursor to a new inode on this replay path.
+            return
+        if proof['source_epoch'] != value['source_epoch'] or proof['epoch'] != value.get('data_epoch'):
+            raise Refused('handoff no longer describes this source epoch')
+        self.cursor(item, eof=True, frozen=proof['source'])
+
+    def restore_intent(self, item):
+        value = self.use(item)
+        self.cold_ready(item)
+        if value['mode'] != 'enabled': return
+        if value.get('restore_intent'): return
+        proof = value['handoff']
+        value['restore_intent'] = {'schema':1, 'kind':'SOURCE_RESTORE_INTENT', 'owner':item['owner'],
+            'certificate':self.proof_hash(proof), 'source_epoch':proof['source_epoch'],
+            'source_data_epoch':proof['epoch'], 'restore_epoch':value['restore_plan']['epoch'],
+            'state':'prepared', 'exposed':False}
+        self.t.write(item, item['phase'])
+
+    def restore_plan(self, item):
+        value = self.use(item)
+        previous = value.get('restore_intent')
+        if previous:
+            try:
+                self.cold_ready(item)
+                return True  # Prior stopped/custody proof permits partial replay.
+            except Refused:
+                if self.units.show(ReaderUnits.SERVICE)['ActiveState'] != 'active':
+                    raise  # Do not adopt a different, unexpectedly exited reader.
+                value.setdefault('restore_history', []).append(previous)
+                value.pop('restore_intent')
+        generation = (value.get('generation') or {}).get('id')
+        plan = value.get('restore_plan')
+        if not plan or plan.get('generation') != generation or plan.get('source_epoch') != value.get('source_epoch'):
+            plan = {'epoch':uuid.uuid4().hex, 'generation':generation, 'source_epoch':value.get('source_epoch')}
+            value['restore_plan'] = plan
+        # Intent for the post-restore epoch is durable BEFORE the certificate.
+        # The current source/data epoch does not change until physical replay;
+        # restore_intent explicitly binds both epochs to that certificate.
+        self.t.write(item, item['phase'])
+        return False
+
+    def restored(self, item):
+        value = self.use(item)
+        if value['mode'] == 'enabled':
+            self.cold_ready(item)
+            value['restore_intent']['state'] = 'restored'
+            value['source_epoch'] = value['restore_intent']['restore_epoch']
+        value['data_epoch'] = value['restore_plan']['epoch']
+        self.t.write(item, item['phase'])
+
     def pause(self, item, restoring=False):
         value = self.use(item)
         if value['mode'] == 'never':
             self.boundary(item)
-            self.source_users(item, value['source'], value['baseline']['pid'] or None,
-                              producers=False, reader_fds=False)
+            self.source_users(item, value['source'], value['baseline']['pid'] or None, producers=False, reader_fds=False)
             return
         self.boundary(item)
         current_pid = int(self.units.show(ReaderUnits.SERVICE)['MainPID']) if value['mode'] == 'enabled' else value['baseline']['pid']
-        self.source_users(item, value['source'], current_pid or None, producers=False,
-                          reader_fds=value['mode'] == 'enabled')
+        self.source_users(item, value['source'], current_pid or None, producers=False, reader_fds=value['mode'] == 'enabled')
         if value['mode'] == 'enabled':
             state = self.units.show(ReaderUnits.SERVICE)
             if state['ActiveState'] == 'active':
@@ -2727,97 +3237,116 @@ class Reader:
                 expected = value.get('resumed_process', value['units']['process'])
                 if process != expected and value['phase'] != 'exposure-intent':
                     raise Refused('reader invocation changed outside a recorded exposure')
-                # A crash immediately after a recorded start may precede the
-                # new PID proof. Re-admit its exact native policy/build/MAC;
-                # never accept an arbitrary executable/activation graph.
                 proof = self.units.admit(protected=[*item['paths'], str(ROOT), str(self.SPOOL)])
                 if ReaderUnits.static(proof) != ReaderUnits.static(value['units']):
                     raise Refused('recovery reader differs from the admitted native policy')
                 value['units'] = proof
-                source = Path(value['source']) / 'alerts/alerts.json'
-                info = source.stat()
-                with source.open('rb') as stream:
-                    if info.st_size:
-                        stream.seek(-1, os.SEEK_END)
-                        if stream.read(1) != b'\n':
-                            raise Refused('frozen Wazuh input has an incomplete record')
-                deadline = time.monotonic() + 30
-                while True:
-                    try:
-                        value['drain'] = self.fds(process['pid'], value['source'], drained=True)
-                        if not any((fd['device'], fd['inode']) == (info.st_dev, info.st_ino)
-                                   for fd in value['drain']):
-                            raise Refused('native reader has no classified current input FD')
-                        break
-                    except Refused:
-                        if time.monotonic() >= deadline:
-                            raise
-                        time.sleep(0.25)
-                after = source.stat()
-                if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != (
-                        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
-                    raise Refused('producer source changed after producer freeze')
+                self.context(item)
+                first = self.cursor(item, pid=process['pid'], retry=True)
+                frozen = first['groups']
+                logical = self.cursor(item, pid=process['pid'], eof=True, frozen=frozen, retry=True)
                 recorded_stop = value['phase'] == 'reader-stop-intent'
+                previous = value.get('preliminary') if recorded_stop else None
+                if recorded_stop and (not previous or previous.get('source') != frozen or previous.get('source_epoch') != value['source_epoch'] or previous.get('epoch') != value['data_epoch']):
+                    raise Refused('recorded stop intent lacks its unchanged logical source barrier')
+                value['preliminary'] = {'schema':1, 'kind':'LOGICAL_PRELIMINARY_ONLY', 'owner':item['owner'],
+                    'epoch':previous['epoch'] if previous else value['data_epoch'], 'source_epoch':value['source_epoch'],
+                    'source':frozen, 'logical':logical, 'binding':self.input_binding(value)}
+                self.t.write(item, item['phase'])
                 if not recorded_stop:
-                    self.write(item, 'drained')
-                    self.write(item, 'reader-stop-intent')
-                # Reconcile an existing intent against the same freshly
-                # observed invocation/drain, never rewind its durable phase.
+                    self.write(item, 'drained'); self.write(item, 'reader-stop-intent')
                 value['exit'] = self.units.stop(proof, requested=recorded_stop)
-            elif state['ActiveState'] == 'inactive' and (
-                    value.get('exit') or value['phase'] == 'reader-stop-intent'):
-                value['exit'] = self.units.stop(value['units'], requested=True)
+            elif state['ActiveState'] == 'inactive' and value['phase'] in ('reader-stop-intent','reader-stopped','queue-sealed','exposure-intent'):
+                self.context(item)
+                value['exit'] = self.stopped(value)
             else:
                 raise Refused('reader stop has unknown or unfinished native state')
+            preliminary = value.get('preliminary')
+            if (not preliminary or preliminary.get('schema') != 1 or preliminary.get('kind') != 'LOGICAL_PRELIMINARY_ONLY'
+                    or preliminary.get('owner') != item['owner'] or preliminary.get('source_epoch') != value['source_epoch']
+                    or preliminary.get('epoch') != value.get('data_epoch')
+                    or preliminary.get('binding') != self.input_binding(value)):
+                raise Refused('stopped reader lacks its native preliminary source proof')
             self.write(item, 'reader-stopped')
-        self.source_users(item, value['source'], None if value['mode'] == 'enabled' else current_pid or None,
-                          producers=False, reader_fds=False)
-        if not value.get('spool_identity'):
-            return
-        ScopeLayout.inspect({str(self.SPOOL): 'directory'}, self.t.root)
-        data = ReaderData(self.SPOOL)
-        try:
-            if data.stamp != value['spool_identity']:
-                raise Refused('reader spool identity changed')
-            # The exact native queue and cursor must be cold, including link
-            # and full content stability. Live admission never froze content.
-            if 'state' in os.listdir(data.fd):
-                with data.directory() as cursor:
-                    data.files(cursor)
-            cycle = value['cycle'] + 1
-            destination = Path(item['backup']) / ('reader-queue-evidence-' + uuid.uuid4().hex)
-            # Unique names are intent recorded before creating any evidence.
-            value.setdefault('checkpoint_intents', []).append({'cycle': cycle, 'evidence': str(destination)})
+            self.source_users(item, value['source'], producers=False, reader_fds=False)
+            # Mandatory final native logical proof AFTER genuine StopProof.
+            logical = self.cursor(item, eof=True, frozen=preliminary['source'])
+            sealed = self.seal_current(item)
+            again = self.cursor(item, eof=True, frozen=preliminary['source'])
+            if logical != again:
+                raise Refused('native cursor changed across the complete cold seal')
+            value['handoff'] = dict(sealed, schema=1, kind='NATIVE_INPUT_HANDOFF', owner=item['owner'],
+                cycle=value['cycle'], epoch=preliminary['epoch'], source_epoch=value['source_epoch'],
+                source=preliminary['source'], logical=logical, stop=value['exit'], binding=self.input_binding(value))
             self.t.write(item, item['phase'])
-            if destination.exists():
-                raise Refused('reader evidence name already exists')
-            private_dir(destination)
-            queue = data.queue(destination)
-            value['cycle'] = cycle
-            value['checkpoints'].append({'cycle': cycle, 'kind': 'CURRENT_EVIDENCE_ONLY',
-                                         'queue': queue, 'evidence': str(destination)})
             self.write(item, 'queue-sealed')
-        finally:
-            data.close()
+            self.cold_ready(item)
+            return
+        self.source_users(item, value['source'], current_pid or None, producers=False, reader_fds=False)
+        if not value.get('spool_identity'): return
+        self.seal_current(item)
+        self.write(item, 'queue-sealed')
+
+    def resume_same_epoch(self, item):
+        active, value = self.context(item)
+        if value.get('restore_intent'):
+            raise Refused('resume-only cannot cross an existing source restore intent')
+        preliminary = value.get('preliminary')
+        if (not preliminary or preliminary.get('owner') != item['owner']
+                or preliminary.get('source_epoch') != value.get('source_epoch')
+                or preliminary.get('epoch') != value.get('data_epoch')
+                    or preliminary.get('binding') != self.input_binding(value)):
+            raise Refused('same-epoch resume lacks its original frozen source proof')
+        self.boundary(item)
+        value['exit'] = self.stopped(value)
+        self.write(item, 'reader-stopped')
+        self.source_users(item, value['source'], producers=False, reader_fds=False)
+        logical = self.cursor(item, frozen=preliminary['source'])
+        sealed = self.seal_current(item)
+        if logical != self.cursor(item, frozen=preliminary['source']):
+            raise Refused('resume-only native cursor changed across cold custody')
+        authority = dict(sealed, schema=1, kind='SAME_EPOCH_RESUME_ONLY', owner=item['owner'],
+                         source_epoch=value['source_epoch'], source=preliminary['source'],
+                         logical=logical, stop=value['exit'], binding=self.input_binding(value), exposed=False)
+        value['resume_custody'] = authority
+        self.t.write(item, item['phase'])
+        durable = self.t.owned(item['owner'])['reader'].get('resume_custody')
+        if durable != authority:
+            raise Refused('resume-only custody was not durably published')
+        self.cursor_custody(value, authority)
+        self.cursor(item, frozen=authority['source'])
+        authority['exposed'] = True
+        self.write(item, 'exposure-intent')
+        self.start_reader(item)
 
     def resume_unmodified(self, item):
-        """Pre-backup failure may cancel safely while the old reader is live."""
+        """Cancel without restore/reset; malformed stopped state retains owner."""
         value = self.use(item)
-        if value['mode'] != 'enabled':
-            return
+        if value['mode'] != 'enabled': return
         state, socket = self.units.show(ReaderUnits.SERVICE), self.units.show(ReaderUnits.SOCKET)
+        expected = value.get('resumed_process', value['units']['process'])
         if (state['ActiveState'] == socket['ActiveState'] == 'active'
                 and state['Job'] in ('', '0') and socket['Job'] in ('', '0')
-                and self.units.process(int(state['MainPID'])) == value['units']['process']):
+                and self.units.process(int(state['MainPID'])) == expected):
             self.boundary(item, running=True)
+            if value['phase'] != 'reader-stop-intent':
+                return
+            # A still-active SAME stop intent must be reconciled once; it is
+            # not the stopped/failed-witness cancellation case below. Never
+            # rewind to drained or infer a cold certificate from active=true.
+            try:
+                self.pause(item)
+            except Refused:
+                self.resume_same_epoch(item)
+            else:
+                self.resume(item)
             return
-        if (state['ActiveState'] == 'inactive' and value['checkpoints']
-                and value['phase'] in ('reader-stopped', 'queue-sealed')):
-            self.units.stop(value['units'], requested=True)
-            self.unchanged_queue(item)
+        try:
+            self.cold_ready(item)
+        except Refused:
+            self.resume_same_epoch(item)
         else:
-            self.pause(item)
-        self.resume(item)
+            self.resume(item)
 
     def unchanged_queue(self, item):
         value = self.use(item)
@@ -2830,6 +3359,7 @@ class Reader:
 
     def retire_cursor(self, item):
         value = self.use(item)
+        self.cold_ready(item)
         if value['mode'] == 'never' or not value.get('spool_identity'):
             return
         self.boundary(item)
@@ -2944,7 +3474,10 @@ class Reader:
             self.boundary(item)
             return
         self.boundary(item)
+        self.cold_ready(item)
         self.unchanged_queue(item)
+        if value.get('restore_intent'):
+            value['restore_intent']['exposed'] = True
         if value.get('generation'):
             data = ReaderData(self.SPOOL)
             try:
@@ -2953,6 +3486,10 @@ class Reader:
                 data.close()
             value['generation']['exposed'] = True
         self.write(item, 'exposure-intent')
+        self.start_reader(item)
+
+    def start_reader(self, item):
+        value = self.use(item)
         value['resumed_process'] = self.units.start(value['units'])
         expected, current = value['units']['process'], value['resumed_process']
         for field in ('exe', 'argv', 'executable_sha256', 'uid', 'gid', 'mac', 'boot'):
@@ -2964,9 +3501,13 @@ class Reader:
                     str(Path(value['source']) / 'alerts/alerts.json')], timeout=15,
                    operation='restored reader source access')
         deadline = time.monotonic() + 20
-        while not self.fds(value['resumed_process']['pid'], value['source']):
+        while True:
+            capability = self.source_capability(item, value['source'])
+            records = capability.fds(value['resumed_process']['pid'])
+            if capability.current is not None and capability.current in {(entry['device'],entry['inode']) for entry in records}:
+                break
             if time.monotonic() >= deadline:
-                raise Refused('resumed native reader does not watch the restored source')
+                raise Refused('resumed native reader does not watch the current restored input')
             time.sleep(0.25)
 
     def final(self, item):
@@ -3648,7 +4189,7 @@ class Central(Transaction):
             self.check_agents(item['target_version'])
         self.finish(item, item['phase'])
 
-    def rollback(self, item):
+    def rollback(self, item, retry_reader=False):
         # Only the durable journal supplies cold restore authority. A caller's
         # in-memory phase/paths cannot promote an incomplete or foreign state.
         phases = tuple(phase for phase, action in CENTRAL_RECOVERY.items() if action == 'restore-old')
@@ -3673,16 +4214,27 @@ class Central(Transaction):
             value = self.reader.use(item)
             self.capacity([], extra_bytes=768 * 1024 ** 2)
             self.quiesce_for_restore(item, remove=False)
-            self.reader.pause(item, restoring=True)
-            if not value.get('data_epoch') or (value.get('generation') or {}).get('exposed'):
-                value['data_epoch'] = uuid.uuid4().hex
+            replay = self.reader.restore_plan(item)
+            if not replay:
+                try:
+                    self.reader.pause(item, restoring=True)
+                except Refused:
+                    if not retry_reader or value.get('restore_intent'):
+                        raise
+                    value.setdefault('redrain_attempts', []).append({'source_epoch':value.get('source_epoch'), 'cycle':value['cycle']})
+                    self.write(item, 'recovering')
+                    self.reader.resume_same_epoch(item)
+                    self.reader.pause(item, restoring=True)
             self.write(item, 'recovering')
             self.reader.unchanged_queue(item)
+            self.reader.restore_intent(item)
         self.quiesce_for_restore(item)
         ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root, missing=item['paths'], sealed=True)
         for entry in item['archives']:
             self.restore(entry['path'], entry['archive'], entry['sha256'], capture=item['capture'])
         ClosedCapture.relink(item['capture'], self.root)
+        if 'reader' in item:
+            self.reader.restored(item)
         if digest(item['compose']) != item['compose_sha256']:
             raise Refused('restored Compose selectors differ from the old durable configuration')
         self.validate_persisted_graph(item)
@@ -3752,7 +4304,7 @@ class Central(Transaction):
                     return dict({'changed': False, 'completed': True}, **item.get('outcome', {}))
                 if action != 'restore-old':
                     raise Refused('no fully backed-up central transaction to recover')
-                self.rollback(item)
+                self.rollback(item, retry_reader=True)
                 return dict({'changed': True, 'recovered': True}, **item.get('outcome', {}))
             self.idle()
             state = self.discover()
@@ -3814,6 +4366,7 @@ class Central(Transaction):
                 self.assert_volume_consumers(item)
                 self.reader.write(item, 'producers-stopped')
                 self.reader.pause(item)
+                self.reader.cold_ready(item)
                 item['capture'] = ClosedCapture.take({path: 'directory' for path in item['paths']}, self.root, sealed=True)
                 self.write(item, 'stopping')
                 item['archives'] = []

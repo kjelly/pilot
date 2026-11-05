@@ -223,17 +223,41 @@ RemoveOnStop=no；每次 admission 重讀 unit fragments、依賴／aliases、en
 驗收須有 jobs 完成、原 invocation/process/cgroup 與 reader/queue FDs 消失、kernel socket
 不再被持有／接收／觸發 activation；pathname 消失既非必要亦非充分條件。
 
-先停止三個 Wazuh producer 以凍結 rotation，再有界驗 current inode/length 與完整紀錄
-邊界，以 dev/inode 辨 hardlink。只分類 admitted Wazuh input 的 data FDs；其他已宣告
-shared inputs 不是 Wazuh FDs。已知 noncurrent FDs 須完整 drain 並綁定來源，
-unknown/deleted/unread candidates 不可略過。FD position 只是必要的 read-progress bound，
-不是 read-ahead 已入 queue 的證明；另需資格化 native graceful shutdown 與 durable queue closure。
-停止的 rc/active=false 不足；既有 90s stop timeout 與 SendSIGKILL=yes 可能強制結束程序。
-須驗 Result、ExecMainCode/ExecMainStatus、確切 invocation exit 與 cgroup/FD/job 證據；
-timeout、實際 forced kill、未知 exit 或 survivor 均不算 graceful save。
-首次 switch 前若 dynamic drain/stop 失敗只在 producer 停止後才可見，保留原資料與 owner/journal，
-僅在安全時走 pre-switch recovery。target 已 exposed 時保留當下 custody，未取得新的 stop/queue
-proof 不得 restore；晚期失敗本身不授予 switch/delete/cold restore 權限。
+source admission、外部 FD exclusion、pause、rollback 與 post-start watch 共用實際 Docker
+volume、封閉 inode/hardlink 集合及 mount projection。proc FD 的 `(deleted)` 是舊 dentry
+標籤，不等於資料 inode 已消失；仍由全部內部 alias 覆蓋的同一 inode 可接受。真正
+nlink=0 orphan、外部 alias／mount、未知 reader/writer、PID 或 FD-slot reuse 必須拒絕，
+不能用去掉 suffix、特定 FD 編號或 512 offset 豁免。watch 證明不是 drain 證明。
+
+資格化精確 native build 與完整 canonical single-line input/module attrs；額外 multiline、
+regex、trim、rate、delay 等 record-processing 選項不得繼承此證明。先停止三個 producer
+並排除外部存取，凍結 current 與所有相關 retained inode groups 的 identity、封閉 aliases、
+長度、時間及完整紀錄邊界。cursor basename 須以 inode 與精確 native
+SipHash-2-4(first512,key00..0f,little-endian hex) 綁定集合；小於 512 bytes 沒有 hash suffix，
+filename JSON 欄僅為資訊，不能以路徑 stat 選取 rotated inode。空檔／缺 state 或未資格化
+rotation 必須在可辨識的 admission 階段拒絕；不能把缺 state 當作讀完。
+
+pre-stop barrier 須有界讀取 coherent native cursor，嚴格驗 schema、唯一 keys、整數型別、
+source/fingerprint、namespace 與全部相關 groups；每組邏輯 curr_offs、strt_offs 均達凍結 EOF，
+且沒有 pending line/message segment。prev_was_nl=0 可是正常結果。native writer 是
+O_TRUNC 原地更新，live 空白／部分 JSON 或變動可有界重讀，不能假設 atomic rename。
+任何／全部 kernel FD 到 EOF 都不能替代此邏輯 barrier；它亦不代表資料已 durable enqueue。
+
+持久記錄原 invocation 的 stop intent，再驗真正 StopProof：Result、ExecMainCode／Status、
+確切 exit、cgroup／FD／job 與 activation socket 均符合；timeout、forced kill 或 survivor 不算
+save。停止後必須重驗同一凍結 source 及最終 native cursor，再 fsync/seal 完整 CURRENT
+cursor 與 queue，持久發布綁定 owner/cycle/data epoch、build/profile、StopProof、source、
+cursor 與 queue checkpoint 的 handoff certificate，之後才可 queue-sealed／成功返回 pause。
+舊 drain boolean、pre-stop sample 或 stopped-but-uncertified 狀態均不授予 capture、restore、
+remove 或 cursor retire/reset；資料回復開始前另持久記錄由該 certificate 派生的 restore intent。
+部分回復 retry 依此 intent／CURRENT custody 完成，不能把舊 cursor 重新綁到已換掉的 source。
+
+失敗後僅在安全時取消：相同 owner、原 static unit／真實 StopProof、未變 source/data epoch、
+結構有效且 source-bound native cursor，以及冷 fsync 的 CURRENT cursor/queue，可形成
+獨立 SAME_EPOCH_RESUME_ONLY custody，僅重新啟動原 reader/input；offset 可落後 EOF，
+但不能 restore、retire/reset/reconcile generation 或冒充 handoff。malformed／foreign cursor
+仍保留停止狀態與 owner。recovering 中、任何 restore intent 之前，同 owner 可作一次有界
+重新 drain；不因缺完整 certificate 盲目遞迴 pause，也不以晚期失敗授予冷回復權限。
 
 冷備份／回復仍驗既有 15-root 與全部實際 persistent sources、原 images、內容、
 ownership、ACL/xattrs 及 link closure；ordinary ACL journal 不跨新舊 inode 重播。
@@ -356,4 +380,5 @@ The current procedure and evidence link are in [wazuh-manager](../runbooks/wazuh
 | 日期 | PR | 驗收語意變更 |
 |------|----|-------------|
 | 2026-11-03 | Issue #211 | Replace UDP syslog_output with host imfile over TCP/RELP; distinguish local C11 health from a fresh real-alert receiver delivery oracle. |
+| 2026-11-05 | Issue #244 | 封閉 inode FD 身分區分 deleted dentry 與 orphan；精確 native logical cursor barrier 加 StopProof 後 CURRENT handoff，取消時 resume-only custody 不授予冷回復。 |
 | 2026-11-04 | Issue #244 | 原生中央版本一致與 retained-agent 上界；明示版本交易保留完整冷資料/images，回復區分原始 skew；host reader 採 CURRENT queue custody、cursor generation 及本機 replay ACK，實際 receiver delivery 另驗。 |

@@ -77,3 +77,13 @@ func TestWazuhReaderPrestartAuthority(t *testing.T) {
 		t.Fatalf("Wazuh prestart authority controls failed: %v\n%s", err, output)
 	}
 }
+
+// Kernel FD EOF does not prove imfile's logical or durable queue handoff.
+// Local real proc/files + authenticated reference-C controls remain distinct
+// from the required native unit/queue and receiver target qualification.
+func TestWazuhReaderLogicalHandoff(t *testing.T) {
+	cmd := exec.Command("python3", "testdata/wazuh_reader_logical_test.py")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Wazuh logical handoff controls failed: %v\n%s", err, output)
+	}
+}

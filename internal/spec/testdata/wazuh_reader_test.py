@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 import wazuh_transaction_test as existing
+import wazuh_reader_model as native_model
 
 w = existing.w
 
@@ -407,10 +408,14 @@ class SelectedReceiverIdentityTests(unittest.TestCase):
                 source=root/'source';source.mkdir()
                 reader=w.Reader(central,request={'selected':True,'enabled':True,
                     'host':'receiver.example.test','address':desired,'port':514,'transport':'tcp'},ack=True)
-                reader.SPOOL=root/'absent-spool'
+                reader.SPOOL=root/'spool';reader.SPOOL.mkdir(mode=0o700);(reader.SPOOL/'state').mkdir(mode=0o700)
+                reader.CONFIG=root/'forward';reader.CONFIG.write_text('native canonical leaf')
+                reader.cursor=lambda *args,**kwargs:{'declared_native_cursor_leaf':True,'groups':{'explicit':{'complete':True}}}
+                self.enterContext(mock.patch.object(w.pwd,'getpwnam',return_value=type('U',(),{'pw_uid':os.geteuid()})()))
+                self.enterContext(mock.patch.object(w.grp,'getgrnam',return_value=type('G',(),{'gr_gid':os.getegid()})()))
                 reader.observe=lambda loaded=True:{'schema':2,'mode_candidate':'enabled',
-                    'authorization':'UNVALIDATED_OBSERVATIONS','resources':[],
-                    'pid':42,'files':{},'profile_sha256':'nativehash',
+                    'authorization':'UNVALIDATED_OBSERVATIONS','resources':native_model.resources(source,reader.SPOOL,reader.CONFIG),
+                    'pid':42,'files':{str(reader.CONFIG):w.digest(reader.CONFIG)},'profile_sha256':'nativehash',
                     'profile':{'enabled':True,'source':str(source),'transport':'tcp'},'action':{'port':'514'}}
                 reader.source=lambda _:str(source)
                 reader.source_users=lambda *args,**kwargs:None
@@ -507,10 +512,19 @@ class EnabledReaderIntegrationTests(unittest.TestCase):
                 def boundary(self,proof):pass
                 def stop(self,proof,requested=False):
                     if self.central.producing:raise AssertionError('reader stopped before producers')
-                    self.active=False;self.events.append('stop');return {'graceful':True}
+                    if self.active:
+                        native_model.cursor(self.central.spool,self.central.volume)
+                        self.active=False;self.events.append('stop')
+                    return {'graceful':True}
                 def start(self,proof):
                     if self.central.producing:raise AssertionError('producers started before reader')
-                    self.active=True;self.pid+=1;self.events.append('start');return self.process(self.pid)
+                    self.active=True;self.pid+=1;self.events.append('start')
+                    native_model.cursor(self.central.spool,self.central.volume)
+                    import shutil
+                    for entry in self.central.reader.PROC.iterdir():
+                        if entry.name.isdecimal():shutil.rmtree(entry)
+                    native_model.process(self.central.reader.PROC,self.central.volume,self.pid)
+                    return self.process(self.pid)
             class Native(existing.Commands):
                 def run(self,argv,**kwargs):
                     if str(argv[0]) in ('/usr/local/libexec/pilot-wazuh-delivery','runuser'):
@@ -520,7 +534,7 @@ class EnabledReaderIntegrationTests(unittest.TestCase):
                 def source_users(self,*args,**kwargs):pass
                 def observe(self,loaded=True):
                     return {'schema':2,'mode_candidate':'enabled',
-                            'authorization':'UNVALIDATED_OBSERVATIONS','resources':[],'profile':{'enabled':True,'source':str(self.t.volume),'transport':'tcp'},
+                            'authorization':'UNVALIDATED_OBSERVATIONS','resources':native_model.resources(self.t.volume,self.SPOOL,self.CONFIG),'profile':{'enabled':True,'source':str(self.t.volume),'transport':'tcp'},
                             'profile_sha256':w.digest(self.PROFILE),'pid':self.units.pid if self.units.active else 0,
                             'action':{'port':'514','queue.type':'LinkedList'},
                             'files':{str(self.t.forward):w.digest(self.t.forward)}}
@@ -537,17 +551,19 @@ class EnabledReaderIntegrationTests(unittest.TestCase):
                     self.command=Native();self.command.agent_release='4.14.9';self.r=self.command
                     self.spool=workspace/'spool';self.spool.mkdir(mode=0o700)
                     (self.spool/'state').mkdir(mode=0o700)
-                    (self.spool/'state'/'native-offset').write_text('old cursor')
+                    # Native-shaped cursor is written after source creation below.
                     (self.spool/'wazuh_alerts.00000001').write_bytes(b'OLD1\n')
                     self.profile=workspace/'profile.json';self.profile.write_text('{"enabled":true}')
                     self.forward=workspace/'forward.conf';self.forward.write_text('native known profile fixture')
                     (self.volume/'alerts').mkdir()
                     (self.volume/'alerts/alerts.json').write_bytes(b'OLD1\n')
+                    native_model.cursor(self.spool,self.volume)
                     self.native_units=Units(self)
                 def make_reader(self,checker_hash='',request=None,ack=False):
                     if not hasattr(self,'native_units'):return w.Reader(self)
                     reader=ActualReader(self,checker_hash,request,ack)
-                    reader.SPOOL=self.spool;reader.PROFILE=self.profile;reader.units=self.native_units
+                    reader.SPOOL=self.spool;reader.PROFILE=self.profile;reader.CONFIG=self.forward;reader.units=self.native_units
+                    reader.PROC=root/'proc';native_model.process(reader.PROC,self.volume,self.native_units.pid)
                     return reader
                 def compose_run(self,item,*args,**kwargs):
                     super().compose_run(item,*args,**kwargs)
@@ -558,6 +574,7 @@ class EnabledReaderIntegrationTests(unittest.TestCase):
                         if item['phase']=='switching':
                             (self.volume/'alerts/alerts.json').write_bytes(b'OLD1\nTARGET2_AFTER_BACKUP\n')
                             with (self.spool/'wazuh_alerts.00000001').open('ab') as queue:queue.write(b'TARGET2_AFTER_BACKUP\n')
+                            native_model.cursor(self.spool,self.volume)
                 def quiesce_for_restore(self,item,remove=True,inspect_only=False):
                     if not inspect_only:self.producing=False
                     super().quiesce_for_restore(item,remove,inspect_only=inspect_only)
@@ -570,7 +587,8 @@ class EnabledReaderIntegrationTests(unittest.TestCase):
             self.assertEqual(central.native_units.events,['stop','start','stop','start'])
             self.assertEqual((central.volume/'alerts/alerts.json').read_bytes(),b'OLD1\n')
             self.assertEqual((central.spool/'wazuh_alerts.00000001').read_bytes(),b'OLD1\nTARGET2_AFTER_BACKUP\n')
-            self.assertEqual(list((central.spool/'state').iterdir()),[])
+            self.assertEqual(len(list((central.spool/'state').iterdir())),1)
+            self.assertEqual(json.loads(next((central.spool/'state').iterdir()).read_text())['curr_offs'],len(b'OLD1\n'))
             manifest=json.loads(next(central.root.glob('central-*/manifest.json')).read_text())
             checkpoints=manifest['reader']['checkpoints']
             self.assertEqual(len(checkpoints),2)
@@ -615,6 +633,7 @@ class ReaderSourceRecoveryAuthorityTests(unittest.TestCase):
                 self.assertEqual(w.HostWriter(central.root).active()['mode'],'apply')
                 Path(source).rmdir()  # interrupted delete/recreate recovery
                 reader.PROC=root/'empty-proc';reader.PROC.mkdir()
+                native_model.proc_root(reader.PROC,Path(source).parent)
                 self.assertEqual(reader.source(item),source)
                 reader.source_users(item,source,producers=False,reader_fds=False)
 
@@ -698,13 +717,14 @@ class ReaderInspectionTests(unittest.TestCase):
             profile.write_text(json.dumps({'enabled':enabled,'transport':'tcp','source':str(source),'heartbeat_interval':0}))
         if enabled:
             owner.write_text(helper['HEADER']+'\n'
-                'module(load="imfile" statefile.directory="/var/spool/rsyslog/pilot-wazuh/state")\n'
+                'module(load="imfile" statefile.directory="'+str(root/'spool/state')+'")\n'
                 'ruleset(name="pilotWazuhForward") {\n'
                 'action(name="wazuh_alerts" type="omfwd" target="siem-log-server" port="514" '
                 'queue.filename="wazuh_alerts" queue.spoolDirectory="/var/spool/rsyslog/pilot-wazuh" '
                 'queue.type="LinkedList" queue.saveOnShutdown="on" queue.discardSeverity="8" '
                 'queue.maxDiskSpace="256m" queue.size="10000")\n}\n'
                 'input(type="imfile" File="'+str(source)+'/alerts/alerts.json" ruleset="pilotWazuhForward" '
+                'Tag="pilot-wazuh-alert:" Facility="local5" Severity="info" addMetadata="off" '
                 'PersistStateInterval="1" freshStartTail="off" reopenOnTruncate="on")\n')
         maps=root/'maps';maps.write_text('')
         argv=root/'cmdline';argv.write_bytes(b'/usr/sbin/rsyslogd\0-n\0-iNONE\0')
@@ -768,6 +788,12 @@ class ReaderInspectionTests(unittest.TestCase):
         reader.qualify=lambda baseline:{'engine':'native-qualified-leaf'}
         reader.verify_tools=lambda:None
         reader.units.admit=lambda **kwargs:{'units':'native-policy-leaf'}
+        # This class tests actual inspector/layout call chain, not native cursor.
+        reader.cursor=lambda *args,**kwargs:{'declared_native_cursor_leaf':True,'groups':{'explicit':{'complete':True}}}
+        if enabled:
+            reader.SPOOL.mkdir(mode=0o700);(reader.SPOOL/'state').mkdir(mode=0o700)
+            self.enterContext(mock.patch.object(w.pwd,'getpwnam',return_value=type('U',(),{'pw_uid':os.geteuid()})()))
+            self.enterContext(mock.patch.object(w.grp,'getgrnam',return_value=type('G',(),{'gr_gid':os.getegid()})()))
         return reader,state,inspect,extra,profile,owner,source,argv,calls
 
     def test_actual_inspect_admit_accepts_native_closed_pairs_append_and_internal_links(self):
@@ -900,13 +926,10 @@ class ReaderInspectionTests(unittest.TestCase):
 class SourceProcessClosureTests(unittest.TestCase):
     def test_unknown_source_fds_and_other_readers_refuse_without_stopping_unrelated_daemon(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary);source=root/'source';source.mkdir();data=source/'alerts.json';data.write_text('old data')
+            root=Path(temporary);source=root/'source';(source/'alerts').mkdir(parents=True);data=source/'alerts/alerts.json';data.write_text('old data')
             proc=root/'proc';proc.mkdir()
             def process(pid,exe,cgroup='',opened=False):
-                folder=proc/str(pid);(folder/'fd').mkdir(parents=True)
-                (folder/'exe').symlink_to(exe);(folder/'cgroup').write_text(cgroup)
-                if opened:(folder/'fd/5').symlink_to(data)
-                return folder
+                return native_model.process(proc,source,pid,exe,opened,cgroup)
             canonical=process(101,'/usr/sbin/rsyslogd',opened=True)
             central=Journal(root/'private');reader=w.Reader(central);reader.PROC=proc
             state={'images':{'wazuh.manager':{'container':'a'*64}}}

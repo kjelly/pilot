@@ -16,6 +16,7 @@ import unittest
 from unittest import mock
 import yaml
 import wazuh_transaction_test as existing
+import wazuh_reader_model as native_model
 w=existing.w
 
 
@@ -43,9 +44,9 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
     spool=root/'spool'
     if retained and mode!='never':
         spool.mkdir(mode=0o700);(spool/'state').mkdir(mode=0o700)
-        (spool/'state'/'native-offset').write_text('old offset')
+        native_model.cursor(spool,volume) if mode=='enabled' else (spool/'state'/'native-offset').write_text('old offset')
         (spool/'wazuh_alerts.00000001').write_text('CURRENT retained queue')
-    proc=root/'empty-proc';proc.mkdir()
+    proc=root/'empty-proc';proc.mkdir();native_model.proc_root(proc,volume)
 
     class Native:
         def __init__(self):
@@ -195,6 +196,9 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
                 native.service.update(ActiveState='inactive',MainPID='0',ExecMainCode='1',
                     ExecMainStatus='0',ExecMainExitTimestampMonotonic=str(int(native.unit_process['start'])+1))
                 native.socket['ActiveState']='inactive'
+                import shutil
+                for entry in proc.iterdir():
+                    if entry.name.isdecimal():shutil.rmtree(entry)
                 return subprocess.CompletedProcess(argv,0,'','')
         units=library.ReaderUnits(Systemd())
         units.show=lambda name:native.service if name==units.SERVICE else native.socket
@@ -216,6 +220,9 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
                 return original(value)
             with mock.patch.object(library,'Path',paths):
                 result=actual_stop(value,requested=requested)
+            import shutil
+            for entry in proc.iterdir():
+                if entry.name.isdecimal():shutil.rmtree(entry)
             if central.interrupt=='after-stop':
                 central.interrupt=None;raise Interrupted('after exact stop before durable stopped phase')
             return result
@@ -227,6 +234,11 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
                 InvocationID='invocation-'+stamp,ExecMainStartTimestampMonotonic=stamp,
                 ExecMainExitTimestampMonotonic='0',ExecMainCode='0',ExecMainStatus='0',Job='')
             native.socket.update(ActiveState='active',Job='')
+            native_model.cursor(spool,volume)
+            import shutil
+            for entry in proc.iterdir():
+                if entry.name.isdecimal():shutil.rmtree(entry)
+            native_model.process(proc,volume,native.unit_process['pid'])
             return dict(native.unit_process)
         units.start=start  # declared qualified native start observation leaf
         return units
@@ -237,7 +249,8 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
             self.interrupt=None;self.stopping_count=0
         def make_reader(self,checker_hash='',request=None,ack=False):
             reader=library.Reader(self,checker_hash,request,ack)
-            reader.PROFILE=profile;reader.SPOOL=spool;reader.CONFIG=root/'absent-owned-config';reader.PROC=proc
+            reader.PROFILE=profile;reader.SPOOL=spool;reader.CONFIG=root/'owned-config';reader.PROC=proc
+            if mode=='enabled' and not reader.CONFIG.exists():reader.CONFIG.write_text('canonical declared native config leaf')
             def observe(loaded=True):
                 self.r.event('observe','reader-'+('loaded' if loaded else 'cold'))
                 if self.r.boundary_fail:raise library.Refused('native reader observation unavailable')
@@ -246,13 +259,17 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
                 if mode!='never':
                     value.update(files={str(profile):library.digest(profile)},profile=json.loads(profile.read_text()),
                                  profile_sha256=library.digest(profile))
-                if mode=='enabled':value['pid']=int(self.r.service['MainPID'])
+                if mode=='enabled':
+                    value['pid']=int(self.r.service['MainPID'])
+                    value['resources']=native_model.resources(volume,spool,reader.CONFIG)
+                    value['files'][str(reader.CONFIG)]=library.digest(reader.CONFIG)
                 return value
             reader.observe=observe
             # Declared native software/account facts, not custody authority.
             reader.qualify=lambda baseline:{'engine':'explicit native software identity leaf'}
             if mode=='enabled':
                 reader.units=unit_model(self.r)
+                native_model.process(proc,volume,int(self.r.service['MainPID']))
                 reader.verify_tools=lambda:None  # native installed-tool identity leaf
                 def fds(pid,source,drained=False):
                     info=(Path(source)/'alerts/alerts.json').stat()

@@ -1054,7 +1054,7 @@ class CentralTransactionTests(unittest.TestCase):
                     central.write(item, phase)
                 calls = []
                 def action(label):
-                    def run(state):
+                    def run(state, **kwargs):
                         calls.append(label)
                         central.finish(state, 'recovered')
                     return run

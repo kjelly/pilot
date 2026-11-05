@@ -251,7 +251,8 @@ def reader_resources(files, root='/etc/rsyslog.conf'):
     workdir = None
     fields = {'load', 'type', 'file', 'name', 'ruleset', 'statefile.directory',
               'queue.filename', 'queue.spooldirectory', 'queue.type', 'queue.saveonshutdown',
-              'statefile', 'workdirectory'}
+              'statefile', 'workdirectory', 'tag', 'facility', 'severity',
+              'persiststateinterval', 'freshstarttail', 'reopenontruncate', 'addmetadata'}
     def visit(filename, depth=0):
         nonlocal workdir
         filename = str(pathlib.Path(filename))
@@ -300,6 +301,12 @@ def reader_resources(files, root='/etc/rsyslog.conf'):
                     workdir = attrs['workdirectory'];workdirs.append(workdir)
                 # Do not export unrelated action credentials or config bytes.
                 selected = {key: value for key, value in attrs.items() if key in fields}
+                if ((name == 'input' and attrs.get('type', '').lower() == 'imfile')
+                        or (name == 'module' and pathlib.Path(attrs.get('load', '')).name in ('imfile', 'imfile.so'))):
+                    # Preserve EVERY semantic parameter name so a coordinator
+                    # cannot bless unsupported read modes by a loose subset.
+                    # Unknown values may be secrets; never export those bytes.
+                    selected.update({key: '<unqualified>' for key in attrs if key not in fields})
                 if name != 'include':
                     result.append({'kind': name, 'attrs': selected,
                                    'workdirectory': workdir, 'file': filename})
@@ -412,11 +419,6 @@ def inspect_reader(cold=False):
     source, action = owned_inputs[0][0], actions[0]
     if (owned_inputs[0][1] != str(OWNER)
             or source.get('file') != value['source'] + '/alerts/alerts.json'
-            or source.get('ruleset') != 'pilotWazuhForward'
-            or source.get('persiststateinterval') != '1'
-            or source.get('freshstarttail') != 'off'
-            or source.get('reopenontruncate') != 'on'
-            or modules[0].get('statefile.directory') != '/var/spool/rsyslog/pilot-wazuh/state'
             or action.get('name') != 'wazuh_alerts'
             or action.get('target') != 'siem-log-server'
             or action.get('queue.filename') != 'wazuh_alerts'
