@@ -167,3 +167,53 @@ func MutateEncryptedRosterFile(path, vaultPasswordFile string, mutate func(plain
 	}
 	return nil
 }
+
+// ErrNoVaultSecret: ansible-vault found no vault secret — neither
+// ANSIBLE_VAULT_PASSWORD_FILE nor ansible.cfg's vault_password_file —
+// and, with stdin closed, could not prompt for one.
+var ErrNoVaultSecret = errors.New("no vault secret is configured: set ANSIBLE_VAULT_PASSWORD_FILE or vault_password_file in ansible.cfg")
+
+// ErrVaultDecryptFailed: the configured vault secret does not decrypt the
+// file.
+var ErrVaultDecryptFailed = errors.New("the configured vault secret does not decrypt the file")
+
+// ViewVaultFileAmbient decrypts the ansible-vault file at path into memory,
+// finding the secret the way ansible-playbook does when pilot passes no
+// --vault-password-file: ANSIBLE_VAULT_PASSWORD_FILE or ansible.cfg's
+// vault_password_file, under env (added to this process's environment)
+// and this process's working directory, as internal/ansible.Runner runs
+// ansible-playbook. Without a secret ansible-vault prompts on stdin
+// (captured: ansible-core 2.19.2); stdin is closed, so that ends as
+// ErrNoVaultSecret instead of waiting.
+func ViewVaultFileAmbient(path string, env []string) ([]byte, error) {
+	if err := validateSecretSourceFile(path); err != nil {
+		return nil, err
+	}
+	bin, err := exec.LookPath("ansible-vault")
+	if err != nil {
+		return nil, fmt.Errorf("ansible-vault not found on PATH: %w", err)
+	}
+	cmd := exec.Command(bin, "view", path)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, classifyVaultView(path, err, stderr.String())
+	}
+	return out, nil
+}
+
+// classifyVaultView names the two failures ansible-vault view reports
+// (captured: testdata/ansible-vault-view-*.stderr).
+func classifyVaultView(path string, err error, stderr string) error {
+	switch {
+	case strings.Contains(stderr, "EOFError"):
+		return fmt.Errorf("ansible-vault view %s: %w", path, ErrNoVaultSecret)
+	case strings.Contains(stderr, "Decryption failed"):
+		return fmt.Errorf("ansible-vault view %s: %w", path, ErrVaultDecryptFailed)
+	}
+	return fmt.Errorf("ansible-vault view %s: %w: %s", path, err, strings.TrimSpace(stderr))
+}

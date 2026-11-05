@@ -57,15 +57,15 @@ Phase 2 的 Go engine 要逐列保持現有行為（`playbooks/apply/freeipa-ide
 
 | 行為 | 現有 task | spec | engine 要求 |
 |---|---|---|---|
-| roster 載入與結構 gate（版本、未知 key、使用者與群組結構、category 前綴、名稱唯一且可解析） | pre_tasks 的 `Gate: canonical …` | §4、C1–C3 | 重用 `internal/inventory` 的載入與 validator；不在 engine 另寫一套。失敗時不建立 tunnel |
+| roster 載入與結構 gate（版本、未知 key、使用者與群組結構、category 前綴、名稱唯一且可解析） | pre_tasks 的 `Gate: canonical …` | §4 | 重用 `internal/inventory` 的載入與 validator；不在 engine 另寫一套。失敗時不建立 tunnel |
 | 只支援 canonical roster（`schema_version`） | legacy `ipa_users[].groups` 路徑 | — | legacy roster 由 engine 拒絕，交舊 engine 處理 |
 | 使用者預設值：first/last 預設為名稱、shell `/bin/bash`、home `/home/<name>`、`enabled` 預設依 `state != disabled` | `Normalize canonical users…` | — | 同一套預設；以表格測試對照 playbook 的 normalize |
 | 建立使用者 | `Ensure IPA users exist` | C9 | 只對不存在者 `user_add` |
-| 屬性收斂：first、last、display name、email、uid、gid、shell、home | `Reconcile user first/last names` | C8、C9 | `user_mod` 只帶不同的欄位；未宣告的欄位不碰。uid/gid 變更屬 destructive（影響檔案擁有者），Phase 2 先拒絕並要求明確確認 |
+| 屬性收斂：first、last、display name、email、uid、gid、shell、home | `Reconcile user first/last names` | C8、C9 | `user_mod` 只帶不同的欄位。first、last、shell、home 未宣告時以預設值（名稱、`/bin/bash`、`/home/<name>`）比較，與 playbook 相同；display name、email、uid、gid 未宣告時不碰（2026-10-30 修正，見 Phase 1 規格 §8）。uid/gid 變更屬 destructive（影響檔案擁有者），Phase 2 先拒絕並要求明確確認 |
 | 密碼：沒有 Kerberos key 時初始化；`preserve_existing: false` 要求重設，使用者仍在上次重設的密碼時不重複；查不到狀態時 fail closed | `Look up password state…`、`Decide the password action…`、兩道 gate | §7.4 | 判斷依 `krbLastPwdChange`、`krbPasswordExpiration`（`maxlife=0` 下自行改密碼後沒有後者；admin 重設後兩者相等，2026-10-27 擷取）。`passwd` 送出後逾時或中斷記為 unknown，不自動重送 |
 | SSH key：`ssh_keys.values` 是 authoritative 清單；空清單清除全部；未宣告不管理 | `Set SSH public keys…` | §5.1（runbook） | **Phase 2 只讀不寫**：變更與 client SSSD 收斂留在舊 playbook（PR #138 的 journal 協定要求先持久化待辦再改 key），見計畫 Phase 1「與 PR #138 的關係」。Go 以 key 本體比較集合，只在 plan 中報告差異，不以此判定成敗；live 端清空後屬性不存在（2026-10-27 擷取）。Phase 3 搬移時的寫入要求：清除時送空值 |
 | 啟用／停用 | `Reconcile canonical account enabled state` | C10 | 只在 `nsaccountlock` 與宣告不同時呼叫 |
-| 建立群組；description、gid 收斂；posix／nonposix／external | `Ensure IPA groups exist`、`Reconcile IPA group descriptions` | C11、C12 | 只對不存在者 `group_add`；`group_mod` 只帶不同的欄位；type 不同時拒絕（FreeIPA 不能就地轉換） |
+| 建立群組；description、gid 收斂；posix／nonposix／external | `Ensure IPA groups exist`、`Reconcile IPA group descriptions` | C11、C12 | 只對不存在者 `group_add`；`group_mod` 只帶不同的欄位（description 未宣告時以群組名稱比較，與 playbook 相同）；type 不同時拒絕（FreeIPA 不能就地轉換）。playbook 不比較 type，這是 Go 比舊 engine 嚴格之處 |
 | 每個套用過的群組有 history marker（`pilot-internal-history-g-<sha256>`，description `pilot.group-history/v1 name=<name>`）；刪除群組前 marker 必須存在 | `Ensure durable history marker…`（`tasks/freeipa-group-history-marker.yml`） | §9 | 相同命名與描述；marker 查詢失敗或碰撞時 fail closed |
 | 直接成員：`membership.authoritative`（預設 true）時撤銷名冊外的直接成員；false 時只新增 | `Look up canonical group direct membership`、`Remove stale…`、`Ensure canonical direct …` | C11、C12 | 直接與間接成員分開：直接成員只從 `group_find --all` 的 `member_user`／`member_group` 讀取，`user_find` 的 `memberof_group` 含間接群組，不得使用（2026-10-27 擷取）；新增與撤銷依集合差合併呼叫，逐成員檢查 `MemberResult`；成員查詢失敗不能當成空集合 |
 | 刪除 `state: absent` 的使用者與群組 | `Delete canonical users…`、`Look up actual FreeIPA group…`、`Delete canonical groups…` | §9 | 刪除前即時重讀；not found 視為已完成；其他錯誤停止 |

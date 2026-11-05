@@ -52,11 +52,16 @@ func init() {
 	reconcileCmd.Flags().BoolVar(&reconcilePreviewOnlyFlag, "preview-only", false, "不顯示互動提示：各欄位採用預設值，只預覽(--check --diff)計畫中的每一支 playbook，全部不套用；每一支都實際預覽通過才以結束碼 0 結束(目標主機全部是無法連線的 optional 主機而延後的 playbook 算沒有預覽)；需要 --component")
 	reconcileCmd.Flags().StringVar(&limitFlag, "limit", "", "只對這些主機(或 Ansible 的主機樣式)執行，等同回答「要限定只套用到某台主機嗎？」；--force/--preview-only 也適用")
 	reconcileCmd.Flags().StringVar(&stageFlag, "stage", "", "直接指定 stage(sandbox、staging、prod)，不再詢問；在指令列指定 staging/prod 即視為確認；--force/--preview-only 沒帶 --stage 時一律是 sandbox")
+	reconcileCmd.Flags().StringVar(&reconcileEngineFlag, "engine", reconcileEngineAnsible, "調和引擎：ansible(預設)或 golang。golang 目前只能與 --preview-only --component freeipa-identity 一起使用，唯讀預覽使用者與群組，不寫入 FreeIPA")
+	reconcileCmd.Flags().StringVar(&reconcilePlanOutFlag, "plan-out", "", "--engine golang：把 plan JSON 寫到這個新檔案(0600，已存在時拒絕)")
 	reconcileCmd.Flags().StringVar(&stagingAttestedHoursFlag, "staging-attested-within-hours", "", "--stage prod 必填：上次 staging 驗證距今幾小時(0-168)")
 	rootCmd.AddCommand(reconcileCmd)
 }
 
 func runReconcile(cmd *cobra.Command, _ []string) error {
+	if err := validateReconcileEngineFlags(reconcileEngineFlag, reconcilePreviewOnlyFlag, reconcileForceFlag, reconcileComponentFlags, reconcileActionsPath, reconcilePlanOutFlag); err != nil {
+		return err
+	}
 	if reconcileForceFlag && reconcilePreviewOnlyFlag {
 		return fmt.Errorf("--force 不能與 --preview-only 同時使用")
 	}
@@ -74,6 +79,9 @@ func runReconcile(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("--actions 不能與 --force、--preview-only、--stage 或 --component 同時使用(scenario 自己回答這些問題)")
 		}
 		return runStandalonePromptWorkflow(cmd, "reconcile", reconcileActionsPath, reconcilePresentation, reconcileTracePath)
+	}
+	if reconcileEngineFlag == reconcileEngineGolang {
+		return runReconcileGolangPreview(cmd)
 	}
 	if (reconcileForceFlag || reconcilePreviewOnlyFlag) && len(reconcileComponentFlags) == 0 {
 		// The defaults driver would otherwise tick only the checklist's first entry.

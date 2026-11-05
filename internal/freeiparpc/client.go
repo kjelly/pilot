@@ -52,6 +52,9 @@ type Config struct {
 	RequestTimeout time.Duration
 	// SupportedAPIVersions; default DefaultSupportedAPIVersions.
 	SupportedAPIVersions []string
+	// ReadOnly refuses every write command, alone or in a batch, before
+	// anything is sent.
+	ReadOnly bool
 }
 
 var fqdnRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
@@ -300,6 +303,9 @@ func (c *Client) Call(ctx context.Context, cmd Command) (json.RawMessage, error)
 	kind, ok := allowlist[cmd.Method]
 	if !ok {
 		return nil, &ErrMethodNotAllowed{Method: cmd.Method}
+	}
+	if kind == write && c.cfg.ReadOnly {
+		return nil, &ErrMethodNotAllowed{Method: cmd.Method, ReadOnly: true}
 	}
 	body, err := json.Marshal(request{Method: cmd.Method, Params: cmd.params()})
 	if err != nil {
