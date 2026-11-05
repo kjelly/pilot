@@ -101,8 +101,21 @@ SSH key（或 GSSAPI）登入、但 FreeIPA 密碼已過期的人在拿到 shell
 - A06 的結果要知道：停用的帳號與 HBAC 拒絕的帳號在 `renew` 下沒有 `passwd` 提示、被直接拒絕；`krbPrincipalExpiration`
   已過期的帳號會走到 `passwd` 提示，但 FreeIPA 拒絕改密碼（即使舊密碼正確），所以沒有 shell、密碼不變。
   同一個帳號在 `off`（原本行為）下用 key 登入會拿到 shell，所以 `renew` 比原本嚴格，但不是在提示之前拒絕。
-- 尚未實跑：A10（gateway／directory／target-policy 主機，階段 3b）、A12（HA／offline）、A16（sudo cache 交叉）。
-  密碼改完後約 3 秒內重新登入可能還會被拒絕一次（evidence 有記錄）。
+- A10（gateway／directory／target-policy 主機）已在六節點拓樸實跑，見
+  [evidence LATEST](../evidence/freeipa-client-password-expiry-gateways/LATEST.md)：鏈（L4、L5 gateway 33/0/0、
+  directory 9/0/0、target-policy 5/0/0、L6 `changed=0`）通過；對這三台套用 `renew` 後，密碼有效時 portal、
+  Directory TUI 與 e2e 的 `disabled` 4/4、`strict` 20/20、`recording` 3/3 都通過；密碼過期時 TTY 登入由 `passwd`
+  取代 ForceCommand（沒有 `pilot-session`／`pilot-directory-session` 行程），沒有 TTY 的登入、遠端命令與經 gateway 的
+  ssh／sftp 都 rc 1／255 且帶 "Password change required but no TTY available"，沒有任何 gateway 事件、session store
+  紀錄或 target 登入產生，所以沒有繞過 recording 的 session。沒有密碼的 portal 帳號在 `renew` 下被拒絕（同 A17）。
+  **這個 PR 沒有解除 preflight 對這三個群組的 `renew` 拒絕**：evidence 是用另一份不含這三個群組的 inventory 套用
+  `renew` 取得的，解除拒絕需要新的 candidate 並重做全部證據；另有未解決的觀察，見下一點。
+- A10 的未解決觀察：在 gateway／directory 主機上，改完密碼後若重試是「只用 TTY」的登入，key 登入曾持續被拒
+  （PAM 12）：2/2 次超過 66 秒，一次約 6 分鐘後仍未恢復，一次 18 分 35 秒，一次 181 秒；非互動式重試約 4 秒就恢復
+  （#262）。管理員 reset 後 gateway 主機要約 52–59 秒才發現密碼過期，directory／target 約 0.2–4 秒（#263）。
+  原因都還不明，沒有試過任何 SSSD 設定。
+- 尚未實跑：A12（HA／offline）、A16（sudo cache 交叉，#267）。`krbPrincipalExpiration` 已過期的帳號是否該在提示前
+  被拒絕尚待決定（#266）。密碼改完後約 3 秒內重新登入可能還會被拒絕一次（evidence 有記錄）。
 
 **這台 client 從 FreeIPA 拿到什麼（AAA）**：
 - **Authentication（認證）**：帳號與 Kerberos 身分來自 FreeIPA，經 SSSD 提供給 NSS/PAM
