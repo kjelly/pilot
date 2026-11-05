@@ -22,7 +22,7 @@ RECEIVER=r'''
 import argparse,importlib.util,json,os,sys
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('action')
-for name in ('version','legacy','owner','component','mode','family','manager','agent-id','agent-name','reader-desired-json','reader-checker-sha256'):p.add_argument('--'+name,default='')
+for name in ('version','legacy','owner','component','mode','family','manager','agent-id','agent-name','reader-desired-json','reader-checker-sha256','operation','preview-tools-json'):p.add_argument('--'+name,default='')
 for name in ('upgrade','preview','recover','confirm-previous-stopped','ack-rsyslog-downtime-and-replay'):p.add_argument('--'+name,action='store_true')
 a=p.parse_args();record={'argv':sys.argv[1:],'guard':None,'native_calls':0};status=0
 if a.preview and a.recover:
@@ -103,6 +103,7 @@ class ManagerScriptArgumentTests(unittest.TestCase):
      wrapper={'block':[command],'rescue':[{'ansible.builtin.set_fact':{'script_case_rescued':True},'tags':['always']}],'tags':['always']}
      tools={'pilot-wazuh-delivery':'a'*64,'pilot-siem-relp-check':'c'*64}
      values={'wazuh_writer_owner':OWNER,'docker_pre':{'rc':0},'siem_forwarding_enabled':False,
+             'wazuh_reader_operation':{'stdout':'a'*32},'wazuh_preview_assets':{'typed_fixture':'script-argv-only'},
              'wazuh_receiver_bound_address':'','siem_forward_host':'','siem_forward_transport':'tcp','siem_forward_port':'514',
              'siem_relp_port':20514,'wazuh_reader_tools':tools,'wazuh_reader_checker_hash':'b'*64,**variables}
      record={'ansible.builtin.copy':{'content':"{{ {'rc': wazuh_central_transaction.rc, 'rescued': script_case_rescued} | to_json }}",'dest':str(result_path),'mode':'0600'},'check_mode':False,'tags':['always']}
@@ -117,7 +118,7 @@ class ManagerScriptArgumentTests(unittest.TestCase):
      argv+=['--reader-desired-json',json.dumps(wanted),'--reader-checker-sha256','b'*64]
      if variables.get('wazuh_ack_rsyslog_downtime_and_replay'):argv+=['--ack-rsyslog-downtime-and-replay']
      if upgrade:argv+=['--upgrade']
-     if preview:argv+=['--preview']
+     if preview:argv+=['--preview','--operation','a'*32,'--preview-tools-json',json.dumps({'typed_fixture':'script-argv-only'})]
      if recover:argv+=['--recover']
      expected.append((stem,args_path,result_path,argv,preview and recover))
     playbook=root/(batch+'.yml');playbook.write_text(yaml.safe_dump(plays,sort_keys=False))

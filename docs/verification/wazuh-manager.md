@@ -168,6 +168,16 @@ canary 涵蓋 analysis → Filebeat → indexer，agent transport 另由 topolog
 ack 不取代 upgrade、exact owner 或 stopped-operation confirmation；同 owner
 journal recovery 沿用原授權。no-op／check 不停 reader，也不要求未使用的 pause 授權。
 
+preview 可建立已授權 writer／lock 與 Ansible 執行 metadata，及單次 invocation 的 root-private
+/run 工具暫存；不得建立部署目錄、覆寫 installed coordinator／helpers，或改 configuration、
+packages／pins、service 與 reader data。configured preview 仍以 desired code 做真實唯讀
+觀察：三個工具須綁定 owner／operation、scope identity、完整 member set 與 desired hashes，
+連 local C11 的 nested child tools 也使用同一驗證 closure。此 capability 僅供 central preview
+及 ordinary enable-admit preview，不授予 apply、recovery、exposure 或 durable receipt 權限。
+retained receipt 的原 fingerprints 不可改成 desired hashes；不相容必須明確拒絕。
+暫存須在 outer always、writer release 前，驗明仍屬本 invocation 且 children 已結束後清理；
+foreign replacement 或不確定狀態保留證據並回報，不刪除未知內容，亦不掩蓋原失敗。
+
 停機前以唯讀 admission 資格化同 effective version 的目前 owned forwarding baseline：
 profile、transport／TLS、input／ruleset／action、exclusive cursor namespace、queue 與
 loaded runtime 一致，啟用時本機 C11 健康；不要求舊版 ordinary apply 或整體 C12 曾成功。
@@ -380,5 +390,6 @@ The current procedure and evidence link are in [wazuh-manager](../runbooks/wazuh
 | 日期 | PR | 驗收語意變更 |
 |------|----|-------------|
 | 2026-11-03 | Issue #211 | Replace UDP syslog_output with host imfile over TCP/RELP; distinguish local C11 health from a fresh real-alert receiver delivery oracle. |
+| 2026-11-05 | Issue #244 | Preview 不部署控制工具；單次 root-private desired-code closure 保持 installed assets／reader data 不變，retained provenance 不遷移。 |
 | 2026-11-05 | Issue #244 | 封閉 inode FD 身分區分 deleted dentry 與 orphan；精確 native logical cursor barrier 加 StopProof 後 CURRENT handoff，取消時 resume-only custody 不授予冷回復。 |
 | 2026-11-04 | Issue #244 | 原生中央版本一致與 retained-agent 上界；明示版本交易保留完整冷資料/images，回復區分原始 skew；host reader 採 CURRENT queue custody、cursor generation 及本機 replay ACK，實際 receiver delivery 另驗。 |

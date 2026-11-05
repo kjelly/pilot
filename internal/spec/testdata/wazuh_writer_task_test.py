@@ -28,7 +28,7 @@ W.MountTable = lambda: MOUNT_TABLE('1 0 8:1 / / rw - ext4 /dev/synthetic rw\n')
 WORKER = '''import argparse,importlib.util,json,sys,subprocess
 from pathlib import Path
 p=argparse.ArgumentParser(); p.add_argument('action')
-for field in ('owner','component','mode','family','manager','version','legacy','agent-id','agent-name','name','operation','resource','path','resources','reader-desired-json','reader-checker-sha256'):
+for field in ('owner','component','mode','family','manager','version','legacy','agent-id','agent-name','name','operation','resource','path','resources','reader-desired-json','reader-checker-sha256','preview-tools-json'):
  p.add_argument('--'+field,default='')
 for field in ('confirm-previous-stopped','upgrade','preview','recover','canary','ack-rsyslog-downtime-and-replay'):
  p.add_argument('--'+field,action='store_true')

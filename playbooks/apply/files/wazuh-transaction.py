@@ -2631,6 +2631,65 @@ READER_TRANSITIONS = {
 }
 
 
+
+def preview_tools(value, owner, operation, checker, tools):
+    """Authenticate fixed desired delivery code BEFORE loading its validator.
+
+    All execution entry points still explicitly require --preview. This object
+    is invocation-only and is never serialized into a transaction or receipt.
+    """
+    names={'pilot-wazuh-heartbeat','pilot-wazuh-delivery','pilot-siem-relp-check'}
+    expected=dict(tools, **{'pilot-wazuh-heartbeat':checker})
+    if (not isinstance(value,dict) or set(value)!={'schema','kind','owner','operation','path','identity','tools'}
+            or value['schema']!=1 or value['kind']!='WAZUH_PREVIEW_TOOLS'
+            or value['owner']!=owner or value['operation']!=operation
+            or not re.fullmatch('[a-f0-9]{32}',owner) or not re.fullmatch('[a-f0-9]{32}',operation)
+            or set(expected)!=names or value['tools']!=expected
+            or any(not re.fullmatch('[a-f0-9]{64}',h) for h in expected.values())):
+        raise Refused('preview capability differs from the desired invocation source')
+    path=canonical(value['path'])
+    if str(path)!=value['path'] or path.parent!=Path('/run') or not re.fullmatch('pilot-wazuh-preview-'+owner+'-'+operation+'-[a-zA-Z0-9_]+',path.name):
+        raise Refused('preview assets are outside the fixed transient namespace')
+    path_shape(path,'directory')
+    for parent in (path,*path.parents):
+        info=parent.stat()
+        if info.st_uid!=0 or info.st_mode & 0o022:raise Refused('preview source has untrusted ancestry')
+    info=path.stat()
+    identity=[info.st_dev,info.st_ino,info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode)]
+    if identity!=value['identity'] or identity[2:]!=[0,0,0o700]:
+        raise Refused('preview source scope identity differs')
+    marker=HostWriter().active()
+    if marker!={'owner':owner,'component':'central','mode':'apply'}:
+        raise Refused('preview assets lack the genuine central writer')
+    ScopeLayout.inspect({str(path):'directory'},ROOT)
+    if set(os.listdir(path))!=names:raise Refused('preview source member set differs')
+    # Bind all three members before importing any desired source bytes.
+    for name in sorted(names):
+        file=path/name;path_shape(file,'file');info=file.stat()
+        if (info.st_uid!=0 or info.st_gid!=0 or stat.S_IMODE(info.st_mode)!=0o700
+                or not 0<info.st_size<=1024*1024 or digest(file)!=expected[name]):
+            raise Refused('preview fixed member differs from trusted desired source')
+    delivery=path/'pilot-wazuh-delivery'
+    fd=os.open(delivery,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        before=os.fstat(fd);payload=os.read(fd,1024*1024+1)
+        if (hashlib.sha256(payload).hexdigest()!=expected['pilot-wazuh-delivery']
+                or ReaderSource.stamp(os.fstat(fd))!=ReaderSource.stamp(before)
+                or ReaderSource.stamp(delivery.lstat())!=ReaderSource.stamp(before)):
+            raise Refused('preview delivery changed before authenticated code load')
+    finally:os.close(fd)
+    namespace={'__name__':'_pilot_preview_delivery','__file__':str(delivery)}
+    exec(compile(payload,str(delivery),'exec'),namespace)
+    try:
+        return namespace['PreviewTools'](value,owner,operation)
+    except ValueError as exc:
+        raise Refused(str(exc)) from exc
+
+
+def preview_tool(capability,name,required):
+    try:return capability.tool(name,required)
+    except ValueError as exc:raise Refused(str(exc)) from exc
+
 class Reader:
     """Current queue custody. Cursor archives/evidence are never restore input."""
     PROC = Path('/proc')
@@ -2638,7 +2697,8 @@ class Reader:
     PROFILE = Path('/etc/rsyslog.d/pilot-wazuh/profile.json')
     CONFIG = Path('/etc/rsyslog.d/31-pilot-wazuh.conf')
     CHECKER = Path('/usr/local/libexec/pilot-wazuh-heartbeat')
-    def __init__(self, central, checker_hash='', request=None, ack=False):
+    def __init__(self, central, checker_hash='', request=None, ack=False, preview=None):
+        self.preview_tools=preview
         self.t, self.r = central, central.r
         self.checker_hash, self.request, self.ack = checker_hash, request or {}, ack
         self.units = ReaderUnits(self.r)
@@ -2667,14 +2727,19 @@ class Reader:
                 raise Refused('configured reader requires the pinned inspection helper')
             return {'schema': 2, 'mode_candidate': 'never', 'files': {}, 'profile': None,
                     'pid': 0, 'resources': [], 'authorization': 'UNVALIDATED_OBSERVATIONS'}
-        path_shape(self.CHECKER, 'file')
-        info = self.CHECKER.stat()
-        if any(parent.stat().st_uid != 0 or parent.stat().st_mode & 0o022 for parent in self.CHECKER.parents):
+        checker=preview_tool(self.preview_tools,'pilot-wazuh-heartbeat',self.checker_hash) if self.preview_tools else self.CHECKER
+        path_shape(checker, 'file')
+        info = checker.stat()
+        if any(parent.stat().st_uid != 0 or parent.stat().st_mode & 0o022 for parent in checker.parents):
             raise Refused('reader inspection helper has untrusted ancestors')
-        if info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022 or digest(self.CHECKER) != self.checker_hash:
+        if info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022 or digest(checker) != self.checker_hash:
             raise Refused('reader inspection helper differs from tracked source')
-        return self.r.json([self.CHECKER, 'inspect-reader'] + ([] if loaded else ['--cold']), timeout=40,
-                           operation='inspect effective owned reader baseline')
+        try:
+            return self.r.json([checker, 'inspect-reader'] + ([] if loaded else ['--cold']), timeout=40,
+                               operation='inspect effective owned reader baseline')
+        except BaseException:
+            if self.preview_tools:self.preview_tools.settled=False
+            raise
 
     def inspect(self, state=None, loaded=True):
         # Discovery has no registry-bound C12 gate: original version skew may
@@ -2957,17 +3022,26 @@ class Reader:
             raise Refused('incomplete native input baseline is not qualified before downtime')
         result['units'] = self.units.admit(protected=[*state['paths'], str(ROOT), str(self.SPOOL)])
         self.verify_tools()
-        self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
-                   operation='current effective local C11 baseline')
+        self.local('current effective local C11 baseline')
         return result
 
     def verify_tools(self):
         tools = self.request.get('tools', {})
         for name in ('pilot-wazuh-delivery', 'pilot-siem-relp-check'):
-            path = Path('/usr/local/libexec') / name
+            path = preview_tool(self.preview_tools,name,tools.get(name)) if self.preview_tools else Path('/usr/local/libexec') / name
             path_shape(path, 'file')
             if path.stat().st_uid != 0 or path.stat().st_mode & 0o022 or digest(path) != tools.get(name):
                 raise Refused('reader proof tool differs from tracked source')
+
+    def local(self, operation):
+        argv=['/usr/local/libexec/pilot-wazuh-delivery','local']
+        if self.preview_tools:
+            argv=[str(preview_tool(self.preview_tools,'pilot-wazuh-delivery',self.request.get('tools',{}).get('pilot-wazuh-delivery'))),
+                  'local','--preview-tools-json',json.dumps(self.preview_tools.value,sort_keys=True)]
+        try:self.r.run(argv,timeout=50,operation=operation)
+        except BaseException:
+            if self.preview_tools:self.preview_tools.settled=False
+            raise
 
     def use(self, item):
         value = item['reader']
@@ -3524,8 +3598,7 @@ class Reader:
         self.boundary(item, running=value['mode'] == 'enabled')
         if value['mode'] == 'enabled':
             self.verify_tools()
-            self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
-                       operation='final effective local C11')
+            self.local('final effective local C11')
         if (value['mode'] == 'disabled' and value.get('data_epoch') and value.get('spool_identity')
                 and (value.get('cursor_present') or value.get('queue_present'))):
             ReplayReceipt(self.t).publish(item)
@@ -3534,7 +3607,8 @@ class Reader:
 
 class ReplayReceipt:
     """Local replay ACK/custody record, never a remote delivery certificate."""
-    def __init__(self, central):
+    def __init__(self, central, preview=None):
+        self.preview_tools=preview
         self.t, self.r = central, central.r
         self.path = central.root / 'reader-replay-pending.json'
 
@@ -3579,7 +3653,8 @@ class ReplayReceipt:
         if type(value.get('ever_exposed')) is not bool:
             raise Refused('unknown replay exposure provenance')
         proof = Reader(self.t, value.get('checker_sha256', ''),
-                       {'tools': value.get('tools', {})})
+                       {'tools': value.get('tools', {})}, preview=self.preview_tools)
+        if self.preview_tools:proof.verify_tools()
         observed = proof.inspect(loaded=native)
         if observed['source_proof']['source'] != value['source']:
             raise Refused('pending replay actual Docker source changed')
@@ -3592,11 +3667,16 @@ class ReplayReceipt:
             proof.verify_tools()
 
     def operation(self, owner, operation, action, ack=False, preview=False):
+        if self.preview_tools and (not preview or action!='admit'):
+            raise Refused('transient tool context is preview admission only')
         if not re.fullmatch('[a-f0-9]{32}', operation):
             raise Refused('invalid local replay invocation identity')
         with self.t.lock(owner=owner):
             self.t.idle()
             value = self.inspect()
+            if self.preview_tools and value:
+                retained=dict(value.get('tools',{}), **{'pilot-wazuh-heartbeat':value.get('checker_sha256','')})
+                for name in sorted(self.preview_tools.NAMES):preview_tool(self.preview_tools,name,retained.get(name))
             if not value:
                 if action == 'verify':
                     self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
@@ -3614,9 +3694,9 @@ class ReplayReceipt:
                     if (not permitted or current.get('enabled') is not True
                             or current.get('source') != value['source']):
                         raise Refused('pending replay profile changed outside its recorded enable attempt')
-                    Reader(self.t, request={'tools': value.get('tools', {})}).verify_tools()
-                    self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
-                               operation='reconcile previous local replay enable attempt')
+                    proof=Reader(self.t, request={'tools':value.get('tools',{})},preview=self.preview_tools)
+                    proof.verify_tools()
+                    proof.local('reconcile previous local replay enable attempt')
                 self.custody(value)
                 if preview:
                     return {'pending': True, 'planned': True}
@@ -3643,10 +3723,9 @@ class ReplayReceipt:
                     value['attempt']['failed'] = True
                 elif action == 'verify':
                     self.custody(value)
-                    proof = Reader(self.t, request={'tools': value.get('tools', {})})
+                    proof = Reader(self.t, request={'tools': value.get('tools', {})}, preview=self.preview_tools)
                     proof.verify_tools()
-                    self.r.run(['/usr/local/libexec/pilot-wazuh-delivery', 'local'], timeout=50,
-                               operation='committed local replay enable convergence')
+                    proof.local('committed local replay enable convergence')
                     value['attempt']['verified_profile_sha256'] = digest(canonical(Reader.PROFILE))
                 elif action == 'complete':
                     if (not value['attempt'].get('verified_profile_sha256')
@@ -4283,12 +4362,15 @@ class Central(Transaction):
         return {}
 
     def execute(self, target, upgrade=False, preview=False, recover=False, owner='',
-                reader_request=None, reader_checker='', reader_ack=False):
+                reader_request=None, reader_checker='', reader_ack=False, preview_assets=None):
         version(target)
+        if preview_assets and (not preview or recover):
+            raise Refused('transient assets cannot authorize apply or recovery')
         if preview and recover:
             raise Refused('check mode cannot execute central recovery')
         with self.lock(owner=owner):
             self.reader = self.make_reader(reader_checker, reader_request, reader_ack)
+            self.reader.preview_tools=preview_assets
             if recover:
                 item = self.active()
                 if not item:
@@ -5329,6 +5411,7 @@ def main():
     parser.add_argument('--resource', default='')
     parser.add_argument('--path', default='')
     parser.add_argument('--resources', default='[]')
+    parser.add_argument('--preview-tools-json',default='')
     parser.add_argument('--reader-desired-json', default='{}')
     parser.add_argument('--reader-checker-sha256', default='')
     parser.add_argument('--ack-rsyslog-downtime-and-replay', action='store_true')
@@ -5336,6 +5419,13 @@ def main():
     if os.geteuid() != 0:
         parser.error('Wazuh transactions require root')
     try:
+        assets=None
+        if args.preview_tools_json:
+            if not args.preview or args.recover or args.action not in ('central','reader-enable-admit'):
+                raise Refused('preview tool context is forbidden for this operation')
+            request=json.loads(args.reader_desired_json)
+            assets=preview_tools(json.loads(args.preview_tools_json),args.owner,args.operation,
+                                 args.reader_checker_sha256,request.get('tools',{}))
         if args.action == 'writer-inspect':
             value = HostWriter().inspect()
         elif args.action == 'writer-claim':
@@ -5359,16 +5449,20 @@ def main():
             else:
                 value = Central().verify(args.canary, args.owner or None)
         elif args.action == 'central':
+            if assets:assets.settled=False
             value = Central().execute(desired(args.version, args.legacy), args.upgrade, args.preview, args.recover, args.owner,
                                       json.loads(args.reader_desired_json), args.reader_checker_sha256,
-                                      args.ack_rsyslog_downtime_and_replay)
+                                      args.ack_rsyslog_downtime_and_replay,assets)
+            if assets:assets.settled=True
         elif args.action == 'reader-tools-check':
             with HostWriter().guard(args.owner, 'central'):
                 value = Reader.check_tool_destinations()
         elif args.action.startswith('reader-enable-'):
-            value = ReplayReceipt(Central()).operation(args.owner, args.operation,
+            if assets:assets.settled=False
+            value = ReplayReceipt(Central(),assets).operation(args.owner, args.operation,
                         args.action.removeprefix('reader-enable-'),
                         args.ack_rsyslog_downtime_and_replay, args.preview)
+            if assets:assets.settled=True
         elif args.action in ('agent-config-save', 'agent-config-restore'):
             snapshot = ConfigSnapshots(args.owner, args.operation)
             value = snapshot.save(args.resource, args.path) if args.action == 'agent-config-save' else snapshot.restore(json.loads(args.resources))
@@ -5402,15 +5496,23 @@ def main():
                           'agent-commit': agent.commit, 'agent-activate': agent.activate,
                           'agent-recovery-commit': agent.finish_recovery}[args.action]
                 value = method(args.owner)
+        if args.preview_tools_json:
+            value=dict(value,preview_children_settled=assets.settled,preview_owner=args.owner,preview_operation=args.operation,preview_source_sha256=digest(Path(__file__)))
         print(json.dumps(value, sort_keys=True))
         return 0 if value.get('overall_success', True) else 2
     except Refused as exc:
-        print(json.dumps({'error': str(exc)}))
+        value={'error':str(exc)}
+        if args.preview_tools_json and args.preview and args.action in ('central','reader-enable-admit') and not args.recover:
+            value.update(preview_children_settled=assets.settled if assets else True,preview_owner=args.owner,preview_operation=args.operation,preview_source_sha256=digest(Path(__file__)))
+        print(json.dumps(value))
         return 1
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         # Native JSON/config/tool failures may carry private values. Do not
         # expose tool stderr, argv, parsed documents or exception repr here.
-        print(json.dumps({'error': 'native transaction probe or state operation failed; private journal retained if present'}))
+        value={'error':'native transaction probe or state operation failed; private journal retained if present'}
+        if args.preview_tools_json and args.preview and args.action in ('central','reader-enable-admit') and not args.recover:
+            value.update(preview_children_settled=assets.settled if assets else True,preview_owner=args.owner,preview_operation=args.operation,preview_source_sha256=digest(Path(__file__)))
+        print(json.dumps(value))
         return 1
 
 

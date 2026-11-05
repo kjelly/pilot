@@ -87,3 +87,12 @@ func TestWazuhReaderLogicalHandoff(t *testing.T) {
 		t.Fatalf("Wazuh logical handoff controls failed: %v\n%s", err, output)
 	}
 }
+
+// Actual private Ansible copy/file/temp operations and typed preview asset
+// validation, with native account/path facts explicitly modeled by the fixture.
+func TestWazuhPreviewToolsBehavior(t *testing.T) {
+	cmd := exec.Command("python3", "testdata/wazuh_preview_tools_test.py")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Wazuh preview asset controls failed: %v\n%s", err, output)
+	}
+}

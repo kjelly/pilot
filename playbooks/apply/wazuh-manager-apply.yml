@@ -169,6 +169,14 @@
         wazuh_finish_host: false
         wazuh_reader_enable_admitted: false
         wazuh_reader_enable_committed: false
+        wazuh_preview_assets: {}
+        wazuh_preview_directory: {}
+        wazuh_preview_cleanup: {}
+        wazuh_preview_failed: false
+        wazuh_preview_central_dispatched: false
+        wazuh_preview_admit_dispatched: false
+        wazuh_central_transaction: {}
+        wazuh_reader_preview_admit: {}
       tags: [always]
   tasks:
     - name: "Own all Wazuh mutations on this host through their final proofs"
@@ -270,8 +278,7 @@
             owner: root
             group: root
             mode: "0755"
-          when: (wazuh_reader_tool_scope.stdout | from_json).create_directory | bool
-          check_mode: false
+          when: not ansible_check_mode and ((wazuh_reader_tool_scope.stdout | from_json).create_directory | bool)
           tags: [always]
 
         - name: "Install tracked reader inspection/proof code before version admission"
@@ -282,7 +289,7 @@
             group: root
             mode: "0755"
           loop: [pilot-wazuh-heartbeat, pilot-wazuh-delivery, pilot-siem-relp-check]
-          check_mode: false
+          when: not ansible_check_mode
           tags: [always]
 
         - name: "Allocate this invocation's local replay acknowledgement identity"
@@ -327,12 +334,61 @@
 
         - name: "Bind desired forwarding and tracked proof code to this version inspection"
           ansible.builtin.set_fact:
+            wazuh_preview_coordinator_hash: "{{ lookup('file', playbook_dir ~ '/files/wazuh-transaction.py', rstrip=False) | hash('sha256') }}"
             wazuh_reader_tools:
               pilot-wazuh-delivery: "{{ lookup('file', playbook_dir ~ '/../files/pilot-wazuh-delivery', rstrip=False) | hash('sha256') }}"
               pilot-siem-relp-check: "{{ lookup('file', playbook_dir ~ '/../files/pilot-siem-relp-check', rstrip=False) | hash('sha256') }}"
             wazuh_reader_checker_hash: "{{ lookup('file', playbook_dir ~ '/../files/pilot-wazuh-heartbeat', rstrip=False) | hash('sha256') }}"
           no_log: true
           tags: [always]
+
+        - name: "Allocate an exclusive transient desired-tool preview scope"
+          ansible.builtin.tempfile:
+            state: directory
+            path: /run
+            prefix: "pilot-wazuh-preview-{{ wazuh_writer_owner }}-{{ wazuh_reader_operation.stdout }}-"
+          register: wazuh_preview_directory
+          check_mode: false
+          changed_when: false
+          when: ansible_check_mode
+          tags: [always]
+
+        - name: "Pin this invocation's transient directory before any staged copy"
+          ansible.builtin.stat:
+            path: "{{ wazuh_preview_directory.path }}"
+            follow: false
+            get_checksum: false
+          register: wazuh_preview_stat
+          when: ansible_check_mode
+          tags: [always]
+
+        - name: "Bind preview scope identity and exact desired member fingerprints"
+          ansible.builtin.set_fact:
+            wazuh_preview_assets:
+              schema: 1
+              kind: WAZUH_PREVIEW_TOOLS
+              owner: "{{ wazuh_writer_owner }}"
+              operation: "{{ wazuh_reader_operation.stdout }}"
+              path: "{{ wazuh_preview_directory.path }}"
+              identity: "{{ [wazuh_preview_stat.stat.dev, wazuh_preview_stat.stat.inode, wazuh_preview_stat.stat.uid, wazuh_preview_stat.stat.gid, wazuh_preview_stat.stat.mode | int(base=8)] }}"
+              tools: "{{ wazuh_reader_tools | combine({'pilot-wazuh-heartbeat': wazuh_reader_checker_hash}) }}"
+          when: ansible_check_mode
+          tags: [always]
+          no_log: true
+
+        - name: "Stage the exact desired preview tools without deploying installed assets"
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../files/{{ item }}"
+            dest: "{{ wazuh_preview_assets.path }}/{{ item }}"
+            owner: root
+            group: root
+            mode: "0700"
+          loop: [pilot-wazuh-delivery, pilot-wazuh-heartbeat, pilot-siem-relp-check]
+          check_mode: false
+          changed_when: false
+          when: ansible_check_mode
+          tags: [always]
+          no_log: true
 
         - name: "Build the secret-free selected reader request"
           ansible.builtin.set_fact:
@@ -362,6 +418,11 @@
             pilot_wazuh_manager_install_planned: true
           tags: [C1, C2, C3]
 
+        - name: "Record whether this invocation dispatches a readonly central preview"
+          ansible.builtin.set_fact:
+            wazuh_preview_central_dispatched: "{{ ansible_check_mode and docker_pre.rc == 0 }}"
+          tags: [always]
+
         - name: "Inspect compatibility or execute the explicitly authorized central upgrade"
           ansible.builtin.script:
             cmd: >-
@@ -372,7 +433,7 @@
               --reader-checker-sha256 {{ wazuh_reader_checker_hash | quote }}
               {{ '--ack-rsyslog-downtime-and-replay' if (wazuh_ack_rsyslog_downtime_and_replay | default(false) | bool) else '' }}
               {{ '--upgrade' if ((wazuh_upgrade | default(false) | bool) and pilot_wazuh_manager_install_planned is defined and pilot_wazuh_manager_install_planned) else '' }}
-              {{ '--preview' if ansible_check_mode else '' }}
+              {{ ('--preview --operation ' ~ (wazuh_reader_operation.stdout | quote) ~ ' --preview-tools-json ' ~ (wazuh_preview_assets | to_json | quote)) if ansible_check_mode else '' }}
               {{ '--recover' if (wazuh_recover | default(false) | bool) else '' }}
             executable: python3
           register: wazuh_central_transaction
@@ -435,6 +496,38 @@
               changed_when: false
               check_mode: false
               when:
+                - not ansible_check_mode
+                - pilot_wazuh_reader_selected | bool
+                - siem_forwarding_enabled | bool
+                - not pilot_wazuh_manager_preview_fresh
+              no_log: true
+              tags: [always]
+
+            - name: "Record selected readonly replay preview dispatch before execution"
+              ansible.builtin.set_fact:
+                wazuh_preview_admit_dispatched: true
+              when:
+                - ansible_check_mode
+                - pilot_wazuh_reader_selected | bool
+                - siem_forwarding_enabled | bool
+                - not pilot_wazuh_manager_preview_fresh
+              tags: [always]
+
+            - name: "Preview selected ordinary enable with the desired coordinator and tool closure"
+              ansible.builtin.script:
+                cmd: >-
+                  files/wazuh-transaction.py reader-enable-admit --preview
+                  --owner {{ wazuh_writer_owner | quote }} --operation {{ wazuh_reader_operation.stdout | quote }}
+                  --reader-desired-json {{ wazuh_reader_request | to_json | quote }}
+                  --reader-checker-sha256 {{ wazuh_reader_checker_hash | quote }}
+                  --preview-tools-json {{ wazuh_preview_assets | to_json | quote }}
+                  {{ '--ack-rsyslog-downtime-and-replay' if (wazuh_ack_rsyslog_downtime_and_replay | default(false) | bool) else '' }}
+                executable: python3
+              register: wazuh_reader_preview_admit
+              check_mode: false
+              changed_when: false
+              when:
+                - ansible_check_mode
                 - pilot_wazuh_reader_selected | bool
                 - siem_forwarding_enabled | bool
                 - not pilot_wazuh_manager_preview_fresh
@@ -942,7 +1035,34 @@
               changed_when: false
               when: not ansible_check_mode
               tags: [C12]
+      rescue:
+        - name: "Retain the original Wazuh failure while settling transient preview ownership"
+          ansible.builtin.set_fact:
+            wazuh_preview_failed: true
+          tags: [always]
+        - name: "Surface the original Wazuh failure after its recorded task diagnostics"
+          ansible.builtin.fail:
+            msg: "Wazuh operation failed; the original task failure remains authoritative. Transient cleanup and exact writer settlement follow."
+          tags: [always]
       always:
+        - name: "Remove only this invocation's validated transient preview tools"
+          ansible.builtin.script:
+            cmd: >-
+              ../files/pilot-wazuh-delivery preview-cleanup {{ wazuh_preview_assets | to_json | quote }}
+              {{ {'coordinator_sha256': wazuh_preview_coordinator_hash, 'calls': [{'dispatched': wazuh_preview_central_dispatched, 'response': wazuh_central_transaction.stdout | default('')}, {'dispatched': wazuh_preview_admit_dispatched, 'response': wazuh_reader_preview_admit.stdout | default('')}]} | to_json | quote }}
+            executable: python3
+          register: wazuh_preview_cleanup
+          changed_when: false
+          failed_when: false
+          check_mode: false
+          when:
+            - ansible_check_mode
+            - wazuh_writer_claimed | default(false) | bool
+            - wazuh_preview_directory is defined
+            - wazuh_preview_directory.path is defined
+          no_log: true
+          tags: [always]
+
         - name: "Retain pending replay after this invocation's uncommitted local enable"
           ansible.builtin.command:
             argv:
@@ -968,7 +1088,22 @@
             executable: python3
           changed_when: false
           check_mode: false
-          when: wazuh_writer_claimed is defined and wazuh_writer_claimed | bool
+          when:
+            - wazuh_writer_claimed is defined and wazuh_writer_claimed | bool
+            - (wazuh_preview_cleanup.rc | default(0)) == 0
+          tags: [always]
+
+        - name: "Disclose retained preview scope and owner after an uncertain cleanup"
+          ansible.builtin.debug:
+            msg: "Preview cleanup retained owner={{ wazuh_writer_owner }} operation={{ wazuh_reader_operation.stdout | default('unknown') }} scope={{ wazuh_preview_assets.path | default(wazuh_preview_directory.path | default('unknown')) }} status=foreground-or-scope-unsettled. Original task failure remains authoritative."
+          when: (wazuh_preview_cleanup.rc | default(0)) != 0
+          tags: [always]
+
+        - name: "Report unsettled transient scope without masking an earlier operation failure"
+          ansible.builtin.assert:
+            that: (wazuh_preview_cleanup.rc | default(0)) == 0
+            fail_msg: "Transient preview cleanup refused an unknown scope/member/process; scope and writer are retained for explicit inspection."
+          when: not (wazuh_preview_failed | bool)
           tags: [always]
 
     - name: "End the completed version or recovery operation after durable writer release"
