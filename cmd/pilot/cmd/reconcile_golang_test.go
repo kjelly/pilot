@@ -173,6 +173,7 @@ type fakeIPA struct {
 	mu      sync.Mutex
 	methods []string
 	bodies  []string
+	dials   int    // tunnel connections the preview opened
 	reader  string // the captured user given admins
 	dir     string // the captured fixtures, absolute: tests chdir
 }
@@ -268,6 +269,9 @@ type fakeGolangDialer struct {
 }
 
 func (d *fakeGolangDialer) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
+	d.f.mu.Lock()
+	d.f.dials++
+	d.f.mu.Unlock()
 	var nd net.Dialer
 	return nd.DialContext(ctx, "tcp", d.f.srv.Listener.Addr().String())
 }
@@ -350,6 +354,12 @@ func runGolangPreview(t *testing.T, args ...string) (string, error) {
 			reconcilePlanOutFlag = args[i+1]
 		case "--stage":
 			stageFlag = args[i+1]
+		case "--limit":
+			limitFlag = args[i+1]
+		case "--timeout":
+			reconcileTimeoutFlag = args[i+1]
+		default:
+			t.Fatalf("runGolangPreview: unknown argument %s", args[i])
 		}
 	}
 	var out bytes.Buffer

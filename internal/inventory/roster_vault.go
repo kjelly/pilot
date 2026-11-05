@@ -8,11 +8,14 @@ package inventory
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -196,22 +199,39 @@ func MutateEncryptedRosterFile(path, vaultPasswordFile string, mutate func(plain
 
 // ErrNoVaultSecret: ansible-vault found no vault secret — neither
 // ANSIBLE_VAULT_PASSWORD_FILE nor ansible.cfg's vault_password_file —
-// and, with stdin closed, could not prompt for one.
+// and, with no terminal and no input, could not prompt for one.
 var ErrNoVaultSecret = errors.New("no vault secret is configured: set ANSIBLE_VAULT_PASSWORD_FILE or vault_password_file in ansible.cfg")
 
 // ErrVaultDecryptFailed: the configured vault secret does not decrypt the
 // file.
 var ErrVaultDecryptFailed = errors.New("the configured vault secret does not decrypt the file")
 
+// vaultViewWaitDelay bounds how long ViewVaultFileAmbient waits for
+// ansible-vault's pipes to drain after it has exited or been killed: a
+// helper it started (a vault password client script) may have inherited
+// them and outlived it.
+const vaultViewWaitDelay = 2 * time.Second
+
 // ViewVaultFileAmbient decrypts the ansible-vault file at path into memory,
 // finding the secret the way ansible-playbook does when pilot passes no
 // --vault-password-file: ANSIBLE_VAULT_PASSWORD_FILE or ansible.cfg's
 // vault_password_file, under env (added to this process's environment)
 // and this process's working directory, as internal/ansible.Runner runs
-// ansible-playbook. Without a secret ansible-vault prompts on stdin
-// (captured: ansible-core 2.19.2); stdin is closed, so that ends as
-// ErrNoVaultSecret instead of waiting.
-func ViewVaultFileAmbient(path string, env []string) ([]byte, error) {
+// ansible-playbook.
+//
+// Without a secret ansible-vault prompts (captured: ansible-core 2.19.2).
+// It prompts through Python's getpass, which opens the controlling
+// terminal when there is one and reads stdin only when there is none; so
+// closing stdin is not enough when pilot runs on a terminal: the prompt
+// would go to the terminal and wait for a person. ansible-vault therefore
+// runs in a new session (no controlling terminal) with no stdin: the prompt
+// reads end-of-file and ends as ErrNoVaultSecret. A vault password client
+// script that needs a terminal is unsupported and fails the same closed
+// way.
+//
+// The read is bounded by ctx: when ctx ends, ansible-vault and every
+// helper in its process group are killed and the error wraps ctx.Err().
+func ViewVaultFileAmbient(ctx context.Context, path string, env []string) ([]byte, error) {
 	if err := validateSecretSourceFile(path); err != nil {
 		return nil, err
 	}
@@ -219,14 +239,22 @@ func ViewVaultFileAmbient(path string, env []string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ansible-vault not found on PATH: %w", err)
 	}
-	cmd := exec.Command(bin, "view", path)
+	cmd := exec.CommandContext(ctx, bin, "view", path)
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
 	}
+	// A new session: no controlling terminal to prompt on, and the process
+	// group (the session's) holds ansible-vault and everything it starts.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = vaultViewWaitDelay
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("ansible-vault view %s: %w", path, ctxErr)
+		}
 		return nil, classifyVaultView(path, err, stderr.String())
 	}
 	return out, nil

@@ -52,6 +52,11 @@ type golangDialer interface {
 
 var newGolangDialer = func(t sshdial.Target) golangDialer { return &sshdial.Dialer{Target: t} }
 
+// newGolangIPAClient builds the JSON-RPC client of the preview: the
+// constructor of the client, replaced in tests that wrap it. The preview
+// asks it for a read-only client and nothing else.
+var newGolangIPAClient = freeiparpc.New
+
 // validateReconcileEngineFlags rejects every combination the Go engine
 // does not support before anything is read (spec §2.1).
 func validateReconcileEngineFlags(engine string, previewOnly, force bool, components []string, actions, planOut string) error {
@@ -149,7 +154,7 @@ func runReconcileGolangPreview(cmd *cobra.Command) error {
 		return fmt.Errorf("%s 沒有設定 freeipa_roster_file", host)
 	}
 	rosterPath = resolveRosterPath(filepath.Dir(inv), rosterPath)
-	rosterData, err := readSecretVarsFile(rosterPath, runtime.Env)
+	rosterData, err := readSecretVarsFile(ctx, rosterPath, runtime.Env)
 	if err != nil {
 		return fmt.Errorf("讀取 roster: %w", err)
 	}
@@ -163,7 +168,7 @@ func runReconcileGolangPreview(cmd *cobra.Command) error {
 	}
 	var vaultData []byte
 	if varsFile := defaultVaultFile(inv); varsFile != "" {
-		if vaultData, err = readSecretVarsFile(varsFile, runtime.Env); err != nil {
+		if vaultData, err = readSecretVarsFile(ctx, varsFile, runtime.Env); err != nil {
 			return fmt.Errorf("讀取 vault vars 檔: %w", err)
 		}
 	}
@@ -188,7 +193,7 @@ func runReconcileGolangPreview(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("讀取 %s 的 IPA CA: %w", host, err)
 	}
-	client, err := freeiparpc.New(freeiparpc.Config{FQDN: fqdn, CA: ca, DialContext: dialer.DialContext, ReadOnly: true})
+	client, err := newGolangIPAClient(freeiparpc.Config{FQDN: fqdn, CA: ca, DialContext: dialer.DialContext, ReadOnly: true})
 	if err != nil {
 		return err
 	}
@@ -297,10 +302,11 @@ func golangPreviewStage(host string, groups map[string][]string, stage, attested
 }
 
 // readSecretVarsFile reads a vars file, decrypting an ansible-vault file
-// in memory with the secret ansible-playbook would find (spec §3).
-func readSecretVarsFile(path string, env []string) ([]byte, error) {
+// in memory with the secret ansible-playbook would find (spec §3). The
+// decryption is bounded by ctx, the preview's --timeout.
+func readSecretVarsFile(ctx context.Context, path string, env []string) ([]byte, error) {
 	if isVaultEncrypted(path) {
-		return inventory.ViewVaultFileAmbient(path, env)
+		return inventory.ViewVaultFileAmbient(ctx, path, env)
 	}
 	return os.ReadFile(path)
 }

@@ -48,7 +48,8 @@ func TestResolveIPAAdminPasswordFollowsThePlaybook(t *testing.T) {
 
 // The two failures ansible-vault view reports, from real stderr
 // (ansible-core 2.19.2, captured 2026-10-30): with no secret it prompts,
-// and closed stdin ends the prompt with EOFError.
+// and with no terminal and no input (ViewVaultFileAmbient's session and
+// closed stdin) the prompt ends with EOFError.
 func TestClassifyVaultViewUsesRealStderr(t *testing.T) {
 	for file, want := range map[string]error{
 		"ansible-vault-view-no-secret.stderr":    ErrNoVaultSecret,
