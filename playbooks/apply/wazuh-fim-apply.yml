@@ -522,7 +522,7 @@
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Record only this invocation's selected attempted resources"
                       ansible.builtin.set_fact:
-                        wazuh_ordinary_resources: "{{ (wazuh_ordinary_resources + ['config']) | unique | list }}"
+                        wazuh_ordinary_resources: "{{ ((wazuh_ordinary_resources | default([])) + ['config']) | unique | list }}"
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Step 5: Append FIM whodata syscheck block to ossec.conf (spec C5, C6)"
                       tags: [C5, C6]
@@ -568,7 +568,7 @@
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Record only this invocation's selected attempted resources"
                       ansible.builtin.set_fact:
-                        wazuh_ordinary_resources: "{{ (wazuh_ordinary_resources + ['hosts']) | unique | list }}"
+                        wazuh_ordinary_resources: "{{ ((wazuh_ordinary_resources | default([])) + ['hosts']) | unique | list }}"
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Step 6: Pin {{ wazuh_manager_alias }} -> {{ wazuh_manager_host | default('') }} in /etc/hosts (spec C7)"
                       tags: [C7]
@@ -597,7 +597,7 @@
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Record only this invocation's selected attempted resources"
                       ansible.builtin.set_fact:
-                        wazuh_ordinary_resources: "{{ (wazuh_ordinary_resources + ['config']) | unique | list }}"
+                        wazuh_ordinary_resources: "{{ ((wazuh_ordinary_resources | default([])) + ['config']) | unique | list }}"
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Step 7: Point ossec.conf's <address> at the manager alias (or loopback placeholder) (spec C8)"
                       tags: [C8]
@@ -659,7 +659,7 @@
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Record only this invocation's selected attempted resources"
                       ansible.builtin.set_fact:
-                        wazuh_ordinary_resources: "{{ (wazuh_ordinary_resources + ['agent-service', 'audit-service']) | unique | list }}"
+                        wazuh_ordinary_resources: "{{ ((wazuh_ordinary_resources | default([])) + ['agent-service', 'audit-service']) | unique | list }}"
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Step 10: Ensure wazuh-agent + auditd enabled+started (spec C3, C4)"
                       tags: [C3, C4]
@@ -684,7 +684,7 @@
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Record only this invocation's selected attempted resources"
                       ansible.builtin.set_fact:
-                        wazuh_ordinary_resources: "{{ (wazuh_ordinary_resources + ['agent-service']) | unique | list }}"
+                        wazuh_ordinary_resources: "{{ ((wazuh_ordinary_resources | default([])) + ['agent-service']) | unique | list }}"
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Step 11: Restart wazuh-agent if config changed or a new enrollment just happened"
                       tags: [C3]
@@ -768,7 +768,8 @@
                   changed_when: false
                   no_log: true
                   when:
-                    - not (wazuh_agent_transaction_reserved | default(false) | bool)
+                    - wazuh_agent_transaction_reserved is not defined or not (wazuh_agent_transaction_reserved | bool)
+                    - wazuh_ordinary_resources is defined
                     - wazuh_ordinary_resources | length > 0
                   tags: [always]
 

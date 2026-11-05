@@ -314,6 +314,14 @@
             pilot_wazuh_reader_selected: true
           tags: [C10, C11]
 
+        # The reset above is the unselected baseline and the C10/C11 mark is the only
+        # thing that can change it. Every always-tagged gate below reads the settled
+        # value, so no --tags selection leaves it missing or stale (AGENTS 4.4).
+        - name: "Settle the selected-forwarding fact for always-tagged consumers"
+          ansible.builtin.set_fact:
+            pilot_wazuh_reader_selected: "{{ pilot_wazuh_reader_selected is defined and (pilot_wazuh_reader_selected | bool) }}"
+          tags: [always]
+
         - name: "Reset this invocation's bound receiver transport"
           ansible.builtin.set_fact:
             wazuh_receiver_bound_address: ""

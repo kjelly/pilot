@@ -216,6 +216,12 @@ func TestWazuhPreviewToolsBehavior(t *testing.T) {
 	runWazuhHarness(t, "testdata/wazuh_preview_tools_test.py", "Wazuh preview asset controls")
 }
 
+// The always-tagged retained-agent reinstall tasks report changed from what apt
+// or dnf did, not literally true (real Ansible over captured/modeled output).
+func TestWazuhRetainedReinstallConvergence(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_convergence_test.py", "Wazuh retained reinstall convergence controls")
+}
+
 // A prerequisite that is missing must stop the harness loudly. Each case puts a
 // shim first on PATH that behaves like the broken environment and checks the
 // probe's message names the fix, so a CI job without PyYAML or the pinned

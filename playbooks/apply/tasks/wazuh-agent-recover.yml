@@ -35,7 +35,10 @@
 - name: "Reinstall the retained signed old RPM agent"
   ansible.builtin.command:
     argv: [timeout, --kill-after=30, '900', dnf, -c, "{{ (wazuh_agent_recovery_result.stdout | from_json).dnf_conf_file }}", -y, --disableexcludes=wazuh, --setopt=gpgcheck=1, --setopt=localpkg_gpgcheck=1, "{{ (wazuh_agent_recovery_result.stdout | from_json).dnf_action }}", "{{ (wazuh_agent_recovery_result.stdout | from_json).package_path }}"]
-  changed_when: true
+  register: wazuh_agent_rpm_reinstall
+  # Reported from what dnf did: a transaction that found nothing to do is not a
+  # change. Anything else, including unfamiliar output, stays changed (fail safe).
+  changed_when: (wazuh_agent_rpm_reinstall.stdout | default('')) is not search('(?m)^Nothing to do[.]$')
   no_log: true
   when:
     - ansible_os_family == 'RedHat'

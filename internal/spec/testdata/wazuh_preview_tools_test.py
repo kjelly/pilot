@@ -606,6 +606,7 @@ class PreviewModuleTests(unittest.TestCase):
             'Record the positively pinned allocation before member copies',
             'Stage the exact desired preview tools without deploying installed assets',
             "Reset this play's actual forwarding selection",'Mark selected forwarding intent without granting container authority',
+            'Settle the selected-forwarding fact for always-tagged consumers',
             'Build the secret-free selected reader request',
             'Record whether this invocation dispatches a readonly central preview',
             'Inspect compatibility or execute the explicitly authorized central upgrade',

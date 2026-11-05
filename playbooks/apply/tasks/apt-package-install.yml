@@ -443,7 +443,11 @@
           environment:
             DEBIAN_FRONTEND: noninteractive
           register: _pilot_apt_reinstall
-          changed_when: true
+          # Reported from apt's own transaction summary (LC_ALL=C via Ansible): a run
+          # that upgraded, installed, reinstalled or downgraded nothing prints
+          # "0 upgraded, 0 newly installed, 0 to remove and N not upgraded."; any other
+          # summary, or unfamiliar output, stays changed (fail safe).
+          changed_when: (_pilot_apt_reinstall.stdout | default('')) is not search('(?m)^0 upgraded, 0 newly installed, 0 to remove and [0-9]+ not upgraded[.]$')
           until: >-
             _pilot_apt_reinstall is success or
             not ((_pilot_apt_reinstall.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
