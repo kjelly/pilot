@@ -114,6 +114,16 @@ manager、indexer、dashboard 的 Wazuh release 必須完全一致（包含 patc
   無官方 digest、native daemon 或 indexer 不健康的 stack 也 fail closed，不被當成「不存在」。
   已註冊 agent 的版本若高於 manager（欄位 fleet 的 skew）同樣拒絕，直到 manager 以其他方式
   升到不低於所有 agent 的版本。這個 gate 唯讀，且被拒絕時 Compose 設定、image 與資料都不變。
+- 已註冊但**從未連線**的 agent（原生 `agent_control -i` rc 0，`Client version: (null)`）、或回報 pre-4.14
+  版本的 agent，沒有可比較的 4.14.x 版本，因此同樣讓 manager 的套用閘門與 C12 fail closed，typed 原因帶出
+  該 agent 的數字 ID（只有 ID，不含名稱或 IP）：`unknown retained agent version in manager registry
+  (agent ID <ID>)`。這是被接受的 skew fail-closed 行為（使用者決定 A4），不是 bug；要解除，在 manager
+  容器內以 `manage_agents -r <ID>` 移除該 agent（`docker exec single-node-wazuh.manager-1
+  /var/ossec/bin/manage_agents -r <ID>`）。已連線但較舊、或已斷線（Disconnected）但仍回報版本的 agent
+  不受影響。
+- dashboard 與 indexer 的 release 各自獨立讀取：dashboard 讀 Wazuh plugin 的 `package.json`（不是
+  OpenSearch Dashboards 的根 `package.json`，其頂層 `version` 是 OpenSearch 版本），indexer 讀
+  `VERSION.json`；任何一個與 manager 不同都 fail closed。
 - 因為 manager 的有效版本是 agent 的相容性上限，wazuh-fim 在動 agent 之前會讀取同一個 native
   值（見 `wazuh-fim.md`）。
 - C12 是不注入事件的目前狀態原生 oracle：三個 release 相同、所有已註冊 agent 版本不超過
@@ -197,9 +207,18 @@ Do not reuse a challenge for negative or recovery trials.
 
 The current procedure and evidence link are in [wazuh-manager](../runbooks/wazuh-manager.md).
 
+Issue #244 版本契約的 target chain 用 `docs/topologies/wazuh-version-topology.yaml`（三台：manager 兼
+agent、Ubuntu 24.04 agent 兼 log-server receiver、AlmaLinux 9 agent）與
+`playbooks/test/fixtures/wazuh-version-topology.yml`（docker、receiver、manager、agents 依序）。receiver 在
+inventory 內，manager 才會轉送（`siem_forward_host` 由 log-server group 推導），C10 與 C11 才適用；
+沒有 receiver 時 forwarding 保持關閉，C10 與 C11 無法通過，而 `topology test --verify` 沒有 row 篩選，鏈路因此驗不到全 PASS。該 run 只驗
+manager 與 wazuh-fim 的列；receiver 的 self-forwarding 與 real-alert delivery（上面的 fresh nonce 檢查）
+不在其範圍。
+
 ## 變更紀錄
 
 | 日期 | PR | 驗收語意變更 |
 |------|----|-------------|
 | 2026-11-03 | Issue #211 | Replace UDP syslog_output with host imfile over TCP/RELP; distinguish local C11 health from a fresh real-alert receiver delivery oracle. |
 | 2026-11-05 | Issue #244 (A) | 新增 `wazuh_version` 與 C12：manager、indexer、dashboard 的原生 release 一致且所有已註冊 agent 不高於 manager；既有 stack 的任何 release 變更與 agent 新於 manager 一律在變更前 typed 拒絕。升級、備份與回復不在本版範圍。未放寬任何既有 Expected。 |
+| 2026-11-06 | Issue #244 (A) | 原生實跑後修正：從未連線或 pre-4.14 agent 的 fail closed 帶出 agent ID 並記載 `manage_agents -r` 解除方式；target chain 加入 log receiver 使 C10/C11 適用；dashboard/indexer 各自獨立讀取 release。未放寬任何 Expected。 |

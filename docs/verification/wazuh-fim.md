@@ -92,10 +92,23 @@ V ≤ M。
   channel（Debian 的 exact 安裝會拒絕其他 source）。升級、降級、備份與回復不在本版範圍；
   本版的失敗都在變更之前以 typed 原因呈現。
 - 為何 C10 與 manager 的 C12 都 fail closed：agent 與 manager 的任何偏差（agent 較新）不被視為健康。
-  這類既有 skew 需手動把 manager 升到不低於 agent 的版本，之後再套用本 spec。
-- 已知限制：EL 新安裝時，coordinator 為 exact RPM 在
+  這類既有 skew 需手動把 manager 升到不低於 agent 的版本，之後再套用本 spec。manager 端另有對稱的
+  fail closed：manager 上登記了「從未連線」（`agent_control -i` 顯示 `Client version: (null)`）或
+  pre-4.14 的 agent 時，manager 的套用閘門與 C12 以 typed 原因拒絕並指出該 agent 的數字 ID；這是被接受的
+  skew fail-closed 行為，不是 bug。要解除，先在 manager 容器內以 `manage_agents -r <ID>` 移除該 agent
+  （已連線但較舊、或已斷線但仍回報版本的 agent 不受影響）。
+- 保護的邊界：APT `hold` 加 preference 擋的是 ordinary updater（`apt upgrade`、unattended-upgrades）
+  與 pilot 自己的 apply；它**不**擋操作者明確下達的 `apt-get install wazuh-agent=<版本>`——那是 apt 的
+  語意（明確指定版本會覆寫 hold 與 preference，原生 `apt-get -s install wazuh-agent=4.14.9-1` 仍規劃升級）。
+  EL 的 versionlock plugin 則連明確指定的其他版本也找不到（排除過濾）。因此「不被降級或升級」只對 pilot
+  的 apply 路徑與 ordinary updater 成立；有人手動明確升到比 manager 新的版本時，由下一次 apply 的
+  `V <= M` 檢查在任何變更之前以 typed 原因拒絕。
+- enrollment endpoint 與 inventory manager 對不上時，typed 原因（`Wazuh endpoint identity is unknown,
+  ambiguous or different`）會顯示；helper 的輸入（inventory 紀錄、原始值）仍被 `no_log` 隱藏，只顯示固定字面值。
+- 已知限制：EL 新安裝成功時，coordinator 為 exact RPM 在
   `/var/backups/pilot/wazuh/{agent-policy,rpm-fresh}-<本次隨機 token>` 留下 root-only 的暫存目錄
-  （private key ring、已驗證的 RPM），不會自動清除。
+  （private key ring、已驗證的 RPM；後續的 dnf 安裝要用它），不會自動清除。被拒絕或失敗的 stage 不留下
+  這兩個目錄（只移除本次呼叫自己建立的；既有的不動），只剩空的 `/var/backups/pilot/wazuh/agent.lock`。
 
 | ID  | Category  | Check                                                                 | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|
@@ -240,3 +253,4 @@ go run ./cmd/pilot vm-target run --name wazuh-fim \
 | 2026-07-06 | v1.1 | `wazuh_fim_directories` 改為可依主機覆寫的變數清單（不同主機可監控不同路徑），預設仍是 `["/etc", "/boot"]`；對應把 C5/C6（原本各自綁死 `/etc`/`/boot` 字面值）合併成單一「至少一個 whodata 目錄」的通用檢查，原 C7-C10 遞補成 C6-C9（row 數 10 → 9），見 §1.5、§2 的重排說明 | sre |
 | 2026-07-22 | v1.2 | C1/C2 package probe 改為 Ubuntu dpkg 與 EL rpm 雙平台；相同候選指令已在 Ubuntu 24.04 與 AlmaLinux 9 的目標 inventory 實跑通過 | sre |
 | 2026-11-05 | Issue #244 (A) | 版本相容契約：先讀 manager 原生版本再動 agent、新安裝固定完整版本、相容的既有 agent 保留、任何版本變更與 agent 新於 manager 一律 typed 拒絕；native hold／versionlock 保護；C1 接受 native hold 狀態；新增 C10（原生版本、pin、服務）。升級與回復不在本版範圍。 | pilot |
+| 2026-11-06 | Issue #244 (A) | 原生實跑後修正：安裝的 coordinator 可直接執行（shebang）；enrollment 拒絕的 typed 原因可見；被拒絕的 EL stage 不留私有目錄；明確記載 apt hold 與明確版本安裝的語意、manager 端「從未連線／pre-4.14 agent」fail closed 與移除方式。未放寬任何 Expected。 | pilot |
