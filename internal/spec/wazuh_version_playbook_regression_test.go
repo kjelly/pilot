@@ -15,11 +15,6 @@ import (
 // TestWazuhVersionPlaybookInvariantsFire, which feeds the same checker the
 // shape it must reject.
 
-type wazuhPlay struct {
-	name  string
-	tasks []map[string]any
-}
-
 func loadWazuhTaskFile(t *testing.T, path string) []map[string]any {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -179,8 +174,8 @@ func TestWazuhVersionPlaybookInvariantsFire(t *testing.T) {
 			return play, all
 		},
 		"verification loses its row tag": func() (map[string]any, []map[string]any) {
-			play, all := good()
-			all = []map[string]any{{"name": "verify", "tags": []any{"always"}}}
+			play, _ := good()
+			all := []map[string]any{{"name": "verify", "tags": []any{"always"}}}
 			play["tasks"] = []any{all[0]}
 			return play, all
 		},

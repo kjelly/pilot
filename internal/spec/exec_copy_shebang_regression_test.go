@@ -109,7 +109,7 @@ func TestRegression_ExecutableCopiesAreRunnableByPath(t *testing.T) {
 	var problems []string
 	checked := 0
 	err := filepath.WalkDir("../../playbooks", func(path string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || !(strings.HasSuffix(path, ".yml") || strings.HasSuffix(path, ".yaml")) {
+		if err != nil || entry.IsDir() || (!strings.HasSuffix(path, ".yml") && !strings.HasSuffix(path, ".yaml")) {
 			return err
 		}
 		raw, readErr := os.ReadFile(path)
