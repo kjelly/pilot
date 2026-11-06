@@ -55,7 +55,7 @@ func playbookAccepts(vars map[string]string, envGroup string) bool {
 		stage = "sandbox" // the play's default
 	}
 	confirmed := map[string]bool{"confirm_staging": vars["confirm_staging"] == "true", "confirm_prod": vars["confirm_prod"] == "true"}
-	if !(stage == "sandbox" || stage == "staging" && confirmed["confirm_staging"] || stage == "prod" && confirmed["confirm_prod"]) {
+	if stage != "sandbox" && !(stage == "staging" && confirmed["confirm_staging"]) && !(stage == "prod" && confirmed["confirm_prod"]) {
 		return false
 	}
 	inGroup := func(g string) bool { return envGroup == g }
@@ -93,45 +93,39 @@ func TestGolangStageRulesAgree(t *testing.T) {
 				if env != "" {
 					groups[env] = []string{"ipa-1"}
 				}
-				// The Go engine: the entry validates the flags, then the preflight's stage gate,
-				// then the playbook gets the variables golangStageVars builds from the stage.
-				goErr := validateStageFlags(stage, hours)
-				goStage := ""
-				var goVars map[string]string
-				if goErr == nil {
-					goStage, goErr = golangPreviewStage("ipa-1", groups, stage, hours)
+				// Both engines refuse a bad flag first, with the same function.
+				if validateStageFlags(stage, hours) != nil {
+					continue
 				}
-				goOK := goErr == nil
-				if goOK {
-					goVars = varsOf(golangStageVars(goStage, hours))
-					goOK = playbookAccepts(goVars, env)
-				}
-				// The Ansible engine: the same flag validation, the stage decision from the
-				// flag, the apply playbook's gates.
-				ansErr := validateStageFlags(stage, hours)
-				ansOK := ansErr == nil
-				var ansVars map[string]string
-				if ansOK {
-					flagStage := stage
-					d := stageDecisionFromFlag(discardWriter{}, "freeipa-identity", flagStage, hours)
-					ansVars = varsOf(append([]string{"stage=" + d.Stage}, d.ConfirmVars...))
-					ansOK = playbookAccepts(ansVars, env)
-				}
-				if goOK != ansOK {
-					t.Errorf("--stage %q, hours %q, host in %q: the Go engine says %v (%v), the Ansible engine %v", stage, hours, env, goOK, goErr, ansOK)
+				// The Ansible engine: the stage decision from the flag, and the playbook's gates
+				// (the model of the lines playbookStageGates just found in the source).
+				d := stageDecisionFromFlag(discardWriter{}, "freeipa-identity", stage, hours)
+				ansVars := varsOf(append([]string{"stage=" + d.Stage}, d.ConfirmVars...))
+				want := playbookAccepts(ansVars, env)
+				// The Go engine's own stage gate, alone: it must accept exactly what the playbook accepts,
+				// or the run would be refused where the playbook runs (or the other way round, and the
+				// entry's gate would be the only one left).
+				goStage, goErr := golangPreviewStage("ipa-1", groups, stage, hours)
+				if (goErr == nil) != want {
+					t.Errorf("--stage %q, hours %q, host in %q: golangPreviewStage says %v (%v), the playbook's gates say %v", stage, hours, env, goErr == nil, goErr, want)
 					continue
 				}
 				checked++
-				if goOK {
+				if goErr == nil {
 					accepted++
+					// And the entry is told the same stage and confirmations the Ansible engine's playbook gets.
+					goVars := varsOf(golangStageVars(goStage, hours))
 					if !slices.Equal(sortedVars(goVars), sortedVars(ansVars)) {
 						t.Errorf("--stage %q, hours %q, host in %q: the entry is told %v, the Ansible engine's playbook %v", stage, hours, env, sortedVars(goVars), sortedVars(ansVars))
+					}
+					if !playbookAccepts(goVars, env) {
+						t.Errorf("--stage %q, hours %q, host in %q: the entry's own gates would refuse the variables it was given: %v", stage, hours, env, sortedVars(goVars))
 					}
 				}
 			}
 		}
 	}
-	if checked < 100 || accepted != 6 {
+	if checked != 18 || accepted != 6 {
 		t.Fatalf("checked %d combinations, accepted %d: the matrix does not reach both verdicts", checked, accepted)
 	}
 }

@@ -41,8 +41,8 @@ func TestWithoutTheTagNothingStopsAndNothingIsWrapped(t *testing.T) {
 		t.Fatal("a notify file exists")
 	}
 	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
 	if got := WrapConn(a); got != a {
 		t.Fatal("WrapConn wrapped a connection in a build without the tag")
 	}

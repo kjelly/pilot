@@ -236,7 +236,7 @@ func runGolangApplyUnderLock(ctx context.Context, held *identitylock.Held, prep 
 	if err != nil {
 		return nil, err // gate: apply-auth-output
 	}
-	defer authOut.Close()
+	defer func() { _ = authOut.Close() }()
 	stageVars := golangStageVars(prep.stage, stagingAttestedHoursFlag)
 	entry, err := identityreconcile.NewAuthCacheEntry(authOut, held, session.fqdn, func(c context.Context, extraVars string) (int, error) {
 		return runGoAuthCacheEntry(c, held, root, prep, stageVars, extraVars, cmd.ErrOrStderr())
@@ -455,9 +455,9 @@ func finishGolangApply(ctx context.Context, cmd *cobra.Command, out io.Writer, p
 			} else {
 				fmt.Fprintf(out, "result JSON：%s\n", resultOut.path)
 			}
-		} else {
-			resultOut.discard() // it never reached the first read: nothing to report
 		}
+		// A run that never reached the first read has no document: the reserved file is removed
+		// by the deferred discard of golangApply.
 	}
 	publishGolangApply(ctx, out, prep, run)
 	if err == nil {

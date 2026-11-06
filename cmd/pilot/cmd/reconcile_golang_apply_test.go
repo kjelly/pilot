@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -273,7 +274,7 @@ func onlyRun(t *testing.T) storedRun {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var runs []storedRun
 	for rows.Next() {
 		var r storedRun
@@ -300,7 +301,7 @@ func runEvents(t *testing.T, runID string) []storedEvent {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []storedEvent
 	for rows.Next() {
 		var ev storedEvent
@@ -361,8 +362,6 @@ func TestReconcileGolangApplyEndToEnd(t *testing.T) {
 		events []string
 		// errHas is a text the error must hold.
 		errHas string
-		// noFile: the result file must not exist (the run never reached the first read).
-		noFile bool
 	}
 	for _, tc := range []struct {
 		name   string
@@ -485,6 +484,21 @@ func TestReconcileGolangApplyEndToEnd(t *testing.T) {
 					t.Errorf("the journal has no %s event: %v", typ, eventTypes(stored))
 				}
 			}
+			// The journal's events are the executor's ids under the sink's prefix: none collides
+			// with the transaction's own (step-apply, run_started...).
+			if len(tc.want.writes) > 0 {
+				for _, id := range []string{"identity:auth_cache", "identity:S3-b1:sending", "identity:S3-b1:result", "identity:verify"} {
+					if findEvent(stored, id) == nil {
+						t.Errorf("the journal has no event %s: %v", id, func() []string {
+							var ids []string
+							for _, e := range stored {
+								ids = append(ids, e.op)
+							}
+							return ids
+						}())
+					}
+				}
+			}
 			if tc.want.failedStep != "" {
 				ev := findEvent(stored, "step-"+tc.want.failedStep)
 				if ev == nil || !ev.exit.Valid || ev.exit.Int64 != 1 {
@@ -562,7 +576,7 @@ func TestReconcileGolangApplyWithABusyLockConnectsToNothing(t *testing.T) {
 	}
 	if _, serr := os.Stat(filepath.Join(dataDir, "history.db")); serr == nil {
 		if rows, err := storeDB(t).Query(`SELECT 1 FROM delivery_runs`); err == nil {
-			defer rows.Close()
+			defer func() { _ = rows.Close() }()
 			if rows.Next() {
 				t.Fatal("a delivery run was recorded for a run that never started")
 			}
@@ -739,6 +753,7 @@ func TestGolangApplyStepsEndTheTransactionAsTheSpecSays(t *testing.T) {
 		{"idle, the probe found nothing owed", &identityreconcile.Result{Observed: true, Entry: identityreconcile.EntryReport{Pending: &no}}, nil, delivery.OutcomeSuccess, "", false},
 		{"a write failed after one was applied", &identityreconcile.Result{Observed: true, Entry: ran, Ops: []identityreconcile.OpResult{applied, failed}}, identityreconcile.ErrWrites, delivery.OutcomePartialFailed, "apply", false},
 		{"every write failed: nothing changed", &identityreconcile.Result{Observed: true, Entry: ran, Ops: []identityreconcile.OpResult{failed}}, identityreconcile.ErrWrites, delivery.OutcomeFailed, "apply", false},
+		{"the writes failed and the read after them did too, a write committed", &identityreconcile.Result{Observed: true, Entry: ran, Ops: []identityreconcile.OpResult{applied, failed}}, errors.Join(identityreconcile.ErrWrites, identityreconcile.ErrVerify), delivery.OutcomePartialFailed, "apply", false},
 		{"an outcome is unknown", &identityreconcile.Result{Observed: true, Entry: ran, Ops: []identityreconcile.OpResult{unknown}}, identityreconcile.ErrWrites, delivery.OutcomePartialFailed, "apply", false},
 		{"only the read after the writes failed, a write committed", &identityreconcile.Result{Observed: true, Entry: ran, Ops: []identityreconcile.OpResult{applied}}, identityreconcile.ErrVerify, delivery.OutcomePartialFailed, "verify", false},
 		{"only the read after the writes failed, nothing committed", &identityreconcile.Result{Observed: true, Entry: ran}, identityreconcile.ErrVerify, delivery.OutcomeFailed, "verify", false},
@@ -789,7 +804,7 @@ func outboxResults(t *testing.T) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
 		var r string
@@ -869,4 +884,70 @@ func newWebhookServer(t *testing.T, c *webhookCapture) *httptest.Server {
 	srv := httptest.NewServer(c.handler())
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// A child process's exit status is not pilot's: an ansible-inventory or ansible that exits 3 or 4 is a
+// failure that exits 1, not a "blocked" or an "obligation owed" (spec §6.3, P1 §2.3 for the apply).
+func TestReconcileGolangApplyChildExitStatusIsNotPilots(t *testing.T) {
+	for _, tc := range []struct {
+		tool string
+		code string
+	}{{"ansible-inventory", "3"}, {"ansible-inventory", "4"}, {"ansible", "3"}, {"ansible", "4"}} {
+		t.Run(tc.tool+" exits "+tc.code, func(t *testing.T) {
+			e := newApplyEnv(t, rosterWithNewUser())
+			fakeTool(t, tc.tool, "echo '[ERROR]: synthetic failure' >&2\nexit "+tc.code)
+			out, err := runReconcileCLI(t, applyArgs()...)
+			if err == nil || processExitCode(err) != 1 {
+				t.Fatalf("exit %d (err %v), want 1\n%s", processExitCode(err), err, out)
+			}
+			if len(e.lock.Requests()) != 0 || len(e.a.writeMethods()) != 0 {
+				t.Fatalf("a lock was built or a write sent after the workspace could not be read")
+			}
+		})
+	}
+}
+
+// The first read of the run fails inside the writer: nothing was observed, so there is no plan to
+// report and no result file (the reserved one is removed), the run is recorded as a failed apply,
+// and the exit code is 1.
+func TestReconcileGolangApplyWhoseFirstReadFailsLeavesNoResultFile(t *testing.T) {
+	e := newApplyEnv(t, rosterWithNewUser())
+	e.f.answers = map[string]string{"user_find": `{"result":null,"error":{"code":4001,"message":"synthetic read failure","name":"NotFound"},"id":0,"principal":"admin@IPA.PILOT.INTERNAL","version":"4.13.4"}`}
+	result := filepath.Join(e.dir, "result.json")
+	out, err := runReconcileCLI(t, applyArgs("--result-out", result)...)
+	if err == nil || processExitCode(err) != 1 || !strings.Contains(err.Error(), "read before planning") {
+		t.Fatalf("exit %d, err = %v\n%s", processExitCode(err), err, out)
+	}
+	noPlan(t, result)
+	run := onlyRun(t)
+	if run.outcome != "failed" {
+		t.Fatalf("the run ended %q, want failed", run.outcome)
+	}
+	if len(e.a.writeMethods()) != 0 || len(e.playbookCalls()) != 0 {
+		t.Fatalf("the entry ran or a write was sent: %v %v", e.playbookCalls(), e.a.writeMethods())
+	}
+	if !strings.Contains(out, "沒有進到第一次讀取") {
+		t.Fatalf("the summary does not say the run never reached its first read:\n%s", out)
+	}
+}
+
+// The lock is given back before the terminal publication: a receiver that is slow to answer does not
+// hold the server's /etc/ipa lock, and the events are in that order.
+func TestReconcileGolangApplyReleasesTheLockBeforeItPublishes(t *testing.T) {
+	e := newApplyEnv(t, rosterWithNewUser())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		appendEvent(t, e.events, "webhook")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	writeOutboundWorkflowIntegrationsYAML(t, e.dir, srv.URL, "      - operation: reconcile\n        result: failure\n        payload: snapshot\n")
+	t.Setenv("PILOT_W_TEST_TOKEN", "w-test-secret")
+	out, err := runReconcileCLI(t, applyArgs()...)
+	if processExitCode(err) != 4 {
+		t.Fatalf("exit %d (%v)\n%s", processExitCode(err), err, out)
+	}
+	evs := readEvents(t, e.events)
+	if !slices.Equal(evs, []string{"lock ipa-1", "release ipa-1", "webhook"}) {
+		t.Fatalf("events = %v, want the lock released before the webhook is sent", evs)
+	}
 }
