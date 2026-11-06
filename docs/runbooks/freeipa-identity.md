@@ -344,7 +344,9 @@ ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（�
    --id <plan>` 或再跑一次 `apply --confirm-host <host>` 都能繼續，不必重新 plan。（修正之前鎖取在最後的 identity 收斂
    步驟：被中斷的 apply 已經先把 client 解除 enrollment。這個修正改的是鎖何時取；一個 workspace 若沒有設選用的
    `ipa_client_fqdn`，uninstall 之後的 SSH 快取退役檢查會失敗，那是另一個既有缺口〔issue #303〕，與鎖無關，這個修正
-   也沒有改變它。）一輪開始之後掉鎖（網路中斷約 45 秒、ssh 結束）：執行中的 playbook 被殺，這一輪以 `lock lost`
+   也沒有改變它。）**TUI 的下架不等鎖**：它在終端機裡同步執行，沒有進度畫面也無法取消，所以鎖忙碌時立即失敗並顯示
+   「尚未開始」（沒有任何步驟執行、approval 保留），用 `pilot host decommission resume --id <plan>`（會等鎖，最多 30
+   分鐘）或重新進入畫面繼續。一輪開始之後掉鎖（網路中斷約 45 秒、ssh 結束）：執行中的 playbook 被殺，這一輪以 `lock lost`
    結束、不啟動下一個步驟；client 可能已部分或全部解除 enrollment，要重跑，之後能不能 `resume` 取決於 workspace 是否
    有效（`ipa_client_fqdn`）。已完成的 plan 重跑只重播 receipt，不取鎖。
 

@@ -534,7 +534,7 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 		// cannot be taken through is refused before the run leaves anything
 		// behind. identityLockFor makes that check (no ssh) and builds the
 		// Acquirer, which is called once, below.
-		lockRequest, requestErr := hostDecommissionLockRequest(dir)
+		lockRequest, requestErr := hostDecommissionLockRequest(ctx, dir)
 		if requestErr != nil {
 			return nil, requestErr
 		}
@@ -814,17 +814,18 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 
 // hostDecommissionLockRequest is the lock request of a decommission run: the
 // workspace's generated inventory (dir's inventory.yml is the one
-// buildHostDecommissionProviders generated), the default wait and the
-// workspace's Ansible runtime (the decommission runner has its own). The lock of
-// apply and resume (identityLockFor) and the warning of plan
-// (precheckHostDecommissionIdentityLock) are both made from it, so they ask the
-// same question.
-func hostDecommissionLockRequest(dir string) (identityLockRequest, error) {
+// buildHostDecommissionProviders generated), how long to wait and where to say
+// so (the default 30 minutes and stderr, unless ctx says otherwise: the TUI
+// does not wait, see pushDecommissionExecute) and the workspace's Ansible
+// runtime (the decommission runner has its own). The lock of apply and resume
+// (identityLockFor) and the warning of plan (precheckHostDecommissionIdentityLock)
+// are both made from it, so they ask the same question.
+func hostDecommissionLockRequest(ctx context.Context, dir string) (identityLockRequest, error) {
 	runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
 	if err != nil {
 		return identityLockRequest{}, fmt.Errorf("prepare ansible runtime for host decommission: %w", err)
 	}
-	return identityLockRequest{Inventory: filepath.Join(dir, "inventory.yml"), Wait: identityLockWaitDefault, Progress: os.Stderr, Runtime: &runtime}, nil
+	return identityLockRequest{Inventory: filepath.Join(dir, "inventory.yml"), Wait: identityLockWaitFrom(ctx), Progress: identityLockProgressFrom(ctx), Runtime: &runtime}, nil
 }
 
 // planHasIdentityConverge reports whether a plan runs the central
@@ -852,7 +853,7 @@ func precheckHostDecommissionIdentityLock(ctx context.Context, dir string, plan 
 	if !planHasIdentityConverge(plan) {
 		return nil
 	}
-	req, err := hostDecommissionLockRequest(dir)
+	req, err := hostDecommissionLockRequest(ctx, dir)
 	if err != nil {
 		return err
 	}

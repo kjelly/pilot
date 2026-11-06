@@ -10,7 +10,9 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -18,6 +20,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/decommission"
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/sshdial"
 	"github.com/kjelly/pilot/internal/tui"
 )
 
@@ -234,6 +237,15 @@ func pushDecommissionStageConfirm(r *editRouterModel, dir, path string, hf *inve
 // removed on disk by Finalize at this point — this call is bookkeeping,
 // not the destructive action) and reports the outcome; on block/error it
 // shows spec.md §11.5's failure screen with the resumable plan ID.
+//
+// The run does not wait for the FreeIPA identity lock (the same policy as the
+// TUI's break-glass, tuiIdentityLockFor): this call is synchronous inside the
+// Bubble Tea update loop, with no way to cancel it and no screen to show the
+// wait on, so a lock another run holds would freeze the terminal for up to the
+// CLI's 30 minutes with a Ctrl-C that cannot reach it. A busy lock fails at
+// once, before any step, with the approval kept: the plan is untouched and
+// `pilot host decommission resume` (which does wait) or this screen again
+// carries on with it.
 func pushDecommissionExecute(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, plan *decommission.Plan, auth decommission.StageAuthorization) tea.Cmd {
 	st, err := openSpecStore()
 	if err != nil {
@@ -243,8 +255,12 @@ func pushDecommissionExecute(r *editRouterModel, dir, path string, hf *inventory
 	ds := decommission.NewStore(st)
 
 	catalog, _ := loadContractCatalogBestEffort()
-	result, err := runHostDecommissionApply(context.Background(), ds, plan, dir, catalog, "confirmed via pilot edit TUI (typed exact host name)", auth)
+	ctx := withIdentityLockProgress(withIdentityLockWait(context.Background(), 0), io.Discard)
+	result, err := runHostDecommissionApply(ctx, ds, plan, dir, catalog, "confirmed via pilot edit TUI (typed exact host name)", auth)
 	if err != nil {
+		if errors.Is(err, sshdial.ErrLockBusy) {
+			return pushDecommissionLockBusy(r, dir, path, hf, name, plan)
+		}
 		return pushDecommissionError(r, dir, path, hf, name, err)
 	}
 
@@ -258,6 +274,28 @@ func pushDecommissionExecute(r *editRouterModel, dir, path string, hf *inventory
 	default: // "blocked"
 		return pushDecommissionFailure(r, dir, path, hf, name, plan, result)
 	}
+}
+
+// pushDecommissionLockBusy is what the TUI shows when another run holds the
+// FreeIPA identity lock: nothing ran, so nothing is undone and nothing is half
+// done, and the way on is the plan that is already approved.
+func pushDecommissionLockBusy(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, plan *decommission.Plan) tea.Cmd {
+	// Short lines: the select widget cuts a title line at the width of the
+	// terminal, and the command to run must not be the part that is cut.
+	var b strings.Builder
+	fmt.Fprintf(&b, "下架主機 %q 尚未開始\n", name)
+	fmt.Fprintf(&b, "plan id=%s\n", plan.ID)
+	b.WriteString("FreeIPA identity 的 /etc/ipa 鎖被另一輪執行持有。\n")
+	b.WriteString("TUI 不等待：沒有任何步驟執行，client、roster 與\n")
+	b.WriteString("server 都沒有改變，主機仍保留在 hosts.yml 中。\n")
+	b.WriteString("approval 已保留。等那一輪結束後，用\n")
+	fmt.Fprintf(&b, "  pilot host decommission resume --id %s\n", plan.ID)
+	fmt.Fprintf(&b, "（會等鎖，最多 %s）或重新進入這個畫面繼續，不必重新 plan。\n", identityLockWaitDefault)
+	choices := []tui.Choice{{ID: decommissionChoiceBack, Label: "↩  返回主機設定"}}
+	spec := tui.SelectSpec{ScreenID: "hosts.decommission.lock_busy", Title: b.String(), Choices: choices}
+	return r.transitionTo(r.uiFactory().Select(spec), "", func(r *editRouterModel, s screen) tea.Cmd {
+		return pushHostMenu(r, dir, path, hf, name)
+	})
 }
 
 // pushDecommissionFailure is spec.md §11.5: completed steps, the blocking
