@@ -278,6 +278,18 @@ ansible-playbook -i inventory-freeipa.yaml \
 > 管權限 = 改 `~/.vault/ipa-identity.yaml` 再跑一次。Repo 永遠只有「怎麼做」，
 > 沒有「是誰、什麼密碼」。
 
+**pilot 自己的入口會先取 FreeIPA server 的 `/etc/ipa` 遠端鎖**（Phase 2 P2-2 的行為契約；
+這一段是程式碼的行為說明，**還沒有對真實 sshd 實跑驗證**，驗證結果會寫進該 PR 的 evidence
+record，不在這裡累積）：`pilot deploy`／`pilot reconcile` 選到 freeipa-identity、`pilot access
+reconcile --once`、`pilot access breakglass activate`／`deactivate`、`pilot access drift`／`pilot
+identity drift` 的 `--repair-managed`、`pilot edit` 的 break-glass 與 `pilot host decommission`
+的 identity 收斂，都在最後一個確認之後、送出 playbook 之前取鎖，playbook（含冪等性再套用）結束
+才放。別的 pilot 執行持有鎖時 CLI 最多等 30 分鐘（`pilot reconcile --lock-wait` 可調，`0` 是忙碌
+就立即失敗；`pilot edit` 的 TUI 不等待，訊息會指向 `pilot access breakglass activate`）。
+freeipa-server 主機若用 docker／local connection、ProxyCommand、密碼 SSH 或不在 allowlist 的 `-o`，
+這些入口會拒絕並指出是哪個 hostvar，**不會無鎖執行**。鎖只約束 pilot 自己的程式碼路徑：上面
+的 `ansible-playbook` 手動執行與 `pilot vm-target run`／`test` 不取鎖，也不會被鎖擋住。
+
 ### 4.4 只跑一部分（tags）
 
 ```bash

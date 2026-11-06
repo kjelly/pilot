@@ -2,7 +2,7 @@
 
 日期：2026-11-06。對應計畫：`docs/superpowers/plans/2026-10-15-freeipa-go-ssh-reconcile.md` Phase 2。前一階段：`docs/superpowers/specs/2026-10-30-freeipa-go-reconcile-phase1-spec.md`（下稱 P1 spec；目前驗收紀錄見 [LATEST](../../evidence/freeipa-go-reconcile/LATEST.md)）與 `docs/superpowers/specs/2026-10-16-freeipa-go-reconcile-phase0-contract.md`（P0）。
 
-狀態：草稿（P2-0，只有文件）。除了 P2-1（#273 的 adapter 拒絕，§7.9）已在 Phase 2 分支實作，沒有其他 Phase 2 的程式碼，也沒有任何 Phase 2 的實跑。規格由 2026-11-06 對 main `402ca398`（含 Phase 1，PR #255）的設計審查整理而成，文中的檔案與行號都是那個 commit 的樣子；行號會漂移，實作與 lint 以符號與 task 名稱為準，不寫死行號。
+狀態：草稿（P2-0，文件）。P2-1（#273 的 adapter 拒絕，§7.9）與 P2-2（取鎖閘門，§4）已在 Phase 2 分支實作；P2-2 只有單元、lint 與以假 ssh 跑真實 flock 的整合測試，**還沒有任何 live arm（L1–L9）的實跑**，U1 也還沒確認，所以不可合併。其餘 Phase 2 沒有程式碼，也沒有任何實跑。規格由 2026-11-06 對 main `402ca398`（含 Phase 1，PR #255）的設計審查整理而成，文中的檔案與行號都是那個 commit 的樣子；行號會漂移，實作與 lint 以符號與 task 名稱為準，不寫死行號。
 
 **讀法：每一項都標明它是什麼。**
 
@@ -11,7 +11,7 @@
 - **待使用者確認 Un**（§12）：附有設計審查的預設值與它的後果，**不是已確認的決定**。未確認前實作不得假設它們已成立；U1 擋住 P2-2 的合併。
 - **未決 Qn**（§13）與**未知 Xn**（§1）：還沒有答案，各自寫明由什麼擷取、量測或誰的回答解決。
 
-修訂：第二、三輪 review（F1–F4、R2-N1 到 R2-N4 與 P3／P4）與 #273 的 adapter 實作已併入，§14 的 E11–E37 列出。
+修訂：第二、三輪 review（F1–F4、R2-N1 到 R2-N4 與 P3／P4）與 #273 的 adapter 實作已併入，§14 的 E11–E38 列出（E38 是 P2-2 實作時的差異）。
 
 本文件不提供操作 SOP。文中的指令、旗標、檔名與 JSON 欄位是要實作的介面（欄位名稱為擬議），不是已實跑的步驟。AGENTS.md §4.0 的資料夾表**不在這個 PR 修改**（入口 playbook 還不存在），P2-3 新增該列（§5.1）。
 
@@ -844,6 +844,7 @@ H1 與 H3 各有對照（A6 與 H4 的 client 仍 allow），兩者都從 acked 
 | E35 | 混合 run 在 Go 階段失敗、Read₃ 失敗或 Plan₃ 不空（D20 的定義，無關物件的 drift 不算）時，Apply 在 playbook 之前失敗、不執行舊 playbook（`FailedStep: apply`）；`users-groups` 的 Read₃ 失敗讓 Verify 失敗 | §7.6、§6.1 |
 | E36 | 其餘小項：§7.9 補上 `users`／`groups` 不是 list、元素不是 mapping、`name` 不是字串的拒絕；A17(iii) 用 `after_send`；Q7 說明退回 `after_entry` 的代價；L9 的持有者是 pilot 自己的 `AcquireLock`；`deploymentMetadata` 辨認 JSON 物件形式的 `-e` 只記 key；`golangPreviewStage` 與 `stageDecisionFromFlag` 的單一來源或一致性測試；P2-6 列的需要暫停點的 arm 更正 | §7.9、§10.2、§13、§8.3、§5.7、§11 |
 | E37 | 最後的措辭修正：`publishTerminalWorkflow` 只在 `ctx.Err() != nil` 時脫離取消並套用期限，正常路徑保留今天的 30 秒 flush 預算與無期限的 projection；混合的 playbook 閘門用 D20 的「嘗試過的物件上仍有操作」，無關物件的 drift 不擋；A16 與 A17(iii)(iv) 移到 P2-7；`FailedStep` 在 `users-groups` 是 `verify`、混合是 `apply`；`internal/tools` 的 verify evidence 加入登記表掃描（T8，有理由的豁免） | §4.4、§7.6、§11 |
+| E38 | P2-2（取鎖閘門）實作時與本規格字面不同或補上的地方（理由在各項）：(1) `executeDeploymentTransaction` 的 apply closure 在 `PrepareApply` 之前還有第二個確認（`runOnce(false, dryRunFirst)` 內的「確定要執行正式套用指令嗎？」），所以 `runOnce` 拆成 `announce`（印指令與確認）與 `execute`，鎖取在最後一個確認之後、`PrepareApply` 之前，`PrepareApply`（目前沒有非測試的設定者）因此移到 announce 之後；(2) §4.6 第 3 點的 contract 守衛另外要求 `freeipa-identity` 不宣告 rollback／upgrade／decommission playbook（那些是別的檔名，`executeDeploymentTransaction` 的檔名判斷看不到）；(3) lint 另有一部分：非測試程式碼中每個 `accessgrants.{Reconcile,Activate,Deactivate}Options` 與 `providers.FreeIPAClientProviderConfig` 的 literal 都要設定它的鎖欄位，`identitylocktest`（測試用的假鎖）只准測試 import，`newIdentityLock`／`newIdentityLockDialer`（測試接縫）非測試程式碼不得賦值；(4) ServerAlive 實作在 `sshdial.AcquireLock` 內（`Target.lockTarget`），不是在 cmd 組 Target 時，所以每個取鎖者都有，tunnel 的 ssh 沒有；(5) 三個漏斗的 hostvars 都用 `loadDeployInventorySnapshot`（含它的 `validateInventorySecretStorage` 檢查），所以 `pilot access`、breakglass、drift repair、`pilot host decommission` 對 group_vars 有明文 secret 的 workspace 現在會在取鎖時拒絕（行為變更）；(6) `pilot access drift --repair-managed` 也是漏斗（經 `RepairManaged` → `ReconcileOnce` → `applyPlan`），§4.2 的表與 §10.2 的 L1–L6 沒有點名它，`RepairManaged` 在探測之前就拒絕 nil 的鎖；(7) `--lock-wait` 只接受 0 或至少 1s 的 Go duration（遠端 `flock --wait` 是整數秒），未設為 30 分鐘，與 `--preview-only` 同用即拒絕；(8) 取鎖等待的進度行走 stderr：`pilot reconcile` 經 context 帶 `cmd.ErrOrStderr()`，其他路徑預設 `os.Stderr` | §4.2、§4.3、§4.5、§4.6 |
 
 ## 15 交給後續階段
 
