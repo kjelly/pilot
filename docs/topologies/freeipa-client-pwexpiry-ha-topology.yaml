@@ -1,0 +1,50 @@
+# Disposable FreeIPA primary + replica + one Ubuntu 24.04 client for
+# docs/verification/freeipa-client.md A12 (the SSSD password-expiry policy with
+# the FreeIPA primary down, the replica up, and with every server down).
+#
+#   pwha-ipa1  FreeIPA primary   (ipa1.ipa.pilot.internal)
+#   pwha-ipa2  FreeIPA replica   (ipa2.ipa.pilot.internal)
+#   pwha-cli   Ubuntu 24.04 client, enrolled against both servers
+#
+# The group names are the production ones, so the client's server pool is read
+# from the inventory (playbooks/apply/tasks/freeipa-server-pool.yml).
+#
+#   pilot vm-target topology up --fresh --topology docs/topologies/freeipa-client-pwexpiry-ha-topology.yaml
+#   pilot vm-target topology test --topology docs/topologies/freeipa-client-pwexpiry-ha-topology.yaml \
+#       --playbook playbooks/test/freeipa-client-pwexpiry-ha-chain.yml \
+#       --verify docs/verification/freeipa-server.md=freeipa-server \
+#       --verify docs/verification/freeipa-server-replica.md=freeipa-server-replica \
+#       --verify docs/verification/freeipa-client.md=freeipa-client \
+#       -- -e stage=sandbox -e freeipa_client_sssd_password_expiry_policy=renew \
+#       -e @<vault with ipa_admin_password and ipa_dm_password>
+nodes:
+  - name: pwha-ipa1
+    base_image: almalinux-9
+    memory: 4608
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-server]
+    wire: ["pwha-ipa2=ipa2.ipa.pilot.internal", "pwha-cli=pwha-cli.ipa.pilot.internal"]
+  - name: pwha-ipa2
+    base_image: almalinux-9
+    memory: 4608
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-server-replica]
+    wire: ["pwha-ipa1=ipa1.ipa.pilot.internal"]
+  - name: pwha-cli
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-client]
+    wire: ["pwha-ipa1=ipa1.ipa.pilot.internal", "pwha-ipa2=ipa2.ipa.pilot.internal"]
