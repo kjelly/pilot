@@ -394,6 +394,8 @@ func TestReconcileGolangWorkspaceFailures(t *testing.T) {
 // of every direct member. The playbook's gate fails on null as well. A null
 // inside those mappings (membership.authoritative, ssh_keys.values, ...) is
 // refused too: the playbook reads it as false, as a failure or as unmanaged.
+// So is a null user or group scalar (`enabled: ~` is user-disable in the
+// playbook, enabled in the Go engine) and a null `users` or `groups` list.
 // Each row is a roster that passes inventory.ValidateRoster, so the refusal is
 // the adapter's (gate roster-adapter): exit 1 with the field and the roster
 // object named, nothing dialed, nothing sent to FreeIPA, no plan, and no value
@@ -426,6 +428,10 @@ func TestReconcileGolangRefusesWrongTypedRosterValues(t *testing.T) {
 			want: "groups[0] (team-a): membership must be a mapping, not null"},
 		{name: "membership is ~ (null)", roster: withGroup("~"), gate: "roster-adapter",
 			want: "groups[0] (team-a): membership must be a mapping, not null"},
+		{name: "enabled is null", roster: withUserField("p1-nopw", "enabled: ~"), gate: "roster-adapter",
+			want: "users[2] (p1-nopw): enabled must be true or false, not null (leave it out, or give a value)"},
+		{name: "users is null", roster: "schema_version: 3\nusers:\n", gate: "roster-adapter",
+			want: "users must be a list, not null (leave it out, or write [])"},
 		{name: "membership.authoritative is null", roster: withGroup("{authoritative: ~, users: [p1-self]}"), gate: "roster-adapter",
 			want: "groups[0] (team-a): membership: authoritative must be true or false, not null"},
 		{name: "ssh_keys.values is null", roster: withUserField("p1-keys", "ssh_keys: {values: ~}"), gate: "roster-adapter",

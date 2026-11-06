@@ -101,7 +101,7 @@ func TestFromRosterRefusesANonStringInitialPassword(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			refusedByAdapter(t, userDoc("password", "{initial: "+tc.yaml+"}"),
-				"users[1] (bob): password: initial must be a string, not "+tc.typ)
+				"users[1] (bob): password: initial must be a string, not "+tc.typ+" (quote the password so it stays a string)")
 		})
 	}
 }
@@ -232,6 +232,94 @@ func TestFromRosterRefusesANullInsideThePasswordSshKeysAndMembershipMappings(t *
 	}
 }
 
+func groupWith(field string) string {
+	return "schema_version: 3\nusers: [{name: alice}]\ngroups:\n  - {name: team-a, category: team, " + field + "}\n"
+}
+
+// A null user or group scalar, and a null top-level users or groups, is
+// refused too: Go used to read it as its default. How the playbook reads each
+// (ansible-core 2.19.2, the normalize expressions of
+// tasks/freeipa-identity-normalize-users-groups.yml and the consumers in
+// freeipa-identity-apply.yml replayed; lines in the commit message):
+//
+//	enabled                 `None | bool` = false: ipa user-disable    Go: enabled
+//	first, last             `--first=None`, `--last=None`              Go: the name
+//	description             `--desc=None`                              Go: the name
+//	login_shell             no --shell (FreeIPA's default)             Go: /bin/bash
+//	home_directory          no --homedir                               Go: /home/<name>
+//	state, type             gate fails (not in the list)               Go: present, posix
+//	users, groups           `loop` must resolve to a list, not None    Go: empty list
+//	uid, gid, display_name,
+//	email                   `is none`: left out, same as absent        Go: not managed
+func TestFromRosterRefusesANullScalarOrList(t *testing.T) {
+	str, boolean, id := "a string", "true or false", "a non-negative integer"
+	for _, tc := range []struct{ field, want string }{
+		{"state", str}, {"enabled", boolean}, {"first", str}, {"last", str}, {"display_name", str},
+		{"email", str}, {"login_shell", str}, {"home_directory", str}, {"uid", id}, {"gid", id},
+	} {
+		t.Run("user "+tc.field, func(t *testing.T) {
+			refusedByAdapter(t, userDoc(tc.field, "~"),
+				"users[1] (bob): "+tc.field+" must be "+tc.want+", not null (leave it out, or give a value)")
+		})
+	}
+	for _, tc := range []struct{ field, want string }{
+		{"state", str}, {"type", str}, {"description", str}, {"gid", id},
+	} {
+		t.Run("group "+tc.field, func(t *testing.T) {
+			refusedByAdapter(t, groupWith(tc.field+": ~"),
+				"groups[0] (team-a): "+tc.field+" must be "+tc.want+", not null (leave it out, or give a value)")
+		})
+	}
+	// The way it is written by hand: the key with nothing after it.
+	t.Run("user enabled as an empty line", func(t *testing.T) {
+		refusedByAdapter(t, "schema_version: 3\nusers:\n  - name: alice\n  - name: bob\n    enabled:\n",
+			"users[1] (bob): enabled must be true or false, not null")
+	})
+	t.Run("group type as an empty line", func(t *testing.T) {
+		refusedByAdapter(t, "schema_version: 3\ngroups:\n  - name: team-a\n    category: team\n    type:\n",
+			"groups[0] (team-a): type must be a string, not null")
+	})
+	for _, key := range []string{"users", "groups"} {
+		t.Run(key+" is ~", func(t *testing.T) {
+			refusedByAdapter(t, "schema_version: 3\n"+key+": ~\n", key+" must be a list, not null (leave it out, or write [])")
+		})
+		t.Run(key+" is an empty line", func(t *testing.T) {
+			refusedByAdapter(t, "schema_version: 3\n"+key+":\n", key+" must be a list, not null")
+		})
+	}
+}
+
+// An entry with `state: absent` is not reconciled, but the playbook's gates
+// (`.keys()` on password, ssh_keys and membership) loop over every entry, so
+// Ansible refuses a wrong shape there too; Go checks the shape of these keys
+// (nothing inside them) and refuses the same.
+func TestFromRosterRefusesAWrongShapeOnAnAbsentEntry(t *testing.T) {
+	for _, tc := range []struct{ name, doc, want string }{
+		{"user password string", "schema_version: 3\nusers:\n  - {name: alice}\n  - {name: bob, state: absent, password: \"" + pwSentinel + "\"}\n",
+			"users[1] (bob): password must be a mapping, not string"},
+		{"user password null", "schema_version: 3\nusers:\n  - {name: alice}\n  - {name: bob, state: absent, password: ~}\n",
+			"users[1] (bob): password must be a mapping, not null"},
+		{"user ssh_keys list", "schema_version: 3\nusers:\n  - {name: alice}\n  - {name: bob, state: absent, ssh_keys: [x]}\n",
+			"users[1] (bob): ssh_keys must be a mapping, not []interface {}"},
+		{"user ssh_keys null", "schema_version: 3\nusers:\n  - {name: alice}\n  - {name: bob, state: absent, ssh_keys: ~}\n",
+			"users[1] (bob): ssh_keys must be a mapping, not null"},
+		{"group membership list", groupWith("state: absent, membership: [alice]"),
+			"groups[0] (team-a): membership must be a mapping, not []interface {}"},
+		{"group membership null", groupWith("state: absent, membership: ~"),
+			"groups[0] (team-a): membership must be a mapping, not null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refusedByAdapter(t, tc.doc, tc.want)
+		})
+	}
+	// The shape is all that is checked: an absent entry with mappings, or
+	// with none, is still a removal, and what is inside is not read.
+	d := desired(t, "schema_version: 3\nusers:\n  - {name: alice}\n  - {name: bob, state: absent, password: {}, ssh_keys: {values: ~}}\ngroups:\n  - {name: team-a, category: team, state: absent, membership: {users: ~}}\n")
+	if len(d.AbsentUsers) != 1 || d.AbsentUsers[0] != "bob" || len(d.AbsentGroups) != 1 || d.AbsentGroups[0] != "team-a" {
+		t.Fatalf("absent = %v %v", d.AbsentUsers, d.AbsentGroups)
+	}
+}
+
 // The values that are accepted, and what they mean: an absent or empty
 // section is "not declared" (the playbook's own default), a mapping is read.
 func TestFromRosterAcceptsAbsentEmptyAndMappingSections(t *testing.T) {
@@ -298,11 +386,9 @@ func TestFromRosterAcceptsAbsentEmptyAndMappingSections(t *testing.T) {
 			t.Fatalf("team-a = %+v", g)
 		}
 	})
-	// A null users or groups list is still an empty one: null is refused only
-	// for the three mappings above (not captured for the lists).
-	t.Run("users and groups null or empty", func(t *testing.T) {
+	// Absent and [] are an empty roster; a null list is refused (TestFromRosterRefusesANullScalarOrList).
+	t.Run("users and groups absent or empty", func(t *testing.T) {
 		for _, doc := range []string{
-			"schema_version: 3\nusers:\ngroups:\n",
 			"schema_version: 3\nusers: []\ngroups: []\n",
 			"schema_version: 3\n",
 		} {

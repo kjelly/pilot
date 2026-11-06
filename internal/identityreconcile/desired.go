@@ -129,6 +129,9 @@ func FromRoster(root map[string]any) (Desired, error) {
 			return d, fmt.Errorf("%s: %w", where, err)
 		}
 		if state == "absent" {
+			if err := refuseWrongShapes(e.fields, "password", "ssh_keys"); err != nil {
+				return d, fmt.Errorf("%s: %w", where, err)
+			}
 			d.AbsentUsers = append(d.AbsentUsers, e.name)
 			continue
 		}
@@ -149,6 +152,9 @@ func FromRoster(root map[string]any) (Desired, error) {
 			return d, fmt.Errorf("%s: %w", where, err)
 		}
 		if state == "absent" {
+			if err := refuseWrongShapes(e.fields, "membership"); err != nil {
+				return d, fmt.Errorf("%s: %w", where, err)
+			}
 			d.AbsentGroups = append(d.AbsentGroups, e.name)
 			continue
 		}
@@ -219,19 +225,19 @@ func desiredUser(u map[string]any, name, state string) (DesiredUser, error) {
 		// a Go engine that writes must not guess how Ansible would turn it
 		// into one (spec §5.1: Go does not repeat Ansible's coercions).
 		if _, ok := initial.(string); !ok {
-			return du, fmt.Errorf("password: initial must be a string, not %T", initial)
+			return du, fmt.Errorf("password: initial must be a string, not %T (quote the password so it stays a string)", initial)
 		}
 		du.HasInitialPassword = true
 	}
 	// A null inside these mappings is refused where Go would otherwise take
-	// its own default for it (declaredBool, nameList, ssh_keys.values below):
-	// the playbook reads a null there as false, as a failure or as unmanaged,
-	// not as the default. password.initial is the exception: a null initial
-	// is no password in both engines.
-	if du.PreserveExisting, err = declaredBool(pw, "preserve_existing", true); err != nil {
+	// its own default for it (boolOr, nameList, ssh_keys.values below): the
+	// playbook reads a null there as false, as a failure or as unmanaged, not
+	// as the default. password.initial is the exception: a null initial is no
+	// password in both engines.
+	if du.PreserveExisting, err = boolOr(pw, "preserve_existing", true); err != nil {
 		return du, fmt.Errorf("password: %w", err)
 	}
-	if _, err = declaredBool(pw, "force_change", false); err != nil {
+	if _, err = boolOr(pw, "force_change", false); err != nil {
 		return du, fmt.Errorf("password: %w", err)
 	}
 	keys, err := declaredMapping(u, "ssh_keys")
@@ -241,7 +247,7 @@ func desiredUser(u map[string]any, name, state string) (DesiredUser, error) {
 	// inventory.ValidateRoster refuses a literal false, but its
 	// boolFieldDefault answers the default for any value that is not a bool,
 	// so a string passes it; the playbook runs `| bool` on the value.
-	authoritative, err := declaredBool(keys, "authoritative", true)
+	authoritative, err := boolOr(keys, "authoritative", true)
 	if err != nil {
 		return du, fmt.Errorf("ssh_keys: %w", err)
 	}
@@ -292,7 +298,7 @@ func desiredGroup(g map[string]any, name string) (DesiredGroup, error) {
 	if err != nil {
 		return dg, err
 	}
-	if dg.Authoritative, err = declaredBool(m, "authoritative", true); err != nil {
+	if dg.Authoritative, err = boolOr(m, "authoritative", true); err != nil {
 		return dg, fmt.Errorf("membership: %w", err)
 	}
 	if dg.Users, dg.UsersDeclared, err = nameList(m, "users"); err != nil {
@@ -330,10 +336,16 @@ func nameList(m map[string]any, key string) ([]string, bool, error) {
 	return out, true, nil
 }
 
+// stringOr, optionalString, boolOr and optionalID read a scalar of a roster
+// object: absent is the default (or "not managed"), a present null is an
+// error, never the default (nullKeyError), as is any other wrong type.
 func stringOr(m map[string]any, key, def string) (string, error) {
 	v, present := m[key]
-	if !present || v == nil {
+	if !present {
 		return def, nil
+	}
+	if v == nil {
+		return "", nullKeyError(key, "a string")
 	}
 	s, ok := v.(string)
 	if !ok {
@@ -344,23 +356,17 @@ func stringOr(m map[string]any, key, def string) (string, error) {
 
 func optionalString(m map[string]any, key string) (*string, error) {
 	v, present := m[key]
-	if !present || v == nil {
+	if !present {
 		return nil, nil
+	}
+	if v == nil {
+		return nil, nullKeyError(key, "a string")
 	}
 	s, ok := v.(string)
 	if !ok {
 		return nil, fmt.Errorf("%s must be a string", key)
 	}
 	return &s, nil
-}
-
-// declaredBool is boolOr for a key whose null is refused rather than read as
-// the default.
-func declaredBool(m map[string]any, key string, def bool) (bool, error) {
-	if v, present := m[key]; present && v == nil {
-		return false, nullKeyError(key, "true or false")
-	}
-	return boolOr(m, key, def)
 }
 
 // nullKeyError is the refusal of a key written without a value.
@@ -370,8 +376,11 @@ func nullKeyError(key, want string) error {
 
 func boolOr(m map[string]any, key string, def bool) (bool, error) {
 	v, present := m[key]
-	if !present || v == nil {
+	if !present {
 		return def, nil
+	}
+	if v == nil {
+		return false, nullKeyError(key, "true or false")
 	}
 	b, ok := v.(bool)
 	if !ok {
@@ -382,8 +391,11 @@ func boolOr(m map[string]any, key string, def bool) (bool, error) {
 
 func optionalID(m map[string]any, key string) (*int64, error) {
 	v, present := m[key]
-	if !present || v == nil {
+	if !present {
 		return nil, nil
+	}
+	if v == nil {
+		return nil, nullKeyError(key, "a non-negative integer")
 	}
 	n, ok := wholeNumber(v)
 	if !ok || n < 0 {
@@ -420,16 +432,19 @@ type rosterEntry struct {
 	name   string
 }
 
-// rosterEntries is root[key] (users or groups) as its entries: absent and
-// null are an empty list; any other type, an element that is not a mapping
-// and a name that is not a string are errors, not an object skipped or
-// read with an empty name. inventory.ValidateRoster refuses the elements
+// rosterEntries is root[key] (users or groups) as its entries: absent is an
+// empty list; null, any other type, an element that is not a mapping and a
+// name that is not a string are errors, not an object skipped or read with an
+// empty name. inventory.ValidateRoster refuses the elements
 // first (a name that does not match its pattern), but not a list of another
 // type, and this must not depend on what the validator happens to refuse.
 func rosterEntries(root map[string]any, key string) ([]rosterEntry, error) {
 	raw, present := root[key]
-	if !present || raw == nil {
+	if !present {
 		return nil, nil
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("%s must be a list, not null (leave it out, or write [])", key)
 	}
 	list, ok := raw.([]any)
 	if !ok {
@@ -469,6 +484,19 @@ func appendUnique(list []string, s string) []string {
 		}
 	}
 	return append(list, s)
+}
+
+// refuseWrongShapes applies declaredMapping to the keys the playbook's gates
+// call `.keys()` on for every entry of the list, a `state: absent` one too
+// (the gates loop over all of them), and drops the result: only the shape of
+// an entry that is not reconciled is checked, nothing inside it is read.
+func refuseWrongShapes(fields map[string]any, keys ...string) error {
+	for _, k := range keys {
+		if _, err := declaredMapping(fields, k); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // declaredMapping is parent[key] as a mapping: absent is an empty one, null

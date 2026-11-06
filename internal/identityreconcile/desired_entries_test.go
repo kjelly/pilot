@@ -37,10 +37,14 @@ func TestRosterEntriesReadsNamesInOrder(t *testing.T) {
 	if err != nil || len(got) != 2 || got[0].name != "bob" || got[1].name != "alice" || got[0].fields["first"] != "B" {
 		t.Fatalf("entries = %+v, %v", got, err)
 	}
-	for _, key := range []string{"users", "absent"} {
-		if got, err := rosterEntries(roster(t, "users:\n"), key); err != nil || len(got) != 0 {
-			t.Fatalf("%s: null or absent must be an empty list: %+v, %v", key, got, err)
+	// Absent and an empty list are no entries; a null list is refused.
+	for _, doc := range []string{"schema_version: 3\n", "users: []\n"} {
+		if got, err := rosterEntries(roster(t, doc), "users"); err != nil || len(got) != 0 {
+			t.Fatalf("%q: must be an empty list: %+v, %v", doc, got, err)
 		}
+	}
+	if _, err := rosterEntries(roster(t, "users:\n"), "users"); err == nil || !strings.Contains(err.Error(), "users must be a list, not null") {
+		t.Fatalf("a null users list: err = %v", err)
 	}
 }
 
