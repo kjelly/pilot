@@ -1,0 +1,3 @@
+▶ ansible-playbook playbooks/apply/freeipa-identity-auth-cache.yml -i <inventory> -e target_group=freeipa-client -e {"pilot_identity_auth_cache_output": "<out>/nohosts-limit-outside-group.json", "pilot_identity_auth_cache_action": "prepare"} --limit ipa-1
+[WARNING]: Invalid characters were found in group names but not replaced, use -vvvv to see details
+  transcript: <transcript>

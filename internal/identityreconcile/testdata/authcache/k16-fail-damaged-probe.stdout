@@ -1,0 +1,62 @@
+
+PLAY [FreeIPA identity authorization-cache entry (prepare or probe)] ***********
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: prod requires recent staging attestation] **************************
+skipping: [ipa-1]
+
+TASK [Gate: this entry is never a preview] *************************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: this entry takes no --tags and no --skip-tags] *********************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: exactly one host] **************************************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: the action is prepare or probe and the result path is absolute] ****
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Read the host's FQDN] ****************************************************
+ok: [ipa-1]
+
+TASK [Record the authorization-cache obligation (prepare)] *********************
+skipping: [ipa-1]
+
+TASK [Read the authorization-cache obligation (probe)] *************************
+[ERROR]: Task failed: Module failed: non-zero return code
+Origin: <repo>/playbooks/apply/freeipa-identity-auth-cache.yml:160:7
+
+158       when: pilot_identity_auth_cache_action == 'prepare'
+159
+160     - name: "Read the authorization-cache obligation (probe)"
+          ^ column 7
+
+fatal: [ipa-1]: FAILED! => {"changed": false, "cmd": ["python3", "-c", "<helper source elided>", "auth_inspect", "/var/lib/pilot-identity/ssh-cache.json"], "delta": "0:00:00.040691", "end": "2026-11-06 12:46:22.118977", "msg": "non-zero return code", "rc": 1, "start": "2026-11-06 12:46:22.078286", "stderr": "", "stderr_lines": [], "stdout": "{\"error\": \"Expecting value: line 1 column 1 (char 0)\"}", "stdout_lines": ["{\"error\": \"Expecting value: line 1 column 1 (char 0)\"}"]}
+
+PLAY RECAP *********************************************************************
+ipa-1                  : ok=7    changed=0    unreachable=0    failed=1    skipped=2    rescued=0    ignored=0   
+

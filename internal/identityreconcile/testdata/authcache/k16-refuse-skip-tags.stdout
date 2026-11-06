@@ -1,0 +1,43 @@
+
+PLAY [FreeIPA identity authorization-cache entry (prepare or probe)] ***********
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: prod requires recent staging attestation] **************************
+skipping: [ipa-1]
+
+TASK [Gate: this entry is never a preview] *************************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: this entry takes no --tags and no --skip-tags] *********************
+[ERROR]: Task failed: Action failed: freeipa-identity-auth-cache.yml takes no --tags and no --skip-tags (run tags: ['all'], skipped: ['sshkeys']).
+Origin: <repo>/playbooks/apply/freeipa-identity-auth-cache.yml:104:7
+
+102     # `| list`: ansible-core 2.19 passes ansible_run_tags as a tuple, which never
+103     # equals a list (AGENTS.md §4.3 point 7). A run with no --tags is ['all'].
+104     - name: "Gate: this entry takes no --tags and no --skip-tags"
+          ^ column 7
+
+fatal: [ipa-1]: FAILED! => {
+    "assertion": "(ansible_skip_tags | list | length) == 0",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "freeipa-identity-auth-cache.yml takes no --tags and no --skip-tags (run tags: ['all'], skipped: ['sshkeys'])."
+}
+
+PLAY RECAP *********************************************************************
+ipa-1                  : ok=3    changed=0    unreachable=0    failed=1    skipped=1    rescued=0    ignored=0   
+

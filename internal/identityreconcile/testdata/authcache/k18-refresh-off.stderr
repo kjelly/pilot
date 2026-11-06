@@ -1,0 +1,12 @@
+[WARNING]: Invalid characters were found in group names but not replaced, use -vvvv to see details
+[WARNING]: Deprecation warnings can be disabled by setting `deprecation_warnings=False` in ansible.cfg.
+[DEPRECATION WARNING]: The `play_hosts` magic variable is deprecated. This feature will be removed from ansible-core version 2.23.
+Origin: <repo>/playbooks/apply/freeipa-identity-apply.yml:4036:20
+
+4034               - auth_settle
+4035               - "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"
+4036             stdin: >-
+                        ^ column 20
+
+Use `ansible_play_batch` instead.
+

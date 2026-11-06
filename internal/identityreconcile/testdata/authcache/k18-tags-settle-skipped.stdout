@@ -1,0 +1,80 @@
+TASK [Gate: SSH cache targets must match the authorized stage] *****************
+ok: [ipa-1] => (item=client-1) => {
+    "ansible_loop_var": "item",
+    "changed": false,
+    "item": "client-1",
+    "msg": "All assertions passed"
+}
+ok: [ipa-1] => (item=ipa-1) => {
+    "ansible_loop_var": "item",
+    "changed": false,
+    "item": "ipa-1",
+    "msg": "All assertions passed"
+}
+
+TASK [Prepare durable SSH key cache work] **************************************
+ok: [ipa-1]
+
+TASK [Set SSH public keys for users (declarative replace)] *********************
+ok: [ipa-1] => (item=fixture-v2-user-a (0 key(s)))
+
+TASK [Settle SSH key cache work after IPA reconciliation] **********************
+ok: [ipa-1]
+
+TASK [Gate: pending SSH cache targets exist in this inventory] *****************
+skipping: [ipa-1]
+
+TASK [Gate: pending SSH cache targets match the authorized stage] **************
+skipping: [ipa-1]
+
+TASK [Invalidate and verify the named user's SSSD SSH keys] ********************
+skipping: [ipa-1]
+
+TASK [Acknowledge verified SSH key cache pairs] ********************************
+ok: [ipa-1]
+
+TASK [Gate: refuse to delete allow_all via the static HBAC rule lifecycle (spec 2026-09-07 §7)] ***
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: sudo rule category vs specific-list fields are mutually exclusive] ***
+skipping: [ipa-1]
+
+TASK [Settle legacy authorization cache recovery] ******************************
+skipping: [ipa-1]
+
+TASK [Report deferred authorization cache refresh] *****************************
+skipping: [ipa-1]
+
+TASK [Read current SSH obligations after propagation and retirement] ***********
+ok: [ipa-1]
+
+TASK [Gate: every SSH key cache pair converged] ********************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Read the host's FQDN for the authorization cache observation] ************
+ok: [ipa-1]
+
+TASK [Record what this run did about the authorization cache (observation for pilot)] ***
+ok: [ipa-1 -> localhost]
+
+TASK [Destroy the private Kerberos cache] **************************************
+included: <repo>/playbooks/apply/tasks/freeipa-private-ccache-close.yml for ipa-1
+
+TASK [Private Kerberos cache — destroy the tickets in it] **********************
+ok: [ipa-1]
+
+TASK [Private Kerberos cache — remove the cache file] **************************
+ok: [ipa-1]
+
+TASK [Private Kerberos cache — forget it] **************************************
+ok: [ipa-1]
+
+PLAY RECAP *********************************************************************
+ipa-1                      : ok=55   changed=0    unreachable=0    failed=0    skipped=19   rescued=0    ignored=0   
+

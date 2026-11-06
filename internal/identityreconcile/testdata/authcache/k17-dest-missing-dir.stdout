@@ -1,0 +1,65 @@
+
+PLAY [FreeIPA identity authorization-cache entry (prepare or probe)] ***********
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: prod requires recent staging attestation] **************************
+skipping: [ipa-1]
+
+TASK [Gate: this entry is never a preview] *************************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: this entry takes no --tags and no --skip-tags] *********************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: exactly one host] **************************************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: the action is prepare or probe and the result path is absolute] ****
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Read the host's FQDN] ****************************************************
+ok: [ipa-1]
+
+TASK [Record the authorization-cache obligation (prepare)] *********************
+skipping: [ipa-1]
+
+TASK [Read the authorization-cache obligation (probe)] *************************
+ok: [ipa-1]
+
+TASK [Write the result for pilot (on the controller)] **************************
+[ERROR]: Task failed: Module failed: Destination directory <out>/no-such-dir does not exist
+Origin: <repo>/playbooks/apply/freeipa-identity-auth-cache.yml:180:7
+
+178     # because an ansible_become set for localhost in the inventory is a variable and
+179     # beats the keyword, the same value as a task variable.
+180     - name: "Write the result for pilot (on the controller)"
+          ^ column 7
+
+fatal: [ipa-1 -> localhost]: FAILED! => {"changed": false, "checksum": "3cc3797185dd8bd996bf5cc7221f4180387e6cac", "msg": "Destination directory <out>/no-such-dir does not exist"}
+
+PLAY RECAP *********************************************************************
+ipa-1                  : ok=8    changed=0    unreachable=0    failed=1    skipped=2    rescued=0    ignored=0   
+

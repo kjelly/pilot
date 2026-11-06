@@ -1,0 +1,10 @@
+▶ ansible-playbook playbooks/apply/freeipa-identity-auth-cache.yml -i <inventory> -e target_group=all -e {"pilot_identity_auth_cache_output": "<out>/no-such-dir/result.json", "pilot_identity_auth_cache_action": "probe"}
+
+❌ Ansible 失敗摘要
+  1. host=ipa-1 -> localhost (fatal)
+     task=Write the result for pilot (on the controller)
+     msg=Destination directory <out>/no-such-dir does not exist
+  詳細輸出請查看上方內容或 run transcript。
+  transcript: <transcript>
+  ✗ playbooks/apply/freeipa-identity-auth-cache.yml
+exit status 2
