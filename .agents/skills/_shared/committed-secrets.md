@@ -63,34 +63,72 @@ hash of it or a prefix of it.
 4. **trec casts.** They are never committed (AGENTS.md §7). Declare
    `--secret-env`/`--secret-file` as `pilot-trec-verification` says.
 
+## The scanner and the gates
+
+`.agents/skills/_shared/scripts/secret_scan.py` (standard library and git only) scans **every
+commit** of `BASE..HEAD`: each commit's added lines, its message and its paths. It does not look at
+the final diff alone, because a value that a later commit replaces is still in the earlier one.
+It reports the class, the file and the commit, never the value. It decides by the shape of a value,
+not by a name that merely contains "password":
+
+| Class | What it catches |
+|---|---|
+| `freeipa-secret-attribute` | the four attributes in the list above used as a key, with anything but the fixture placeholder as the value |
+| `private-key` | a `-----BEGIN ... PRIVATE KEY-----` header followed by a key body (a bare header in code or a regex is fine) |
+| `authorization-header` | `Authorization:` with a bearer, basic, negotiate, digest or token credential, or a long bare token |
+| `cookie-header` | `Cookie:` or `Set-Cookie:` with a credential-shaped `name=value` |
+| `ipa-session` | `ipa_session=` followed by a session value |
+| `known-value` | a value you supply with `--secret-file` (see below) |
+
+The three gates run it over every commit of the branch and refuse it on any finding:
+`issue_gate.py` (also `create_pr.py`, `mark_ready.py`), `pr_gate.py` and
+`review_gate.py` (also `apply_decision.py`). Evidence-only paths such as `docs/evidence/**` are
+scanned like any other path. A gate that cannot scan (an object missing from the clone, a scanner
+that does not load, an unusable `--secret-file`) refuses; it never skips.
+
 ## Before every commit and every push
 
-Check every added line of the staged diff, including hand-written evidence sections
-and new `testdata/` files.
-
-1. Look for the names above next to a real value:
-
-   ```bash
-   git diff --cached -U0 | grep -n -i -E '^\+.*(passw|secret|token|ipanthash|krbprincipalkey|ipatokenotpkey|ipa_session|authorization:|cookie:|PRIVATE KEY)'
-   ```
-
-   A placeholder, a vault key name, `no_log` or a variable reference is fine. A
-   value is not.
-2. Look for each secret value you know of (the vault, generated lab passwords)
-   without printing it. In bash, keep the value off the command line:
+1. Before each commit, read every added line of the staged diff, including hand-written
+   evidence sections and new `testdata/` files. A placeholder, a vault key name, `no_log` or a
+   variable reference is fine. A value is not.
+2. Before each push, run the scanner over every commit you are about to push. Use
+   `@{upstream}..HEAD`, or the base for a branch that has no upstream yet:
 
    ```bash
-   git diff --cached -U0 | grep -F -q -f <(printf '%s\n' "$SECRET") && echo FOUND
+   python3 "$SNAP/.agents/skills/_shared/scripts/secret_scan.py" \
+     --repo "$REPO_ROOT" --base "@{upstream}" --head HEAD
    ```
 
-Before pushing, run the same checks over every commit you are about to push
-(`git log -p @{upstream}..HEAD`, or `BASE..HEAD` for a new branch). A value removed
-in a later commit is still in the earlier one.
+   Exit status 0 is clean, 1 means findings, 2 means the scan could not complete (for
+   example a base commit you have not fetched). Anything but 0 stops the push.
+3. To look for the values you know of (the vault, generated lab passwords), put them one per line in a
+   file **outside** the repository (each at least 8 bytes), and add `--secret-file`. The scanner
+   matches the bytes in added lines, commit messages and paths, and names a file and line, never the
+   value. The gates take the same option. Do not type the value on a command line.
+
+   ```bash
+   python3 "$SNAP/.agents/skills/_shared/scripts/secret_scan.py" \
+     --repo "$REPO_ROOT" --base "$BASE" --head HEAD --secret-file /path/outside/the/repo/known.txt
+   ```
+
+## Writing tests that carry trigger shapes
+
+A test that needs a credential-shaped value builds it at run time (`secrets`, `os.urandom`, string
+concatenation such as `"-----BEGIN " + ...`) inside a temporary repository or directory. It never
+writes the value into a file of this repository, so the scanner's own tests and every later PR
+stay clean. `.agents/skills/_shared/tests/test_secret_scan.py` scans every skill file, this one
+included.
+
+Synthetic test material that is already in the repository can still match a class when a later PR
+edits those lines. `.github/secret-scan.json` names such a file (`class`, `path_glob`, `reason`); keep
+the entries few and specific. The gates read it from the base branch only, so a PR cannot exempt
+itself, and a `known-value` match can never be exempted. A malformed file is an error, not a pass.
 
 ## When a secret was committed or pushed
 
 - Stop. Do not merge, do not push more on top, and do not count a scrubbing commit as
-  the fix.
+  the fix. There is no override in the gates: a finding stays a finding for as long as
+  the commit is in the range.
 - Report to the user:
   - the secret by name, never by value;
   - the commits that hold it;
