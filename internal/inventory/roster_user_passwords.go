@@ -121,7 +121,7 @@ func RosterUserPasswords(data []byte) (map[string]RosterUserPassword, error) {
 		var initial *yaml.Node
 		if pw, _ := mappingValue(item, "password"); pw != nil && pw.Kind == yaml.MappingNode {
 			initial, _ = mappingValue(pw, "initial")
-		} else if pw != nil && !(pw.Kind == yaml.ScalarNode && pw.ShortTag() == "!!null") {
+		} else if pw != nil && (pw.Kind != yaml.ScalarNode || pw.ShortTag() != "!!null") {
 			// Not a mapping and not null: the engine's adapter refuses it by name
 			// and kind; here it is a password nobody can read.
 			out[name] = RosterUserPassword{Form: PasswordNotString}

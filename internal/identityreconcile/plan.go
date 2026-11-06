@@ -691,11 +691,6 @@ func difference(a, b []string) []string {
 	return out
 }
 
-// isOnly reports whether values holds exactly want.
-func isOnly(values []string, want string) bool {
-	return len(values) == 1 && values[0] == want
-}
-
 // onResetPassword: an admin reset leaves the expiration at or before the
 // last change; a user's own change moves it later, or (maxlife=0) drops it.
 func onResetPassword(u LiveUser) bool {
