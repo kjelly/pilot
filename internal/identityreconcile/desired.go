@@ -203,12 +203,13 @@ func desiredUser(u map[string]any, name, state string) (DesiredUser, error) {
 	if du.Enabled, err = boolOr(u, "enabled", state != "disabled"); err != nil {
 		return du, err
 	}
-	// password, ssh_keys and (below) membership are refused when they are not
-	// mappings, not read as undeclared: for membership that reading is "an
-	// authoritative group with no members", which a writing engine turns into
-	// removing every direct member. The message names the type, never the
-	// value: a password written as a string must not reach an error.
-	pw, err := optionalMapping(u, "password")
+	// password, ssh_keys and (below) membership are refused when they are
+	// present and not mappings, null included, not read as undeclared: for
+	// membership that reading is "an authoritative group with no members",
+	// which a writing engine turns into removing every direct member. The
+	// message names the type, never the value: a password written as a string
+	// must not reach an error.
+	pw, err := declaredMapping(u, "password")
 	if err != nil {
 		return du, err
 	}
@@ -228,7 +229,7 @@ func desiredUser(u map[string]any, name, state string) (DesiredUser, error) {
 	if _, err = boolOr(pw, "force_change", false); err != nil {
 		return du, fmt.Errorf("password: %w", err)
 	}
-	keys, err := optionalMapping(u, "ssh_keys")
+	keys, err := declaredMapping(u, "ssh_keys")
 	if err != nil {
 		return du, err
 	}
@@ -276,7 +277,7 @@ func desiredGroup(g map[string]any, name string) (DesiredGroup, error) {
 	if dg.Type, err = stringOr(g, "type", "posix"); err != nil {
 		return dg, err
 	}
-	m, err := optionalMapping(g, "membership")
+	m, err := declaredMapping(g, "membership")
 	if err != nil {
 		return dg, err
 	}
@@ -439,6 +440,30 @@ func appendUnique(list []string, s string) []string {
 		}
 	}
 	return append(list, s)
+}
+
+// declaredMapping is parent[key] as a mapping: absent is an empty one, null
+// and any other type are errors. Unlike optionalMapping (which the login
+// sections use, absent and null alike), a null here is refused because the
+// playbook's gate on password, ssh_keys and membership,
+// `(item.X | default({})).keys()`, fails on it (default() replaces an
+// undefined value, not None; ansible-core 2.19.2): reading it as "not
+// declared" would let a stanza left empty (`membership:`) act as an
+// authoritative group with no members while the Ansible engine refuses the
+// roster.
+func declaredMapping(parent map[string]any, key string) (map[string]any, error) {
+	raw, present := parent[key]
+	if !present {
+		return nil, nil
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("%s must be a mapping, not null (leave it out, or write {})", key)
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a mapping, not %T", key, raw)
+	}
+	return m, nil
 }
 
 // optionalMapping is parent[key] as a mapping: absent and null are an empty

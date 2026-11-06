@@ -147,12 +147,41 @@ func TestFromRosterRefusesUsersOrGroupsThatAreNotLists(t *testing.T) {
 	}
 }
 
-// The values that are accepted, and what they mean: an absent, null or empty
+// A null password, ssh_keys or membership is refused too, not read as "not
+// declared": the playbook's gate `(item.X | default({})).keys()` fails on None
+// (default() replaces an undefined value, not null), and for membership "not
+// declared" is an authoritative group with no members. The forms: the explicit
+// null, and the stanza left empty, the way it is written by hand.
+func TestFromRosterRefusesANullPasswordSshKeysOrMembership(t *testing.T) {
+	for _, field := range []string{"password", "ssh_keys"} {
+		t.Run(field+" is ~", func(t *testing.T) {
+			refusedByAdapter(t, userDoc(field, "~"), "users[1] (bob): "+field+" must be a mapping, not null")
+		})
+		t.Run(field+" is an empty stanza", func(t *testing.T) {
+			refusedByAdapter(t, "schema_version: 3\nusers:\n  - name: alice\n  - name: bob\n    "+field+":\n",
+				"users[1] (bob): "+field+" must be a mapping, not null")
+		})
+	}
+	t.Run("membership is ~", func(t *testing.T) {
+		refusedByAdapter(t, groupDoc("~"), "groups[0] (team-a): membership must be a mapping, not null")
+	})
+	t.Run("membership is an empty stanza", func(t *testing.T) {
+		refusedByAdapter(t, "schema_version: 3\nusers:\n  - name: alice\ngroups:\n  - name: team-a\n    category: team\n    membership:\n",
+			"groups[0] (team-a): membership must be a mapping, not null")
+	})
+	// The object that is wrong is the one named, also when only a later group
+	// carries the empty stanza.
+	t.Run("a later group", func(t *testing.T) {
+		refusedByAdapter(t, "schema_version: 3\nusers:\n  - name: alice\ngroups:\n  - {name: team-a, category: team, membership: {users: [alice]}}\n  - name: team-b\n    category: team\n    membership:\n",
+			"groups[1] (team-b): membership must be a mapping, not null")
+	})
+}
+
+// The values that are accepted, and what they mean: an absent or empty
 // section is "not declared" (the playbook's own default), a mapping is read.
-func TestFromRosterAcceptsAbsentNullEmptyAndMappingSections(t *testing.T) {
+func TestFromRosterAcceptsAbsentEmptyAndMappingSections(t *testing.T) {
 	for _, tc := range []struct{ name, yaml string }{
 		{"absent", ""},
-		{"null", "password: ~"},
 		{"empty mapping", "password: {}"},
 	} {
 		t.Run("password "+tc.name, func(t *testing.T) {
@@ -176,7 +205,6 @@ func TestFromRosterAcceptsAbsentNullEmptyAndMappingSections(t *testing.T) {
 	})
 	for _, tc := range []struct{ name, yaml string }{
 		{"absent", ""},
-		{"null", "ssh_keys: ~"},
 		{"empty mapping", "ssh_keys: {}"},
 		{"only authoritative", "ssh_keys: {authoritative: true}"},
 	} {
@@ -194,7 +222,6 @@ func TestFromRosterAcceptsAbsentNullEmptyAndMappingSections(t *testing.T) {
 	})
 	for _, tc := range []struct{ name, membership string }{
 		{"absent", ""},
-		{"null", "membership: ~"},
 		{"empty mapping", "membership: {}"},
 	} {
 		t.Run("membership "+tc.name, func(t *testing.T) {
@@ -216,8 +243,8 @@ func TestFromRosterAcceptsAbsentNullEmptyAndMappingSections(t *testing.T) {
 			t.Fatalf("team-a = %+v", g)
 		}
 	})
-	// A null list is an empty one, not a refusal: the same convention as
-	// the sections above.
+	// A null users or groups list is still an empty one: null is refused only
+	// for the three mappings above (not captured for the lists).
 	t.Run("users and groups null or empty", func(t *testing.T) {
 		for _, doc := range []string{
 			"schema_version: 3\nusers:\ngroups:\n",
