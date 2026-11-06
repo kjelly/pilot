@@ -298,7 +298,7 @@ func TestDeployAndReconcileRefuseAnUnlockableInventoryBeforeAnything(t *testing.
 		}
 	}
 
-	t.Run("a batch (several selected items, one authorization) is refused before its plan is shown or asked", func(t *testing.T) {
+	t.Run("a batch (one selected item, one authorization) is refused before its plan is shown or asked", func(t *testing.T) {
 		env := newFunnelEnv(t, proxyCommandVars)
 		t.Setenv("PILOT_ROOT", repoRootForTest(t))
 		oldPrompt := activePromptAutomation
@@ -312,6 +312,42 @@ func TestDeployAndReconcileRefuseAnUnlockableInventoryBeforeAnything(t *testing.
 		env.assertRefused(err, out.String(), "ProxyCommand")
 		if strings.Contains(out.String(), "batch execution plan") {
 			t.Fatalf("the batch plan was shown before the refusal:\n%s", out.String())
+		}
+	})
+
+	// The batch checks every request, not only the first: a selection that
+	// starts with another component (the order is the operator's) and holds the
+	// identity playbook second is refused before the plan is shown, and nothing
+	// of the first component runs either. A loop that stopped at the first
+	// request that is not the identity playbook would show the plan, ask, and run
+	// freeipa-dns before the identity item met its refusal at the lock.
+	t.Run("a batch that starts with another component is refused before anything of it runs", func(t *testing.T) {
+		env := newFunnelEnv(t, proxyCommandVars)
+		t.Setenv("PILOT_ROOT", repoRootForTest(t))
+		oldPrompt := activePromptAutomation
+		activePromptAutomation = &promptAutomation{useDefaults: true, forceApply: true}
+		t.Cleanup(func() { activePromptAutomation = oldPrompt })
+		stubDeploymentAvailabilityAllReachable(t)
+		var out bytes.Buffer
+		err := executeCatalogReconcileBatch(context.Background(), ansible.NewRunner(), &out, []catalogDeploymentRequest{
+			{playbook: "playbooks/apply/freeipa-dns-apply.yml", inv: env.inv, stage: "sandbox", componentHints: []string{"freeipa-dns"}, workspaceDir: filepath.Dir(env.inv)},
+			{playbook: playbook, inv: env.inv, stage: "sandbox", componentHints: []string{"freeipa-identity"}, workspaceDir: filepath.Dir(env.inv)},
+		})
+		env.assertRefused(err, out.String(), "ProxyCommand")
+		if strings.Contains(out.String(), "batch execution plan") || strings.Contains(out.String(), "選取項目") {
+			t.Fatalf("the batch plan was shown before the refusal:\n%s", out.String())
+		}
+	})
+
+	t.Run("a batch of other components is not asked", func(t *testing.T) {
+		env := newFunnelEnv(t, proxyCommandVars)
+		t.Setenv("PILOT_ROOT", repoRootForTest(t))
+		err := precheckIdentityBatch(context.Background(), []catalogDeploymentRequest{
+			{playbook: "playbooks/apply/freeipa-dns-apply.yml", inv: env.inv, stage: "sandbox", componentHints: []string{"freeipa-dns"}},
+			{playbook: "playbooks/apply/dns-apply.yml", inv: env.inv, stage: "sandbox", componentHints: []string{"dns"}},
+		})
+		if err != nil {
+			t.Fatalf("a batch with no identity request was refused: %v", err)
 		}
 	})
 
