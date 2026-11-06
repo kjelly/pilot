@@ -132,7 +132,21 @@ const (
 	resolutionStillUnknown = "still-unknown"
 )
 
-// Stop says where the executor stopped scheduling and why.
+// The stages a run can stop before its first command, as a Stop names them: the
+// stage names S1 to S8 are those of stage.go.
+const (
+	stopPlan1 = "plan1" // the plan made before the entry is blocked
+	stopEntry = "entry" // the authorization cache entry failed or was rejected
+	stopRead2 = "read2" // the read after the entry failed
+	stopPlan2 = "plan2" // the plan made after the entry is blocked or destructive beyond the first
+)
+
+// Stop says where the executor stopped scheduling and why. A run that stops before
+// its first command names plan1, entry, read2 or plan2; one that stops among the
+// stages names the stage. A Stop does not by itself make a run a failure: an unknown
+// outcome stops the scheduling, and when the read after the writes shows that
+// command was applied and nothing was left unsent, the run is still a success (the
+// operations decide, spec §7.4).
 type Stop struct {
 	Stage  string `json:"stage"`
 	Reason string `json:"reason"`
@@ -217,8 +231,18 @@ func (r Result) Counts() map[Outcome]int {
 //	Read₃ and Plan₃ (Verification), after the writes whatever they ended as.
 //
 // It returns a nil error only for a run that ended as it planned: nothing to do, or
-// everything applied and verified. Every other end is an error that wraps one of
-// the Err values above. The Result is returned whatever the error.
+// every planned operation applied (success or noop, an unknown outcome counting as
+// applied when the read after the writes shows it was) and verified. An unknown
+// outcome that converged still leaves its Stop in the Result, which is then no
+// failure; one that did not, or that left an operation unsent, is ErrWrites. Every
+// other end is an error that wraps one of the Err values above. The Result is
+// returned whatever the error.
+//
+// The journal accounts for every planned operation: the operations of each batch or
+// call that was sent are in its "result" event, every other one (a re-read that
+// refused it or found nothing to do, one the gate or the stop kept from going out,
+// those of a plan that was not run at all) is in one "not_sent" event with the Stop,
+// and the last event, identity.verify, says whether the run as a whole succeeded.
 func Execute(ctx context.Context, rpc RPC, opts Options) (*Result, error) {
 	held, err := identitylock.Require(ctx)
 	if err != nil {
@@ -261,6 +285,7 @@ type runner struct {
 	stopped bool
 	sent    bool // a command has left
 	batches map[Stage]int
+	covered map[int]bool // operations whose batch or call has a "result" event
 }
 
 func (r *runner) principal() string { return strings.ToLower(r.opts.Desired.Principal) }
@@ -272,7 +297,8 @@ func (r *runner) run() error {
 	}
 	r.res.Plan1 = Build(r.des, obs1.Users, obs1.Groups)
 	if len(r.res.Plan1.Blocked) > 0 {
-		return blockedError(r.res.Plan1)
+		err := blockedError(r.res.Plan1)
+		return r.refuse(stopPlan1, err.Error(), r.res.Plan1, err)
 	}
 	if r.res.Plan1.Writes() == 0 {
 		return r.idle()
@@ -285,7 +311,9 @@ func (r *runner) run() error {
 		err = fmt.Errorf("the entry's result is a %q result for %q, not a prepare result for the locked host %q", prep.Action, prep.Host, r.held.Host)
 	}
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrEntry, err)
+		// The reason is fixed: what the entry's playbook printed is the error's, not
+		// the journal's.
+		return r.refuse(stopEntry, "the authorization cache entry failed or its result was rejected", r.res.Plan1, fmt.Errorf("%w: %v", ErrEntry, err))
 	}
 	r.res.Entry = EntryReport{Ran: true, Previous: &prep.Previous}
 	if err := r.record(Event{Kind: EventAuthCache, ID: "auth_cache", Payload: map[string]any{
@@ -298,18 +326,21 @@ func (r *runner) run() error {
 
 	obs2, err := Observe(r.ctx, r.rpc, r.opts.Desired.Principal)
 	if err != nil {
-		return fmt.Errorf("read after the entry (the entry ran, nothing was written): %w", err)
+		err = fmt.Errorf("read after the entry (the entry ran, nothing was written): %w", err)
+		return r.refuse(stopRead2, err.Error(), r.res.Plan1, err)
 	}
 	r.obs2 = obs2
 	plan2 := Build(r.des, obs2.Users, obs2.Groups)
 	r.res.Plan2 = &plan2
 	r.res.PlanChanged = comparePlans(r.res.Plan1, plan2)
 	if len(plan2.Blocked) > 0 {
-		return blockedError(plan2)
+		err := blockedError(plan2)
+		return r.refuse(stopPlan2, err.Error(), plan2, err)
 	}
 	if conflicts := newDestructive(r.res.Plan1, plan2); len(conflicts) > 0 {
 		r.res.Conflicts = conflicts
-		return fmt.Errorf("%w: %s", ErrDestructiveDiff, strings.Join(conflicts, ", "))
+		err := fmt.Errorf("%w: %s", ErrDestructiveDiff, strings.Join(conflicts, ", "))
+		return r.refuse(stopPlan2, err.Error(), plan2, err)
 	}
 	if plan2.Writes() == 0 {
 		return nil // the entry ran and there is nothing left to write: a refresh too many, harmless
@@ -317,7 +348,49 @@ func (r *runner) run() error {
 
 	r.prepare(plan2)
 	r.runStages()
+	r.recordNotSent()
 	return r.finish()
+}
+
+// notSentEvent is the payload of the event that holds what no batch's result does.
+type notSentEvent struct {
+	Phase      string     `json:"phase"`
+	Stop       *Stop      `json:"stop,omitempty"`
+	Operations []OpResult `json:"operations"`
+}
+
+// refuse ends a run that stops before its first command: the Stop is kept, the
+// journal gets one "not_sent" event holding every operation of the plan that was not
+// run, and a failure to record it is reported beside err.
+func (r *runner) refuse(stage, reason string, plan Plan, err error) error {
+	r.res.Stop = &Stop{Stage: stage, Reason: reason}
+	ops := make([]OpResult, len(plan.Operations))
+	for i, op := range plan.Operations {
+		ops[i] = OpResult{Operation: op, Stage: StageOf(op.Kind).String(), Outcome: OutcomeNotExecuted}
+	}
+	_ = r.record(Event{Kind: EventOp, ID: "not_sent", Payload: notSentEvent{Phase: "not_sent", Stop: r.res.Stop, Operations: ops}})
+	if r.res.JournalError != "" {
+		err = errors.Join(err, fmt.Errorf("%w: %s", ErrJournal, r.res.JournalError))
+	}
+	return err
+}
+
+// recordNotSent writes the one "not_sent" event of a run that went through the
+// stages: every operation that is not in a batch or call that was sent and has its
+// result recorded (a re-read refused it, found nothing to do, or the stop, the gate
+// or the journal kept it from going out), each with its outcome, and the Stop. A run
+// that sent everything has none.
+func (r *runner) recordNotSent() {
+	var ops []OpResult
+	for i, o := range r.res.Ops {
+		if !r.covered[i] {
+			ops = append(ops, o)
+		}
+	}
+	if len(ops) == 0 {
+		return
+	}
+	_ = r.record(Event{Kind: EventOp, ID: "not_sent", Payload: notSentEvent{Phase: "not_sent", Stop: r.res.Stop, Operations: ops}})
 }
 
 // idle ends a run whose first plan has nothing to write: no entry, no write. With
@@ -434,6 +507,7 @@ func (r *runner) prepare(plan2 Plan) {
 	}
 	r.created = map[string]bool{}
 	r.batches = map[Stage]int{}
+	r.covered = map[int]bool{}
 	for _, op := range plan2.Operations {
 		s := StageOf(op.Kind)
 		r.res.Ops = append(r.res.Ops, OpResult{Operation: op, Stage: s.String(), Outcome: OutcomeNotExecuted})
@@ -463,21 +537,35 @@ func (r *runner) conflict(i int, detail string) {
 }
 
 // finish reads the result back and ends the run: the verdict is the writes' and the
-// verification's.
+// verification's, and the journal's last event says it.
 func (r *runner) finish() error {
 	r.verify()
 	var errs []error
-	counts := r.res.Counts()
-	if r.res.Stop != nil || counts[OutcomeConflictFailed]+counts[OutcomeFailed]+counts[OutcomeUnknown]+counts[OutcomeNotExecuted] > 0 {
+	applied := r.writesApplied()
+	if !applied {
 		errs = append(errs, fmt.Errorf("%w: %s", ErrWrites, r.writesSummary()))
 	}
 	if r.res.Verify.Done && !r.res.Verify.OK() {
 		errs = append(errs, fmt.Errorf("%w: %s", ErrVerify, r.verifySummary()))
 	}
+	// ok is the run's: it is never true for a run that returns an error, and a
+	// journal event that already failed to be recorded is such an error.
+	r.recordVerify(len(errs) == 0 && r.res.JournalError == "", applied)
 	if r.res.JournalError != "" {
 		errs = append(errs, fmt.Errorf("%w: %s", ErrJournal, r.res.JournalError))
 	}
 	return errors.Join(errs...)
+}
+
+// writesApplied reports whether every planned operation ended applied: success or
+// noop, an unknown outcome as the read after the writes resolved it. An operation
+// that conflicted, failed, is still unknown or was not executed is not. The Stop is
+// not asked: it is the consequence of such an operation, except for an unknown
+// outcome the read showed was applied, which stopped the scheduling of nothing that
+// is left (the not-executed ones are counted).
+func (r *runner) writesApplied() bool {
+	counts := r.res.Counts()
+	return counts[OutcomeConflictFailed]+counts[OutcomeFailed]+counts[OutcomeUnknown]+counts[OutcomeNotExecuted] == 0
 }
 
 func (r *runner) writesSummary() string {
@@ -535,7 +623,6 @@ func (r *runner) verify() {
 				r.res.Ops[i].Resolution = resolutionStillUnknown
 			}
 		}
-		r.recordVerify()
 		return
 	}
 	plan3 := Build(r.des, obs3.Users, obs3.Groups)
@@ -549,7 +636,6 @@ func (r *runner) verify() {
 		}
 	}
 	r.resolveUnknown(plan3, obs3)
-	r.recordVerify()
 }
 
 // resolveUnknown classifies each unknown outcome from the plan made after the
@@ -608,8 +694,15 @@ func passwordHint(op Operation, obs Observation) string {
 	return ""
 }
 
-// recordVerify writes the verification event.
-func (r *runner) recordVerify() {
+// recordVerify writes identity.verify, the last event of a run that went through
+// the stages (spec §7.7). ok is the run's own verdict, not the read's alone: true
+// only when every planned operation ended applied (writes_ok), the read after the
+// writes was made and succeeded and shows nothing left on the objects the run tried
+// to change (D20: read_done, no read_error, no remaining) whenever a command was
+// sent, and no earlier event failed to be recorded. A run that sent nothing has no
+// read: read_done is false, and ok is true only when everything it was planned to do
+// was a noop.
+func (r *runner) recordVerify(ok, writesOK bool) {
 	v := r.res.Verify
 	resolutions := map[string]string{}
 	for _, o := range r.res.Ops {
@@ -618,7 +711,8 @@ func (r *runner) recordVerify() {
 		}
 	}
 	_ = r.record(Event{Kind: EventVerify, ID: "verify", Payload: map[string]any{
-		"ok": v.OK(), "read_error": v.ReadError, "remaining": v.Remaining, "unrelated": v.Unrelated, "unknown_resolved": resolutions,
+		"ok": ok, "writes_ok": writesOK, "read_done": v.Done, "read_error": v.ReadError,
+		"remaining": v.Remaining, "unrelated": v.Unrelated, "unknown_resolved": resolutions, "stop": r.res.Stop,
 	}})
 }
 

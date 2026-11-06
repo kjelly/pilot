@@ -144,14 +144,17 @@ func TestExecuteClassifiesAnUnknownOutcomeFromTheReadAfterTheWrites(t *testing.T
 			t.Fatalf("ub: %+v", o)
 		}
 		// The unknown answer killed the whole batch's answer, so ua is unknown too and
-		// resolved the same way; the run is not a failure of the writes then.
+		// resolved the same way; the run is not a failure of the writes then: every
+		// planned operation ended applied and nothing was left unsent (spec §7.4).
 		if o := res.op("user.create:ua"); o.Final() != OutcomeSuccess {
 			t.Fatalf("ua: %+v", o)
 		}
 		if !res.Committed() {
 			t.Fatal("a run with unknown outcomes was committed")
 		}
-		_ = err
+		if err != nil {
+			t.Fatalf("err = %v: an unknown outcome that converged, with nothing left unsent, is no failure", err)
+		}
 	})
 	t.Run("it had not been applied: not-applied, failed", func(t *testing.T) {
 		e := unknown(false)

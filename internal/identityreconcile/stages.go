@@ -162,6 +162,7 @@ func (r *runner) afterSending(s Stage, batch int, id string, items []pending) {
 	results := make([]OpResult, len(items))
 	for i, it := range items {
 		results[i] = r.res.Ops[it.idx]
+		r.covered[it.idx] = true
 		if r.res.Ops[it.idx].Outcome.stops() && r.res.Stop == nil {
 			r.stopAt(s, fmt.Sprintf("%s %s", it.op.ID, r.res.Ops[it.idx].Outcome))
 		}
