@@ -171,3 +171,110 @@ func TestCapturedExternalGroupIsBlocked(t *testing.T) {
 		t.Fatalf("plan = %+v", plan)
 	}
 }
+
+// ipauniqueid is what tells a user that was deleted and added again from the
+// one the plan was made for (captured: user-show-after-recreate has another one
+// than user-show-before-recreate); the planner's reads keep it.
+func TestParseKeepsTheUniqueIDOfUsersAndGroups(t *testing.T) {
+	entries := captured(t, "user-find-states")
+	users, err := ParseUsers(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range entries {
+		raw, _ := e["ipauniqueid"].([]any)
+		if len(raw) != 1 || users[i].UniqueID != raw[0] || users[i].UniqueID == "" {
+			t.Fatalf("user %s: UniqueID %q, the capture has %v", users[i].Name, users[i].UniqueID, e["ipauniqueid"])
+		}
+	}
+	gEntries := captured(t, "group-find-states")
+	groups, err := ParseGroups(gEntries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range gEntries {
+		raw, _ := e["ipauniqueid"].([]any)
+		if len(raw) != 1 || groups[i].UniqueID != raw[0] || groups[i].UniqueID == "" {
+			t.Fatalf("group %s: UniqueID %q, the capture has %v", groups[i].Name, groups[i].UniqueID, e["ipauniqueid"])
+		}
+	}
+	// Different objects have different ones: the capture would not distinguish a
+	// parser that read some other field.
+	seen := map[string]bool{}
+	for _, u := range users {
+		if seen[u.UniqueID] {
+			t.Fatalf("two users share UniqueID %q", u.UniqueID)
+		}
+		seen[u.UniqueID] = true
+	}
+}
+
+// And the ways it can be wrong are errors, not an empty identity: more than one
+// value, or not a string. An entry without one parses to "" (the writer's checks
+// refuse to act on it).
+func TestParseUniqueIDRefusesWhatIsNotOne(t *testing.T) {
+	user := func(mod func(map[string]any)) error {
+		e := captured(t, "user-find-states")[0]
+		mod(e)
+		_, err := ParseUsers([]map[string]any{e})
+		return err
+	}
+	if err := user(func(e map[string]any) {}); err != nil {
+		t.Fatalf("the capture itself: %v", err)
+	}
+	if err := user(func(e map[string]any) { e["ipauniqueid"] = []any{"a", "b"} }); err == nil {
+		t.Fatal("two ipauniqueid values parsed")
+	}
+	if err := user(func(e map[string]any) { e["ipauniqueid"] = []any{7.0} }); err == nil {
+		t.Fatal("a number as ipauniqueid parsed")
+	}
+	if err := user(func(e map[string]any) { delete(e, "ipauniqueid") }); err != nil {
+		t.Fatalf("an entry without ipauniqueid is refused at parse time (the writer's checks refuse it): %v", err)
+	}
+	group := func(mod func(map[string]any)) error {
+		e := captured(t, "group-find-states")[0]
+		mod(e)
+		_, err := ParseGroups([]map[string]any{e})
+		return err
+	}
+	if err := group(func(e map[string]any) { e["ipauniqueid"] = []any{"a", "b"} }); err == nil {
+		t.Fatal("two group ipauniqueid values parsed")
+	}
+}
+
+// The writer reads user_show and group_show before it deletes or disables;
+// the same parsers read those answers (captured in P2-4). Their memberof_group
+// is the direct groups, which the field's doc says.
+func TestParseReadsTheReReadAnswersOfShow(t *testing.T) {
+	u, err := parseUser(capturedOne(t, "user-show-before-member-group-del"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Name != "p24cap-m1" || u.UniqueID == "" || u.UIDNumber == "" || u.Preserved || u.Locked {
+		t.Fatalf("user = %+v", u)
+	}
+	if !slices.Equal(u.MemberOf, []string{"ipausers", "p24cap-mdel"}) {
+		t.Fatalf("a user_show's memberof_group = %v, want the direct groups only (p24cap-mg1 is indirect)", u.MemberOf)
+	}
+	p, err := parseUser(capturedOne(t, "user-show-preserved"))
+	if err != nil || !p.Preserved || !p.Locked {
+		t.Fatalf("a preserved user read with user_show: %+v, %v", p, err)
+	}
+	g, err := parseGroup(capturedOne(t, "group-show-before-member-group-del"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Name != "p24cap-mg1" || g.UniqueID == "" || g.GIDNumber == "" || g.Type != TypePosix || !slices.Equal(g.MemberGroups, []string{"p24cap-mdel"}) || g.MemberUsers != nil {
+		t.Fatalf("group = %+v", g)
+	}
+	m, err := parseGroup(capturedOne(t, "group-show-marker"))
+	if err != nil || m.Type != TypeNonPosix || len(m.Description) != 1 || !strings.HasPrefix(m.Description[0], "pilot.group-history/v1 name=") {
+		t.Fatalf("the marker read with group_show: %+v, %v", m, err)
+	}
+	// A recreated user is another entry.
+	before, errB := parseUser(capturedOne(t, "user-show-before-recreate"))
+	after, errA := parseUser(capturedOne(t, "user-show-after-recreate"))
+	if errB != nil || errA != nil || before.Name != after.Name || before.UniqueID == after.UniqueID || before.UIDNumber == after.UIDNumber {
+		t.Fatalf("recreate: %+v / %+v (%v %v)", before, after, errB, errA)
+	}
+}

@@ -28,6 +28,25 @@ func captured(t *testing.T, name string) []map[string]any {
 	return env.Result.Result
 }
 
+// capturedOne reads result.result of a captured user_show or group_show: one
+// entry, not a list.
+func capturedOne(t *testing.T, name string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "freeiparpc", "testdata", name+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env struct {
+		Result struct {
+			Result map[string]any `json:"result"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil || env.Result.Result == nil {
+		t.Fatalf("%s: no entry in result.result (%v)", name, err)
+	}
+	return env.Result.Result
+}
+
 func liveUsers(t *testing.T, names ...string) []LiveUser {
 	t.Helper()
 	var out []LiveUser
