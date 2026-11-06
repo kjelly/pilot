@@ -826,6 +826,68 @@ class SecretScanGateTests(LocalGitFixture):
         self.assertEqual("BLOCKED", result["status"])
         self.assertEqual([], calls)
 
+    def history_only_value(self):
+        """A value that one commit adds and the next scrubs: only the history holds it. Returns the path of
+        the --secret-file that lists it and the value."""
+        value = fx.mixed(18)
+        secrets_file = self.root / "known.txt"
+        secrets_file.write_text(f"\n{value}\n", encoding="utf-8")
+        self.commit("notes.txt", f"scratch {value}\n", "chore: scratch")
+        self.commit("notes.txt", "scrubbed\n", "chore: scrub")
+        self.rebind()
+        return secrets_file, value
+
+    def test_a_known_value_only_the_history_holds_refuses_through_create_pr(self):
+        secrets_file, value = self.history_only_value()
+        body = self.state / "body.md"
+        body.write_text("Fixes #123\n\n## Tests\n- regression passed\n", encoding="utf-8")
+
+        def create(**kwargs):
+            with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), \
+                    patch.object(issue_gate, "remote_head", return_value=self.evidence["head_sha"]), \
+                    patch.object(create_pr, "check_pr", return_value={"number": 9, "url": "u"}), \
+                    patch.object(create_pr, "execute", return_value="") as execute:
+                result = create_pr.create(repo="OWNER/REPO", issue=123, worktree=self.worktree, evidence=self.path,
+                                          title="fix: issue 123 proper fix", body_file=body, **kwargs)
+            return result, execute
+
+        result, execute = create(secret_files=[secrets_file])
+        self.assertEqual("BLOCKED", result["status"], result)
+        self.assertIn("known-value", " ".join(result["blockers"]))
+        self.assertNotIn(value, json.dumps(result))
+        execute.assert_not_called()
+        # Control: the same branch without the file goes through (the scanner finds nothing else).
+        result, execute = create()
+        self.assertEqual("DRAFT_PR_CREATED", result["status"], result)
+        self.assertTrue(execute.called)
+
+    def test_a_known_value_only_the_history_holds_refuses_through_mark_ready(self):
+        secrets_file, value = self.history_only_value()
+        head = self.evidence["head_sha"]
+        pr = {"number": 9, "state": "OPEN", "isDraft": True, "headRefName": "issue/123-fix", "headRefOid": head,
+              "mergeable": "MERGEABLE", "url": "u", "body": "Fixes #123\n\nTests pass"}
+
+        def mark(**kwargs):
+            calls = []
+            with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), \
+                    patch.object(issue_gate, "remote_head", return_value=head), \
+                    patch.object(mark_ready, "command", side_effect=[pr, NO_REVIEW_THREADS,
+                                                                     {"isDraft": False, "headRefOid": head, "url": "u"}]), \
+                    patch.object(mark_ready.pr_ci, "inspect", return_value={"status": "CI_PASSED"}), \
+                    patch.object(mark_ready, "execute", side_effect=lambda a, cwd: calls.append(a) or ""):
+                result = mark_ready.mark_ready(repo="OWNER/REPO", issue=123, pr=9, worktree=self.worktree,
+                                               evidence=self.path, confirm_complete=True, **kwargs)
+            return result, calls
+
+        result, calls = mark(secret_files=[secrets_file])
+        self.assertEqual("BLOCKED", result["status"], result)
+        self.assertIn("known-value", " ".join(result["blockers"]))
+        self.assertNotIn(value, json.dumps(result))
+        self.assertEqual([], calls)
+        result, calls = mark()
+        self.assertEqual("READY_FOR_REVIEW", result["status"], result)
+        self.assertEqual([["gh", "pr", "ready", "9", "-R", "OWNER/REPO"]], calls, "control: without the file Ready goes through")
+
     def test_create_pr_and_mark_ready_hand_the_secret_files_to_the_gate(self):
         secret = self.root / "known.txt"
         secret.write_text(f"{fx.mixed(16)}\n", encoding="utf-8")

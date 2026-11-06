@@ -546,12 +546,21 @@ class LongLines(RangeFixture):
         self.assertEqual([], result.errors)
 
     def test_the_tail_of_a_removed_long_line_is_not_this_commits(self):
-        body = self.filler(scan.LINE_WINDOW + 500) + f" Authorization: Bearer {fx.mixed(40)}"
+        # The commit replaces the long line by a short one: the file has an added line (so it is judged at
+        # all) and a removed line whose tail, past the first window, still holds the credential and a known value.
+        value = fx.mixed(24)
+        body = self.filler(scan.LINE_WINDOW + 500) + f" Authorization: Bearer {fx.mixed(40)} {value}"
         leak = self.commit_body(body)
-        self.assertEqual("FOUND", self.scan().status, "premise: the commit that adds it is found")
+        known = [value.encode()]
+        self.assertEqual(["authorization-header", "known-value"], sorted(f.cls for f in self.scan(known=known).findings),
+                         "premise: the commit that adds the long line is found")
         self.r.write("long.txt", "short\n")
-        self.r.commit("remove the long line")
-        self.assertClean(self.scan(base=leak))
+        self.r.commit("replace the long line")
+        patch = self.r.out("show", "--format=", "-U0", "HEAD")
+        self.assertIn("\n+short", patch, "premise: a line is added")
+        self.assertTrue(any(line.startswith("-") and len(line) > scan.LINE_WINDOW for line in patch.splitlines()),
+                        "premise: the long line is removed")
+        self.assertClean(self.scan(base=leak, known=known))
 
     # -- known values past and across the window boundary ------------------------------------------
 
@@ -661,6 +670,21 @@ class KnownValues(RangeFixture):
         self.assertEqual(1, result.known_values)
         self.assertNotIn(self.value, self.dump(result), "the path that holds the value is masked too")
         self.assertEqual("FOUND", result.status)
+
+    def test_a_known_value_in_the_new_path_of_a_pure_rename_is_found(self):
+        # With rename detection a 100% rename has no `+++` line and no hunk: the new path would never be read.
+        self.r.write("old.txt", "some plain content, a few lines long\n" * 4)
+        before = self.r.commit("old")
+        self.r.git("mv", "old.txt", f"{self.value}.txt")
+        self.r.git("commit", "-q", "-m", "rename")
+        shown = self.r.out("show", "--format=", "-M", "HEAD")
+        self.assertIn("rename to", shown, "premise: git calls it a rename")
+        self.assertNotIn("+++ ", shown, "premise: and then shows no new path in a header")
+        result = self.scan(base=before, known=[self.value.encode()])
+        self.assertEqual([(scan.KNOWN_VALUE, "(path contains a supplied secret value)")], self.classes(result))
+        self.assertNotIn(self.value, self.dump(result))
+        # Control: the same rename to a name that is not on the list is clean.
+        self.assertClean(self.scan(base=before, known=[fx.mixed(18).encode()]))
 
     def test_without_the_value_the_same_history_is_clean(self):
         self.r.write("notes.txt", f"the password is {self.value}\n")
@@ -816,6 +840,53 @@ class FailClosed(RangeFixture):
                 self.assertIn("fetch", " ".join(result.errors))
                 self.assertTrue(scan.refusal_messages(result))
                 self.assertEqual("ERROR", scan.ScanResult(base="x", head="y", errors=["e"]).status)
+
+    def test_a_walk_that_covers_another_number_of_commits_than_the_range_has_is_an_error(self):
+        # git log -p is the only reader of the commits; rev-list --count is the independent number it is
+        # checked against. A leak that a short walk missed must never come back as CLEAN.
+        self.r.write("a.txt", f"Authorization: Bearer {fx.mixed(40)}\n")
+        self.r.commit("leak")
+        self.r.write("b.txt", "b\n")
+        self.r.commit("b")
+        honest = self.scan()
+        self.assertEqual(("FOUND", 2, []), (honest.status, honest.commits, honest.errors), "premise: two commits, no error")
+        real = scan._run_git
+
+        def counting(delta):
+            def run(repo, *args):
+                p = real(repo, *args)
+                if args[:2] == ("rev-list", "--count"):
+                    return subprocess.CompletedProcess(p.args, 0, str(int(p.stdout) + delta).encode() + b"\n", b"")
+                return p
+            return run
+
+        for delta in (1, -1):
+            with self.subTest(delta=delta), mock.patch.object(scan, "_run_git", counting(delta)):
+                result = self.scan()
+                self.assertEqual("FOUND", result.status, "the finding is kept ...")
+                self.assertTrue(result.errors, "... and the walk's count is called out")
+                self.assertIn("scanned 2 commit(s)", " ".join(result.errors))
+        # A clean walk that disagrees with the count is an ERROR, not CLEAN.
+        self.r.git("reset", "-q", "--hard", "HEAD~2")
+        self.r.write("c.txt", "c\n")
+        self.r.commit("c")
+        with mock.patch.object(scan, "_run_git", counting(1)):
+            result = self.scan()
+        self.assertEqual("ERROR", result.status)
+        self.assertTrue(scan.error_messages(result))
+
+    def test_an_external_diff_driver_cannot_hide_content(self):
+        # git runs an external diff only when asked; the scan asks for none, whatever the configuration says.
+        driver = self.r.base / "ext-diff.sh"
+        driver.write_text("#!/bin/sh\necho nothing to see here\n", encoding="utf-8")
+        driver.chmod(0o755)
+        self.r.git("config", "diff.external", str(driver))
+        self.r.write("a.txt", f"Authorization: Bearer {fx.mixed(40)}\n")
+        self.r.commit("leak")
+        shown = self.r.out("show", "--format=", "--ext-diff", "HEAD")
+        self.assertIn("nothing to see here", shown, "premise: the driver does replace the diff when asked")
+        with mock.patch.dict(os.environ, {"GIT_EXTERNAL_DIFF": str(driver)}):
+            self.assertEqual([(scan.AUTHORIZATION, "a.txt")], self.classes(self.scan()))
 
     # -- a shallow clone ----------------------------------------------------------------------------
 

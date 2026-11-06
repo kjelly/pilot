@@ -600,6 +600,12 @@ class SecretScanTests(unittest.TestCase):
                 self.assertEqual(1, scan.call_count)
                 gate.secret_scan_errors(repo, {**pr, "baseRefOid": self.base2_sha}, (), cache)
                 self.assertEqual(2, scan.call_count, "a different base is scanned again")
+                # The head is part of the key too: a PR that gained a commit while --wait polled is a new range.
+                gate.secret_scan_errors(repo, {**pr, "headRefOid": self.base2_sha}, (), cache)
+                self.assertEqual(3, scan.call_count, "a different head is scanned again")
+                for key in (pr, {**pr, "baseRefOid": self.base2_sha}, {**pr, "headRefOid": self.base2_sha}):
+                    gate.secret_scan_errors(repo, key, (), cache)
+                self.assertEqual(3, scan.call_count, "every (base, head) pair is scanned once")
 
     def test_a_base_that_is_not_in_the_clone_blocks_with_a_fetch_hint(self):
         with tempfile.TemporaryDirectory() as tmp:
