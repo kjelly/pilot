@@ -326,9 +326,12 @@ ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（�
    active）。處理：重跑同一個指令（`activate` 的 apply 是冪等的）；要收掉就跑 `deactivate`。
 7. **`pilot edit --actions`、scenario 與 MCP apply 的 `activate_breakglass`／`deactivate_breakglass` 失敗就是
    步驟失敗**：預檢查拒絕、鎖忙碌（TUI 不等待）、掉鎖、playbook 失敗時，`--actions` 結束碼非 0、stderr 是
-   `step N (activate_breakglass): break-glass <name> was not activated: <原因>`（之前的步驟保留），apply 整個
-   rollback、MCP 回 `apply_failed`；失敗的啟用不留紀錄，失敗的停用不改紀錄。（修正之前這些情況回報成功，
-   結束碼 0 而沒有任何緊急存取生效。）**plan 不執行這兩個步驟**：它回 warning「沒有執行 …」，不是失敗；要實際
+   `step N (activate_breakglass): break-glass <name>: activation failed: <原因>`（停用是 `deactivation failed`；
+   之前的步驟保留），apply 整個 rollback、MCP 回 `apply_failed`。訊息只說操作失敗，不說啟用的狀態，因為失敗可以
+   發生在 FreeIPA 已改動之後：原因寫 `activation applied to FreeIPA but recording state failed`（或停用的
+   `deactivation applied to …`）時規則已在 FreeIPA 生效（或已被收掉）、本機紀錄卻沒寫進去，要用
+   `pilot access breakglass status` 檢查，再重跑或 `deactivate`。FreeIPA 還沒改動之前就失敗的（預檢查拒絕、鎖忙碌、
+   playbook 失敗）不留紀錄，失敗的停用不改紀錄。（修正之前這些情況回報成功，結束碼 0 而沒有任何緊急存取生效。）**plan 不執行這兩個步驟**：它回 warning「沒有執行 …」，不是失敗；要實際
    啟用請 apply，或用 `pilot access breakglass activate`。
 8. **apply 的 rollback 收不回已生效的 breakglass 啟用**：scenario 裡 `activate_breakglass` 之後的步驟失敗時，
    workspace 的檔案會還原，但啟用已在 FreeIPA 生效、也已記錄。把 breakglass 步驟放在 scenario 最後，或失敗後

@@ -145,7 +145,7 @@ func Activate(ctx context.Context, opts ActivateOptions) (Activation, error) {
 	}
 	store, err := openActivationStore(opts.StateDir)
 	if err != nil {
-		return Activation{}, err
+		return Activation{}, fmt.Errorf("accessgrants: activation applied to FreeIPA but recording state failed: %w", err)
 	}
 	if err := store.Mutate(func(activations []Activation) ([]Activation, error) {
 		return append(activations, record), nil
@@ -206,11 +206,13 @@ func Deactivate(ctx context.Context, opts DeactivateOptions) error {
 		return err
 	}
 
+	// The rule is already pruned from FreeIPA here, so a failure from now on is
+	// not "nothing happened": say which half is missing, as Activate does.
 	store, err := openActivationStore(opts.StateDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("accessgrants: deactivation applied to FreeIPA but recording state failed: %w", err)
 	}
-	return store.Mutate(func(activations []Activation) ([]Activation, error) {
+	if err := store.Mutate(func(activations []Activation) ([]Activation, error) {
 		for i, a := range activations {
 			if a.Name == opts.Name && a.IsActive(now) {
 				activations[i].Deactivated = true
@@ -218,7 +220,10 @@ func Deactivate(ctx context.Context, opts DeactivateOptions) error {
 			}
 		}
 		return activations, nil
-	})
+	}); err != nil {
+		return fmt.Errorf("accessgrants: deactivation applied to FreeIPA but recording state failed: %w", err)
+	}
+	return nil
 }
 
 // Status returns every recorded activation for name (or all names when

@@ -220,7 +220,7 @@ func TestEditAutomationDriverRosterGrantsFlow_ActivateDeactivateBreakglass(t *te
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	err := d.activateBreakglass(&r, "infra-emergency", "30m", "outage", "INC-1")
-	if err == nil || !strings.Contains(err.Error(), "break-glass infra-emergency was not activated") || !strings.Contains(err.Error(), "exited 1") {
+	if err == nil || !strings.Contains(err.Error(), "break-glass infra-emergency: activation failed") || !strings.Contains(err.Error(), "exited 1") {
 		t.Fatalf("activateBreakglass() error = %v, want the failure of the playbook", err)
 	}
 	if !strings.HasPrefix(r.banner, "❌") || !strings.Contains(r.banner, "exited 1") {
@@ -237,7 +237,7 @@ func TestEditAutomationDriverRosterGrantsFlow_ActivateDeactivateBreakglass(t *te
 		t.Fatalf("the lock was taken %d times and released %d", lock.Acquired(), lock.Released())
 	}
 	// And deactivating goes through the same funnel.
-	if err := d.deactivateBreakglass(&r, "infra-emergency"); err == nil || !strings.Contains(err.Error(), "break-glass infra-emergency was not deactivated") {
+	if err := d.deactivateBreakglass(&r, "infra-emergency"); err == nil || !strings.Contains(err.Error(), "break-glass infra-emergency: deactivation failed") {
 		t.Fatalf("deactivateBreakglass() error = %v, want the failure of the playbook", err)
 	}
 	if reqs := lock.Requests(); len(reqs) != 2 || reqs[1].Wait != 0 || lock.Acquired() != 2 {

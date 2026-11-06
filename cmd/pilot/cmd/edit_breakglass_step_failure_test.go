@@ -51,6 +51,7 @@ type breakglassEnv struct {
 	stateDir string
 	calls    string
 	exitFile string
+	bin      string            // the directory with the fake ansible-playbook (fake-lock workspaces)
 	lock     *fakeIdentityLock // nil when the production precheck is used
 	funnel   *funnelEnv        // nil when the fake lock is used
 }
@@ -80,14 +81,37 @@ func newBreakglassEnv(t *testing.T) *breakglassEnv {
 		exitFile: filepath.Join(t.TempDir(), "exit"),
 	}
 	e.setPlaybookExit("0")
-	bin := t.TempDir()
-	script := "#!/bin/sh\necho \"ansible-playbook $*\" >> '" + e.calls + "'\nexit $(cat '" + e.exitFile + "')\n"
-	if err := os.WriteFile(filepath.Join(bin, "ansible-playbook"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	e.bin = t.TempDir()
+	e.writePlaybook("")
+	t.Setenv("PATH", e.bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	e.lock = useFakeIdentityLock(t)
 	return e
+}
+
+// writePlaybook (re)writes the fake ansible-playbook: it logs its arguments, runs
+// after (shell, may be empty) and exits with the status in the exit file.
+func (e *breakglassEnv) writePlaybook(after string) {
+	e.t.Helper()
+	script := "#!/bin/sh\necho \"ansible-playbook $*\" >> '" + e.calls + "'\n" + after + "\nexit $(cat '" + e.exitFile + "')\n"
+	if err := os.WriteFile(filepath.Join(e.bin, "ansible-playbook"), []byte(script), 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// failRecordingAfterThePlaybook makes the playbook succeed and then take the
+// write permission off the state directory, so accessgrants applies the rule to
+// FreeIPA (the playbook ran and exited 0) and then cannot record it. The lock
+// sidecar already exists by then (the screens read the state first), so reading
+// the state still works and only the write fails. Directory permissions do not
+// bind root: the case is skipped there (and its accessgrants-level twin,
+// TestActivateAndDeactivate_FailingToRecordSaysFreeIPAWasChanged, does not need them).
+func (e *breakglassEnv) failRecordingAfterThePlaybook() {
+	e.t.Helper()
+	if os.Geteuid() == 0 {
+		e.t.Skip("directory permissions do not bind root")
+	}
+	e.t.Cleanup(func() { _ = os.Chmod(e.stateDir, 0o700) })
+	e.writePlaybook("chmod 0500 '" + e.stateDir + "'")
 }
 
 // newBreakglassEnvOnInventory is the workspace whose inventory.yml (the one the
@@ -199,6 +223,80 @@ func assertStepFailed(t *testing.T, err error, step int, action string, want ...
 			t.Fatalf("err = %v, want it to hold %q", err, w)
 		}
 	}
+	// The wording of a failed step never states the access state: an activation
+	// can fail after the rule is in FreeIPA, so "was not activated" would be false.
+	for _, claim := range []string{"was not activated", "was not deactivated"} {
+		if strings.Contains(err.Error(), claim) {
+			t.Fatalf("err = %v claims %q; the operation can fail after it changed FreeIPA", err, claim)
+		}
+	}
+}
+
+// What an MCP client reads of the two actions (the registry's Description) says
+// what happens on a failure and in a plan, because it cannot try them to find
+// out: a failure fails the step, an apply rolls back the workspace files and not
+// an access change that already took effect, and a plan skips the step with a
+// warning instead of running it.
+func TestBreakglassActionDescriptionsSayWhatAFailureAndAPlanDo(t *testing.T) {
+	found := map[string]bool{}
+	for _, def := range editActionRegistry() {
+		name := def.Spec.Name
+		if name != "activate_breakglass" && name != "deactivate_breakglass" {
+			continue
+		}
+		found[name] = true
+		for _, want := range []string{"fails the step", "exits non-zero", "rolls the workspace files back", "already took effect", "A plan does not run this step", "skips it with a warning"} {
+			if !strings.Contains(def.Spec.Description, want) {
+				t.Errorf("%s: Description %q does not say %q", name, def.Spec.Description, want)
+			}
+		}
+	}
+	if len(found) != 2 {
+		t.Fatalf("found %v, want both break-glass actions in the registry", found)
+	}
+}
+
+// The activation and the deactivation can fail after the playbook changed
+// FreeIPA: the rule is applied (or pruned) and only the local record could not
+// be written. The step fails, and what it says must stay true: it names the
+// failure and carries the cause that says FreeIPA was changed, and it does not
+// claim the access is not in effect.
+func TestBreakglassStepFailureAfterTheApplySaysFreeIPAWasChanged(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		action string
+		steps  func() []editAction
+		want   []string
+	}{
+		{"activation", "activate_breakglass", func() []editAction { return append(breakglassGrantSteps(), activateStep()) },
+			[]string{"break-glass " + breakglassGrant + ": activation failed", "activation applied to FreeIPA but recording state failed"}},
+		{"deactivation", "deactivate_breakglass", func() []editAction { return []editAction{deactivateStep()} },
+			[]string{"break-glass " + breakglassGrant + ": deactivation failed", "deactivation applied to FreeIPA but recording state failed"}},
+	} {
+		for feName, run := range breakglassFrontEnds() {
+			t.Run(tc.name+"/"+feName, func(t *testing.T) {
+				e := newBreakglassEnv(t)
+				steps := tc.steps()
+				if tc.action == "deactivate_breakglass" {
+					// the grant has to exist: set it up through the router, then break the recording
+					if err := breakglassFrontEnds()["terminal router"](t, e.dir, breakglassGrantSteps()); err != nil {
+						t.Fatalf("setting up the grant: %v", err)
+					}
+				}
+				e.failRecordingAfterThePlaybook()
+
+				err := run(t, e.dir, steps)
+
+				assertStepFailed(t, err, len(steps), tc.action, tc.want...)
+				if got := e.ran(); len(got) != 1 {
+					t.Fatalf("ansible-playbook ran %d times (%q), want once: the case must fail after the apply", len(got), got)
+				}
+				if e.lock.Acquired() != 1 || e.lock.Released() != 1 {
+					t.Fatalf("the lock was taken %d times and released %d, want one each", e.lock.Acquired(), e.lock.Released())
+				}
+			})
+		}
+	}
 }
 
 // Every failure of the activation fails the step, with the cause, on every
@@ -221,7 +319,7 @@ func TestBreakglassActivationFailureFailsTheAutomationStep(t *testing.T) {
 			env: func(t *testing.T) *breakglassEnv {
 				return newBreakglassEnvOnInventory(t, proxyCommandVars)
 			},
-			want:         []string{"break-glass " + breakglassGrant + " was not activated", "取鎖前檢查沒有通過", "ProxyCommand"},
+			want:         []string{"break-glass " + breakglassGrant + ": activation failed", "取鎖前檢查沒有通過", "ProxyCommand"},
 			playbookRuns: 0,
 			lockTaken:    -1,
 		},
@@ -232,7 +330,7 @@ func TestBreakglassActivationFailureFailsTheAutomationStep(t *testing.T) {
 				e.lock.Err = &sshdial.TunnelError{Kind: sshdial.ErrLockBusy, ExitCode: 75}
 				return e
 			},
-			want:         []string{"break-glass " + breakglassGrant + " was not activated", "take the FreeIPA identity lock", "TUI 不等待"},
+			want:         []string{"break-glass " + breakglassGrant + ": activation failed", "take the FreeIPA identity lock", "TUI 不等待"},
 			playbookRuns: 0,
 			lockTaken:    0,
 		},
@@ -243,7 +341,7 @@ func TestBreakglassActivationFailureFailsTheAutomationStep(t *testing.T) {
 				e.lock.OnAcquire = func(context.Context) { e.lock.Lose() }
 				return e
 			},
-			want:         []string{"break-glass " + breakglassGrant + " was not activated", "lock lost"},
+			want:         []string{"break-glass " + breakglassGrant + ": activation failed", "lock lost"},
 			playbookRuns: -1,
 			lockTaken:    1,
 		},
@@ -254,7 +352,7 @@ func TestBreakglassActivationFailureFailsTheAutomationStep(t *testing.T) {
 				e.setPlaybookExit("1")
 				return e
 			},
-			want:         []string{"break-glass " + breakglassGrant + " was not activated", "exited 1"},
+			want:         []string{"break-glass " + breakglassGrant + ": activation failed", "exited 1"},
 			playbookRuns: 1,
 			lockTaken:    1,
 		},
@@ -350,7 +448,7 @@ func TestBreakglassDeactivationFailureFailsTheAutomationStep(t *testing.T) {
 
 				err := run(t, e.dir, []editAction{deactivateStep()})
 
-				assertStepFailed(t, err, 1, "deactivate_breakglass", append([]string{"break-glass " + breakglassGrant + " was not deactivated"}, tc.want...)...)
+				assertStepFailed(t, err, 1, "deactivate_breakglass", append([]string{"break-glass " + breakglassGrant + ": deactivation failed"}, tc.want...)...)
 				if got := e.active(); got != 1 {
 					t.Fatalf("%d activations in effect after a failed deactivation, want 1 (the access was not ended)", got)
 				}

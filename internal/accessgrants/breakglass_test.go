@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -236,5 +237,49 @@ func TestStatus_MostRecentFirst(t *testing.T) {
 	}
 	if len(statuses) != 3 || !statuses[0].ActivatedAt.Equal(base.Add(2*time.Hour)) {
 		t.Fatalf("expected most-recent-first ordering, got: %+v", statuses)
+	}
+}
+
+// An activation or a deactivation can fail after the playbook has already
+// changed FreeIPA: the rule is applied (or pruned) and the state file cannot be
+// written. The error must say which half is missing, so that the caller never
+// reports "not activated" for access that is in effect (the step wording of
+// pilot edit relies on it). A directory where the state file belongs is a real
+// failure of the write that works for root as well.
+func TestActivateAndDeactivate_FailingToRecordSaysFreeIPAWasChanged(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, roster, stateDir string, runner *fakeRunner) error
+		want string
+	}{
+		{"activate", func(t *testing.T, roster, stateDir string, runner *fakeRunner) error {
+			_, err := Activate(context.Background(), ActivateOptions{
+				Lock: testLock(t), RosterFile: roster, Inventory: "inv.yml", StateDir: stateDir,
+				Name: "infra-emergency", Duration: 45 * time.Minute, Reason: "x", Ticket: "y", Now: now, Runner: runner,
+			})
+			return err
+		}, "activation applied to FreeIPA but recording state failed"},
+		{"deactivate", func(t *testing.T, roster, stateDir string, runner *fakeRunner) error {
+			return Deactivate(context.Background(), DeactivateOptions{
+				Lock: testLock(t), RosterFile: roster, Inventory: "inv.yml", StateDir: stateDir,
+				Name: "infra-emergency", Now: now, Runner: runner,
+			})
+		}, "deactivation applied to FreeIPA but recording state failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(stateDir, activationStateFilename), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runner := &fakeRunner{exitCode: 0}
+			err := tc.run(t, writeBreakglassTestRoster(t), stateDir, runner)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+			if runner.lastArgs == nil {
+				t.Fatal("the playbook did not run: the case does not exercise a failure after the apply")
+			}
+		})
 	}
 }
