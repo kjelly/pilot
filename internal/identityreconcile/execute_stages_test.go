@@ -367,6 +367,7 @@ func TestExecuteNeverDeletesOrDisablesTheLogin(t *testing.T) {
 	e := newRunEnv(t, rosterWith("", ""))
 	r := &runner{des: e.opts.Desired, opts: e.opts}
 	r.users2 = map[string]LiveUser{"admin": {Name: "admin", UniqueID: "u1", UIDNumber: "1"}}
+	admin := e.f.users["admin"]
 	if v, why := r.disableVerdict(op(KindUserDisable, "admin"), shown{present: true, user: LiveUser{Name: "admin", UniqueID: "u1"}}); v != verdictConflict || !strings.Contains(why, "login") {
 		t.Fatalf("disable the login: %v %q", v, why)
 	}
@@ -388,7 +389,9 @@ func TestExecuteNeverDeletesOrDisablesTheLogin(t *testing.T) {
 	// deletion: the login is refused before anything is sent.
 	rr := &runner{des: e.opts.Desired, opts: e.opts, rpc: e.f, ctx: e.ctx}
 	rr.opts.BatchLimit = MaxBatch
-	rr.users2 = map[string]LiveUser{"admin": {Name: "admin", UniqueID: "00000000-0000-0000-0000-000000000001", UIDNumber: "1000001"}}
+	// The login as the observation saw it: every other predicate passes, so only the
+	// rule about the login can refuse it.
+	rr.users2 = map[string]LiveUser{"admin": {Name: "admin", UniqueID: admin.uuid, UIDNumber: admin.uid}}
 	rr.res = &Result{Ops: []OpResult{{Operation: op(KindUserDelete, "admin"), Stage: "S8", Outcome: OutcomeNotExecuted}}}
 	rr.batches = map[Stage]int{}
 	if rr.deleteUsers([]int{0}) || rr.res.Ops[0].Outcome != OutcomeConflictFailed || strings.Contains(strings.Join(e.f.writes(), ","), "user_del") {

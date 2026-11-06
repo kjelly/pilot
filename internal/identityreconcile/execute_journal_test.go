@@ -471,3 +471,48 @@ func TestExecuteResolvesAWriteTheSignalCutOff(t *testing.T) {
 		t.Fatalf("journal problems %v, verify %+v", e.journal.problem, res.Verify)
 	}
 }
+
+// The journal never says "sending" of a batch the executor's own gate stopped, and
+// a batch the client's gate refused (it was recorded, and was not sent) gets its
+// result: not executed.
+func TestExecuteJournalsWhatTheGatesStopped(t *testing.T) {
+	t.Run("the executor's gate: no record of a batch that was never going to be sent", func(t *testing.T) {
+		e := newRunEnv(t, fullRoster)
+		seedFullRoster(e.f)
+		e.entry.onPrepare = func() { e.lock.Lose() }
+		_, err := e.execute()
+		if !errors.Is(err, ErrWrites) {
+			t.Fatalf("err = %v", err)
+		}
+		for _, id := range e.journal.ids() {
+			if strings.HasSuffix(id, ":sending") {
+				t.Fatalf("journal %v holds a sending of a batch the gate stopped", e.journal.ids())
+			}
+		}
+	})
+	t.Run("the client's gate: sending, then a result that says it was not executed", func(t *testing.T) {
+		e := newRunEnv(t, fullRoster)
+		seedFullRoster(e.f)
+		e.f.writeGate = func(context.Context, string) error { return errors.New("closed by the client") }
+		res, err := e.execute()
+		if !errors.Is(err, ErrWrites) || len(e.f.writes()) != 0 || res.Verify.Done {
+			t.Fatalf("err %v, writes %v, verify %+v", err, e.f.writes(), res.Verify)
+		}
+		ids := e.journal.ids()
+		if !slices.Contains(ids, "S1-b1:sending") || !slices.Contains(ids, "S1-b1:result") {
+			t.Fatalf("journal = %v", ids)
+		}
+		for _, ev := range e.journal.events {
+			if ev.ID == "S1-b1:result" {
+				for _, r := range ev.Payload.(resultEvent).Results {
+					if r.Outcome != OutcomeNotExecuted {
+						t.Fatalf("result %+v", r)
+					}
+				}
+				if ev.Payload.(resultEvent).Stopped == nil || !strings.Contains(ev.Payload.(resultEvent).Stopped.Reason, "client refused") {
+					t.Fatalf("the stop is not in the result event: %+v", ev.Payload)
+				}
+			}
+		}
+	})
+}

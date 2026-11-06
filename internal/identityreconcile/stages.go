@@ -133,10 +133,18 @@ func refusedBeforeSending(err error) bool {
 	return errors.As(err, &gate) || errors.As(err, &na)
 }
 
-// beforeSending runs what must hold before a batch or a call leaves: the record of
-// it in the journal (without which nothing is sent: fail closed, AGENTS.md §5.8),
-// and the engine's own gate for each command, besides the one in the client.
+// beforeSending runs what must hold before a batch or a call leaves: the engine's
+// own gate for each command (besides the one in the client), and then the record of
+// it in the journal, without which nothing is sent (fail closed, AGENTS.md §5.8).
+// The gate comes first so that the journal never says "sending" of a batch the gate
+// stopped.
 func (r *runner) beforeSending(s Stage, batch int, id string, items []pending) bool {
+	for _, it := range items {
+		if err := r.opts.Gate.Check(r.ctx, it.cmd.Method); err != nil {
+			r.stopAt(s, "the write gate refused: "+err.Error())
+			return false
+		}
+	}
 	ops := make([]Operation, len(items))
 	for i, it := range items {
 		ops[i] = it.op
@@ -144,12 +152,6 @@ func (r *runner) beforeSending(s Stage, batch int, id string, items []pending) b
 	if err := r.record(Event{Kind: EventOp, ID: id + ":sending", Payload: sendEvent{Phase: "sending", Stage: s.String(), Batch: batch, Operations: ops}}); err != nil {
 		r.stopAt(s, "the journal refused the record of the batch, so it was not sent: "+err.Error())
 		return false
-	}
-	for _, it := range items {
-		if err := r.opts.Gate.Check(r.ctx, it.cmd.Method); err != nil {
-			r.stopAt(s, "the write gate refused: "+err.Error())
-			return false
-		}
 	}
 	return true
 }
@@ -181,7 +183,10 @@ func (r *runner) sendBatch(s Stage, items []pending) {
 	got, err := r.rpc.Batch(r.ctx, cmds)
 	switch {
 	case err != nil && refusedBeforeSending(err):
+		// The client's own gate or allowlist refused it: not sent, so not executed,
+		// and the journal that said "sending" says what became of it.
 		r.stopAt(s, "the client refused to send: "+err.Error())
+		r.afterSending(s, n, id, items)
 		return
 	case err != nil:
 		r.sent = true
@@ -214,6 +219,7 @@ func (r *runner) sendOne(s Stage, it pending) {
 	raw, err := r.rpc.Call(r.ctx, it.cmd)
 	if err != nil && refusedBeforeSending(err) {
 		r.stopAt(s, "the client refused to send: "+err.Error())
+		r.afterSending(s, n, id, items)
 		return
 	}
 	r.sent = true
