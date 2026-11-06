@@ -110,7 +110,13 @@ func FromRoster(root map[string]any) (Desired, error) {
 	if err != nil {
 		return d, fmt.Errorf("freeipa.%w", err)
 	}
-	if p, present := admin["principal"]; present && p != nil {
+	if p, present := admin["principal"]; present {
+		// A null principal is refused like the other nulls: the playbook's
+		// `principal | default('admin')` keeps None, and kinit then asks for
+		// `None@REALM`, where Go would log in as admin.
+		if p == nil {
+			return d, fmt.Errorf("freeipa.admin.%w", nullKeyError("principal", "a string"))
+		}
 		s, ok := p.(string)
 		if !ok || s == "" {
 			return d, fmt.Errorf("freeipa.admin.principal must be a string")
@@ -188,16 +194,16 @@ func desiredUser(u map[string]any, name, state string) (DesiredUser, error) {
 	if du.Last, err = stringOr(u, "last", name); err != nil {
 		return du, err
 	}
-	if du.DisplayName, err = optionalString(u, "display_name"); err != nil {
+	if du.DisplayName, err = unmanagedString(u, "display_name"); err != nil {
 		return du, err
 	}
-	if du.Email, err = optionalString(u, "email"); err != nil {
+	if du.Email, err = unmanagedString(u, "email"); err != nil {
 		return du, err
 	}
-	if du.UID, err = optionalID(u, "uid"); err != nil {
+	if du.UID, err = unmanagedID(u, "uid"); err != nil {
 		return du, err
 	}
-	if du.GID, err = optionalID(u, "gid"); err != nil {
+	if du.GID, err = unmanagedID(u, "gid"); err != nil {
 		return du, err
 	}
 	if du.Shell, err = stringOr(u, "login_shell", "/bin/bash"); err != nil {
@@ -288,7 +294,7 @@ func desiredGroup(g map[string]any, name string) (DesiredGroup, error) {
 	if dg.Description, err = stringOr(g, "description", name); err != nil {
 		return dg, err
 	}
-	if dg.GID, err = optionalID(g, "gid"); err != nil {
+	if dg.GID, err = unmanagedID(g, "gid"); err != nil {
 		return dg, err
 	}
 	if dg.Type, err = stringOr(g, "type", "posix"); err != nil {
@@ -336,9 +342,21 @@ func nameList(m map[string]any, key string) ([]string, bool, error) {
 	return out, true, nil
 }
 
-// stringOr, optionalString, boolOr and optionalID read a scalar of a roster
-// object: absent is the default (or "not managed"), a present null is an
-// error, never the default (nullKeyError), as is any other wrong type.
+// A scalar of a roster object is read by one of two kinds of helper, and a
+// new key has to pick one, because they answer an explicit null differently:
+//
+//   - stringOr and boolOr give a key Go's own default when it is absent, and
+//     refuse a null (nullKeyError), as they do any other wrong type: the
+//     playbook does not read a null as that default (it is false, "None", a
+//     missing argument, or a failed gate), so taking the default would
+//     reconcile something the Ansible engine does not.
+//   - unmanagedString and unmanagedID read a key Go does not manage when it
+//     is not declared. Absent and null are both "not managed" (nil): the
+//     playbook leaves the argument out for both (`is none`), and the roster
+//     editor writes a null for a blank integer field.
+//
+// optionalMapping (the login sections) and declaredMapping (password,
+// ssh_keys, membership) do the same for mappings.
 func stringOr(m map[string]any, key, def string) (string, error) {
 	v, present := m[key]
 	if !present {
@@ -354,13 +372,12 @@ func stringOr(m map[string]any, key, def string) (string, error) {
 	return s, nil
 }
 
-func optionalString(m map[string]any, key string) (*string, error) {
+// unmanagedString is a string key that is not managed when it is absent or
+// null (see stringOr).
+func unmanagedString(m map[string]any, key string) (*string, error) {
 	v, present := m[key]
-	if !present {
+	if !present || v == nil {
 		return nil, nil
-	}
-	if v == nil {
-		return nil, nullKeyError(key, "a string")
 	}
 	s, ok := v.(string)
 	if !ok {
@@ -389,13 +406,12 @@ func boolOr(m map[string]any, key string, def bool) (bool, error) {
 	return b, nil
 }
 
-func optionalID(m map[string]any, key string) (*int64, error) {
+// unmanagedID is a numeric id key that is not managed when it is absent or
+// null (see stringOr).
+func unmanagedID(m map[string]any, key string) (*int64, error) {
 	v, present := m[key]
-	if !present {
+	if !present || v == nil {
 		return nil, nil
-	}
-	if v == nil {
-		return nil, nullKeyError(key, "a non-negative integer")
 	}
 	n, ok := wholeNumber(v)
 	if !ok || n < 0 {

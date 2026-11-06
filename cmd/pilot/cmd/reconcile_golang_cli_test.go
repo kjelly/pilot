@@ -472,6 +472,32 @@ func TestReconcileGolangRefusesWrongTypedRosterValues(t *testing.T) {
 	}
 }
 
+// The other side of the rows above: a null uid, gid, display_name or email is
+// "not managed", the same as leaving the key out (the playbook leaves the
+// argument out for both, and the roster editor writes a null for a blank id),
+// so the preview still runs and plans nothing for them.
+func TestReconcileGolangPreviewReadsANullIdAsNotManaged(t *testing.T) {
+	f := newFakeIPA(t, "p1-self")
+	withFakeDialer(t, f)
+	roster := strings.Replace(captureRoster, "%s", "/bin/sh", 1)
+	roster = strings.Replace(roster, "{name: p1-nokeys, ", "{name: p1-nokeys, uid: ~, gid: ~, email: ~, ", 1)
+	roster = strings.Replace(roster, "display_name: P1 NoKeys, ", "display_name: ~, ", 1)
+	if !strings.Contains(roster, "uid: ~, gid: ~, email: ~") || !strings.Contains(roster, "display_name: ~") {
+		t.Fatalf("the roster was not changed:\n%s", roster)
+	}
+	golangWorkspace(t, roster, nil)
+	out, err := runGolangPreview(t)
+	if err != nil {
+		t.Fatalf("preview: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "計畫：沒有任何寫入") {
+		t.Fatalf("a null id or display name planned a change:\n%s", out)
+	}
+	if _, methods := f.requests(); slices.Contains(methods, "user_add") || slices.Contains(methods, "user_mod") {
+		t.Fatalf("a write was sent: %v", methods)
+	}
+}
+
 // withRosterServer is the capture roster declaring freeipa.server as the given
 // YAML value.
 func withRosterServer(value string) string {

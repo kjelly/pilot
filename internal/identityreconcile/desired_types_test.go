@@ -237,7 +237,9 @@ func groupWith(field string) string {
 }
 
 // A null user or group scalar, and a null top-level users or groups, is
-// refused too: Go used to read it as its default. How the playbook reads each
+// refused too, except the keys Go does not manage (uid, gid, display_name,
+// email: see TestFromRosterReadsANullIdOrDisplayNameAsNotManaged): Go used to
+// read it as its default. How the playbook reads each
 // (ansible-core 2.19.2, the normalize expressions of
 // tasks/freeipa-identity-normalize-users-groups.yml and the consumers in
 // freeipa-identity-apply.yml replayed; lines in the commit message):
@@ -249,13 +251,14 @@ func groupWith(field string) string {
 //	home_directory          no --homedir                               Go: /home/<name>
 //	state, type             gate fails (not in the list)               Go: present, posix
 //	users, groups           `loop` must resolve to a list, not None    Go: empty list
-//	uid, gid, display_name,
-//	email                   `is none`: left out, same as absent        Go: not managed
+//
+// (uid, gid, display_name, email: `is none`, left out, the same as absent,
+// and Go does not manage them either: accepted, not a row here.)
 func TestFromRosterRefusesANullScalarOrList(t *testing.T) {
-	str, boolean, id := "a string", "true or false", "a non-negative integer"
+	str, boolean := "a string", "true or false"
 	for _, tc := range []struct{ field, want string }{
-		{"state", str}, {"enabled", boolean}, {"first", str}, {"last", str}, {"display_name", str},
-		{"email", str}, {"login_shell", str}, {"home_directory", str}, {"uid", id}, {"gid", id},
+		{"state", str}, {"enabled", boolean}, {"first", str}, {"last", str},
+		{"login_shell", str}, {"home_directory", str},
 	} {
 		t.Run("user "+tc.field, func(t *testing.T) {
 			refusedByAdapter(t, userDoc(tc.field, "~"),
@@ -263,7 +266,7 @@ func TestFromRosterRefusesANullScalarOrList(t *testing.T) {
 		})
 	}
 	for _, tc := range []struct{ field, want string }{
-		{"state", str}, {"type", str}, {"description", str}, {"gid", id},
+		{"state", str}, {"type", str}, {"description", str},
 	} {
 		t.Run("group "+tc.field, func(t *testing.T) {
 			refusedByAdapter(t, groupWith(tc.field+": ~"),
@@ -287,6 +290,54 @@ func TestFromRosterRefusesANullScalarOrList(t *testing.T) {
 			refusedByAdapter(t, "schema_version: 3\n"+key+":\n", key+" must be a list, not null")
 		})
 	}
+}
+
+// The keys Go does not manage when they are not declared (uid, gid,
+// display_name, email, group gid) read a null as "not managed": the playbook
+// leaves the argument out for null and for absent alike (`is none`,
+// freeipa-identity-apply.yml :1006, :1128-:1134), and the roster editor writes
+// a null for a blank integer field (edit_tui_roster.go, "留空 = 未設定"), so
+// refusing it would refuse rosters pilot itself writes and the shipped example.
+func TestFromRosterReadsANullIdOrDisplayNameAsNotManaged(t *testing.T) {
+	for _, field := range []string{"uid", "gid", "display_name", "email"} {
+		for _, form := range []struct{ name, doc string }{
+			{"~", userDoc(field, "~")},
+			{"an empty line", "schema_version: 3\nusers:\n  - name: alice\n  - name: bob\n    " + field + ":\n"},
+			{"absent", userDoc2("")},
+		} {
+			t.Run("user "+field+" "+form.name, func(t *testing.T) {
+				root := roster(t, form.doc)
+				if v := inventory.ValidateRoster(root); len(v) != 0 {
+					t.Fatalf("validator: %v", v)
+				}
+				d, err := FromRoster(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				bob := d.Users[1]
+				if bob.UID != nil || bob.GID != nil || bob.DisplayName != nil || bob.Email != nil {
+					t.Fatalf("not managed means nil: %+v", bob)
+				}
+			})
+		}
+	}
+	for _, form := range []struct{ name, doc string }{
+		{"~", groupWith("gid: ~")},
+		{"an empty line", "schema_version: 3\ngroups:\n  - name: team-a\n    category: team\n    gid:\n"},
+	} {
+		t.Run("group gid "+form.name, func(t *testing.T) {
+			g := desired(t, form.doc).Groups[0]
+			if g.GID != nil {
+				t.Fatalf("not managed means nil: %+v", g)
+			}
+		})
+	}
+	// A value is still read, and a wrong type is still refused.
+	if bob := desired(t, userDoc("uid", "1200")).Users[1]; bob.UID == nil || *bob.UID != 1200 {
+		t.Fatalf("uid = %v", bob.UID)
+	}
+	refusedByAdapter(t, userDoc("uid", `"12x"`), "uid must be a non-negative integer")
+	refusedByAdapter(t, userDoc("email", "5"), "email must be a string")
 }
 
 // An entry with `state: absent` is not reconciled, but the playbook's gates

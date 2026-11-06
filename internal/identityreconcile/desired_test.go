@@ -105,6 +105,8 @@ func TestFromRosterRefuses(t *testing.T) {
 		{"freeipa is a string", "schema_version: 3\nfreeipa: ipa.example.test\nusers:\n  - {name: a}\n", "freeipa must be a mapping, not string"},
 		{"freeipa.admin is a string", "schema_version: 3\nfreeipa:\n  admin: bob\nusers:\n  - {name: a}\n", "freeipa.admin must be a mapping, not string"},
 		{"numeric principal", "schema_version: 3\nfreeipa:\n  admin: {principal: 5}\nusers:\n  - {name: a}\n", "principal must be a string"},
+		{"null principal", "schema_version: 3\nfreeipa:\n  admin: {principal: ~}\nusers:\n  - {name: a}\n", "freeipa.admin.principal must be a string, not null (leave it out, or give a value)"},
+		{"principal as an empty line", "schema_version: 3\nfreeipa:\n  admin:\n    principal:\nusers:\n  - {name: a}\n", "freeipa.admin.principal must be a string, not null"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := FromRoster(roster(t, tc.doc))
