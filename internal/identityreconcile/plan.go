@@ -56,6 +56,10 @@ const (
 	// a roster whose password forms were not read). Only an operation that is
 	// planned is blocked on it; a user whose password needs no change is not.
 	BlockedPasswordValue = "password_value_unsupported"
+	// BlockedProtectedObject: running the plan would take away what the engine
+	// itself needs: the login it uses, its path to admins, or a group FreeIPA
+	// depends on (selflock.go).
+	BlockedProtectedObject = "protected_object"
 )
 
 // Change is one attribute's live and desired value; From is nil for an
@@ -124,6 +128,7 @@ func (p Plan) Writes() int { return len(p.Operations) }
 // the reads returned, preserved ones included (LiveUser.Preserved).
 func Build(d Desired, users []LiveUser, groups []LiveGroup) Plan {
 	b := &builder{
+		principal:     d.Principal,
 		plan:          Plan{Operations: []Operation{}, Blocked: []Blocked{}},
 		liveUsers:     map[string]LiveUser{},
 		preserved:     map[string]bool{},
@@ -149,11 +154,13 @@ func Build(d Desired, users []LiveUser, groups []LiveGroup) Plan {
 	b.users(d)
 	b.membership(d)
 	b.deletions(d)
+	b.protect(d.Principal)
 	b.finish()
 	return b.plan
 }
 
 type builder struct {
+	principal     string
 	plan          Plan
 	liveUsers     map[string]LiveUser
 	preserved     map[string]bool
