@@ -28,7 +28,10 @@ import (
 //
 //  1. every reference to the playbook in non-test code is on a list that says
 //     what it is (a funnel that locks, or data that reaches one);
-//  2. each funnel on the list takes the lock before its first execution call;
+//  2. each funnel on the list takes the lock before its first execution call
+//     (a decommission's lock is the run's, taken after the approval and before
+//     decommission.Apply, so before the client's uninstall; its converge step only
+//     reads it: E41);
 //  3. the contract of freeipa-identity keeps the shape that leaves the funnels
 //     of (1) as the only ways to run it (no dependency on it, no canonical_apply
 //     remediation, not part of site.yml, no other lifecycle playbook);
@@ -76,7 +79,7 @@ var identityLockReferences = []lockReference{
 	{File: "cmd/pilot/cmd/deploy_catalog.go", Token: "lit:playbooks/apply/freeipa-identity-apply.yml", Count: 1, Role: "data",
 		Reason: "the catalog entry of the freeipa-identity component. Every deploy and reconcile of it reaches executeRecordedDeploymentCore, which sets IdentityLock (funnel check), and executeDeploymentTransaction refuses the playbook without one"},
 	{File: "cmd/pilot/cmd/host_decommission.go", Token: "lit:playbooks/apply/freeipa-identity-apply.yml", Count: 1, Role: "data",
-		Reason: "wires the path into providers.FreeIPAClientProviderConfig next to its IdentityLock; the converge step that runs it is a funnel ((*freeipaIdentityConvergeStep).Execute) and the read-only queries do not mutate"},
+		Reason: "wires the path into providers.FreeIPAClientProviderConfig; the converge step that runs it is a funnel ((*freeipaIdentityConvergeStep).Execute, which refuses without the lock runHostDecommissionApply holds for the run) and the read-only queries do not mutate"},
 	{File: "cmd/pilot/cmd/access_cli.go", Token: "ref:accessgrants.DefaultPlaybook", Count: 1, Role: "data",
 		Reason: "the default of the --playbook flag; whatever it names reaches accessgrants.applyPlan, which locks unconditionally"},
 	{File: "cmd/pilot/cmd/access_breakglass_cli.go", Token: "ref:accessgrants.DefaultPlaybook", Count: 2, Role: "data",
@@ -249,14 +252,18 @@ func referenceProblems(t *testing.T, src lockSources, allow []lockReference) []s
 // playbook, and what takes the lock and what runs the playbook in it. Names are
 // matched, not receivers' types: the funnels are reached through interfaces.
 type lockFunnel struct {
-	File     string
-	Recv     string // receiver type name, "" for a function
-	Func     string
-	Closure  string // a closure assigned to this name inside Func; "" for the function body
-	Acquire  callMatcher
-	Execute  callMatcher
-	Before   []callMatcher // calls that must also come after the lock
-	Requires string        // when set, the lock call must be unconditional (top level of the body) unless it sits in `if <Requires> {` (compared as source text: an identifier or a condition)
+	File    string
+	Recv    string // receiver type name, "" for a function
+	Func    string
+	Closure string // a closure assigned to this name inside Func; "" for the function body
+	Acquire callMatcher
+	Execute callMatcher
+	Before  []callMatcher // calls that must also come after the lock
+	// Confirm are the calls that make the confirmation the lock comes after (D1:
+	// the lock is taken after the confirmation, before the first thing that runs):
+	// each must exist, and none may come after the lock.
+	Confirm  []callMatcher
+	Requires string // when set, the lock call must be unconditional (top level of the body) unless it sits in `if <Requires> {` (compared as source text: an identifier or a condition)
 	// Nested is for a funnel whose lock call sits in a closure the function hands
 	// to something else (a TUI screen's handler): the branch check cannot look
 	// into it, only the order of the calls is checked.
@@ -297,9 +304,22 @@ var identityLockFunnels = []lockFunnel{
 		Execute: callMatcher{"runner.Run", "method:runner.Run"},
 	},
 	{
+		// The converge step does not take the lock: it reads the one the run holds
+		// from its context before it runs the playbook, and refuses without it.
 		File: "internal/decommission/providers/freeipa_client.go", Recv: "freeipaIdentityConvergeStep", Func: "Execute",
-		Acquire: callMatcher{"the provider's IdentityLock", "sel:IdentityLock"},
+		Acquire: callMatcher{"identitylock.Require", "method:identitylock.Require"},
 		Execute: callMatcher{"e.provider.exec", "sel:exec"},
+	},
+	{
+		// The decommission's lock is the run's, and the converge is its last step: the
+		// first change is the client's uninstall. The lock comes after the approval
+		// (the confirmation) and before decommission.Apply, so before the first
+		// step; only a plan that is not completed and runs the converge step takes it.
+		File: "cmd/pilot/cmd/host_decommission.go", Func: "runHostDecommissionApply",
+		Acquire:  callMatcher{"the run's lock acquirer", "ident:acquire"},
+		Execute:  callMatcher{"decommission.Apply", "method:decommission.Apply"},
+		Confirm:  []callMatcher{{"ds.RecordApproval", "sel:RecordApproval"}},
+		Requires: "needsLock",
 	},
 	{
 		// The apply closure: after every confirmation (announce), before
@@ -319,10 +339,11 @@ var identityLockFunnels = []lockFunnel{
 // wraps it); Execute is the first thing the entry does that runs, asks or
 // changes something; Before are the other things that must come after it. The
 // funnels of identityLockFunnels refuse an inventory at the moment they take the
-// lock, which for most of them is late: a decommission's converge step runs
-// after the client is uninstalled and the roster entry tombstoned, a deploy's
-// after preflight, the freeipa-server dependency and the `--check`, a drift
-// repair's after its probe.
+// lock, which for most of them is late: a deploy's after preflight, the
+// freeipa-server dependency and the `--check`, a drift repair's after its probe
+// (a decommission's was after the client's uninstall and the roster tombstone
+// until E41 moved the lock to the front of the run; its precheck still comes
+// before the approval).
 var identityPrecheckFunnels = []lockFunnel{
 	{
 		File: "cmd/pilot/cmd/identity_lock.go", Func: "identityLockFor",
@@ -365,14 +386,16 @@ var identityPrecheckFunnels = []lockFunnel{
 		Execute: callMatcher{"accessgrants.Deactivate", "method:accessgrants.Deactivate"},
 	},
 	{
-		// A plan already completed replays its receipt and runs nothing: the
-		// precheck is for the plans that go on to run steps, and comes before the
-		// approval is recorded.
+		// A plan already completed replays its receipt and runs nothing, and a plan
+		// without the converge step never runs the identity playbook: the precheck is
+		// for the plans that take the lock (needsLock) and comes before the approval
+		// is recorded. identityLockFor makes it and builds the run's Acquirer, which
+		// is called after the approval (the funnel above).
 		File: "cmd/pilot/cmd/host_decommission.go", Func: "runHostDecommissionApply",
-		Acquire:  callMatcher{"precheckHostDecommissionIdentityLock", "ident:precheckHostDecommissionIdentityLock"},
+		Acquire:  callMatcher{"identityLockFor", "ident:identityLockFor"},
 		Execute:  callMatcher{"decommission.Apply", "method:decommission.Apply"},
 		Before:   []callMatcher{{"ds.RecordApproval", "sel:RecordApproval"}},
-		Requires: "plan.Status != decommission.PlanStatusCompleted",
+		Requires: "needsLock",
 	},
 	{
 		// Before the plan is rendered or the operator is asked, before the
@@ -433,11 +456,12 @@ var identityProtectedCalls = []protectedCall{
 
 // identityLockBuilders are the places that build a funnel's Acquirer by calling
 // newIdentityLock themselves, with how many calls each makes. The others get
-// theirs from identityLockFor, which makes the precheck first. These two cannot:
-// the deploy runner learns the host it locks in two steps (the candidates for
-// the precheck, the included hosts after availability for the lock), and the
-// decommission provider registry is built for plan as well, which does not
-// lock. Each has its precheck on identityPrecheckFunnels.
+// theirs from identityLockFor, which makes the precheck first (a decommission's
+// run does: runHostDecommissionApply, and no provider registry builds a lock any
+// more, so `plan`, which builds the registry too, never builds one). The deploy
+// runner cannot: it learns the host it locks in two steps (the candidates for the
+// precheck, the included hosts after availability for the lock). It has its
+// precheck on identityPrecheckFunnels.
 var identityLockBuilders = []struct {
 	File   string
 	Count  int
@@ -445,7 +469,6 @@ var identityLockBuilders = []struct {
 }{
 	{"cmd/pilot/cmd/identity_lock.go", 1, "identityLockFor: the precheck, then the Acquirer"},
 	{"cmd/pilot/cmd/deploy.go", 1, "executeRecordedDeploymentCore builds the apply step's Acquirer from the included hosts; precheckIdentityDeploy (called first by executeRecordedDeploymentWithAuthorizationResult) asks about the candidates"},
-	{"cmd/pilot/cmd/host_decommission.go", 1, "buildHostDecommissionProviders builds the converge step's Acquirer from hostDecommissionIdentityLockRequest; precheckHostDecommissionIdentityLock (called by runHostDecommissionApply) asks the same request"},
 }
 
 // enclosingFuncs lists, for every call in file that m matches, the name of the
@@ -581,6 +604,18 @@ func firstCall(body *ast.BlockStmt, m callMatcher) (token.Pos, bool) {
 	return first, first != token.NoPos
 }
 
+// lastCallAfter reports whether any call in body that m matches comes after pos.
+func lastCallAfter(body *ast.BlockStmt, m callMatcher, pos token.Pos) bool {
+	after := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && m.matches(call) && call.Pos() > pos {
+			after = true
+		}
+		return !after
+	})
+	return after
+}
+
 // lockIsUnconditional reports whether the call that m matches is a statement of
 // the body itself (or of `if <cond> {` when cond is not empty), not behind a
 // branch that could skip it.
@@ -662,6 +697,17 @@ func funnelProblems(t *testing.T, src lockSources, funnels []lockFunnel) []strin
 				problems = append(problems, where+": "+b.Desc+" is called before the lock is taken")
 			}
 		}
+		for _, c := range f.Confirm {
+			first, found := firstCall(body, c)
+			switch {
+			case !found:
+				problems = append(problems, where+": no call of "+c.Desc+": the lint no longer recognizes where the confirmation is made")
+			case locks && lastCallAfter(body, c, lockAt):
+				problems = append(problems, where+": "+c.Desc+" is called after the lock is taken: the lock comes after the confirmation and before the first step (D1)")
+			case locks && first > lockAt:
+				problems = append(problems, where+": "+c.Desc+" is called after the lock is taken")
+			}
+		}
 		if locks && !f.Nested && !lockIsUnconditional(body, f.Acquire, f.Requires) {
 			problems = append(problems, where+": the lock is taken behind a branch that can skip it")
 		}
@@ -716,10 +762,9 @@ func optionsLiteralProblems(t *testing.T, src lockSources) []string {
 // nil, which is the safety net; this check makes the omission fail a test of the
 // caller too, at the literal, before anyone runs it.
 var lockedOptionTypes = map[string]string{
-	"accessgrants.ReconcileOptions":         "Lock",
-	"accessgrants.ActivateOptions":          "Lock",
-	"accessgrants.DeactivateOptions":        "Lock",
-	"providers.FreeIPAClientProviderConfig": "IdentityLock",
+	"accessgrants.ReconcileOptions":  "Lock",
+	"accessgrants.ActivateOptions":   "Lock",
+	"accessgrants.DeactivateOptions": "Lock",
 }
 
 // optionLiteralProblems: every composite literal of one of those types in
@@ -1085,25 +1130,52 @@ func applyPlan(lock Acquirer, runner R) {
 	t.Run("an access options literal without the lock", func(t *testing.T) {
 		src := lockSources{"cmd/pilot/cmd/new.go": "package cmd\nvar o = accessgrants.ReconcileOptions{Inventory: \"i\"}\nvar d = accessgrants.DeactivateOptions{Lock: l}\nvar c = providers.FreeIPAClientProviderConfig{}\n"}
 		p := optionLiteralProblems(t, src)
-		if len(p) != 2 || !strings.Contains(p[0], "ReconcileOptions literal without Lock") || !strings.Contains(p[1], "FreeIPAClientProviderConfig literal without IdentityLock") {
-			t.Fatalf("problems = %v, want exactly the Reconcile and the decommission literal", p)
+		if len(p) != 1 || !strings.Contains(p[0], "ReconcileOptions literal without Lock") {
+			t.Fatalf("problems = %v, want exactly the Reconcile literal (the decommission config carries no lock any more: the run's owner holds it)", p)
 		}
 	})
 	// Part 6's own mechanics, on synthetic sources.
 	t.Run("a precheck behind a condition that is not the required one", func(t *testing.T) {
-		src := lockSources{"cmd/pilot/cmd/host_decommission.go": "package cmd\nfunc runHostDecommissionApply(plan P) {\n\tif plan.Status != Other {\n\t\tprecheckHostDecommissionIdentityLock(ctx)\n\t}\n\tds.RecordApproval()\n\tdecommission.Apply(ctx)\n}\n"}
+		src := lockSources{"cmd/pilot/cmd/host_decommission.go": "package cmd\nfunc runHostDecommissionApply(plan P) {\n\tif plan.Status != Other {\n\t\tidentityLockFor(ctx)\n\t}\n\tds.RecordApproval()\n\tdecommission.Apply(ctx)\n}\n"}
 		funnel := []lockFunnel{{
 			File: "cmd/pilot/cmd/host_decommission.go", Func: "runHostDecommissionApply",
-			Acquire:  callMatcher{"precheck", "ident:precheckHostDecommissionIdentityLock"},
+			Acquire:  callMatcher{"precheck", "ident:identityLockFor"},
 			Execute:  callMatcher{"decommission.Apply", "method:decommission.Apply"},
-			Requires: "plan.Status != decommission.PlanStatusCompleted",
+			Requires: "needsLock",
 		}}
 		if p := funnelProblems(t, src, funnel); len(p) != 1 || !strings.Contains(p[0], "behind a branch") {
 			t.Fatalf("problems = %v, want the branch refusal", p)
 		}
-		src["cmd/pilot/cmd/host_decommission.go"] = "package cmd\nfunc runHostDecommissionApply(plan P) {\n\tif plan.Status != decommission.PlanStatusCompleted {\n\t\tprecheckHostDecommissionIdentityLock(ctx)\n\t}\n\tdecommission.Apply(ctx)\n}\n"
+		src["cmd/pilot/cmd/host_decommission.go"] = "package cmd\nfunc runHostDecommissionApply(plan P) {\n\tif needsLock {\n\t\tidentityLockFor(ctx)\n\t}\n\tdecommission.Apply(ctx)\n}\n"
 		if p := funnelProblems(t, src, funnel); len(p) != 0 {
 			t.Fatalf("the allowed condition is reported: %v", p)
+		}
+	})
+	t.Run("the lock taken before the confirmation, or a confirmation that is not recognized", func(t *testing.T) {
+		funnel := []lockFunnel{{
+			File: "cmd/pilot/cmd/host_decommission.go", Func: "runHostDecommissionApply",
+			Acquire:  callMatcher{"the run's lock acquirer", "ident:acquire"},
+			Execute:  callMatcher{"decommission.Apply", "method:decommission.Apply"},
+			Confirm:  []callMatcher{{"ds.RecordApproval", "sel:RecordApproval"}},
+			Requires: "needsLock",
+		}}
+		const file = "cmd/pilot/cmd/host_decommission.go"
+		good := lockSources{file: "package cmd\nfunc runHostDecommissionApply() {\n\tds.RecordApproval()\n\tif needsLock {\n\t\theld, err = acquire(ctx)\n\t}\n\tdecommission.Apply(ctx)\n}\n"}
+		if p := funnelProblems(t, good, funnel); len(p) != 0 {
+			t.Fatalf("the good order is reported: %v", p)
+		}
+		early := lockSources{file: "package cmd\nfunc runHostDecommissionApply() {\n\tif needsLock {\n\t\theld, err = acquire(ctx)\n\t}\n\tds.RecordApproval()\n\tdecommission.Apply(ctx)\n}\n"}
+		if p := funnelProblems(t, early, funnel); len(p) != 1 || !strings.Contains(p[0], "ds.RecordApproval is called after the lock is taken") {
+			t.Fatalf("problems = %v, want the confirmation-order refusal", p)
+		}
+		// One approval before the lock and a second one after it: the late one counts.
+		twice := lockSources{file: "package cmd\nfunc runHostDecommissionApply() {\n\tds.RecordApproval()\n\tif needsLock {\n\t\theld, err = acquire(ctx)\n\t}\n\tds.RecordApproval()\n\tdecommission.Apply(ctx)\n}\n"}
+		if p := funnelProblems(t, twice, funnel); len(p) != 1 || !strings.Contains(p[0], "called after the lock is taken") {
+			t.Fatalf("problems = %v, want the late approval refused", p)
+		}
+		none := lockSources{file: "package cmd\nfunc runHostDecommissionApply() {\n\tif needsLock {\n\t\theld, err = acquire(ctx)\n\t}\n\tdecommission.Apply(ctx)\n}\n"}
+		if p := funnelProblems(t, none, funnel); len(p) != 1 || !strings.Contains(p[0], "no longer recognizes where the confirmation is made") {
+			t.Fatalf("problems = %v, want the unrecognized-confirmation refusal", p)
 		}
 	})
 	t.Run("a nested funnel is checked for order only", func(t *testing.T) {
@@ -1189,8 +1261,22 @@ func TestIdentityLockLintFailsOnMutationsOfTheRealFunnels(t *testing.T) {
 			"without taking the lock",
 		},
 		"the converge step without the lock": {
-			"internal/decommission/providers/freeipa_client.go", "held, err := e.provider.cfg.IdentityLock(ctx)", "held, err := e.provider.cfg.Skip(ctx)",
+			"internal/decommission/providers/freeipa_client.go", "held, err := identitylock.Require(ctx)", "held, err := identitylock.Skip(ctx)",
 			"without taking the lock",
+		},
+		// E41: the decommission's lock is the run's, taken after the approval and
+		// before decommission.Apply.
+		"the decommission run takes no lock": {
+			"cmd/pilot/cmd/host_decommission.go", "held, err = acquire(ctx)", "held, err = nil, nil",
+			"runHostDecommissionApply: runs the playbook (decommission.Apply) without taking the lock: no call of the run's lock acquirer",
+		},
+		"the decommission run takes the lock before the approval": {
+			"cmd/pilot/cmd/host_decommission.go", "acquire, err = identityLockFor(ctx, lockRequest)\n", "acquire, err = identityLockFor(ctx, lockRequest)\n\t\theld, err = acquire(ctx)\n",
+			"ds.RecordApproval is called after the lock is taken",
+		},
+		"the decommission run takes the lock only for some plans": {
+			"cmd/pilot/cmd/host_decommission.go", "\t\theld, err = acquire(ctx)\n\t\tif err != nil {\n\t\t\treturn nil, fmt.Errorf(\"host decommission %s was not started", "\t\tif plan.Host.Name != \"\" {\n\t\t\theld, err = acquire(ctx)\n\t\t}\n\t\tif err != nil {\n\t\t\treturn nil, fmt.Errorf(\"host decommission %s was not started",
+			"the lock is taken behind a branch that can skip it",
 		},
 		"the deploy apply step without the lock": {
 			"cmd/pilot/cmd/deploy.go", "acquired, err := options.IdentityLock(ctx)", "acquired, err := options.NoLock(ctx)",
@@ -1215,10 +1301,6 @@ func TestIdentityLockLintFailsOnMutationsOfTheRealFunnels(t *testing.T) {
 		"the TUI builds its options without the lock": {
 			"cmd/pilot/cmd/edit_tui_roster_breakglass.go", "\t\t\tLock:        lock,\n", "",
 			"ActivateOptions literal without Lock",
-		},
-		"the decommission config is built without the lock": {
-			"cmd/pilot/cmd/host_decommission.go", "\t\tIdentityLock: newIdentityLock(hostDecommissionIdentityLockRequest(invPath, runtime)),\n", "",
-			"FreeIPAClientProviderConfig literal without IdentityLock",
 		},
 		"a new unlisted literal": {
 			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "var sneakyPlaybook = \"playbooks/apply/freeipa-identity-apply.yml\"\n\nvar accessReconcileEffects",
@@ -1255,14 +1337,18 @@ func TestIdentityLockLintFailsOnMutationsOfTheRealFunnels(t *testing.T) {
 			"pushBreakglassActivateTicket: runs the playbook (accessgrants.Activate) without taking the lock: no call of tuiIdentityLockFor",
 		},
 		"the decommission apply without the precheck": {
-			"cmd/pilot/cmd/host_decommission.go", "err = precheckHostDecommissionIdentityLock(ctx, dir, plan)", "err = nil",
-			"runHostDecommissionApply: runs the playbook (decommission.Apply) without taking the lock: no call of precheckHostDecommissionIdentityLock",
+			"cmd/pilot/cmd/host_decommission.go", "acquire, err = identityLockFor(ctx, lockRequest)", "acquire, err = wrapLock(ctx, lockRequest)",
+			"runHostDecommissionApply: runs the playbook (decommission.Apply) without taking the lock: no call of identityLockFor",
 		},
 		"the decommission precheck after the approval": {
 			"cmd/pilot/cmd/host_decommission.go",
-			"\t\terr = precheckHostDecommissionIdentityLock(ctx, dir, plan)\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t\tif err := ds.RecordApproval(plan.ID, plan.PlanHash, decommissionActor(), \"approve\", reason, now); err != nil {\n\t\t\treturn nil, fmt.Errorf(\"record approval: %w\", err)\n\t\t}\n",
-			"\t\tif err := ds.RecordApproval(plan.ID, plan.PlanHash, decommissionActor(), \"approve\", reason, now); err != nil {\n\t\t\treturn nil, fmt.Errorf(\"record approval: %w\", err)\n\t\t}\n\t\terr = precheckHostDecommissionIdentityLock(ctx, dir, plan)\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n",
+			"\t\tacquire, err = identityLockFor(ctx, lockRequest)\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t}\n\tif plan.Status != decommission.PlanStatusCompleted {\n\t\tif err := ds.RecordApproval(plan.ID, plan.PlanHash, decommissionActor(), \"approve\", reason, now); err != nil {\n\t\t\treturn nil, fmt.Errorf(\"record approval: %w\", err)\n\t\t}\n\t\tif err := decommission.RequireApproval(ds, plan.ID, plan.PlanHash, plan.Environment); err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t}\n",
+			"\t\tacquire, err = wrapLock(ctx, lockRequest)\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t}\n\tif plan.Status != decommission.PlanStatusCompleted {\n\t\tif err := ds.RecordApproval(plan.ID, plan.PlanHash, decommissionActor(), \"approve\", reason, now); err != nil {\n\t\t\treturn nil, fmt.Errorf(\"record approval: %w\", err)\n\t\t}\n\t\tif err := decommission.RequireApproval(ds, plan.ID, plan.PlanHash, plan.Environment); err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t}\n\tif needsLock {\n\t\tacquire, err = identityLockFor(ctx, lockRequest)\n\t}\n",
 			"ds.RecordApproval is called before the lock is taken",
+		},
+		"a new direct Acquirer builder in the decommission file": {
+			"cmd/pilot/cmd/host_decommission.go", "func planHasIdentityConverge(", "func sneakyDecommissionLock() {\n\t_ = newIdentityLock(identityLockRequest{})\n}\n\nfunc planHasIdentityConverge(",
+			"cmd/pilot/cmd/host_decommission.go: calls newIdentityLock directly",
 		},
 		"the deploy precheck removed": {
 			"cmd/pilot/cmd/deploy.go", "err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars)", "err = nil",

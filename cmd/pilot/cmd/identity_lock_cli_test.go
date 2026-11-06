@@ -3,7 +3,6 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,8 +10,6 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/accessgrants"
-	"github.com/kjelly/pilot/internal/contract"
-	"github.com/kjelly/pilot/internal/decommission/providers"
 	"github.com/kjelly/pilot/internal/outbound"
 	"github.com/kjelly/pilot/internal/sshdial"
 )
@@ -152,52 +149,4 @@ func TestDeployCoreBuildsTheIdentityLockRequest(t *testing.T) {
 			t.Fatal("a component that is not the identity playbook took the lock")
 		}
 	})
-}
-
-// pilot host decommission: the provider registry it builds hands the
-// central converge step the identity lock, for the inventory it generated
-// and the Ansible runtime of the workspace.
-func TestBuildHostDecommissionProvidersGivesTheConvergeStepTheIdentityLock(t *testing.T) {
-	dir := t.TempDir()
-	hostsYAML := "hosts:\n  client1:\n    ansible_host: \"10.0.0.9\"\n    env: sandbox\n    roles:\n      - freeipa-client\n    freeipa_roster_file: roster.yaml\n"
-	if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte(hostsYAML), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "roster.yaml"), []byte("schema_version: 2\nfreeipa: {server: ipa1.ipa.pilot.internal}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PILOT_DATA_DIR", t.TempDir())
-	events := filepath.Join(t.TempDir(), "events.log")
-	bin := t.TempDir()
-	script := "#!/bin/sh\necho \"run $(basename \"$1\")\" >> '" + events + "'\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(bin, "ansible-playbook"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	lock := useFakeIdentityLock(t)
-	lock.Events = func(e string) { appendEvent(t, events, e) }
-
-	provs, err := buildHostDecommissionProviders(dir, "client1", contract.Catalog{}, io.Discard, noStageAuthorization())
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider, ok := provs[providers.FreeIPAClientProviderID].(*providers.FreeIPAClientProvider)
-	if !ok {
-		t.Fatalf("providers = %v", provs)
-	}
-	step, err := provider.ExecutorForStep(providers.Step{Action: providers.ActionFreeIPAIdentityApplyConverge,
-		TargetIdentity: "client1.ipa.pilot.internal", Params: map[string]string{"inventory_alias": "client1"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := step.Execute(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	req := onlyRequest(t, lock)
-	if req.Inventory != filepath.Join(dir, "inventory.yml") || req.Hosts != nil || req.Wait != identityLockWaitDefault || req.Runtime == nil || req.Runtime.TempDir == "" {
-		t.Fatalf("request = %+v: want the generated inventory, the freeipa-server group, the default wait and the workspace's Ansible runtime", req)
-	}
-	if got, want := readEvents(t, events), []string{"lock ipa-1", "run freeipa-identity-apply.yml", "release ipa-1"}; strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("events = %v, want %v", got, want)
-	}
 }

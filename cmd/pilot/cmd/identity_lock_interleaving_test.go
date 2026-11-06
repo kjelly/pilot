@@ -348,21 +348,32 @@ func (h *interleaveHarness) accessFunnel(name string, lock identitylock.Acquirer
 }
 
 // decommissionFunnel runs the central converge step of a host decommission
-// (the funnel behind pilot host decommission) with the simulated run `name`.
+// (the funnel behind pilot host decommission) with the simulated run `name`,
+// the way runHostDecommissionApply runs it: the owner of the run takes the lock
+// first, binds the context of the steps to it and gives it back after the last
+// one; the step reads the lock from that context and takes none of its own. (The
+// owner itself is driven end to end by host_decommission_lock_test.go.)
 func (h *interleaveHarness) decommissionFunnel(name string, lock identitylock.Acquirer) error {
 	runner := ansible.NewRunner()
 	runner.Binary = h.binary(name)
 	runner.Timeout = 2 * time.Minute
 	p := providers.NewFreeIPAClientProvider(providers.FreeIPAClientProviderConfig{
 		Executor: runner, InventoryAlias: "web-1", ServerInventory: h.inv,
-		IdentityApplyPlaybook: identityPlaybookForTest, IdentityLock: lock,
+		IdentityApplyPlaybook: identityPlaybookForTest,
 	})
 	step, err := p.ExecutorForStep(providers.Step{Action: providers.ActionFreeIPAIdentityApplyConverge,
 		TargetIdentity: "web-1.ipa.pilot.internal", Params: map[string]string{"inventory_alias": "web-1"}})
 	if err != nil {
 		return err
 	}
-	return step.Execute(context.Background())
+	held, err := lock(context.Background())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = held.Release() }()
+	ctx, cancel := held.Bind(context.Background())
+	defer cancel()
+	return step.Execute(ctx)
 }
 
 // deployFunnel runs executeDeploymentTransaction of the identity playbook

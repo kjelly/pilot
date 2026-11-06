@@ -119,14 +119,16 @@ type FreeIPAClientProviderConfig struct {
 	ClientStageArgs func() ([]string, error)
 	ServerStageArgs func() ([]string, error)
 
-	// IdentityLock takes the FreeIPA server's /etc/ipa lock for the central
-	// identity-apply convergence (the only step that runs the identity apply
-	// playbook with a mutating tag; the read-only host_absent_inspect queries
-	// do not lock). Required by that step: nil fails it before the playbook
-	// runs, so a provider built without it cannot converge. The caller builds
-	// it (it resolves the server from ServerInventory, which this package
-	// cannot) — cmd/pilot/cmd/host_decommission.go.
-	IdentityLock identitylock.Acquirer
+	// There is no lock acquirer here, on purpose. The central identity-apply
+	// convergence (the only step that runs the identity apply playbook with a
+	// mutating tag; the read-only host_absent_inspect queries do not lock) runs
+	// under the FreeIPA server's /etc/ipa lock, but the decommission's first
+	// change is the local uninstall, many steps before it, so the lock belongs to
+	// the whole run: its owner (runHostDecommissionApply in
+	// cmd/pilot/cmd/host_decommission.go, which resolves the server from the
+	// inventory, as this package cannot) takes it before the first step and carries
+	// it in the context of decommission.Apply. The step reads it with
+	// identitylock.Require and refuses with ErrNoLock when there is none.
 }
 
 // FreeIPAClientProvider implements providers.Provider for the FreeIPA
@@ -464,12 +466,16 @@ func (e *freeipaIdentityConvergeStep) Inspect(ctx context.Context) (bool, error)
 // so a resume that re-runs this after a partial prior success converges
 // cleanly rather than erroring.
 //
-// It runs under the server's /etc/ipa lock (IdentityLock), taken right before
-// the playbook and given back when it has ended: this is one of the funnels
-// the lint of cmd/pilot/cmd/identity_lock_funnel_test.go names.
+// It runs under the server's /etc/ipa lock, which the run's owner holds from
+// before the first step of the decommission to after the last (see the
+// config's note): the step reads it from its context (identitylock.Require) and
+// never takes or releases one. This is one of the funnels the lint of
+// cmd/pilot/cmd/identity_lock_funnel_test.go names. A context that carries no
+// lock, or one that is already lost, stops the step before the playbook.
 func (e *freeipaIdentityConvergeStep) Execute(ctx context.Context) error {
-	if e.provider.cfg.IdentityLock == nil {
-		return fmt.Errorf("freeipa-client identity-apply-converge %s: %w", e.fqdn, identitylock.ErrNoLock)
+	held, err := identitylock.Require(ctx)
+	if err != nil {
+		return fmt.Errorf("freeipa-client identity-apply-converge %s: %w", e.fqdn, err)
 	}
 	args := []string{e.provider.cfg.IdentityApplyPlaybook}
 	if e.provider.cfg.ServerInventory != "" {
@@ -491,11 +497,8 @@ func (e *freeipaIdentityConvergeStep) Execute(ctx context.Context) error {
 	if stageErr != nil {
 		return fmt.Errorf("freeipa-client identity-apply-converge %s: %w", e.fqdn, stageErr)
 	}
-	held, err := e.provider.cfg.IdentityLock(ctx)
-	if err != nil {
-		return fmt.Errorf("freeipa-client identity-apply-converge %s: take the FreeIPA identity lock: %w", e.fqdn, err)
-	}
-	defer func() { _ = held.Release() }()
+	// The owner binds the context of the whole run; bind again so that a caller
+	// that only attached the lock still has the playbook killed when it is lost.
 	runCtx, cancel := held.Bind(ctx)
 	defer cancel()
 	res, err := e.provider.exec(runCtx, args)
