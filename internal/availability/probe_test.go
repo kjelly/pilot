@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kjelly/pilot/internal/delivery"
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/sshdial"
 )
@@ -280,5 +281,68 @@ func TestClassifyConnectionSupport_AgreesWithTheSSHTargetDerivation(t *testing.T
 				t.Fatalf("ResolveEndpoint = %+v, %v, want ok = %v", ep, ok, tc.ssh)
 			}
 		})
+	}
+}
+
+// The same agreement for a REQUIRED host (the policy an inventory gets when it
+// says nothing, and the one the freeipa-server hosts of a real deployment
+// have). Before IsSSHConnection was shared, an inventory that spelled the
+// plugin ansible.builtin.ssh was "not ssh" to the probe, so a required host
+// that was down was never probed and nothing stopped the run before the
+// lock's own ssh failed; now it is Probable, and a required host that does
+// not answer is Blocking, exactly as with ssh. A required host on a
+// connection the probe has no prober for stays outside it (never fatal, never
+// blocking: Ansible's own connection handling is authoritative, unchanged
+// from before the availability feature).
+func TestClassifyConnectionSupport_RequiredHostAgreesWithTheSSHTargetDerivation(t *testing.T) {
+	for _, tc := range []struct {
+		connection string
+		ssh        bool
+	}{
+		{"ssh", true},
+		{"ansible.builtin.ssh", true},
+		{"", true},
+		{"paramiko", false},
+		{"docker", false},
+		{"community.docker.docker", false},
+		{"winrm", false},
+		{"SSH", false},
+	} {
+		for _, policy := range []string{"", "required"} {
+			t.Run(tc.connection+"/policy="+policy, func(t *testing.T) {
+				vars := map[string]any{"ansible_host": "10.0.0.5"}
+				if tc.connection != "" {
+					vars["ansible_connection"] = tc.connection
+				}
+				if policy != "" {
+					vars["deployment_availability"] = policy
+				}
+				rh := ResolveRuntimeHost("vm-01", vars)
+				got := ClassifyConnectionSupport(rh)
+				if got.Probable != tc.ssh || got.Fatal {
+					t.Fatalf("a required host with ansible_connection %q: %+v, want Probable=%v and never Fatal", tc.connection, got, tc.ssh)
+				}
+				if _, err := sshdial.TargetFromHostVars("vm-01", vars); (err == nil) != tc.ssh {
+					t.Fatalf("sshdial.TargetFromHostVars for ansible_connection %q: err = %v, want accepted = %v: the probe and the lock disagree", tc.connection, err, tc.ssh)
+				}
+				if _, ok := ResolveEndpoint(rh); ok != tc.ssh {
+					t.Fatalf("ResolveEndpoint ok = %v, want %v", ok, tc.ssh)
+				}
+				// What the deploy does with the probe's answer: a host the probe
+				// covers is Reachable only if it answered; one it does not cover
+				// is left to Ansible (deploy_availability.go treats it as
+				// reachable). An unreachable required ssh host is Blocking and is
+				// never deferred; a host outside the probe is never blocked by it.
+				reachable := !got.Probable
+				scope := delivery.ResolveExecutionScope([]delivery.CandidateHost{{Host: "vm-01", Policy: rh.DeploymentAvailability, Reachable: reachable}})
+				if tc.ssh {
+					if len(scope.Blocking) != 1 || scope.Blocking[0] != "vm-01" || len(scope.Deferred) != 0 || len(scope.Included) != 0 {
+						t.Fatalf("an unreachable required host on %q: scope = %+v, want it Blocking only", tc.connection, scope)
+					}
+				} else if len(scope.Blocking) != 0 || len(scope.Included) != 1 {
+					t.Fatalf("a required host on %q that the probe does not cover: scope = %+v, want it Included", tc.connection, scope)
+				}
+			})
+		}
 	}
 }
