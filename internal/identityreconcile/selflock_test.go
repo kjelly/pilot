@@ -1,9 +1,13 @@
 package identityreconcile
 
 import (
+	"context"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kjelly/pilot/internal/inventory"
 )
@@ -52,7 +56,8 @@ func duser(name string, enabled bool) DesiredUser {
 	return DesiredUser{Name: name, First: name, Last: name, Home: "/home/" + name, Shell: "/bin/bash", Enabled: enabled, PreserveExisting: true}
 }
 
-func plan(live liveState, d Desired) Plan {
+// planRaw plans against the live state exactly as given.
+func planRaw(live liveState, d Desired) Plan {
 	d.Principal = login
 	groups := slices.Clone(live.groups)
 	for _, g := range d.Groups {
@@ -62,6 +67,44 @@ func plan(live liveState, d Desired) Plan {
 		groups = withMarkers(groups, n)
 	}
 	return Build(d, live.users, groups)
+}
+
+// plan plans against the live state with the reads consistent, as a real server's are:
+// every user carries the memberof_group user_find gives it, the transitive closure of
+// the group read (captured: the admin user lists admins, and admins lists it in
+// member_user). A row that needs the two reads to disagree uses planRaw.
+func plan(live liveState, d Desired) Plan {
+	return planRaw(consistentReads(live), d)
+}
+
+// consistentReads gives each user the groups the group read puts it in, directly or
+// through groups, written independently of the planner's own walk.
+func consistentReads(live liveState) liveState {
+	out := liveState{groups: live.groups, users: slices.Clone(live.users)}
+	for i, u := range out.users {
+		seen := map[string]bool{}
+		var frontier []string
+		for _, g := range live.groups {
+			if slices.Contains(g.MemberUsers, u.Name) {
+				frontier = append(frontier, g.Name)
+			}
+		}
+		for len(frontier) > 0 {
+			cur := frontier[0]
+			frontier = frontier[1:]
+			if seen[cur] {
+				continue
+			}
+			seen[cur] = true
+			for _, g := range live.groups {
+				if slices.Contains(g.MemberGroups, cur) {
+					frontier = append(frontier, g.Name)
+				}
+			}
+		}
+		out.users[i].MemberOf = sortedKeys(seen)
+	}
+	return out
 }
 
 func protectedBlocks(p Plan) []Blocked {
@@ -143,11 +186,12 @@ func TestSelfLockoutAtEveryStageBoundary(t *testing.T) {
 			"the login adm would be disabled after S7 (user_enable and user_disable)", login},
 		{"S7 another admin disabled", base(),
 			Desired{Users: []DesiredUser{duser(login, true), duser("bob", false)}}, "", ""},
-		{"S7 the login is enabled by the roster and disabled live: enabling is never blocked", func() liveState {
+		{"S7 the login is disabled live and the roster enables it: the reads disagree, they cannot be of a login the engine is using", func() liveState {
 			s := base()
 			s.users[0] = lu(login, true)
 			return s
-		}(), Desired{Users: []DesiredUser{duser(login, true)}}, "", ""},
+		}(), Desired{Users: []DesiredUser{duser(login, true)}},
+			"the reads disagree: user_find shows the login adm disabled, but the engine is using it", login},
 		// S8: deleted, and the groups FreeIPA depends on.
 		{"S8 the login deleted by the roster", base(),
 			Desired{AbsentUsers: []string{login}},
@@ -199,25 +243,133 @@ func TestSelfLockoutDetailTellsTheOperatorToSplitTheChange(t *testing.T) {
 	}
 }
 
-// The check follows the plan, not the roster: a plan that does not touch the
-// login's path is never blocked on the path, however the live graph looks.
-func TestSelfLockoutIsDifferentialOnTheLivePath(t *testing.T) {
-	// The reads give the login but not a group graph that shows its path to
-	// admins (as a read of an incomplete directory, or a test double, might):
-	// nothing is known to be lost by removing a member, so no plan is blocked
-	// on reach, but the login's existence and state are still checked.
-	noPath := liveState{users: []LiveUser{lu(login, false), lu("bob", false)}, groups: []LiveGroup{lg("admins", []string{"bob"}, nil)}}
-	if got := protectedBlocks(plan(noPath, Desired{Groups: []DesiredGroup{dgroup("admins", true, nil, nil)}})); len(got) != 0 {
-		t.Fatalf("blocked on a path the reads never showed: %+v", got)
+// The reads must agree before the check can say what a plan takes away. user_find's
+// transitive memberof_group and the group read are two reads of one fact: where they
+// disagree, or show the login disabled although the engine is using it, the plan is
+// blocked with the reason, not passed (spec §7.10, P2-5 review F3). They agree on a
+// real server, so a read that cannot show the path is a read that cannot be trusted
+// with a destructive plan.
+func TestSelfLockoutRefusesReadsThatDisagree(t *testing.T) {
+	harmless := Desired{Groups: []DesiredGroup{dgroup("ops", true, []string{"carol"}, nil)}}
+	// The login is in admins by user_find and not by the group read.
+	claimedNotShown := base()
+	claimedNotShown.users[0].MemberOf = []string{"admins", "ipausers"}
+	claimedNotShown.groups[0] = lg("admins", []string{"bob"}, nil)
+	// ... in admins by the group read and not by user_find.
+	shownNotClaimed := base()
+	for i := range shownNotClaimed.users {
+		shownNotClaimed.users[i].MemberOf = nil
 	}
-	if got := protectedBlocks(plan(noPath, Desired{Users: []DesiredUser{duser(login, false)}})); len(got) != 1 {
-		t.Fatalf("a disabled login with no visible path: %+v", got)
+	// ... in admins by neither.
+	neither := base()
+	neither.groups[0] = lg("admins", []string{"bob"}, nil)
+	neither = consistentReads(neither)
+	// The reads agree: control.
+	agree := consistentReads(base())
+	for _, tc := range []struct {
+		name string
+		live liveState
+		want string // "" for no protected_object entry
+	}{
+		{"user_find lists admins and the group read shows no path", claimedNotShown,
+			"the reads disagree: user_find lists admins among the groups of the login adm, but the group read shows no path"},
+		{"the group read shows a path and user_find does not list admins", shownNotClaimed,
+			"the reads disagree: the group read shows a path from the login adm to admins, but user_find does not list it"},
+		{"neither read has the login in admins", neither, "the login adm is not a member of admins in the reads"},
+		{"the reads agree", agree, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A plan that touches nothing of the login's: the refusal is the reads', not
+			// the plan's.
+			got := protectedBlocks(planRaw(tc.live, harmless))
+			if tc.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("blocked: %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Object != login || !strings.Contains(got[0].Detail, tc.want) {
+				t.Fatalf("protected_object = %+v, want one on %s holding %q", got, login, tc.want)
+			}
+			// Once: a plan that also removes the login's other path adds no second entry.
+			twice := protectedBlocks(planRaw(tc.live, Desired{Groups: []DesiredGroup{dgroup("admins", true, nil, nil)}, Users: []DesiredUser{duser(login, false)}}))
+			if len(twice) != 1 || twice[0].Object != login {
+				t.Fatalf("a plan on top of reads that disagree: %+v", twice)
+			}
+		})
 	}
-	// A login the reads do not show is not checked at all: Observe refuses such a
-	// run before a plan is made, and the plans of the earlier tests are made
-	// without the login among the captured users.
+	// A login the reads do not show is not checked at all: Observe refuses such a run
+	// before a plan is made.
 	if got := protectedBlocks(Build(Desired{Principal: "nobody", AbsentUsers: []string{"nobody"}}, nil, nil)); len(got) != 0 {
 		t.Fatalf("blocked for a login that is not live: %+v", got)
+	}
+}
+
+// The walk ends on a graph with a cycle (FreeIPA accepts one, captured: A in B and B
+// in A). It runs in a child process with a deadline: a walk that does not end would
+// otherwise hang the package until its timeout instead of failing this test.
+func TestSelfLockoutWalkEndsOnACycle(t *testing.T) {
+	if os.Getenv("PILOT_TEST_SELFLOCK_CYCLE_CHILD") == "1" {
+		cycleRows(t)
+		return
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSelfLockoutWalkEndsOnACycle$", "-test.v")
+	cmd.Env = append(os.Environ(), "PILOT_TEST_SELFLOCK_CYCLE_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("the walk did not end on a graph with a cycle within 30s (the guard that visits each group once is gone):\n%s", out)
+	}
+	if err != nil || !strings.Contains(string(out), "--- PASS: TestSelfLockoutWalkEndsOnACycle") {
+		t.Fatalf("the child failed: %v\n%s", err, out)
+	}
+}
+
+// cycleRows are the rows the child runs: each reads a graph whose groups form a cycle.
+func cycleRows(t *testing.T) {
+	g := func(groups ...LiveGroup) *simGraph {
+		m := map[string]LiveGroup{}
+		for _, x := range groups {
+			m[x.Name] = x
+		}
+		return newSimGraph(map[string]LiveUser{login: lu(login, false)}, m)
+	}
+	for _, tc := range []struct {
+		name string
+		g    *simGraph
+		want bool
+	}{
+		{"the login in x, x in y, y in x, admins out of reach", g(lg("x", []string{login}, []string{"y"}), lg("y", nil, []string{"x"}), lg("admins", []string{"bob"}, nil)), false},
+		{"the same cycle with y in admins: the way out of the cycle is found", g(lg("x", []string{login}, []string{"y"}), lg("y", nil, []string{"x"}), lg("admins", nil, []string{"y"})), true},
+		{"the login in a, a in b, b in c, c in b: the cycle holds no group the login is directly in, so none of its groups is a seed", g(lg("a", []string{login}, nil), lg("b", nil, []string{"a", "c"}), lg("c", nil, []string{"b"}), lg("admins", []string{"bob"}, nil)), false},
+		{"a group in itself", g(lg("x", []string{login}, []string{"x"}), lg("admins", []string{"bob"}, nil)), false},
+		{"a cycle that does not hold the login", g(lg("x", nil, []string{"y"}), lg("y", nil, []string{"x"}), lg("ops", []string{login}, nil), lg("admins", []string{"bob"}, nil)), false},
+	} {
+		if got := tc.g.reaches(login, adminsGroup); got != tc.want {
+			t.Errorf("%s: reaches = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// Through the planner: reads that agree on a cycle, then the plan that cuts the
+	// login's one edge.
+	cycle := base()
+	cycle.groups = []LiveGroup{
+		lg("admins", []string{"bob"}, []string{"ops"}), lg("ops", []string{login}, []string{"admins"}),
+		lg("ipausers", []string{login, "bob"}, nil), lg("editors", nil, nil), lg("trust admins", nil, nil),
+	}
+	if got := protectedBlocks(plan(cycle, Desired{Groups: []DesiredGroup{dgroup("ops", true, nil, []string{"admins"})}})); len(got) != 1 || got[0].Object != login {
+		t.Errorf("a plan that cuts the login's edge in a cycle: %+v", got)
+	}
+	// A cycle the reads show without the login's path, user_find still claiming admins:
+	// the reads disagree, and the walk over the cycle ends to say so.
+	broken := base()
+	broken.users[0].MemberOf = []string{"admins"}
+	broken.groups = []LiveGroup{
+		lg("x", []string{login}, []string{"y"}), lg("y", nil, []string{"x"}), lg("admins", []string{"bob"}, nil),
+		lg("ipausers", []string{login}, nil), lg("editors", nil, nil), lg("trust admins", nil, nil),
+	}
+	if got := protectedBlocks(planRaw(broken, Desired{})); len(got) != 1 || !strings.Contains(got[0].Detail, "the reads disagree") {
+		t.Errorf("reads that disagree over a cycle: %+v", got)
 	}
 }
 

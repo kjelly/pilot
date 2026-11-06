@@ -139,21 +139,22 @@ func (g *simGraph) apply(ops []Operation) {
 // protect blocks the plan when it would lock the engine out: the login must
 // exist, be enabled and reach admins after every stage, its own password must not
 // be reset, and the groups FreeIPA depends on must not be deleted. It adds at
-// most one entry per object and reason, naming the first stage that fails.
+// most one entry per object, naming the first stage that fails.
 //
-// The login is the user the preview or run reads and writes as. It is checked when
-// the reads show it (Observe refuses a run whose login is not among them), as
-// enabled only when it is enabled to begin with, and its reach of admins is
-// checked when the group graph read shows the path at all: a
-// read whose graph cannot show a path that user_find's transitive memberof_group
-// claims is a read that cannot say what a plan takes away, so it is not made to
-// block every plan; on a real server the two agree.
+// The login is the user the preview or run reads and writes as. Observe refuses a
+// run whose login is not among the users read or is not in admins, so a login that
+// is not live is not checked here. For a login that is, the check is strict: the
+// reads must agree with each other and with the fact that the engine is using the
+// login (baseline), and the login must then exist, be enabled and reach admins
+// through the group graph after every stage. Two reads that disagree, user_find
+// saying the login is in admins while the group read shows no path to it, or
+// showing it disabled, cannot say what a plan takes away, so the plan is blocked
+// instead of passed (spec §7.10): on a real server the reads agree (captured: the
+// admin user's memberof_group lists admins, and admins lists it in member_user).
 func (b *builder) protect(principal string) {
 	login := strings.ToLower(principal)
 	graph := newSimGraph(b.liveUsers, b.liveGroups)
-	baseline := graph.users[login] != nil
-	followEnabled := baseline && graph.users[login].enabled
-	followReach := baseline && graph.reaches(login, adminsGroup)
+	live, baseline := b.liveUsers[login]
 
 	reported := map[string]bool{}
 	report := func(object, detail string) {
@@ -162,6 +163,12 @@ func (b *builder) protect(principal string) {
 			b.plan.Blocked = append(b.plan.Blocked, Blocked{Reason: BlockedProtectedObject, Object: object, Detail: detail})
 		}
 	}
+	if baseline {
+		if detail := readsDisagree(login, live, graph); detail != "" {
+			report(login, detail)
+		}
+	}
+	adminsDeleted := false
 	for _, s := range Stages {
 		ops := operationsOf(b.plan, s)
 		if s == S4 {
@@ -175,6 +182,7 @@ func (b *builder) protect(principal string) {
 			for _, op := range ops {
 				if op.Kind == KindGroupDelete && slices.Contains(protectedGroups, op.Object) {
 					report(op.Object, fmt.Sprintf("%s (%s) would delete the group %s, which FreeIPA and the engine depend on", s, s.what(), op.Object))
+					adminsDeleted = adminsDeleted || op.Object == adminsGroup
 				}
 			}
 		}
@@ -186,12 +194,32 @@ func (b *builder) protect(principal string) {
 		switch u := graph.users[login]; {
 		case u == nil:
 			report(login, fmt.Sprintf("the login %s would not exist %s: the engine would lose the session it reads and writes with", login, after))
-		case followEnabled && !u.enabled:
+		case !u.enabled:
 			report(login, fmt.Sprintf("the login %s would be disabled %s: the engine would lose the session it reads and writes with", login, after))
-		case followReach && graph.groups[adminsGroup] != nil && !graph.reaches(login, adminsGroup):
+		case !adminsDeleted && !graph.reaches(login, adminsGroup):
 			// (A deleted admins group is reported as that, once, at its own
 			// deletion: the login's path to it is then not a second finding.)
 			report(login, fmt.Sprintf("%s the login %s would not be a member of %s through any group: its next write would be refused with an ACIError, partway through the run. Change the roster in two steps: first add the new path to admins, apply, then remove the old one", after, login, adminsGroup))
 		}
 	}
+}
+
+// readsDisagree is "" when what the reads say of the login is what its use by the
+// engine implies, and what is inconsistent otherwise: the login must be enabled, and
+// user_find's transitive memberof_group (live.MemberOf) must list admins exactly when
+// the group read shows a path from the login to it.
+func readsDisagree(login string, live LiveUser, graph *simGraph) string {
+	claimed := slices.Contains(live.MemberOf, adminsGroup)
+	shown := graph.reaches(login, adminsGroup)
+	switch {
+	case live.Locked:
+		return fmt.Sprintf("the reads disagree: user_find shows the login %s disabled, but the engine is using it; what it would take away cannot be told", login)
+	case claimed && !shown:
+		return fmt.Sprintf("the reads disagree: user_find lists %s among the groups of the login %s, but the group read shows no path from it to %s; what a plan takes away from it cannot be told", adminsGroup, login, adminsGroup)
+	case !claimed && shown:
+		return fmt.Sprintf("the reads disagree: the group read shows a path from the login %s to %s, but user_find does not list it among its groups; what a plan takes away from it cannot be told", login, adminsGroup)
+	case !shown:
+		return fmt.Sprintf("the login %s is not a member of %s in the reads: the Go engine reads and writes with an admins member only", login, adminsGroup)
+	}
+	return ""
 }

@@ -294,8 +294,10 @@ func (f *fakeIPA) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(f.fixture("user-find-states"))
 	case req.Method == "user_find":
 		_, _ = w.Write(f.withAdmins(f.fixture("user-find-states")))
-	case req.Method == "group_find":
+	case req.Method == "group_find" && f.noAdmins:
 		_, _ = w.Write(f.fixture("group-find-no-match"))
+	case req.Method == "group_find":
+		_, _ = w.Write(f.adminsGroupRead())
 	case req.Method == "session_logout":
 		_, _ = w.Write([]byte(`{"result":{"result":null},"error":null,"id":0,"principal":"admin@EXAMPLE.TEST","version":"4.13.4"}`))
 	default:
@@ -304,8 +306,8 @@ func (f *fakeIPA) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// withAdmins makes the captured reader a member of admins (spec §9 K4
-// replaces this with a real admin entry once captured).
+// withAdmins makes the captured reader a member of admins (spec §9 K4); the group
+// read gives the same fact with adminsGroupRead.
 func (f *fakeIPA) withAdmins(data []byte) []byte {
 	var env map[string]any
 	_ = json.Unmarshal(data, &env)
@@ -315,6 +317,35 @@ func (f *fakeIPA) withAdmins(data []byte) []byte {
 			u["memberof_group"] = append(u["memberof_group"].([]any), "admins")
 		}
 	}
+	out, _ := json.Marshal(env)
+	return out
+}
+
+// adminsGroupRead is the group_find answer that goes with withAdmins: the one group
+// admins, as a real server returns it (the captured entry of
+// k3-records10-sizelimit0-groups), listing the reader in member_user. The two reads
+// are of one fact, so the fake gives them together: the self-lockout check refuses
+// reads that disagree (spec §7.10).
+func (f *fakeIPA) adminsGroupRead() []byte {
+	var env, captured map[string]any
+	if err := json.Unmarshal(f.fixture("group-find-no-match"), &env); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := json.Unmarshal(f.fixture("k3-records10-sizelimit0-groups"), &captured); err != nil {
+		f.t.Fatal(err)
+	}
+	var admins map[string]any
+	for _, e := range captured["result"].(map[string]any)["result"].([]any) {
+		if g := e.(map[string]any); g["cn"].([]any)[0] == "admins" {
+			admins = g
+		}
+	}
+	if admins == nil {
+		f.t.Fatal("the capture has no admins group")
+	}
+	admins["member_user"] = []any{f.reader}
+	res := env["result"].(map[string]any)
+	res["result"], res["count"], res["summary"] = []any{admins}, 1, "1 group matched"
 	out, _ := json.Marshal(env)
 	return out
 }
