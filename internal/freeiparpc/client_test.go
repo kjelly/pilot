@@ -372,6 +372,39 @@ func TestCommandsOutsideTheAllowlistAreNeverSent(t *testing.T) {
 	}
 }
 
+// A read-only client refuses every write, alone or in a batch, before
+// sending anything, and still sends reads.
+func TestReadOnlyClientNeverSendsAWrite(t *testing.T) {
+	f := newFakeServer(t, testFQDN)
+	f.answer = byMethod(map[string]string{"user_show": "user-show"})
+	c := newTestClient(t, f, func(cfg *Config) { cfg.ReadOnly = true })
+	ctx := context.Background()
+	if err := c.Login(ctx, "admin", testPassword); err != nil {
+		t.Fatal(err)
+	}
+	for method, k := range allowlist {
+		if k != write {
+			continue
+		}
+		var refused *ErrMethodNotAllowed
+		if _, err := c.Call(ctx, Command{Method: method}); !errors.As(err, &refused) || !refused.ReadOnly {
+			t.Fatalf("Call(%s) = %v, want a read-only refusal", method, err)
+		}
+		if _, err := c.Batch(ctx, []Command{{Method: "user_show"}, {Method: method}}); !errors.As(err, &refused) || !refused.ReadOnly {
+			t.Fatalf("Batch with %s = %v, want a read-only refusal", method, err)
+		}
+	}
+	if got := f.methods(); len(got) != 0 {
+		t.Fatalf("sent %v", got)
+	}
+	if _, err := c.Call(ctx, Command{Method: "user_show", Args: []any{"p0-alice"}}); err != nil {
+		t.Fatalf("read on a read-only client: %v", err)
+	}
+	if s := c.Stats(); s.Writes != 0 || s.Reads != 1 {
+		t.Fatalf("stats = %+v, want 1 read and no write", s)
+	}
+}
+
 // A 401 comes before the command runs (captured: a write after
 // session_logout got 401 and changed nothing), so it is re-sent once after
 // a new login, write or not.

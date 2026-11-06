@@ -58,7 +58,7 @@ Long checks are expensive, and any commit invalidates SHA-bound receipts unless 
 1. Freeze code/tests as a clean candidate commit. Obtain an independent preliminary code review that identifies unresolved findings and required target runs. This is not final PASS while mandatory evidence is missing.
 2. Gather repository-required evidence (live runs and relevant failure paths) against that exact candidate.
 3. Have the independent Reviewer inspect the candidate-bound artifacts and full diff, then issue final PASS only when all required verification is complete and blockers are resolved.
-4. Commit sanitized evidence separately. A record being evidence-only for repo publication does not automatically make its delta accepted by the Python gate: without base-manifest allowances, checks/review remain strictly SHA-bound and must cover the new HEAD. Never let the PR declare its own exemption.
+4. Commit sanitized evidence separately. Sanitized means `.agents/skills/_shared/committed-secrets.md`: pilot's redaction does not cover the hand-written sections, encrypted vault values or derived values. A record being evidence-only for repo publication does not automatically make its delta accepted by the Python gate: without base-manifest allowances, checks/review remain strictly SHA-bound and must cover the new HEAD. Never let the PR declare its own exemption.
 5. Run long receipts (`run_check.py`) on the final HEAD, or reuse candidate receipts only when the gate accepts the evidence-only delta. Refresh the final review on the actual HEAD when required; do not claim the earlier PASS covers an unaccepted delta.
 6. Run the gate.
 

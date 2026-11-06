@@ -68,8 +68,12 @@ func (d *Dialer) AcquireLock(ctx context.Context, opts LockOptions) (*Lock, erro
 	if err != nil {
 		return nil, err
 	}
-	p, err := start(cmd)
+	p, err := d.start(cmd)
 	if err != nil {
+		// A refused start (ErrDialerClosed) leaves the pipes unclosed: Start
+		// closes them only when it runs and fails.
+		stdin.Close()
+		stdout.Close()
 		return nil, err
 	}
 	locked := make(chan bool, 1)

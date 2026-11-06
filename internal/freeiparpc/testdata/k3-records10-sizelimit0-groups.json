@@ -1,0 +1,3134 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "45d9f2e2-c877-11f1-a302-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1043"
+        ],
+        "gidnumber": [
+          "1927600043"
+        ],
+        "cn": [
+          "access-pwb-01"
+        ],
+        "description": [
+          "Bench access 1"
+        ],
+        "member_group": [
+          "team-pwb-01"
+        ],
+        "memberindirect_user": [
+          "pwb-u081",
+          "pwb-u011",
+          "pwb-u041",
+          "pwb-u101",
+          "pwb-u051",
+          "pwb-u091",
+          "pwb-u061",
+          "pwb-u001",
+          "pwb-u111",
+          "pwb-u071",
+          "pwb-u031",
+          "pwb-u021"
+        ],
+        "dn": "cn=access-pwb-01,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "46571c2c-c877-11f1-bb64-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1044"
+        ],
+        "gidnumber": [
+          "1927600044"
+        ],
+        "cn": [
+          "access-pwb-02"
+        ],
+        "description": [
+          "Bench access 2"
+        ],
+        "member_group": [
+          "team-pwb-02"
+        ],
+        "memberindirect_user": [
+          "pwb-u012",
+          "pwb-u042",
+          "pwb-u032",
+          "pwb-u022",
+          "pwb-u112",
+          "pwb-u062",
+          "pwb-u072",
+          "pwb-u052",
+          "pwb-u102",
+          "pwb-u082",
+          "pwb-u092",
+          "pwb-u002"
+        ],
+        "dn": "cn=access-pwb-02,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "46b15c8c-c877-11f1-a2ca-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1045"
+        ],
+        "gidnumber": [
+          "1927600045"
+        ],
+        "cn": [
+          "access-pwb-03"
+        ],
+        "description": [
+          "Bench access 3"
+        ],
+        "member_group": [
+          "team-pwb-03"
+        ],
+        "memberindirect_user": [
+          "pwb-u093",
+          "pwb-u083",
+          "pwb-u033",
+          "pwb-u053",
+          "pwb-u063",
+          "pwb-u043",
+          "pwb-u023",
+          "pwb-u113",
+          "pwb-u003",
+          "pwb-u103",
+          "pwb-u073",
+          "pwb-u013"
+        ],
+        "dn": "cn=access-pwb-03,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "472eb56a-c877-11f1-bb64-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1046"
+        ],
+        "gidnumber": [
+          "1927600046"
+        ],
+        "cn": [
+          "access-pwb-04"
+        ],
+        "description": [
+          "Bench access 4"
+        ],
+        "member_group": [
+          "team-pwb-04"
+        ],
+        "memberindirect_user": [
+          "pwb-u114",
+          "pwb-u044",
+          "pwb-u074",
+          "pwb-u004",
+          "pwb-u024",
+          "pwb-u084",
+          "pwb-u014",
+          "pwb-u064",
+          "pwb-u054",
+          "pwb-u034",
+          "pwb-u094",
+          "pwb-u104"
+        ],
+        "dn": "cn=access-pwb-04,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "478ada2a-c877-11f1-9342-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1047"
+        ],
+        "gidnumber": [
+          "1927600047"
+        ],
+        "cn": [
+          "access-pwb-05"
+        ],
+        "description": [
+          "Bench access 5"
+        ],
+        "member_group": [
+          "team-pwb-05"
+        ],
+        "memberindirect_user": [
+          "pwb-u005",
+          "pwb-u025",
+          "pwb-u015",
+          "pwb-u085",
+          "pwb-u115",
+          "pwb-u055",
+          "pwb-u045",
+          "pwb-u075",
+          "pwb-u065",
+          "pwb-u105",
+          "pwb-u035",
+          "pwb-u095"
+        ],
+        "dn": "cn=access-pwb-05,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "47e2f458-c877-11f1-928c-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1048"
+        ],
+        "gidnumber": [
+          "1927600048"
+        ],
+        "cn": [
+          "access-pwb-06"
+        ],
+        "description": [
+          "Bench access 6"
+        ],
+        "member_group": [
+          "team-pwb-06"
+        ],
+        "memberindirect_user": [
+          "pwb-u096",
+          "pwb-u116",
+          "pwb-u036",
+          "pwb-u056",
+          "pwb-u066",
+          "pwb-u106",
+          "pwb-u086",
+          "pwb-u076",
+          "pwb-u006",
+          "pwb-u026",
+          "pwb-u046",
+          "pwb-u016"
+        ],
+        "dn": "cn=access-pwb-06,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "485eb5f2-c877-11f1-9342-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1049"
+        ],
+        "gidnumber": [
+          "1927600049"
+        ],
+        "cn": [
+          "access-pwb-07"
+        ],
+        "description": [
+          "Bench access 7"
+        ],
+        "member_group": [
+          "team-pwb-07"
+        ],
+        "memberindirect_user": [
+          "pwb-u027",
+          "pwb-u087",
+          "pwb-u037",
+          "pwb-u047",
+          "pwb-u017",
+          "pwb-u077",
+          "pwb-u097",
+          "pwb-u007",
+          "pwb-u117",
+          "pwb-u057",
+          "pwb-u107",
+          "pwb-u067"
+        ],
+        "dn": "cn=access-pwb-07,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "48dbf24c-c877-11f1-bb64-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1050"
+        ],
+        "gidnumber": [
+          "1927600050"
+        ],
+        "cn": [
+          "access-pwb-08"
+        ],
+        "description": [
+          "Bench access 8"
+        ],
+        "member_group": [
+          "team-pwb-08"
+        ],
+        "memberindirect_user": [
+          "pwb-u058",
+          "pwb-u118",
+          "pwb-u048",
+          "pwb-u088",
+          "pwb-u028",
+          "pwb-u098",
+          "pwb-u078",
+          "pwb-u018",
+          "pwb-u008",
+          "pwb-u068",
+          "pwb-u108",
+          "pwb-u038"
+        ],
+        "dn": "cn=access-pwb-08,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "495d77fe-c877-11f1-9342-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1051"
+        ],
+        "gidnumber": [
+          "1927600051"
+        ],
+        "cn": [
+          "access-pwb-09"
+        ],
+        "description": [
+          "Bench access 9"
+        ],
+        "member_group": [
+          "team-pwb-09"
+        ],
+        "memberindirect_user": [
+          "pwb-u099",
+          "pwb-u109",
+          "pwb-u009",
+          "pwb-u019",
+          "pwb-u039",
+          "pwb-u049",
+          "pwb-u069",
+          "pwb-u089",
+          "pwb-u059",
+          "pwb-u079",
+          "pwb-u029",
+          "pwb-u119"
+        ],
+        "dn": "cn=access-pwb-09,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "49b4fce0-c877-11f1-928c-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1052"
+        ],
+        "gidnumber": [
+          "1927600052"
+        ],
+        "cn": [
+          "access-pwb-10"
+        ],
+        "description": [
+          "Bench access 10"
+        ],
+        "member_group": [
+          "team-pwb-10"
+        ],
+        "memberindirect_user": [
+          "pwb-u100",
+          "pwb-u070",
+          "pwb-u120",
+          "pwb-u010",
+          "pwb-u060",
+          "pwb-u090",
+          "pwb-u080",
+          "pwb-u020",
+          "pwb-u050",
+          "pwb-u110",
+          "pwb-u040",
+          "pwb-u030"
+        ],
+        "dn": "cn=access-pwb-10,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "posixgroup",
+          "ipausergroup",
+          "ipaobject",
+          "nestedGroup",
+          "ipaNTGroupAttrs"
+        ],
+        "ipauniqueid": [
+          "4b8d8b6e-c862-11f1-ada4-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-512"
+        ],
+        "gidnumber": [
+          "1927600000"
+        ],
+        "cn": [
+          "admins"
+        ],
+        "description": [
+          "Account administrators group"
+        ],
+        "member_user": [
+          "admin"
+        ],
+        "dn": "cn=admins,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4a347fb0-c877-11f1-9342-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1053"
+        ],
+        "gidnumber": [
+          "1927600053"
+        ],
+        "cn": [
+          "data-pwb-01"
+        ],
+        "description": [
+          "Bench data 1"
+        ],
+        "member_group": [
+          "team-pwb-01"
+        ],
+        "memberindirect_user": [
+          "pwb-u081",
+          "pwb-u011",
+          "pwb-u041",
+          "pwb-u101",
+          "pwb-u051",
+          "pwb-u091",
+          "pwb-u061",
+          "pwb-u001",
+          "pwb-u111",
+          "pwb-u071",
+          "pwb-u031",
+          "pwb-u021"
+        ],
+        "dn": "cn=data-pwb-01,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4ab34566-c877-11f1-928c-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1054"
+        ],
+        "gidnumber": [
+          "1927600054"
+        ],
+        "cn": [
+          "data-pwb-02"
+        ],
+        "description": [
+          "Bench data 2"
+        ],
+        "member_group": [
+          "team-pwb-02"
+        ],
+        "memberindirect_user": [
+          "pwb-u012",
+          "pwb-u042",
+          "pwb-u032",
+          "pwb-u022",
+          "pwb-u112",
+          "pwb-u062",
+          "pwb-u072",
+          "pwb-u052",
+          "pwb-u102",
+          "pwb-u082",
+          "pwb-u092",
+          "pwb-u002"
+        ],
+        "dn": "cn=data-pwb-02,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4b326cd8-c877-11f1-a2ca-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1055"
+        ],
+        "gidnumber": [
+          "1927600055"
+        ],
+        "cn": [
+          "data-pwb-03"
+        ],
+        "description": [
+          "Bench data 3"
+        ],
+        "member_group": [
+          "team-pwb-03"
+        ],
+        "memberindirect_user": [
+          "pwb-u093",
+          "pwb-u083",
+          "pwb-u033",
+          "pwb-u053",
+          "pwb-u063",
+          "pwb-u043",
+          "pwb-u023",
+          "pwb-u113",
+          "pwb-u003",
+          "pwb-u103",
+          "pwb-u073",
+          "pwb-u013"
+        ],
+        "dn": "cn=data-pwb-03,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4bcdb49a-c877-11f1-928c-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1056"
+        ],
+        "gidnumber": [
+          "1927600056"
+        ],
+        "cn": [
+          "data-pwb-04"
+        ],
+        "description": [
+          "Bench data 4"
+        ],
+        "member_group": [
+          "team-pwb-04"
+        ],
+        "memberindirect_user": [
+          "pwb-u114",
+          "pwb-u044",
+          "pwb-u074",
+          "pwb-u004",
+          "pwb-u024",
+          "pwb-u084",
+          "pwb-u014",
+          "pwb-u064",
+          "pwb-u054",
+          "pwb-u034",
+          "pwb-u094",
+          "pwb-u104"
+        ],
+        "dn": "cn=data-pwb-04,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4c7f0434-c877-11f1-9342-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1057"
+        ],
+        "gidnumber": [
+          "1927600057"
+        ],
+        "cn": [
+          "data-pwb-05"
+        ],
+        "description": [
+          "Bench data 5"
+        ],
+        "member_group": [
+          "team-pwb-05"
+        ],
+        "memberindirect_user": [
+          "pwb-u005",
+          "pwb-u025",
+          "pwb-u015",
+          "pwb-u085",
+          "pwb-u115",
+          "pwb-u055",
+          "pwb-u045",
+          "pwb-u075",
+          "pwb-u065",
+          "pwb-u105",
+          "pwb-u035",
+          "pwb-u095"
+        ],
+        "dn": "cn=data-pwb-05,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4d46fdb8-c877-11f1-bb64-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1058"
+        ],
+        "gidnumber": [
+          "1927600058"
+        ],
+        "cn": [
+          "data-pwb-06"
+        ],
+        "description": [
+          "Bench data 6"
+        ],
+        "member_group": [
+          "team-pwb-06"
+        ],
+        "memberindirect_user": [
+          "pwb-u096",
+          "pwb-u116",
+          "pwb-u036",
+          "pwb-u056",
+          "pwb-u066",
+          "pwb-u106",
+          "pwb-u086",
+          "pwb-u076",
+          "pwb-u006",
+          "pwb-u026",
+          "pwb-u046",
+          "pwb-u016"
+        ],
+        "dn": "cn=data-pwb-06,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4ddb91a8-c877-11f1-a2ca-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1059"
+        ],
+        "gidnumber": [
+          "1927600059"
+        ],
+        "cn": [
+          "data-pwb-07"
+        ],
+        "description": [
+          "Bench data 7"
+        ],
+        "member_group": [
+          "team-pwb-07"
+        ],
+        "memberindirect_user": [
+          "pwb-u027",
+          "pwb-u087",
+          "pwb-u037",
+          "pwb-u047",
+          "pwb-u017",
+          "pwb-u077",
+          "pwb-u097",
+          "pwb-u007",
+          "pwb-u117",
+          "pwb-u057",
+          "pwb-u107",
+          "pwb-u067"
+        ],
+        "dn": "cn=data-pwb-07,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4e7b61c4-c877-11f1-928c-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1060"
+        ],
+        "gidnumber": [
+          "1927600060"
+        ],
+        "cn": [
+          "data-pwb-08"
+        ],
+        "description": [
+          "Bench data 8"
+        ],
+        "member_group": [
+          "team-pwb-08"
+        ],
+        "memberindirect_user": [
+          "pwb-u058",
+          "pwb-u118",
+          "pwb-u048",
+          "pwb-u088",
+          "pwb-u028",
+          "pwb-u098",
+          "pwb-u078",
+          "pwb-u018",
+          "pwb-u008",
+          "pwb-u068",
+          "pwb-u108",
+          "pwb-u038"
+        ],
+        "dn": "cn=data-pwb-08,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4f3fc2a8-c877-11f1-a302-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1061"
+        ],
+        "gidnumber": [
+          "1927600061"
+        ],
+        "cn": [
+          "data-pwb-09"
+        ],
+        "description": [
+          "Bench data 9"
+        ],
+        "member_group": [
+          "team-pwb-09"
+        ],
+        "memberindirect_user": [
+          "pwb-u099",
+          "pwb-u109",
+          "pwb-u009",
+          "pwb-u019",
+          "pwb-u039",
+          "pwb-u049",
+          "pwb-u069",
+          "pwb-u089",
+          "pwb-u059",
+          "pwb-u079",
+          "pwb-u029",
+          "pwb-u119"
+        ],
+        "dn": "cn=data-pwb-09,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4fd63dd2-c877-11f1-bb64-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1062"
+        ],
+        "gidnumber": [
+          "1927600062"
+        ],
+        "cn": [
+          "data-pwb-10"
+        ],
+        "description": [
+          "Bench data 10"
+        ],
+        "member_group": [
+          "team-pwb-10"
+        ],
+        "memberindirect_user": [
+          "pwb-u100",
+          "pwb-u070",
+          "pwb-u120",
+          "pwb-u010",
+          "pwb-u060",
+          "pwb-u090",
+          "pwb-u080",
+          "pwb-u020",
+          "pwb-u050",
+          "pwb-u110",
+          "pwb-u040",
+          "pwb-u030"
+        ],
+        "dn": "cn=data-pwb-10,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "posixgroup",
+          "ipausergroup",
+          "ipaobject",
+          "nestedGroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4bb4f4d8-c862-11f1-b193-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1002"
+        ],
+        "gidnumber": [
+          "1927600002"
+        ],
+        "cn": [
+          "editors"
+        ],
+        "description": [
+          "Limited admins who can edit other users"
+        ],
+        "dn": "cn=editors,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "4bb3e980-c862-11f1-ac07-5254001b059e"
+        ],
+        "cn": [
+          "ipausers"
+        ],
+        "description": [
+          "Default group for all users"
+        ],
+        "member_user": [
+          "pw-nokey",
+          "pw-pending",
+          "pw-self",
+          "pwt-keep",
+          "pwt-reset",
+          "pwt-plain",
+          "pwi-short",
+          "pwb-u001",
+          "pwb-u002",
+          "pwb-u003",
+          "pwb-u004",
+          "pwb-u005",
+          "pwb-u006",
+          "pwb-u007",
+          "pwb-u008",
+          "pwb-u009",
+          "pwb-u010",
+          "pwb-u011",
+          "pwb-u012",
+          "pwb-u013",
+          "pwb-u014",
+          "pwb-u015",
+          "pwb-u016",
+          "pwb-u017",
+          "pwb-u018",
+          "pwb-u019",
+          "pwb-u020",
+          "pwb-u021",
+          "pwb-u022",
+          "pwb-u023",
+          "pwb-u024",
+          "pwb-u025",
+          "pwb-u026",
+          "pwb-u027",
+          "pwb-u028",
+          "pwb-u029",
+          "pwb-u030",
+          "pwb-u031",
+          "pwb-u032",
+          "pwb-u033",
+          "pwb-u034",
+          "pwb-u035",
+          "pwb-u036",
+          "pwb-u037",
+          "pwb-u038",
+          "pwb-u039",
+          "pwb-u040",
+          "pwb-u041",
+          "pwb-u042",
+          "pwb-u043",
+          "pwb-u044",
+          "pwb-u045",
+          "pwb-u046",
+          "pwb-u047",
+          "pwb-u048",
+          "pwb-u049",
+          "pwb-u050",
+          "pwb-u051",
+          "pwb-u052",
+          "pwb-u053",
+          "pwb-u054",
+          "pwb-u055",
+          "pwb-u056",
+          "pwb-u057",
+          "pwb-u058",
+          "pwb-u059",
+          "pwb-u060",
+          "pwb-u061",
+          "pwb-u062",
+          "pwb-u063",
+          "pwb-u064",
+          "pwb-u065",
+          "pwb-u066",
+          "pwb-u067",
+          "pwb-u068",
+          "pwb-u069",
+          "pwb-u070",
+          "pwb-u071",
+          "pwb-u072",
+          "pwb-u073",
+          "pwb-u074",
+          "pwb-u075",
+          "pwb-u076",
+          "pwb-u077",
+          "pwb-u078",
+          "pwb-u079",
+          "pwb-u080",
+          "pwb-u081",
+          "pwb-u082",
+          "pwb-u083",
+          "pwb-u084",
+          "pwb-u085",
+          "pwb-u086",
+          "pwb-u087",
+          "pwb-u088",
+          "pwb-u089",
+          "pwb-u090",
+          "pwb-u091",
+          "pwb-u092",
+          "pwb-u093",
+          "pwb-u094",
+          "pwb-u095",
+          "pwb-u096",
+          "pwb-u097",
+          "pwb-u098",
+          "pwb-u099",
+          "pwb-u100",
+          "pwb-u101",
+          "pwb-u102",
+          "pwb-u103",
+          "pwb-u104",
+          "pwb-u105",
+          "pwb-u106",
+          "pwb-u107",
+          "pwb-u108",
+          "pwb-u109",
+          "pwb-u110",
+          "pwb-u111",
+          "pwb-u112",
+          "pwb-u113",
+          "pwb-u114",
+          "pwb-u115",
+          "pwb-u116",
+          "pwb-u117",
+          "pwb-u118",
+          "pwb-u119",
+          "pwb-u120",
+          "uf-enabled",
+          "uf-disabled",
+          "pwk-a",
+          "pwk-b",
+          "pwe-keep",
+          "pwe-reset",
+          "pwe-plain",
+          "pwe-nomax-keep",
+          "pwe-nomax-reset",
+          "pwe-new",
+          "p1-live",
+          "p1-k3u1",
+          "p1-k3u2",
+          "p1-k3u3",
+          "p1-k3u4",
+          "p1-k3u5",
+          "p1-k3u6",
+          "p1-k3u7",
+          "p1-k3u8",
+          "p1-k3u9",
+          "p1-k3u10",
+          "p1-k3u11",
+          "p1-k3u12"
+        ],
+        "dn": "cn=ipausers,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "ipaexternalgroup"
+        ],
+        "ipauniqueid": [
+          "fab4c0a2-d8c1-11f1-ba68-5254001b059e"
+        ],
+        "cn": [
+          "p1-ext"
+        ],
+        "description": [
+          "P1 external"
+        ],
+        "dn": "cn=p1-ext,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "faff8970-d8c1-11f1-ad7c-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1276"
+        ],
+        "gidnumber": [
+          "1927600276"
+        ],
+        "cn": [
+          "p1-k3g1"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g1,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "fe870b68-d8c1-11f1-b825-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1294"
+        ],
+        "gidnumber": [
+          "1927600294"
+        ],
+        "cn": [
+          "p1-k3g10"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g10,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "fef33dd8-d8c1-11f1-a5dd-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1296"
+        ],
+        "gidnumber": [
+          "1927600296"
+        ],
+        "cn": [
+          "p1-k3g11"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g11,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "ff163ab8-d8c1-11f1-b825-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1298"
+        ],
+        "gidnumber": [
+          "1927600298"
+        ],
+        "cn": [
+          "p1-k3g12"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g12,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "fb432bee-d8c1-11f1-b21a-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1278"
+        ],
+        "gidnumber": [
+          "1927600278"
+        ],
+        "cn": [
+          "p1-k3g2"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g2,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "fbd95ce0-d8c1-11f1-ad7c-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1280"
+        ],
+        "gidnumber": [
+          "1927600280"
+        ],
+        "cn": [
+          "p1-k3g3"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g3,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "fc70521c-d8c1-11f1-b825-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1282"
+        ],
+        "gidnumber": [
+          "1927600282"
+        ],
+        "cn": [
+          "p1-k3g4"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g4,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "fcbd49d2-d8c1-11f1-a5dd-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1284"
+        ],
+        "gidnumber": [
+          "1927600284"
+        ],
+        "cn": [
+          "p1-k3g5"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g5,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "fd010424-d8c1-11f1-8c63-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1286"
+        ],
+        "gidnumber": [
+          "1927600286"
+        ],
+        "cn": [
+          "p1-k3g6"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g6,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "fd8f8c58-d8c1-11f1-ad7c-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1288"
+        ],
+        "gidnumber": [
+          "1927600288"
+        ],
+        "cn": [
+          "p1-k3g7"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g7,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "fdd0a080-d8c1-11f1-b825-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1290"
+        ],
+        "gidnumber": [
+          "1927600290"
+        ],
+        "cn": [
+          "p1-k3g8"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g8,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "fe563f74-d8c1-11f1-a5dd-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1292"
+        ],
+        "gidnumber": [
+          "1927600292"
+        ],
+        "cn": [
+          "p1-k3g9"
+        ],
+        "description": [
+          "P1 K3"
+        ],
+        "dn": "cn=p1-k3g9,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "93b25b4e-c877-11f1-8312-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-01016473b14dc8fa5f509320691f44683e450a763d0e9418964b15fefb61967b"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=access-pwb-09"
+        ],
+        "dn": "cn=pilot-internal-history-g-01016473b14dc8fa5f509320691f44683e450a763d0e9418964b15fefb61967b,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "84c3514c-c877-11f1-9342-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-08f43716c0fe4f3dd9fca35799b960e0c55548cae0de2536cb24e04b2ea1c5ef"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=role-pwb-09"
+        ],
+        "dn": "cn=pilot-internal-history-g-08f43716c0fe4f3dd9fca35799b960e0c55548cae0de2536cb24e04b2ea1c5ef,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "88071cb2-c877-11f1-8312-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-10a52387f3d7fe3d03135cadcb2371d549db24202be527ea82afd3f46ca95c4b"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=access-pwb-01"
+        ],
+        "dn": "cn=pilot-internal-history-g-10a52387f3d7fe3d03135cadcb2371d549db24202be527ea82afd3f46ca95c4b,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "eeae5f8a-c916-11f1-9342-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-1561c1d7b2827cdceb4f6100936babd356d014c399ab745f8194d7b37b66f56d"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-gf-ev"
+        ],
+        "dn": "cn=pilot-internal-history-g-1561c1d7b2827cdceb4f6100936babd356d014c399ab745f8194d7b37b66f56d,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "92460ee0-c877-11f1-a74c-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-192d920994341b691a03bd527b096617da5c52734c521e08f180459dffff80ad"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=access-pwb-08"
+        ],
+        "dn": "cn=pilot-internal-history-g-192d920994341b691a03bd527b096617da5c52734c521e08f180459dffff80ad,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "7d6da0fa-c877-11f1-928c-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-1babbb4ebd7a9119ae9868986ccaba064c803751c3b34c11bd1b47f4e214e668"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=role-pwb-05"
+        ],
+        "dn": "cn=pilot-internal-history-g-1babbb4ebd7a9119ae9868986ccaba064c803751c3b34c11bd1b47f4e214e668,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "71d96fd0-c877-11f1-bb64-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-22abf661de453d1f0701dbb71bb34ce282b876f82459757d8d72592f4875d645"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-pwb-07"
+        ],
+        "dn": "cn=pilot-internal-history-g-22abf661de453d1f0701dbb71bb34ce282b876f82459757d8d72592f4875d645,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "8c86b630-c877-11f1-8f95-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-28959a9422473220936b485c2c4ebaaf59bf4d545d06ccb811b717663a2f61a3"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=access-pwb-04"
+        ],
+        "dn": "cn=pilot-internal-history-g-28959a9422473220936b485c2c4ebaaf59bf4d545d06ccb811b717663a2f61a3,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "7ebea0a8-c877-11f1-8f95-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-37daeb10e450a4da44bdae4e3bb98048582663ad0b47599c7421df6247adc07e"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=role-pwb-06"
+        ],
+        "dn": "cn=pilot-internal-history-g-37daeb10e450a4da44bdae4e3bb98048582663ad0b47599c7421df6247adc07e,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "8954cf7e-c877-11f1-8260-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-5040058902fac092aa4d86a22ae2c401e00d23a188ed8e7c835730bcdf97e3de"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=access-pwb-02"
+        ],
+        "dn": "cn=pilot-internal-history-g-5040058902fac092aa4d86a22ae2c401e00d23a188ed8e7c835730bcdf97e3de,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "79389d0a-c877-11f1-a74c-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-5505f1c17bc4da42459b35849f0d25b1561fd050327cbdbf372f23ef2411ab92"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=role-pwb-02"
+        ],
+        "dn": "cn=pilot-internal-history-g-5505f1c17bc4da42459b35849f0d25b1561fd050327cbdbf372f23ef2411ab92,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "9db85242-c877-11f1-a74c-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-577e80e0802696d2fe12d748fd4af30b410e6db23a0718ec6100312a052222d0"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=data-pwb-06"
+        ],
+        "dn": "cn=pilot-internal-history-g-577e80e0802696d2fe12d748fd4af30b410e6db23a0718ec6100312a052222d0,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "90deb0c0-c877-11f1-9342-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-5a576c9d8ed501f51a6f72a4254e6b72681e35805bc574d07004ad86c0137239"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=access-pwb-07"
+        ],
+        "dn": "cn=pilot-internal-history-g-5a576c9d8ed501f51a6f72a4254e6b72681e35805bc574d07004ad86c0137239,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "965a717e-c877-11f1-928c-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-5a96f9cbe39474d5527fcd6679c4c93a572ad2b855a1958a6f709d132e82782e"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=data-pwb-01"
+        ],
+        "dn": "cn=pilot-internal-history-g-5a96f9cbe39474d5527fcd6679c4c93a572ad2b855a1958a6f709d132e82782e,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "f9ffcdd8-c957-11f1-b4a7-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-5c365e4cc6e7101abea2405b637e2ac5ecd645a77e5659f22302586196574806"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-PWB-01"
+        ],
+        "dn": "cn=pilot-internal-history-g-5c365e4cc6e7101abea2405b637e2ac5ecd645a77e5659f22302586196574806,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "6b2e548e-c877-11f1-9342-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-5e7e39574187ddc37ac5409456e98fd9d25c4900971d78d49e5ffa83b86fd80d"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-pwb-03"
+        ],
+        "dn": "cn=pilot-internal-history-g-5e7e39574187ddc37ac5409456e98fd9d25c4900971d78d49e5ffa83b86fd80d,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "680cfd3c-c877-11f1-b282-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-611a14f3cbb1e981271127d3cb0798d7cad0863bd9694aa507667c23ee5262fc"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-pwb-01"
+        ],
+        "dn": "cn=pilot-internal-history-g-611a14f3cbb1e981271127d3cb0798d7cad0863bd9694aa507667c23ee5262fc,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "9c1d513a-c877-11f1-9342-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-65212669bb9249074aaf53da52758ef68e5c6cd86d224cf69a6f093cdfd7c88e"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=data-pwb-05"
+        ],
+        "dn": "cn=pilot-internal-history-g-65212669bb9249074aaf53da52758ef68e5c6cd86d224cf69a6f093cdfd7c88e,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "8b039c88-c877-11f1-928c-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-6b0cf31f323c94519723b8ef0db47d76f1d88ceef16f306dd792d4de4e067840"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=access-pwb-03"
+        ],
+        "dn": "cn=pilot-internal-history-g-6b0cf31f323c94519723b8ef0db47d76f1d88ceef16f306dd792d4de4e067840,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "734fc6d4-c877-11f1-8f95-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-6bcc4941c073cc6ad2482b0c859157bf79b2d39f24f3908b0687d22ed36943f8"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-pwb-08"
+        ],
+        "dn": "cn=pilot-internal-history-g-6bcc4941c073cc6ad2482b0c859157bf79b2d39f24f3908b0687d22ed36943f8,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "8f9a4706-c877-11f1-a302-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-6e20046f0e2b12727c00a56c32c4f8cae22acb122347d8a70710f93fabc87dda"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=access-pwb-06"
+        ],
+        "dn": "cn=pilot-internal-history-g-6e20046f0e2b12727c00a56c32c4f8cae22acb122347d8a70710f93fabc87dda,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "74c1f83e-c877-11f1-b282-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-703fa9cd5ceeee0b9c1602e98c5346e82980865baa8af8e071d279508a82aba3"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-pwb-09"
+        ],
+        "dn": "cn=pilot-internal-history-g-703fa9cd5ceeee0b9c1602e98c5346e82980865baa8af8e071d279508a82aba3,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "97c86408-c877-11f1-8f95-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-709aae194c4c5c237e4d8bd762f483f77c80f3b7b72c238ecce80b13231d81ed"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=data-pwb-02"
+        ],
+        "dn": "cn=pilot-internal-history-g-709aae194c4c5c237e4d8bd762f483f77c80f3b7b72c238ecce80b13231d81ed,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "8e282e24-c877-11f1-b282-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-7411314a9c406d18291c695a5c63622993cb0275c57b2d7bc72878cad4aa98c1"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=access-pwb-05"
+        ],
+        "dn": "cn=pilot-internal-history-g-7411314a9c406d18291c695a5c63622993cb0275c57b2d7bc72878cad4aa98c1,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "9aa2f67a-c877-11f1-a302-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-80452f968c6247a243e15fb02f9cc47e81200dd2845b369feef5c2f2c079a807"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=data-pwb-04"
+        ],
+        "dn": "cn=pilot-internal-history-g-80452f968c6247a243e15fb02f9cc47e81200dd2845b369feef5c2f2c079a807,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "811e4e34-c877-11f1-b282-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-831d3a79b4f5a19032402a23a3f9a70070c3db79b3b398cb102fca40a758c55a"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=role-pwb-07"
+        ],
+        "dn": "cn=pilot-internal-history-g-831d3a79b4f5a19032402a23a3f9a70070c3db79b3b398cb102fca40a758c55a,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "69aa386c-c877-11f1-a302-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-a1acd6b981ef7d5faeef243ea9501f48f700da874fa4974849cefbdaa7d60881"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-pwb-02"
+        ],
+        "dn": "cn=pilot-internal-history-g-a1acd6b981ef7d5faeef243ea9501f48f700da874fa4974849cefbdaa7d60881,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "94ede640-c877-11f1-8260-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-a7263a83a4baa0a09deec6afee13638cbb627dd90aafd01429c94844f7b66495"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=access-pwb-10"
+        ],
+        "dn": "cn=pilot-internal-history-g-a7263a83a4baa0a09deec6afee13638cbb627dd90aafd01429c94844f7b66495,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "866987c8-c877-11f1-a74c-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-a9de4834d3c1910bf942f7d12749dd1fc05ff615aae022cfe83c4750ba391bda"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=role-pwb-10"
+        ],
+        "dn": "cn=pilot-internal-history-g-a9de4834d3c1910bf942f7d12749dd1fc05ff615aae022cfe83c4750ba391bda,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "a1d6b8e6-c877-11f1-928c-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-ab4c9694dc788b087f058e43cdb905c1223132076fd2458c7beb2faf471c3a5f"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=data-pwb-09"
+        ],
+        "dn": "cn=pilot-internal-history-g-ab4c9694dc788b087f058e43cdb905c1223132076fd2458c7beb2faf471c3a5f,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "705a96f2-c877-11f1-8260-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-ad1144b0d60b9a54d8ca6222ed177ad1656a908c8a7cf1edcc01e59609284800"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-pwb-06"
+        ],
+        "dn": "cn=pilot-internal-history-g-ad1144b0d60b9a54d8ca6222ed177ad1656a908c8a7cf1edcc01e59609284800,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "9f2e73a4-c877-11f1-8312-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-b00921cc63ad064bf0eabd53a2a59f747636c1085e69ef4e33963648c1eb5ffe"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=data-pwb-07"
+        ],
+        "dn": "cn=pilot-internal-history-g-b00921cc63ad064bf0eabd53a2a59f747636c1085e69ef4e33963648c1eb5ffe,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "6d00920e-c877-11f1-a74c-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-b5b0a0bed2c756eba51895dcbdd0026533d545fd70e24d70470d4f9bdbdc2581"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-pwb-04"
+        ],
+        "dn": "cn=pilot-internal-history-g-b5b0a0bed2c756eba51895dcbdd0026533d545fd70e24d70470d4f9bdbdc2581,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "779a8bd4-c877-11f1-9342-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-b7f07692c4abfad417f197e043d33ebada11fa00d6f153dc212dc44625975d0d"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=role-pwb-01"
+        ],
+        "dn": "cn=pilot-internal-history-g-b7f07692c4abfad417f197e043d33ebada11fa00d6f153dc212dc44625975d0d,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "762d7f22-c877-11f1-a302-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-b82b8c532ef8b6a5d1aa0a61fb5b890cfc5806b2ff6f1d673153b05d13ab8c69"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-pwb-10"
+        ],
+        "dn": "cn=pilot-internal-history-g-b82b8c532ef8b6a5d1aa0a61fb5b890cfc5806b2ff6f1d673153b05d13ab8c69,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "992e7292-c877-11f1-b282-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-b87eb5d6b009016381914d10237cfff891770a0235006c7bee6e6b2161bdeb74"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=data-pwb-03"
+        ],
+        "dn": "cn=pilot-internal-history-g-b87eb5d6b009016381914d10237cfff891770a0235006c7bee6e6b2161bdeb74,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "a3402db6-c877-11f1-8f95-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-bcbdb2a11f9b7062e0b57ede0352569476136dafb3a385bd29c1d774754a1be1"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=data-pwb-10"
+        ],
+        "dn": "cn=pilot-internal-history-g-bcbdb2a11f9b7062e0b57ede0352569476136dafb3a385bd29c1d774754a1be1,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "7abb4768-c877-11f1-8312-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-c75ada5a7ebb4829316fabcc3059db45084cbcce7d884af0e6e16b99abb2d8f4"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=role-pwb-03"
+        ],
+        "dn": "cn=pilot-internal-history-g-c75ada5a7ebb4829316fabcc3059db45084cbcce7d884af0e6e16b99abb2d8f4,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "831bc55e-c877-11f1-a302-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-da0f7124505fd2d5dae044fdfc4e433f34d5911927a402247209a1fc23461606"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=role-pwb-08"
+        ],
+        "dn": "cn=pilot-internal-history-g-da0f7124505fd2d5dae044fdfc4e433f34d5911927a402247209a1fc23461606,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "a0914a8c-c877-11f1-8260-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-e1d483344b98e9a9273254ba30169bf4caf292cd9406e7635357443e441daa90"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=data-pwb-08"
+        ],
+        "dn": "cn=pilot-internal-history-g-e1d483344b98e9a9273254ba30169bf4caf292cd9406e7635357443e441daa90,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "6ec19282-c877-11f1-8312-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-f5ba661641aab42a06b114697506f34b5146f33c9227cdc57b1e6fc635a7b980"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=team-pwb-05"
+        ],
+        "dn": "cn=pilot-internal-history-g-f5ba661641aab42a06b114697506f34b5146f33c9227cdc57b1e6fc635a7b980,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "7bfd4ff4-c877-11f1-8260-5254001b059e"
+        ],
+        "cn": [
+          "pilot-internal-history-g-ff9f74a5ec0159d186b44fefab564172eb98b15938625d373ec432d82f1e06d2"
+        ],
+        "description": [
+          "pilot.group-history/v1 name=role-pwb-04"
+        ],
+        "dn": "cn=pilot-internal-history-g-ff9f74a5ec0159d186b44fefab564172eb98b15938625d373ec432d82f1e06d2,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "6b02b2f4-c86b-11f1-a302-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1020"
+        ],
+        "gidnumber": [
+          "1927600020"
+        ],
+        "cn": [
+          "pwc-pol"
+        ],
+        "description": [
+          "Pilot test policy group"
+        ],
+        "dn": "cn=pwc-pol,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "6a5b0fb8-c86b-11f1-872b-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1019"
+        ],
+        "gidnumber": [
+          "1927600019"
+        ],
+        "cn": [
+          "pwc-team"
+        ],
+        "description": [
+          "Pilot test team"
+        ],
+        "dn": "cn=pwc-team,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "41b5b9a8-c877-11f1-a2ca-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1033"
+        ],
+        "gidnumber": [
+          "1927600033"
+        ],
+        "cn": [
+          "role-pwb-01"
+        ],
+        "description": [
+          "Bench role 1"
+        ],
+        "member_user": [
+          "pwb-u001"
+        ],
+        "memberof_sudorule": [
+          "sudo-pwb-01"
+        ],
+        "dn": "cn=role-pwb-01,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4215124a-c877-11f1-bb64-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1034"
+        ],
+        "gidnumber": [
+          "1927600034"
+        ],
+        "cn": [
+          "role-pwb-02"
+        ],
+        "description": [
+          "Bench role 2"
+        ],
+        "member_user": [
+          "pwb-u002"
+        ],
+        "memberof_sudorule": [
+          "sudo-pwb-02"
+        ],
+        "dn": "cn=role-pwb-02,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "42716a90-c877-11f1-9342-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1035"
+        ],
+        "gidnumber": [
+          "1927600035"
+        ],
+        "cn": [
+          "role-pwb-03"
+        ],
+        "description": [
+          "Bench role 3"
+        ],
+        "member_user": [
+          "pwb-u003"
+        ],
+        "memberof_sudorule": [
+          "sudo-pwb-03"
+        ],
+        "dn": "cn=role-pwb-03,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "42f867de-c877-11f1-b4a7-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1036"
+        ],
+        "gidnumber": [
+          "1927600036"
+        ],
+        "cn": [
+          "role-pwb-04"
+        ],
+        "description": [
+          "Bench role 4"
+        ],
+        "member_user": [
+          "pwb-u004"
+        ],
+        "memberof_sudorule": [
+          "sudo-pwb-04"
+        ],
+        "dn": "cn=role-pwb-04,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4375b59a-c877-11f1-9342-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1037"
+        ],
+        "gidnumber": [
+          "1927600037"
+        ],
+        "cn": [
+          "role-pwb-05"
+        ],
+        "description": [
+          "Bench role 5"
+        ],
+        "member_user": [
+          "pwb-u005"
+        ],
+        "memberof_sudorule": [
+          "sudo-pwb-05"
+        ],
+        "dn": "cn=role-pwb-05,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "43d3bdd4-c877-11f1-b4a7-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1038"
+        ],
+        "gidnumber": [
+          "1927600038"
+        ],
+        "cn": [
+          "role-pwb-06"
+        ],
+        "description": [
+          "Bench role 6"
+        ],
+        "member_user": [
+          "pwb-u006"
+        ],
+        "dn": "cn=role-pwb-06,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "4452582e-c877-11f1-a302-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1039"
+        ],
+        "gidnumber": [
+          "1927600039"
+        ],
+        "cn": [
+          "role-pwb-07"
+        ],
+        "description": [
+          "Bench role 7"
+        ],
+        "member_user": [
+          "pwb-u007"
+        ],
+        "dn": "cn=role-pwb-07,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "44aa94d0-c877-11f1-b4a7-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1040"
+        ],
+        "gidnumber": [
+          "1927600040"
+        ],
+        "cn": [
+          "role-pwb-08"
+        ],
+        "description": [
+          "Bench role 8"
+        ],
+        "member_user": [
+          "pwb-u008"
+        ],
+        "dn": "cn=role-pwb-08,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "45274ec6-c877-11f1-a2ca-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1041"
+        ],
+        "gidnumber": [
+          "1927600041"
+        ],
+        "cn": [
+          "role-pwb-09"
+        ],
+        "description": [
+          "Bench role 9"
+        ],
+        "member_user": [
+          "pwb-u009"
+        ],
+        "dn": "cn=role-pwb-09,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "457de682-c877-11f1-bb64-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1042"
+        ],
+        "gidnumber": [
+          "1927600042"
+        ],
+        "cn": [
+          "role-pwb-10"
+        ],
+        "description": [
+          "Bench role 10"
+        ],
+        "member_user": [
+          "pwb-u010"
+        ],
+        "dn": "cn=role-pwb-10,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "3cc67b3a-c877-11f1-872b-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1023"
+        ],
+        "gidnumber": [
+          "1927600023"
+        ],
+        "cn": [
+          "team-pwb-01"
+        ],
+        "description": [
+          "Bench team 1"
+        ],
+        "member_user": [
+          "pwb-u001",
+          "pwb-u011",
+          "pwb-u021",
+          "pwb-u031",
+          "pwb-u041",
+          "pwb-u051",
+          "pwb-u061",
+          "pwb-u071",
+          "pwb-u081",
+          "pwb-u091",
+          "pwb-u101",
+          "pwb-u111"
+        ],
+        "memberof_group": [
+          "data-pwb-01",
+          "access-pwb-01"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-01"
+        ],
+        "dn": "cn=team-pwb-01,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "3d436d52-c877-11f1-bb64-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1024"
+        ],
+        "gidnumber": [
+          "1927600024"
+        ],
+        "cn": [
+          "team-pwb-02"
+        ],
+        "description": [
+          "Bench team 2"
+        ],
+        "member_user": [
+          "pwb-u002",
+          "pwb-u012",
+          "pwb-u022",
+          "pwb-u032",
+          "pwb-u042",
+          "pwb-u052",
+          "pwb-u062",
+          "pwb-u072",
+          "pwb-u082",
+          "pwb-u092",
+          "pwb-u102",
+          "pwb-u112"
+        ],
+        "memberof_group": [
+          "data-pwb-02",
+          "access-pwb-02"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-02"
+        ],
+        "dn": "cn=team-pwb-02,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "3dc04ef8-c877-11f1-9342-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1025"
+        ],
+        "gidnumber": [
+          "1927600025"
+        ],
+        "cn": [
+          "team-pwb-03"
+        ],
+        "description": [
+          "Bench team 3"
+        ],
+        "member_user": [
+          "pwb-u003",
+          "pwb-u013",
+          "pwb-u023",
+          "pwb-u033",
+          "pwb-u043",
+          "pwb-u053",
+          "pwb-u063",
+          "pwb-u073",
+          "pwb-u083",
+          "pwb-u093",
+          "pwb-u103",
+          "pwb-u113"
+        ],
+        "memberof_group": [
+          "access-pwb-03",
+          "data-pwb-03"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-03"
+        ],
+        "dn": "cn=team-pwb-03,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "3e1748ac-c877-11f1-bb64-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1026"
+        ],
+        "gidnumber": [
+          "1927600026"
+        ],
+        "cn": [
+          "team-pwb-04"
+        ],
+        "description": [
+          "Bench team 4"
+        ],
+        "member_user": [
+          "pwb-u004",
+          "pwb-u014",
+          "pwb-u024",
+          "pwb-u034",
+          "pwb-u044",
+          "pwb-u054",
+          "pwb-u064",
+          "pwb-u074",
+          "pwb-u084",
+          "pwb-u094",
+          "pwb-u104",
+          "pwb-u114"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-04"
+        ],
+        "memberof_group": [
+          "access-pwb-04",
+          "data-pwb-04"
+        ],
+        "dn": "cn=team-pwb-04,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "3e96b498-c877-11f1-a2ca-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1027"
+        ],
+        "gidnumber": [
+          "1927600027"
+        ],
+        "cn": [
+          "team-pwb-05"
+        ],
+        "description": [
+          "Bench team 5"
+        ],
+        "member_user": [
+          "pwb-u005",
+          "pwb-u015",
+          "pwb-u025",
+          "pwb-u035",
+          "pwb-u045",
+          "pwb-u055",
+          "pwb-u065",
+          "pwb-u075",
+          "pwb-u085",
+          "pwb-u095",
+          "pwb-u105",
+          "pwb-u115"
+        ],
+        "memberof_group": [
+          "data-pwb-05",
+          "access-pwb-05"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-05"
+        ],
+        "dn": "cn=team-pwb-05,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "3ef4a1d4-c877-11f1-b4a7-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1028"
+        ],
+        "gidnumber": [
+          "1927600028"
+        ],
+        "cn": [
+          "team-pwb-06"
+        ],
+        "description": [
+          "Bench team 6"
+        ],
+        "member_user": [
+          "pwb-u006",
+          "pwb-u016",
+          "pwb-u026",
+          "pwb-u036",
+          "pwb-u046",
+          "pwb-u056",
+          "pwb-u066",
+          "pwb-u076",
+          "pwb-u086",
+          "pwb-u096",
+          "pwb-u106",
+          "pwb-u116"
+        ],
+        "memberof_group": [
+          "data-pwb-06",
+          "access-pwb-06"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-06"
+        ],
+        "dn": "cn=team-pwb-06,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "3f896878-c877-11f1-a2ca-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1029"
+        ],
+        "gidnumber": [
+          "1927600029"
+        ],
+        "cn": [
+          "team-pwb-07"
+        ],
+        "description": [
+          "Bench team 7"
+        ],
+        "member_user": [
+          "pwb-u007",
+          "pwb-u017",
+          "pwb-u027",
+          "pwb-u037",
+          "pwb-u047",
+          "pwb-u057",
+          "pwb-u067",
+          "pwb-u077",
+          "pwb-u087",
+          "pwb-u097",
+          "pwb-u107",
+          "pwb-u117"
+        ],
+        "memberof_group": [
+          "access-pwb-07",
+          "data-pwb-07"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-07"
+        ],
+        "dn": "cn=team-pwb-07,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "40308176-c877-11f1-b4a7-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1030"
+        ],
+        "gidnumber": [
+          "1927600030"
+        ],
+        "cn": [
+          "team-pwb-08"
+        ],
+        "description": [
+          "Bench team 8"
+        ],
+        "member_user": [
+          "pwb-u008",
+          "pwb-u018",
+          "pwb-u028",
+          "pwb-u038",
+          "pwb-u048",
+          "pwb-u058",
+          "pwb-u068",
+          "pwb-u078",
+          "pwb-u088",
+          "pwb-u098",
+          "pwb-u108",
+          "pwb-u118"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-08"
+        ],
+        "memberof_group": [
+          "access-pwb-08",
+          "data-pwb-08"
+        ],
+        "dn": "cn=team-pwb-08,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "40b1b476-c877-11f1-a2ca-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1031"
+        ],
+        "gidnumber": [
+          "1927600031"
+        ],
+        "cn": [
+          "team-pwb-09"
+        ],
+        "description": [
+          "Bench team 9"
+        ],
+        "member_user": [
+          "pwb-u009",
+          "pwb-u019",
+          "pwb-u029",
+          "pwb-u039",
+          "pwb-u049",
+          "pwb-u059",
+          "pwb-u069",
+          "pwb-u079",
+          "pwb-u089",
+          "pwb-u099",
+          "pwb-u109",
+          "pwb-u119"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-09"
+        ],
+        "memberof_group": [
+          "access-pwb-09",
+          "data-pwb-09"
+        ],
+        "dn": "cn=team-pwb-09,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "posixgroup",
+          "ipantgroupattrs"
+        ],
+        "ipauniqueid": [
+          "41346650-c877-11f1-b4a7-5254001b059e"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1032"
+        ],
+        "gidnumber": [
+          "1927600032"
+        ],
+        "cn": [
+          "team-pwb-10"
+        ],
+        "description": [
+          "Bench team 10"
+        ],
+        "member_user": [
+          "pwb-u010",
+          "pwb-u020",
+          "pwb-u030",
+          "pwb-u040",
+          "pwb-u050",
+          "pwb-u060",
+          "pwb-u070",
+          "pwb-u080",
+          "pwb-u090",
+          "pwb-u100",
+          "pwb-u110",
+          "pwb-u120"
+        ],
+        "memberof_group": [
+          "data-pwb-10",
+          "access-pwb-10"
+        ],
+        "memberof_hbacrule": [
+          "hbac-pwb-10"
+        ],
+        "dn": "cn=team-pwb-10,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "ipausergroup",
+          "nestedgroup",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "b8b1c6b0-c862-11f1-9dc0-5254001b059e"
+        ],
+        "cn": [
+          "trust admins"
+        ],
+        "description": [
+          "Trusts administrators group"
+        ],
+        "member_user": [
+          "admin"
+        ],
+        "dn": "cn=trust admins,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 101,
+    "truncated": false,
+    "summary": "101 groups matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

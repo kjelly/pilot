@@ -21,7 +21,9 @@ Before each dispatch the contract's role check applies: PASS dispatches, DRIFT (
 target branch carries a different role file) dispatches with the snapshot as the
 binding contract and a reported pin difference, STOP is `BLOCKED`. At the end, whatever
 the outcome, the contract's restore step switches back to the starting branch when that
-is safe, and otherwise stays and reports why.
+is safe, and otherwise stays and reports why. Complete restoration before changing
+GitHub PR state; restoration failure blocks the state change. Recheck the live
+gate after restoration using saved PR identities, then change state last.
 
 For target evidence after integrating an advanced base, read
 `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` from the verified snapshot,
@@ -81,6 +83,13 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   findings. The reviewer records `target_validation = required | not-needed |
   blocked` with the invariant (`target_validation` in the evidence JSON, see
   `references/evidence-contract.md`); `blocked` never becomes `not-needed`.
+- **Secrets in the branch.** Pass the reviewer the snapshot path of
+  `.agents/skills/_shared/committed-secrets.md`. The reviewer searches every commit
+  of `BASE..HEAD`, not only the final diff. A secret in any commit is a leaked
+  secret: P0, blocking, even when HEAD no longer has it. It stays blocking until the
+  user has recorded on the PR that the credential is revoked, rotated or confirmed
+  dead, and how the history is handled. Draft comments name the secret and the
+  commits, never the value.
 - **Mandated actual-run evidence.** `.github/pr-evidence.json` on the base branch
   declares `docs/evidence/**` as evidence-only and requires an `actual-run` record
   for any change to playbooks, specs, contracts, inventory handling or deploy
@@ -153,7 +162,12 @@ python3 "$SNAP/.agents/skills/pr-review-merge/scripts/review_gate.py" --repo OWN
   --evidence /safe/state/123/review.json
 ```
 
-This command reads GitHub state and outputs structured JSON, no mutation. If the result is `MERGE` or `DRAFT`, run the guarded actor:
+This command reads GitHub state and outputs structured JSON, no mutation. If the
+result is `MERGE` or `DRAFT`, first complete the shared contract's safe restore
+and verify the starting branch/SHA. Restore failure leaves the PR unchanged
+(WAITING). After restoration, rerun this live gate with the saved PR HEAD/Base
+and external evidence; do not use the restored local HEAD as the PR candidate.
+Only then run the guarded actor from the snapshot:
 
 ```bash
 python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 \

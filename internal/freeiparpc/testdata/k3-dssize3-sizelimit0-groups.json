@@ -1,0 +1,12 @@
+{
+  "result": null,
+  "error": {
+    "code": 4215,
+    "message": "Configured size limit exceeded",
+    "data": {},
+    "name": "SizeLimitExceeded"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

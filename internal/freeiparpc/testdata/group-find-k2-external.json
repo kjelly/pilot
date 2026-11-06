@@ -1,0 +1,33 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "top",
+          "groupofnames",
+          "nestedgroup",
+          "ipausergroup",
+          "ipaobject",
+          "ipaexternalgroup"
+        ],
+        "ipauniqueid": [
+          "fab4c0a2-d8c1-11f1-ba68-5254001b059e"
+        ],
+        "cn": [
+          "p1-ext"
+        ],
+        "description": [
+          "P1 external"
+        ],
+        "dn": "cn=p1-ext,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 1,
+    "truncated": false,
+    "summary": "1 group matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

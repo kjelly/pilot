@@ -103,6 +103,10 @@ worktree. A run whose result will be cited as evidence follows
    summary update as a separate evidence-only commit that names the tested
    commit and tree. Cast paths and filenames, the recording manifest and the
    drivers stay out of it (AGENTS.md, *Evidence recordings are disposable*).
+   No password, hash, token or cookie goes in either, including values a cast's
+   secret scan never saw: the passwords of users you created, `kinit` inputs, and
+   wizard answers. Check the staged diff before committing, as
+   `.agents/skills/_shared/committed-secrets.md` says.
 
 ---
 
