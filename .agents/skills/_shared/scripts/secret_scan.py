@@ -12,7 +12,7 @@ part of it; no exception text is ever echoed either. The rules, and what to do o
 
 Classes are decided by the shape of the value, never by a name that merely contains "password":
   freeipa-secret-attribute  ipanthash/userpassword/krbprincipalkey/ipatokenotpkey used as a key whose
-                            value is anything but the fixture placeholder
+                            value is secret-shaped (not the fixture placeholder)
   private-key               `-----BEGIN ... PRIVATE KEY-----` followed by a key body
   authorization-header      `Authorization:` with a bearer/basic/... credential
   cookie-header             `Cookie:`/`Set-Cookie:` with a credential-shaped name=value
@@ -239,10 +239,17 @@ def _attribute_spans(t: _Text) -> Iterator[tuple[int, int, str]]:
         unsafe, value_end = None, line_end
         if p < len(s) and s[p] in '[{"':
             try:
-                obj, value_end = _JSON.raw_decode(s, p)
-                unsafe = _unsafe_value(obj)
+                obj, parsed_end = _JSON.raw_decode(s, p)
             except (ValueError, RecursionError):
-                unsafe, value_end = None, line_end
+                pass
+            else:
+                unsafe = _unsafe_value(obj)
+                if unsafe or _value_ends_at(s, parsed_end, line_end):
+                    value_end = parsed_end
+                else:
+                    # The JSON was only the start of the value (`[]` of `[]string{"..."}`): the rest of
+                    # it is judged as text as well.
+                    unsafe = None
         if unsafe is None:
             rest = s[p:min(line_end, p + _RESTRICT)]
             continuation = line_end
@@ -257,6 +264,14 @@ def _attribute_spans(t: _Text) -> Iterator[tuple[int, int, str]]:
             unsafe = _text_value_is_secret(rest, sep)
         if unsafe:
             yield t.line_of(start), t.line_of(max(value_end - 1, start)), FREEIPA_ATTRIBUTE
+
+
+def _value_ends_at(s: str, end: int, line_end: int) -> bool:
+    """Whether the value parsed up to `end` is the whole value: only whitespace, then the end of the
+    line or a `,` `}` `]` that closes it, follows."""
+    while end < line_end and s[end] in " \t\r":
+        end += 1
+    return end >= line_end or s[end] in ",}]"
 
 
 def _text_value_is_secret(rest: str, sep: str) -> bool:

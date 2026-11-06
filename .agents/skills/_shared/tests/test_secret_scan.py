@@ -99,6 +99,22 @@ class Classes(unittest.TestCase):
         self.passes("%s: <redacted>\n%s: ${HASH}\n%s: {{ vault_hash }}\n" % (fx.NT_HASH, fx.USER_PASSWORD, fx.KRB_KEY))
         self.passes("- %s: the derived value, never committed\n" % fx.NT_HASH)
 
+    def test_a_go_composite_literal_that_holds_a_value_fires(self):
+        # A JSON parse of `[]string{"..."}` succeeds on its first two characters, `[]`: the rest of the
+        # value is still the value (a test that builds a user the way the Go fixtures do).
+        value = fx.random_b64()
+        for text in ('%s: []string{"%s"},' % ("Ipa" + "nthash", value),
+                     'u := Entry{%s: []string{"%s"}}' % ("User" + "password", value),
+                     '%s: [][]byte{[]byte("%s")},' % (fx.KRB_KEY, value),
+                     '"%s": []string{"%s"}' % (fx.OTP_KEY, value)):
+            with self.subTest(text=text[:24]):
+                self.fires(text + "\n", scan.FREEIPA_ATTRIBUTE)
+        # Controls: the placeholder, an empty slice, and a one-line JSON object whose other keys follow.
+        self.passes('%s: []string{"%s"},\n' % ("Ipa" + "nthash", fx.PLACEHOLDER))
+        self.passes('%s: []string{},\n%s: []string(nil),\n' % ("Ipa" + "nthash", fx.KRB_KEY))
+        self.passes('{"%s": [{"__base64__": "%s"}], "ipauniqueid": ["f3a4b1c2-1111-2222-3333-aabbccddee11"]}\n'
+                    % (fx.NT_HASH, fx.PLACEHOLDER))
+
     def test_a_name_that_merely_contains_password_is_not_a_secret(self):
         # The class is decided by the value's shape, never by the name (kjelly/pilot#260).
         self.passes("ipa_admin_password: \"{{ ipa_admin_password }}\"\nkeycloak_db_password: !vault |\n"

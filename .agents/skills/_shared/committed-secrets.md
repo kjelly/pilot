@@ -73,12 +73,24 @@ not by a name that merely contains "password":
 
 | Class | What it catches |
 |---|---|
-| `freeipa-secret-attribute` | the four attributes in the list above used as a key, with anything but the fixture placeholder as the value |
+| `freeipa-secret-attribute` | the four attributes in the list above used as a key, with a secret-shaped value (random-looking data, a `{SCHEME}hash`, or binary that is not the fixture placeholder) |
 | `private-key` | a `-----BEGIN ... PRIVATE KEY-----` header followed by a key body (a bare header in code or a regex is fine) |
 | `authorization-header` | `Authorization:` with a bearer, basic, negotiate, digest or token credential, or a long bare token |
 | `cookie-header` | `Cookie:` or `Set-Cookie:` with a credential-shaped `name=value` |
 | `ipa-session` | `ipa_session=` followed by a session value |
 | `known-value` | a value you supply with `--secret-file` (see below) |
+
+What it does not see. These are blind spots of the shape rules, which are kept narrow so that an
+ordinary PR does not trip them. For a value you know, `--secret-file` closes the gap; for the rest,
+reading the staged diff (below) is the check:
+
+- a short or single-class password (`hunter2`, all lowercase) with no `--secret-file` entry, because
+  it cannot be told from a word;
+- a value on a later line than its key in a YAML block (`key:` and then an indented value or list item;
+  a multi-line JSON array or object is read);
+- a file in UTF-16 (the scan reads bytes);
+- a cookie jar in the Netscape tab-separated form (only a `Cookie:`/`Set-Cookie:` header or
+  `ipa_session=` is recognised).
 
 The three gates run it over every commit of the branch and refuse it on any finding:
 `issue_gate.py` (also `create_pr.py`, `mark_ready.py`), `pr_gate.py` and
@@ -90,7 +102,8 @@ that does not load, an unusable `--secret-file`) refuses; it never skips.
 
 1. Before each commit, read every added line of the staged diff, including hand-written
    evidence sections and new `testdata/` files. A placeholder, a vault key name, `no_log` or a
-   variable reference is fine. A value is not.
+   variable reference is fine. A value is not. `git diff --cached -U0` lists them; to look for the
+   shapes above first: `git diff --cached -U0 | grep -inE '^\+.*(authorization|cookie|ipa_session|private key)'`.
 2. Before each push, run the scanner over every commit you are about to push. Use
    `@{upstream}..HEAD`, or the base for a branch that has no upstream yet:
 
