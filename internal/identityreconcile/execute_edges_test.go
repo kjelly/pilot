@@ -92,7 +92,7 @@ func TestExecuteReportsTheEntrysOwnErrorAndRecordsThatItRan(t *testing.T) {
 	e2.entry.previous = true
 	e2.mustApply()
 	raw, _ := json.Marshal(e2.journal.payloadOf("auth_cache"))
-	if string(raw) != `{"entry_ran":true,"previous":true,"source":"this_run"}` {
+	if string(raw) != `{"entry_ran":true,"observed_acked":false,"previous":true,"source":"this_run"}` {
 		t.Fatalf("auth_cache = %s", raw)
 	}
 }

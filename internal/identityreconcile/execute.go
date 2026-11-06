@@ -161,14 +161,25 @@ type Verification struct {
 	// Remaining are the operations the plan made from that read still holds on the
 	// objects this run tried to change: Plan₃ is not empty in the spec's sense.
 	Remaining []string `json:"remaining,omitempty"`
+	// Blocked are the objects this run changed, or may have (an operation that was
+	// applied or whose outcome is unknown), that the plan made from that read blocks
+	// ("reason object"): the plan can say nothing of a blocked object, which has no
+	// operation, so it counts as left undone exactly as an operation in Remaining
+	// does (spec §7.6, D20). It is what a concurrent writer leaves of an object the
+	// run created: a uid or gid that is not the declared one. An object the run only
+	// looked at and refused to touch (a conflict, nothing sent) is not here: that is
+	// drift of an object the run did not change.
+	Blocked []string `json:"blocked,omitempty"`
 	// Unrelated are the operations it holds on other objects: drift that is not a
 	// result of this run's writes. It does not fail the verification.
 	Unrelated []string `json:"unrelated,omitempty"`
 }
 
 // OK reports whether the read was done, succeeded and shows nothing left on what
-// the run changed.
-func (v Verification) OK() bool { return v.Done && v.ReadError == "" && len(v.Remaining) == 0 }
+// the run changed: no operation, and no blocked object.
+func (v Verification) OK() bool {
+	return v.Done && v.ReadError == "" && len(v.Remaining) == 0 && len(v.Blocked) == 0
+}
 
 // PlanChange is how the plan made after the entry differs from the first one.
 type PlanChange struct {
@@ -179,8 +190,12 @@ type PlanChange struct {
 // Result is what a run did. Execute returns it with every error it also returns,
 // so a caller reports the operations and outcomes of a failed run.
 type Result struct {
-	Plan1 Plan  `json:"plan1"`
-	Plan2 *Plan `json:"plan2,omitempty"`
+	// Observed: the first read was made and Plan1 was built from it. A run that
+	// stopped before that (the read failed) has none, and a result file is written
+	// only for one that has (spec §8.6).
+	Observed bool  `json:"observed"`
+	Plan1    Plan  `json:"plan1"`
+	Plan2    *Plan `json:"plan2,omitempty"`
 	// Plan3 is the plan made from the read after the writes; nil when there was no
 	// such read or it failed.
 	Plan3       *Plan       `json:"plan3,omitempty"`
@@ -296,6 +311,7 @@ func (r *runner) run() error {
 		return fmt.Errorf("read before planning: %w", err)
 	}
 	r.res.Plan1 = Build(r.des, obs1.Users, obs1.Groups)
+	r.res.Observed = true
 	if len(r.res.Plan1.Blocked) > 0 {
 		err := blockedError(r.res.Plan1)
 		return r.refuse(stopPlan1, err.Error(), r.res.Plan1, err)
@@ -317,10 +333,15 @@ func (r *runner) run() error {
 	}
 	r.res.Entry = EntryReport{Ran: true, Previous: &prep.Previous}
 	if err := r.record(Event{Kind: EventAuthCache, ID: "auth_cache", Payload: map[string]any{
-		"source": "this_run", "entry_ran": true, "previous": prep.Previous,
+		"source": ObligationThisRun, "entry_ran": true, "previous": prep.Previous, "observed_acked": false,
 	}}); err != nil {
-		// Nothing has been written yet: no write without the record of the run.
-		return fmt.Errorf("%w: %v", ErrJournal, err)
+		// Nothing has been written yet: no write without the record of the run. It
+		// stops like every other stop before the first command: the Stop is kept and
+		// the plan's operations are listed as not executed (refuse joins ErrJournal
+		// with the first journal failure). The entry did run, so the obligation is
+		// recorded on the server whatever the journal says: Result.Entry has it.
+		return r.refuse(stopEntry, "the journal refused the record that the entry ran, so nothing was written", r.res.Plan1,
+			errors.New("the authorization cache entry ran but its record could not be written: nothing was written"))
 	}
 	r.opts.Gate.open(r.held)
 
@@ -353,10 +374,70 @@ func (r *runner) run() error {
 }
 
 // notSentEvent is the payload of the event that holds what no batch's result does.
+// A run with many operations needs more than one such event: Part and Parts say
+// which of how many this is (both 0 when there is one), and the first is the one
+// with the id "not_sent".
 type notSentEvent struct {
 	Phase      string     `json:"phase"`
 	Stop       *Stop      `json:"stop,omitempty"`
+	Part       int        `json:"part,omitempty"`
+	Parts      int        `json:"parts,omitempty"`
 	Operations []OpResult `json:"operations"`
+}
+
+// The most one journal event of the not-sent operations holds: by count, and by
+// the size of what is encoded. The delivery store limits neither, but an event
+// that holds a whole plan (an unattended run of thousands of operations that stops
+// at its first conflict) is megabytes of JSON in a row of the stream every reader of
+// the run has to carry, and a member operation holds every member of its group. A
+// sink may refuse an oversized event (the delivery store's does), and a refused
+// event is a journal that is not whole: so the executor never makes one.
+const (
+	notSentMaxOps   = 200
+	notSentMaxBytes = 128 * 1024
+)
+
+// chunkOpResults splits ops into the parts of the not-sent events: in order, each
+// within the count and size bounds, an operation that is bigger than the size bound
+// on its own in a part by itself.
+func chunkOpResults(ops []OpResult) [][]OpResult {
+	var parts [][]OpResult
+	var cur []OpResult
+	size := 0
+	for _, o := range ops {
+		n := 0
+		if b, err := json.Marshal(o); err == nil {
+			n = len(b)
+		}
+		if len(cur) > 0 && (len(cur) >= notSentMaxOps || size+n > notSentMaxBytes) {
+			parts = append(parts, cur)
+			cur, size = nil, 0
+		}
+		cur = append(cur, o)
+		size += n
+	}
+	if len(cur) > 0 {
+		parts = append(parts, cur)
+	}
+	return parts
+}
+
+// recordNotSentOps writes the not-sent events for ops: one, with the id "not_sent",
+// when they fit, else the parts "not_sent", "not_sent:2", "not_sent:3"… Every
+// operation is in exactly one of them.
+func (r *runner) recordNotSentOps(ops []OpResult) {
+	parts := chunkOpResults(ops)
+	for i, part := range parts {
+		ev := notSentEvent{Phase: "not_sent", Stop: r.res.Stop, Operations: part}
+		id := "not_sent"
+		if len(parts) > 1 {
+			ev.Part, ev.Parts = i+1, len(parts)
+			if i > 0 {
+				id = fmt.Sprintf("not_sent:%d", i+1)
+			}
+		}
+		_ = r.record(Event{Kind: EventOp, ID: id, Payload: ev})
+	}
 }
 
 // refuse ends a run that stops before its first command: the Stop is kept, the
@@ -368,7 +449,7 @@ func (r *runner) refuse(stage, reason string, plan Plan, err error) error {
 	for i, op := range plan.Operations {
 		ops[i] = OpResult{Operation: op, Stage: StageOf(op.Kind).String(), Outcome: OutcomeNotExecuted}
 	}
-	_ = r.record(Event{Kind: EventOp, ID: "not_sent", Payload: notSentEvent{Phase: "not_sent", Stop: r.res.Stop, Operations: ops}})
+	r.recordNotSentOps(ops)
 	if r.res.JournalError != "" {
 		err = errors.Join(err, fmt.Errorf("%w: %s", ErrJournal, r.res.JournalError))
 	}
@@ -390,7 +471,7 @@ func (r *runner) recordNotSent() {
 	if len(ops) == 0 {
 		return
 	}
-	_ = r.record(Event{Kind: EventOp, ID: "not_sent", Payload: notSentEvent{Phase: "not_sent", Stop: r.res.Stop, Operations: ops}})
+	r.recordNotSentOps(ops)
 }
 
 // idle ends a run whose first plan has nothing to write: no entry, no write. With
@@ -408,7 +489,7 @@ func (r *runner) idle() error {
 	}
 	r.res.Entry = EntryReport{Pending: &res.Pending}
 	if err := r.record(Event{Kind: EventAuthCache, ID: "auth_cache", Payload: map[string]any{
-		"source": "previous_run", "entry_ran": false, "probe_pending": res.Pending,
+		"source": ObligationPreviousRun, "entry_ran": false, "probe_pending": res.Pending, "observed_acked": false,
 	}}); err != nil {
 		return fmt.Errorf("%w: %v", ErrJournal, err)
 	}
@@ -588,7 +669,14 @@ func (r *runner) verifySummary() string {
 	if v.ReadError != "" {
 		return "the read failed: " + v.ReadError
 	}
-	return fmt.Sprintf("%d operation(s) still planned on objects this run changed: %s", len(v.Remaining), strings.Join(v.Remaining, ", "))
+	var parts []string
+	if len(v.Remaining) > 0 {
+		parts = append(parts, fmt.Sprintf("%d operation(s) still planned on objects this run changed: %s", len(v.Remaining), strings.Join(v.Remaining, ", ")))
+	}
+	if len(v.Blocked) > 0 {
+		parts = append(parts, fmt.Sprintf("%d object(s) this run changed are blocked in the read after the writes: %s", len(v.Blocked), strings.Join(v.Blocked, ", ")))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // attempted is the set of objects the run tried to change: the object of every
@@ -597,7 +685,21 @@ func (r *runner) attempted() map[string]bool {
 	out := map[string]bool{}
 	for _, o := range r.res.Ops {
 		if o.Outcome != OutcomeNotExecuted {
-			out[o.Operation.Object] = true
+			out[strings.ToLower(o.Operation.Object)] = true
+		}
+	}
+	return out
+}
+
+// touched is the set of objects the run changed or may have: the object of every
+// operation that was applied, changed a member, or has an outcome that is still
+// unknown. An operation that was refused before it was sent (a conflict, a
+// failure, not executed) changed nothing.
+func (r *runner) touched() map[string]bool {
+	out := map[string]bool{}
+	for _, o := range r.res.Ops {
+		if f := o.Final(); f == OutcomeSuccess || f == OutcomeUnknown || o.Completed > 0 {
+			out[strings.ToLower(o.Operation.Object)] = true
 		}
 	}
 	return out
@@ -629,25 +731,45 @@ func (r *runner) verify() {
 	r.res.Plan3 = &plan3
 	attempted := r.attempted()
 	for _, op := range plan3.Operations {
-		if attempted[op.Object] {
+		if attempted[strings.ToLower(op.Object)] {
 			r.res.Verify.Remaining = append(r.res.Verify.Remaining, op.ID)
 		} else {
 			r.res.Verify.Unrelated = append(r.res.Verify.Unrelated, op.ID)
 		}
 	}
-	r.resolveUnknown(plan3, obs3)
+	// A blocked object has no operation in the plan, so the check above cannot see
+	// it: an object this run created that a concurrent writer gave another uid, say,
+	// shows nothing planned and would read as done (and an unknown create of it as
+	// converged). Blocked on what the run changed, or may have, is left undone.
+	touched := r.touched()
+	blocked := map[string]bool{}
+	for _, b := range plan3.Blocked {
+		if touched[strings.ToLower(b.Object)] {
+			blocked[strings.ToLower(b.Object)] = true
+			r.res.Verify.Blocked = append(r.res.Verify.Blocked, b.Reason+" "+b.Object)
+		}
+	}
+	r.resolveUnknown(plan3, obs3, blocked)
 }
 
 // resolveUnknown classifies each unknown outcome from the plan made after the
 // writes (spec §7.5): the operation is converged when the plan no longer holds it,
 // not applied when the plan still holds all of it, and still unknown when that
 // cannot be said: a password (its value cannot be compared; the timestamps are only
-// a hint), or an operation whose members the plan holds in part.
-func (r *runner) resolveUnknown(plan3 Plan, obs3 Observation) {
+// a hint), an operation whose members the plan holds in part, or an operation on an
+// object the plan blocks (it holds no operation for a blocked object, which is not
+// the same as having nothing left to do: the object is not in the state the
+// operation was meant to leave).
+func (r *runner) resolveUnknown(plan3 Plan, obs3 Observation, blocked map[string]bool) {
 	left := keySet(plan3, func(Operation) bool { return true })
 	for i := range r.res.Ops {
 		o := &r.res.Ops[i]
 		if o.Outcome != OutcomeUnknown {
+			continue
+		}
+		if blocked[strings.ToLower(o.Operation.Object)] {
+			o.Resolution = resolutionStillUnknown
+			o.Detail = strings.TrimSpace(o.Detail + " (the read after the writes blocks this object, so it cannot be said whether the operation applied)")
 			continue
 		}
 		if isPasswordKind(o.Operation.Kind) {
@@ -710,10 +832,27 @@ func (r *runner) recordVerify(ok, writesOK bool) {
 			resolutions[o.Operation.ID] = o.Resolution
 		}
 	}
+	remaining, unrelated := boundedList(v.Remaining), boundedList(v.Unrelated)
 	_ = r.record(Event{Kind: EventVerify, ID: "verify", Payload: map[string]any{
 		"ok": ok, "writes_ok": writesOK, "read_done": v.Done, "read_error": v.ReadError,
-		"remaining": v.Remaining, "unrelated": v.Unrelated, "unknown_resolved": resolutions, "stop": r.res.Stop,
+		"remaining": remaining, "remaining_total": len(v.Remaining),
+		"blocked": boundedList(v.Blocked), "blocked_total": len(v.Blocked),
+		"unrelated": unrelated, "unrelated_total": len(v.Unrelated),
+		"unknown_resolved": resolutions, "stop": r.res.Stop,
 	}})
+}
+
+// verifyListMax is how many entries of a list the identity.verify event carries; the
+// event says how many there are in all. The lists are those of the whole roster's
+// drift (unrelated) and of what the run left (remaining, blocked), and the Result and
+// the result file hold them whole.
+const verifyListMax = 100
+
+func boundedList(in []string) []string {
+	if len(in) <= verifyListMax {
+		return in
+	}
+	return in[:verifyListMax]
 }
 
 // sortedKeys is the keys of m in order.
