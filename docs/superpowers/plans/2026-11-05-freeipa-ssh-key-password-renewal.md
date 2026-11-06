@@ -121,7 +121,7 @@ pwd_expiration_warning = 14
 - **寫入方式**：preflight assert sssd.conf 恰好一個 `[domain/` section、`ipa_access_order`／`pwd_expiration_warning` 各最多一行、現有值是已知形式（見 P0）；通過後沿用現有 hardening task 的 `lineinfile` + `insertafter: '^ipa_domain\s*='` 整行寫入。只有一個 domain section 時，整檔 regex 不會改錯 section，不需要 INI parser 或 ownership 契約；檔案註解與不相關鍵不動。
 - **最小變更**：未設定時不產生 mutation；already converged 時無改變、無重啟；更新 `pwd_expiration_warning` 只針對目標 domain，不要改全域 `[pam]` 以波及其他 realm。
 - **實際順序**（apply 已實作）：`slurp` 目前的 sssd.conf（快照在 Ansible 變數裡，不寫前像檔）→ preflight 檔案形狀 → `lineinfile` 整行寫入 → `sssctl config-check`（檢查的是已寫入的檔案，失敗由 rescue 把快照寫回）→ 依既有 SSSD restart gate 只重啟一次（另加 confdb 與檔案不一致時也重啟）→ 確認 SSSD active、`sssctl config-check`、confdb 與檔案一致。前像不可使用歷史 `.prev` 模糊回退；變更腳本中斷後，下次 apply 以 confdb 與檔案的比對補上重啟。PAM account 結果（C15–C17）由 verify 檢查，不在 apply 的 block 內。
-- **失敗時**：兩個 block 各有 `always` 的 rescue。(a) 寫入階段（preflight、寫入、`sssctl config-check`）失敗：rescue 把本次快照寫回（內容、mode `0600`、owner root），SSSD 此時還沒重啟，run 失敗。(b) 重啟**成功之後**的驗證（SSSD active、`sssctl config-check`、confdb 與檔案一致）失敗：rescue 寫回快照、在還原的檔案上重啟 SSSD，run 失敗。**不在 rescue 內**：兩個 SSSD 重啟 task（「restart SSSD after wiring responders」與「enable + start SSSD」）。`systemctl restart sssd` 自己失敗時不會回滾，sssd.conf 保留新政策、SSSD 可能停著，由操作者處理（`journalctl -u sssd`、修檔後重跑 apply），這是 spec §5 的已知限制。只帶 `--tags C14`／`C20` 而略過快照的 run 沒有可還原的前像，失敗訊息會明說沒有還原。還原後 playbook 不另外跑 `sssctl config-check`，也不確認管理連線，沒有 `PARTIAL` 狀態：還原的 copy 或重啟自己失敗時，該 task 失敗，由操作者處理。敏感檔的內容、密碼、PAM 輸入、Kerberos ticket 不得出現在 CI、log、diff、evidence。
+- **失敗時**：快照 → 修改 → 驗證是同一個回滾邊界，兩個 block 各有 `always` 的 rescue。(a) 寫入階段（preflight、寫入、`sssctl config-check`）失敗：rescue 把本次快照寫回（內容、mode `0600`、owner root），SSSD 此時還沒重啟，run 失敗。(b) 第二個 block 含 confdb drift 檢查、「restart SSSD after wiring responders」、「enable + start SSSD」與重啟後的驗證（SSSD active、`sssctl config-check`、confdb 與檔案一致）：任何一步失敗，包含 `systemctl restart sssd` 自己失敗，rescue 都寫回快照、在還原的檔案上重啟 SSSD，run 失敗。還原後的重啟結果碼被登記、不被吞掉，失敗訊息說明哪個 task 失敗、sssd.conf 有沒有還原、SSSD 有沒有在還原的檔案上重啟成功（重啟又失敗時說 SSSD 可能停著，查 `systemctl status sssd`／`journalctl -u sssd`）。第二個 block 本身沒有 tag 與 `when:`，每個 task 保留自己的 tag 與條件，沒設政策時 restart 與 enable + start 照常執行（rescue 此時沒有快照可還原，訊息明說沒有還原、不重啟 SSSD）。只帶 `--tags C14`／`C20` 而略過快照的 run 同樣沒有可還原的前像，失敗訊息會明說沒有還原。還原後 playbook 不另外跑 `sssctl config-check`，也不確認管理連線，沒有 `PARTIAL` 狀態：還原的 copy 自己失敗時，該 task 失敗，由操作者處理。敏感檔的內容、密碼、PAM 輸入、Kerberos ticket 不得出現在 CI、log、diff、evidence。
 - **標籤與 idempotency**：沿用 `freeipa-client`、`sssd_hardening` 及新 spec row tag，注意 [PR #243](https://github.com/kjelly/pilot/pull/243) 對 `always` task 的收斂限制。第二次 apply 必須 `changed=0`，不能因為備份／健康檢查而永遠報 changed。新 row tag 與 `sssd_hardening` 都要加到 SSSD restart task（`freeipa-client-apply.yml:848`）；restart 的 `when:` 讀其他 register 一律改成 `(x | default({})) is changed`，否則 `--tags <新 row>` 會因 `ipa_sssd_services` undefined 而失敗（§2 的既有 bug，同一個 PR 修掉）。rescue 每個 task 標 `always`（AGENTS.md §4.4）。
 - **保留既有支援**：不能更動 `services = nss, pam, ssh...`、Ubuntu `sssd-sudo.socket` 與 AlmaLinux responder 差異；不能倒退 [PR #222](https://github.com/kjelly/pilot/pull/222) 的 sudo full-refresh 邏輯。
 
@@ -213,7 +213,7 @@ sssctl user-checks -a acct -s sudo <interactive-ipa-user>
 ### 正式回滾策略
 
 1. 部署前記錄 host identity、targeted SSSD domain、`sssd.conf` checksum／權限、SSHD effective config、SSSD health、仍可用的本機 root/console/break-glass 通路。
-2. **當次 apply 失敗**：寫入階段（preflight、寫入、config-check）失敗，與重啟成功之後的驗證（SSSD active、config-check、confdb 與檔案一致）失敗，都由 Ansible rescue 還原本次快照（後者並在還原的檔案上重啟 SSSD），run 失敗；操作者確認 SSSD active 與原 SSH／PAM allow/deny 行為後，才可繼續 rollout，失敗即停批。**SSSD 重啟本身失敗不回滾**（兩個重啟 task 在 rescue 之外，spec §5）：sssd.conf 保留新政策、SSSD 可能停著，要由操作者處理（`journalctl -u sssd`、修檔後重跑 apply），所以 rollout 先在單一 staging canary 上做，並備好 break-glass（§1、§5 階段 4）。
+2. **當次 apply 失敗**：寫入階段（preflight、寫入、config-check），以及 SSSD 重啟、enable + start 與重啟後的驗證（SSSD active、config-check、confdb 與檔案一致）任何一步失敗，都由 Ansible rescue 還原本次快照（後者並在還原的檔案上重啟 SSSD），run 失敗，訊息說明有沒有還原、SSSD 有沒有重啟成功（spec §5）；操作者確認 SSSD active 與原 SSH／PAM allow/deny 行為後，才可繼續 rollout，失敗即停批。還原的檔案上重啟也失敗時 SSSD 可能停著，要由操作者處理（`journalctl -u sssd`），所以 rollout 先在單一 staging canary 上做，並備好 break-glass（§1、§5 階段 4）。
 3. **部署已成功但後續相容性失敗**：由 `pilot edit` 將該 host 政策改為 `warn`（保持可登入）或 `off`（寫回 `ipa_access_order = expire`），經 `pilot generate/deploy` 重新套用；再以 live SSH+sudo+login-probe 驗證。取消設定（回到未設定）**不能當作 rollback**。
 4. 變更責任邊界是 **client-host** 的 SSSD/SSHD；不修改 FreeIPA global password policy、HBAC roster、sudo rule 作為回滾捷徑。若測試帳號密碼真的過期，優先透過 FreeIPA password-change／admin reset 恢復。
 
@@ -230,7 +230,7 @@ sssctl user-checks -a acct -s sudo <interactive-ipa-user>
 - [x] 階段 2：apply（`always` 輸入 gate、快照→preflight→整行寫入→`sssctl config-check`、confdb drift 檢查、post-restart 驗證與 rescue）、fixture playbook、`TestRegression_FreeipaClientApplyPlaybook_PasswordExpiryPolicy`／`_PwexpiryFixtures`；`TestSpecPlaybookTagAlignment` 通過；restart task 的 tag 修正有反向測試證明會失敗。
 - [x] 階段 1：`docs/verification/freeipa-client.md` v1.14 新增 C13–C18（隨主機政策判斷的列）；contract 宣告 `freeipa_client_sssd_password_expiry_policy`（`^(warn|renew|off)$`）與 `freeipa_client_sssd_password_expiry_warning_days`；regression test 鎖住列與契約；spec lint 0 errors。`TestSpecPlaybookTagAlignment` 在 C13/C14 失敗是預期的，直到階段 2 的 apply playbook 加上 tag。
 - [x] `freeipa-client` contract 支援 `warn/renew/off`，未設定時不動；預設與既有 host 行為完全相容。
-- [x] 單一 domain assert + 整行寫入的 SSSD edit、有效設定檢查、fail-closed、冪等性全部通過；當次前像回滾涵蓋寫入階段與重啟成功之後的驗證失敗，**不含** SSSD 重啟本身失敗（兩個重啟 task 在 rescue 之外，spec §5 已知限制）。
+- [x] 單一 domain assert + 整行寫入的 SSSD edit、有效設定檢查、fail-closed、冪等性全部通過；當次前像回滾涵蓋寫入階段、SSSD 重啟、enable + start 與重啟後的驗證（同一個回滾邊界，spec §5）。
 - [x] SSSD restart task 帶新 row tag 與 `sssd_hardening`，`--tags` 只選其中一個時設定也會生效。
 - [x] 真實 SSH Key + 已過期密碼出現互動修改，修改前不能進正常 Shell，`passwd` 結束後斷線，重新 SSH 與 sudo 正常。
 - [x] HBAC deny、停用帳號、SCP/SFTP／遠端命令、login-probe 沒有未授權的存取回歸；gateway／directory／target-policy 主機在 A10 通過前，由 preflight 拒絕 `renew`。
@@ -240,7 +240,7 @@ sssctl user-checks -a acct -s sudo <interactive-ipa-user>
 - [x] A16（sudo cache 交叉，#267）已實跑：PAM 過期狀態與 sudo 規則分開診斷，規則變更等 `SUDO Smart Refresh`（預設 900 秒），與 `renew`、`pam_initgroups_scheme` 無關，沒有用清快取指令（`docs/evidence/freeipa-client-password-renewal/LATEST.md`）。
 - [ ] 啟用前已列出並通知還在用預設密碼的使用者；主機上能登入的 FreeIPA 帳號都有密碼，canary 的密碼到期日在遠未來。
 - [x] Ubuntu 24.04 產出真實實跑 evidence；spec 明寫只支援 Ubuntu 24.04（不支援 22.04），非 24.04 主機設定本功能時在修改前拒絕。
-- [x] `--check --diff`（已 enroll 的主機不預覽政策變更，spec §5）、選定 row tag／component、第二次 apply `changed=0`、失敗恢復（寫入階段與重啟成功之後的驗證失敗由 rescue 還原；SSSD 重啟本身失敗不回滾，spec §5）與 CI／negative controls 完成。
+- [x] `--check --diff`（已 enroll 的主機不預覽政策變更，spec §5）、選定 row tag／component、第二次 apply `changed=0`、失敗恢復（寫入階段、SSSD 重啟、enable + start 與重啟後的驗證任何一步失敗都由 rescue 還原並重啟，訊息說明結果，spec §5）與 CI／negative controls 完成。
 - [ ] 可由 `pilot edit/generate/deploy` 執行 staging rollout 與 `warn/off` rollback；沒有任何必要的人工作業去直接編修 inventory/vault。
 - [ ] 獨立 reviewer PASS，PR HEAD 含最新 `main` 祖先且 CI 與 native evidence 對齊最新 candidate；才標記 Ready for Review。
 
@@ -258,4 +258,4 @@ sssctl user-checks -a acct -s sudo <interactive-ipa-user>
 
 ---
 
-**交付判定：** 本文件是 `kjelly/pilot` 的**實作計畫**，也記錄這個 PR 的交付狀態。階段 1–3 已完成：spec 列（C13–C20）、contract、regression test、`freeipa-client-apply.yml` 的 SSSD 政策 block（含 `renew` 的 `pam_initgroups_scheme = always`）與 fixture playbook，並在 Ubuntu 24.04 真實 topology 上實跑；結果、tested candidate 與限制都在 evidence record（見上方三份 LATEST），本檔不重複。最關鍵的不確定性「Ubuntu 24.04 的 sshd 是否如 §1.1 所述，在 publickey 登入後執行 `passwd` 完成修改」已由實機確認（A04）。**尚未完成**：preflight 對 gateway／directory／target-policy 主機的 `renew` 拒絕仍在（解除要改 playbook 並重做證據，階段 3b）；啟用前通知還在用預設密碼的使用者，與 staging rollout／`warn`、`off` rollback（階段 0／4）是操作者的前置，不在這個 PR 內完成。已知限制（SSSD 重啟本身失敗不回滾、不讀 `conf.d`、`--check --diff` 不預覽政策變更、純金鑰帳號被拒絕、`always` 是主機全域）見 `docs/verification/freeipa-client.md` §5。
+**交付判定：** 本文件是 `kjelly/pilot` 的**實作計畫**，也記錄這個 PR 的交付狀態。階段 1–3 已完成：spec 列（C13–C20）、contract、regression test、`freeipa-client-apply.yml` 的 SSSD 政策 block（含 `renew` 的 `pam_initgroups_scheme = always`）與 fixture playbook，並在 Ubuntu 24.04 真實 topology 上實跑；結果、tested candidate 與限制都在 evidence record（見上方三份 LATEST），本檔不重複。最關鍵的不確定性「Ubuntu 24.04 的 sshd 是否如 §1.1 所述，在 publickey 登入後執行 `passwd` 完成修改」已由實機確認（A04）。**尚未完成**：preflight 對 gateway／directory／target-policy 主機的 `renew` 拒絕仍在（解除要改 playbook 並重做證據，階段 3b）；啟用前通知還在用預設密碼的使用者，與 staging rollout／`warn`、`off` rollback（階段 0／4）是操作者的前置，不在這個 PR 內完成。已知限制（不讀 `conf.d`、`--check --diff` 不預覽政策變更、純金鑰帳號被拒絕、`always` 是主機全域；SSSD 重啟失敗也會還原，見 §5 的回滾邊界）見 `docs/verification/freeipa-client.md` §5。

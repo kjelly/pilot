@@ -390,13 +390,16 @@ and §4.5.
 **`freeipa-client.md`, `freeipa-identity.md`, and `freeipa-dns.md` do not fully pass `pilot verify`
 against this topology's own roster/manifest — this is expected, not a regression.** All three
 specs' Command/Expected columns are pinned to a fixed fixture (a `pilotuser` account for
-`freeipa-client.md`'s C5/C8; `fixture-group-a`/`fixture-canonical-user-a`/etc. for
+`freeipa-client.md`'s C5/C8 and the password-state accounts `pilot-pwexpired`/`pilot-pwvalid`/`pilot-nopw`
+for its C15-C17, created only by `playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml`;
+`fixture-group-a`/`fixture-canonical-user-a`/etc. for
 `freeipa-identity.md`; `delete-fixture`/`authoritative-fixture.pilot.internal.`/etc. for
 `freeipa-dns.md`), provisioned by each spec's own separate `§7.1` fixtures playbook — never by this
 runbook's roster/manifest, which intentionally uses `alice`/`bob` and this PoC's own DNS zone.
 Confirmed 2026-08-06 (round 19, the first round to actually run `pilot verify` against these 3
-specs): `freeipa-client.md` 16/20 (only the fixture-bound C5/C8 fail), `freeipa-identity.md` 2/18,
-`freeipa-dns.md` 0/12 — all failures are fixture-name mismatches, not tool/playbook errors. The real
+specs): `freeipa-client.md`'s fixture-bound rows fail on this topology (C5/C8 then; the later C15-C17
+are fixture-bound too, so the pass count has since changed and is not restated here),
+`freeipa-identity.md` 2/18, `freeipa-dns.md` 0/12 — all failures are fixture-name mismatches, not tool/playbook errors. The real
 acceptance test for THIS runbook's own identity/DNS state is §4.1/§4.4 below plus the live checks
 already exercised during `freeipa-identity`/`freeipa-dns` reconcile (group membership, HBAC,
 hostgroups, sudo rules, and a live `dig` round-trip against the real records) — not these 3 specs.

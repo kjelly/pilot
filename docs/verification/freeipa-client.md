@@ -15,7 +15,8 @@
 > delegation，確保未來停用密碼登入後 pilot-access-gateway 跳板機仍可 relay 登入，見 §9 v1.8 說明；
 > v1.14 新增 C13–C18：SSH key 等非密碼登入時對已過期 FreeIPA 密碼的政策（opt-in，
 > `freeipa_client_sssd_password_expiry_policy`），row 指令與 apply／fixture playbook 已實作，正式 evidence 在 §0 連結的 record，見 §0 / §9 v1.14／v1.15；
-> v1.16 新增 C19–C20：`renew` 時一併設定 `[pam] pam_initgroups_scheme = always`，讓改密碼後重新登入與管理員 reset 不被 SSSD 的 PAM 快取擋住（#262／#263），見 §0 / §9 v1.16
+> v1.16 新增 C19–C20：`renew` 時一併設定 `[pam] pam_initgroups_scheme = always`，讓改密碼後重新登入與管理員 reset 不被 SSSD 的 PAM 快取擋住（#262／#263），見 §0 / §9 v1.16；
+> v1.17 Checklist 不變：SSSD 重啟、enable + start 與重啟後的檢查移進同一個 rescue（重啟本身失敗也會還原 sssd.conf），並把「驗證整份 spec 的 consumer 必須先跑兩支 fixture playbook」寫成契約，見 §2 / §5 / §7.2 / §9 v1.17
 > 對齊規範：pilot 通用基礎設施**使用端**規範；本 host 是**被 enroll 的 client**，
 > 把「帳號認證（Authentication）+ 存取授權（Authorization / HBAC + sudo）+ 稽核（Audit）」
 > 交給 FreeIPA server 統一提供。
@@ -276,9 +277,19 @@ Inventory 輸入由各元件 contract 的 `groupVars` 檢查。FreeIPA 的 `ipa_
 >   （§3 v1.14 四種狀態都 PASS），不是「健康時 grep 找不到」的反邏輯。
 > - **C15–C17 依賴 fixture 帳號**：`pilot-pwexpired`（管理員 reset 過、還沒自己改：
 >   `krbPasswordExpiration` = `krbLastPwdChange`）、`pilot-pwvalid`（有密碼，`--password-expiration`
->   設在遠未來）、`pilot-nopw`（沒有密碼），三者都要被 HBAC 允許登入本機。fixture playbook 待新增
->   （§5、§7）。實測 client 的 SSSD 快取讀得到 `krbLastPwdChange`／`krbPasswordExpiration`，這是整個
->   功能的前提。
+>   設在遠未來）、`pilot-nopw`（沒有密碼），三者都要被 HBAC 允許登入本機。這些帳號只由
+>   `playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml` 在 FreeIPA server 上建立（§7.2）。
+>   **每一個驗證整份 spec 的 consumer，在 verify 之前都必須在 FreeIPA server 上跑兩支 fixture playbook**：
+>   `freeipa-client-fixtures.yml`（C5／C8 的 `pilotuser` 與 `pilot-all` 規則）與
+>   `freeipa-client-pwexpiry-fixtures.yml`（C15–C17）。少跑任何一支，對應的 row 會 FAIL，整條鏈回滾。
+>   目前這樣做的 consumer：`playbooks/test/freeipa-client-pwexpiry-chain.yml`、
+>   `playbooks/test/freeipa-client-pwexpiry-ha-chain.yml`、`playbooks/test/per-host-recording-topology.yml`
+>   （`scripts/per-host-recording-topology-test.sh`）。`scripts/topology-checkmode-test.sh`（`playbooks/site.yml`，
+>   minimal-poc 拓樸）是刻意不跑 fixture 的 consumer，固定樣態的 row（C5／C8／C15–C17）在那裡不會通過，
+>   見 `docs/runbooks/minimal-poc-architecture.md`。這份對照由
+>   `TestRegression_FreeipaClientFullSpecConsumersCreateTheirFixtures` 鎖住：新增一個驗證整份 spec 的 script，
+>   不跑兩支 fixture 就失敗，除非明確列入該測試的 allowlist 並寫明理由。實測 client 的 SSSD 快取讀得到
+>   `krbLastPwdChange`／`krbPasswordExpiration`，這是整個功能的前提。
 > - **C18**：`renew` 要靠 sshd 呼叫 PAM account 才會觸發；`UsePAM no` 時 sshd 不走 PAM，政策完全
 >   無效。用 `sshd -T` 讀合併 `sshd_config.d` 後的有效值，不讀單一檔案。
 
@@ -454,9 +465,9 @@ NOOP`——因為 server 上仍留著同一 IP 的舊記錄，這是預期行為
 | C9/C10 | auditd 屬「本機稽核」補強，非 FreeIPA 元件；若站台以其他集中式稽核（如轉送 KDC/系統日誌到 SIEM）取代，可標 `skip` 並在文件註明替代來源 | 有替代稽核方案的站台 | 依站台 |
 | C11 | 若 `freeipa_client_register_dns` effective 值為 `false`（selected FreeIPA server 未啟用 native DNS），本 row 預期 fail（authoritative DNS 本來就不會有這筆 record）；應改標 `skip`，佐證改用 apply 輸出的 `FreeIPA client DNS plan: registration: DISABLED`（spec.md §13.2）debug 訊息 | selected server `freeipa_setup_dns=false` 的站台 | 永久 |
 | —   | 本 spec 的 NTP 部分不含獨立 row：`--no-ntp`，時間同步交給既有 `ntp` role（見 §1）| 全部 | 永久 |
-| C15–C17 | 依賴三個 fixture 帳號（`pilot-pwexpired`／`pilot-pwvalid`／`pilot-nopw`，§2 C13–C18 備註）。沒有跑過 fixture 的站台這三列會 FAIL（帳號不存在），可標 `skip`；正式環境不要建立這三個帳號以外的測試帳號來代替。| 沒有跑 fixture 的站台 | 依站台 |
+| C15–C17 | 依賴三個 fixture 帳號（`pilot-pwexpired`／`pilot-pwvalid`／`pilot-nopw`，§2 C13–C18 備註），只由 `freeipa-client-pwexpiry-fixtures.yml` 建立（§7.2）。驗證整份 spec 的 consumer 必須先跑它（連同 C5／C8 的 `freeipa-client-fixtures.yml`），否則這三列 FAIL、整條鏈回滾。沒有跑過 fixture 的站台（例如 minimal-poc 拓樸的 `site.yml`）這三列會 FAIL（帳號不存在），可標 `skip`；正式環境不要建立這三個帳號以外的測試帳號來代替。| 沒有跑 fixture 的站台 | 依站台 |
 | C19 | `renew` 下改完密碼後重新登入：`pam_initgroups_scheme = always`（v1.16）之前，只用 TTY 重試的使用者可能被擋數分鐘（#262），有了它以後 5 秒窗口之外的重試就成功。管理員 reset 在使用者有開著的 session 時，也會在使用者的下一個 PAM 請求被發現（#263）。代價（每個 PAM 請求多一次後端使用者與群組查詢）與 FreeIPA 不可達時的行為見 evidence；不要用清快取當修法（AGENTS.md §5.9）| `renew` 的主機 | 永久（SSSD 行為）|
-| C13／C14／C19／C20 | **SSSD 重啟本身失敗不會回滾**。寫入與 `sssctl config-check` 失敗，以及重啟成功之後的比對（SSSD active、config-check、confdb 與檔案一致）失敗，都由 rescue 還原 sssd.conf 並重啟 SSSD；但兩個重啟 task（「restart SSSD after wiring responders」與「enable + start SSSD」）在所有 rescue 之外，`systemctl restart sssd` 自己失敗時 sssd.conf 保留新政策、SSSD 可能停著，要由操作者處理（`journalctl -u sssd`、修檔後重跑 apply）。只帶 `--tags C14`／`C20` 而略過 C13 快照的 run 沒有可還原的快照，失敗訊息會明說沒有還原 | 所有套用 `freeipa_client_sssd_password_expiry_policy` 的主機 | 永久（設計）|
+| C13／C14／C19／C20 | **快照 → 修改 → 驗證是同一個回滾邊界**：寫入與 `sssctl config-check` 失敗由第一個 rescue 還原 sssd.conf（SSSD 此時還沒重啟）；confdb drift 檢查、SSSD 重啟（`restart SSSD after wiring responders`）、`enable + start SSSD`，以及重啟之後的比對（SSSD active、config-check、confdb 與檔案一致），任何一步失敗（包含 `systemctl restart sssd` 自己失敗）都由第二個 rescue 還原 sssd.conf、在還原的檔案上重啟 SSSD，再讓 run 失敗。失敗訊息明說是哪個 task 失敗，以及 sssd.conf 有沒有還原、SSSD 有沒有在還原的檔案上重啟成功（重啟失敗時帶它的結束碼並說 SSSD 可能停著，要查 `systemctl status sssd`／`journalctl -u sssd`）。這個 block 本身沒有 tag 也沒有 `when:`，每個 task 保留自己的 tag 與條件，所以沒有設政策時 restart 與 enable + start 照常執行（它們服務 C8／C2）。這個 run 沒有快照（沒設政策，或帶 `--tags` 而略過 C13）時沒有東西可還原：訊息說沒有還原、rescue 不重啟 SSSD，要自己查 sssd.conf 與 `journalctl -u sssd`。還原的 copy 自己失敗時該 task 失敗，由操作者處理 | 所有套用 `freeipa_client_sssd_password_expiry_policy` 的主機 | 永久（設計）|
 | C13／C14／C19／C20 | preflight 與 C13／C19 只讀 `/etc/sssd/sssd.conf`，不讀 `/etc/sssd/conf.d` 的片段。片段若設了同名選項，執行中的 SSSD 讀到的值會與 sssd.conf 不同，C14／C20 的 confdb 比對會 fail closed（不會靜默通過），但訊息不會指名 conf.d，要自己查 `/etc/sssd/conf.d` | 使用 `conf.d` 片段的主機 | 永久（設計）|
 | C13／C14／C19／C20 | `--check --diff` 對已 enroll 的主機看不到政策變更：寫入、重啟與比對的 block 在 check mode 下刻意略過（全新主機還沒有 sssd.conf），預覽不顯示 `ipa_access_order`／`pam_initgroups_scheme` 的差異；要看會改什麼，只能在實際套用後讀 sssd.conf | 全部 | 永久（設計）|
 | C17 | `warn`／`renew` 拒絕從沒設過密碼的帳號，包含純金鑰的服務帳號與自動化帳號（SSSD 2.9.4 固定用 MIT Kerberos 密碼政策，快取沒有 `krbLastPwdChange` 就拒絕，A17）。這些帳號要先設一組密碼（到期日設在遠未來），否則啟用後就無法登入 | 啟用 `warn`／`renew` 的主機 | 永久（SSSD 行為）|
@@ -480,10 +491,10 @@ NOOP`——因為 server 上仍留著同一 IP 的舊記錄，這是預期行為
 | C9/C10  | 裝 + 啟 `auditd`（`package` + `systemd`）| 本機稽核 |
 | C11     | `tasks/freeipa-client-host-dns.yml`（phase `plan`，pre_tasks，在 `/etc/hosts` pin **之前**：resolve + validate + dig 查 authoritative DNS + CAS/identity 狀態機；phase `apply`，enrollment/health 之後：`ADD` 走 kinit+`dnsrecord-add`，`REPLACE` 走 apply-time re-read + kinit + `dnsrecord-mod`/value-scoped `dnsrecord-del`；兩邊都收尾於 dig-based exact post-apply verify）| effective `freeipa_client_register_dns` 未設時繼承 selected FreeIPA server 的 `freeipa_setup_dns`；`extra` 非空且無 `freeipa_client_dns_replace_from_address` 授權時 fail-closed（spec.md §8），不 silent takeover；有授權時見 §9 Day-2 replacement 狀態機。**不使用 `ipa-client-install --ip-address=`**——2026-08-21 live vm-target 實測發現該旗標並非透過 server 端 host-add 靜態註冊，而是觸發 client 端一次性 `nsupdate` GSS-TSIG 動態更新，前提是 OS resolver 已指向 FreeIPA DNS（`freeipa-dns-client` 的職責，spec.md §18 明確要求兩者獨立），在未指向時會逾時失敗且不建立任何 record（`ipa host-show`/`ipa dnsrecord-find` 均確認無 IP）。因此新 enroll 與既有 client 統一改用 admin-kinit + `dnsrecord-add`，不依賴 installer 本身的 DNS 更新 |
 | C12     | `/etc/ssh/ssh_config.d/05-freeipa-client-gssapi-delegate.conf`（`copy`，`Host *.{{ ipa_domain }}` 區塊開 `GSSAPIAuthentication`/`GSSAPIDelegateCredentials yes`）| 純 client-side 設定檔，無對應 service 需重啟；`ipa-client-install` 自己的 `04-ipa.conf` 從不動這兩個選項 |
-| C13     | `freeipa-client-apply.yml` 的 block：快照 sssd.conf → preflight（恰好一個 `[domain/`、`access_provider = ipa`、`ipa_access_order` 最多一行且是已知形式、`pwd_expiration_warning` 最多一行）→ `lineinfile` 整行寫入 `ipa_access_order`（`warn`／`renew` 另寫 `pwd_expiration_warning`，`insertafter: '^ipa_domain\s*='`）→ `sssctl config-check`；失敗由 rescue（`always`）還原快照。輸入檢查（值、Ubuntu 24.04、`renew` 不在 gateway／directory／target-policy 主機、天數 1–30）是 `always` 的 pre_tasks，在任何修改之前 | 未設定時完全不碰 sssd.conf |
-| C14     | 既有的「restart SSSD after wiring responders」task 加上 `C13`／`C14`／`sssd_hardening` 的 tag，`when:` 改讀 `(x \| default({})) is changed`，並在 confdb 與檔案不一致（drift 檢查 rc=1）時也重啟；重啟後的 block 再確認 SSSD active、`sssctl config-check`、confdb 與檔案一致，不一致就還原快照、重啟 SSSD 並讓 run 失敗 | 既有 bug 的修正：`sssd_hardening` 的 task 改了 sssd.conf，但 restart 原本只標 `C8`，`--tags sssd_hardening` 從不重啟 |
+| C13     | `freeipa-client-apply.yml` 的 block：快照 sssd.conf → preflight（恰好一個 `[domain/`、`access_provider = ipa`、`ipa_access_order` 最多一行且是已知形式、`pwd_expiration_warning` 最多一行）→ `lineinfile` 整行寫入 `ipa_access_order`（`warn`／`renew` 另寫 `pwd_expiration_warning`，`insertafter: '^ipa_domain\s*='`）→ `sssctl config-check`；失敗由 rescue（`always`）還原快照（SSSD 此時還沒重啟）。輸入檢查（值、Ubuntu 24.04、`renew` 不在 gateway／directory／target-policy 主機、天數 1–30）是 `always` 的 pre_tasks，在任何修改之前 | 未設定時完全不碰 sssd.conf |
+| C14     | 既有的「restart SSSD after wiring responders」task 加上 `C13`／`C14`／`sssd_hardening` 的 tag，`when:` 改讀 `(x \| default({})) is changed`，並在 confdb 與檔案不一致（drift 檢查 rc=1）時也重啟；drift 檢查、重啟、`enable + start SSSD` 與重啟後的檢查（SSSD active、`sssctl config-check`、confdb 與檔案一致）同在一個 block、一個 rescue：任何一步失敗（含重啟本身）都還原快照、在還原的檔案上重啟 SSSD 並讓 run 失敗，訊息說明有沒有還原與有沒有重啟成功（§5） | 既有 bug 的修正：`sssd_hardening` 的 task 改了 sssd.conf，但 restart 原本只標 `C8`，`--tags sssd_hardening` 從不重啟 |
 | C19     | `freeipa-client-apply.yml` 同一個 C13 block：preflight 另要求恰好一個 `[pam]` 區塊、`pam_initgroups_scheme` 最多一行且值是 `always` 或 `no_session`；`renew` 時用 `lineinfile` 整行寫入 `pam_initgroups_scheme = always`（`insertafter: '^\[pam\]\s*$'`），`warn`／`off` 時只移除值剛好是 `always` 的那一行；寫入失敗由同一個 rescue 還原快照 | 未設定時不碰；`renew` 之外的政策不寫入 |
-| C20     | restart 的 `when:` 讀這個 register 的 `is changed`；confdb drift 檢查與重啟後的檢查同時比對 `cn=pam,cn=config` 的 `pam_initgroups_scheme`（重啟後最多重試 5 次，每次隔 2 秒，因為 SSSD 剛啟動時 confdb 可能還沒寫完）；不一致就還原快照、重啟並讓 run 失敗 | 與 C14 同一個 tag 機制 |
+| C20     | restart 的 `when:` 讀這個 register 的 `is changed`；confdb drift 檢查與重啟後的檢查同時比對 `cn=pam,cn=config` 的 `pam_initgroups_scheme`（重啟後最多重試 5 次，每次隔 2 秒，因為 SSSD 剛啟動時 confdb 可能還沒寫完）；不一致就由同一個 rescue 還原快照、重啟並讓 run 失敗 | 與 C14 同一個 tag 機制 |
 | C15–C17 | verify-only：fixture 帳號的 PAM account 結果，對應的 mutation 是 C13／C14 | `playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml`（經 `freeipa-client-fixtures.yml` 建帳號，再用 `ipa user-mod --random`／`--password-expiration` 造出狀態；只對還沒有密碼的帳號寫入，重跑 `changed=0`）|
 | C18     | verify-only：`UsePAM yes` 是 Ubuntu 的 sshd 預設，本 playbook 不寫 | 只確認沒有被其他 drop-in 關掉 |
 > Apply playbook 用 `block/rescue`：enroll/health 失敗時 rescue 收 `sssctl domain-status` +
@@ -620,6 +631,16 @@ pilot vm-target run --name <server-vm> playbooks/test/fixtures/freeipa-client-fi
 把 `pilotuser` 掛進該規則都存在（實測冪等：重跑 `ok=6 changed=0`）。
 （慣例見 `AGENTS.md` §4.1：`docs/verification/<spec>.md` 的跨 host 前置放
 `playbooks/test/fixtures/<spec>-fixtures.yml`。）
+
+C15–C17 依賴的三個帳號（`pilot-pwexpired`／`pilot-pwvalid`／`pilot-nopw`，另有 A04–A09 的帳號）是**另一支**
+fixture playbook：`playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml`，同樣跑在 **FreeIPA server**
+群組上（`fixtures_target_group` 預設 `freeipa-server`；單機 vm-target 用 `-e fixtures_target_group=all`），
+同樣冪等、秘密走 vault，帳號只經 `freeipa-client-fixtures.yml` 建立，密碼狀態直接用 `ipa user-mod` 造出。
+**驗證整份 spec 的 consumer，在 client apply 與 verify 之前，必須兩支 fixture playbook 都跑**
+（兩支都要在 client apply 之前，這樣 client 的 SSSD 第一次查詢就看得到帳號；
+`freeipa-client-fixtures.yml` 必須用預設的 `pilotuser`，不能改 `ipa_fixture_user`）；
+`freeipa-client-pwexpiry-chain.yml`、`freeipa-client-pwexpiry-ha-chain.yml` 與
+`per-host-recording-topology.yml` 已經是這樣（§2 備註列出所有 consumer 與刻意不跑 fixture 的例外）。
 
 ### 7.3 client enroll（Ubuntu）
 
@@ -806,4 +827,5 @@ subprocess timeout——均與 freeipa-client DNS 無關，非本次改動造成
 | 2026-10-29 | v1.13 | Checklist 不變。issue #168：已 enroll 主機的 resolver 被改過、解析不到 `krb5.conf` 的 KDC 名稱時，`--check` preview 在 host annotations 的 admin `kinit` 失敗且被 `no_log` 遮蔽；修復它的 `/etc/hosts` server-pool pin 是 mutation，preview 不會寫入。新增 `tasks/freeipa-client-kdc-preflight.yml`（kinit 之前以主機自己的 resolver 解析 KDC 與 FreeIPA 名稱，`--check` 且 pin 待變更時 deferred、其餘解析不到一律不遮蔽地失敗並列出 host/FQDN/resolver）與 `tasks/freeipa-client-kinit-result.yml`（kinit 失敗分類，不輸出原始 stderr），接到 annotations 與 access policy 兩個 task 檔；annotations 的 kinit 由 shell `printf` pipe 改為 `command` + `stdin`。pool pin 加 `register: freeipa_client_hosts_pool_pin`。PR #180 review 後就地修正：preflight 的必要名稱改為 OR（任一 KDC 名稱可解析即可，pin 只需涵蓋其中一個＋每個解析不到的 admin endpoint；retired-only 在 preview 仍失敗、不預測 failover reconciliation），KDC 值依 libkrb5 解碼（引號、空白、`host:port`／`[v6]`／https），`master_kdc` 不計入，kinit 分類只在必要名稱解析不到時才歸 `cannot_resolve`。resolver 偏離偵測不在此次範圍（另開 issue）。見 §6；vm-target 實跑見 [`docs/evidence/freeipa-client/2026-10-29-9e9f2b3e.md`](../evidence/freeipa-client/2026-10-29-9e9f2b3e.md) | pilot |
 | 2026-11-05 | v1.14 | 新增 C13–C18：SSH key 等非密碼登入時對已過期 FreeIPA 密碼的政策（`freeipa_client_sssd_password_expiry_policy`：`warn`／`renew`／`off`，未設定不動；`freeipa_client_sssd_password_expiry_warning_days`）。row 依主機當下的 `ipa_access_order` 判斷，未啟用的主機也會 PASS。2026-11-05 在拋棄式 AlmaLinux 9 server + Ubuntu 24.04 client 以 `pilot verify --probe` 實跑：四種政策狀態全部 PASS，每一列要擋的狀態都 FAIL（§3 v1.14）。實測發現：`sssctl user-checks` 的結果在 stderr 且 rc 永遠 0；confdb 只在 SSSD 重啟時更新；從沒設過密碼的帳號在 `warn`／`renew` 下被拒絕（SSSD 2.9.4 原始碼與實測一致，C17）；改完密碼後數秒內重新登入仍被要求修改（§5）。apply playbook、fixture playbook、正式 evidence 尚未完成，`tag_coverage_test` 對 C13／C14 會失敗直到 apply 實作 | pilot |
 | 2026-11-05 | v1.15 | Checklist 不變（C1–C18）。實作 C13／C14 的 apply：`freeipa-client-apply.yml` 新增 `always` 的輸入 gate（值、Ubuntu 24.04、`renew` 不在 gateway／directory／target-policy 主機）、快照→preflight→整行寫入→`sssctl config-check` 的 block（rescue 還原）、confdb drift 檢查，並修正既有 bug：SSSD restart task 只標 `C8`，`--tags sssd_hardening` 改了 sssd.conf 卻不重啟（現在帶 `C13`／`C14`／`sssd_hardening`，讀其他 register 一律 `default({})`）。新增 `playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml`。在拋棄式 AlmaLinux 9 server + Ubuntu 24.04 client 以 `ansible-playbook` 實跑（開發期，不是 `topology test`）：四種政策狀態 C13–C18 全 PASS、重跑 `changed=0`；負向控制與 rescue（含 confdb 讀不到時還原快照並重啟 SSSD）都實際觸發。正式 evidence 尚未產生 | pilot |
-| 2026-11-05 | v1.16 | 新增 C19–C20：`renew` 時一併在 `[pam]` 設 `pam_initgroups_scheme = always`（`warn`／`off` 時移除值剛好是 `always` 的那一行）。原因：SSSD 2.9.4 PAM responder 在「5 秒 initgr 窗口內或使用者有 session」時不向後端重讀使用者，造成改密碼後反覆 TTY 重試持續被拒（#262）與管理員 reset 在使用者有 session 時延遲發現（#263）；`always` 讓每個 PAM 請求（5 秒窗口之外）都重讀，前者在窗口之外的重試就恢復、後者在下一個 PAM 請求就被發現。row 指令在實機以 `pilot verify --probe` 對各種狀態各驗過 PASS／FAIL（§3，開發期探測）。playbook 與 regression test（含 preflight 拒絕情形的 runtime 測試）隨同一個 PR；§5 補上已知限制（重啟本身失敗不回滾、不讀 conf.d、`--check --diff` 看不到差異、純金鑰帳號被拒絕、`always` 是主機全域）。正式 evidence 是 §0 連結的三份 record（一般 client、HA、gateway／directory／target-policy 拓樸，含負向對照組與代價量測），結果與 candidate 都在 record，本列不重複；v1.14／v1.15 列所說「正式 evidence 尚未完成」是當時的狀態 | pilot |
+| 2026-11-05 | v1.16 | 新增 C19–C20：`renew` 時一併在 `[pam]` 設 `pam_initgroups_scheme = always`（`warn`／`off` 時移除值剛好是 `always` 的那一行）。原因：SSSD 2.9.4 PAM responder 在「5 秒 initgr 窗口內或使用者有 session」時不向後端重讀使用者，造成改密碼後反覆 TTY 重試持續被拒（#262）與管理員 reset 在使用者有 session 時延遲發現（#263）；`always` 讓每個 PAM 請求（5 秒窗口之外）都重讀，前者在窗口之外的重試就恢復、後者在下一個 PAM 請求就被發現。row 指令在實機以 `pilot verify --probe` 對各種狀態各驗過 PASS／FAIL（§3，開發期探測）。playbook 與 regression test（含 preflight 拒絕情形的 runtime 測試）隨同一個 PR；§5 補上已知限制（重啟本身失敗不回滾〔v1.17 已解除〕、不讀 conf.d、`--check --diff` 看不到差異、純金鑰帳號被拒絕、`always` 是主機全域）。正式 evidence 是 §0 連結的三份 record（一般 client、HA、gateway／directory／target-policy 拓樸，含負向對照組與代價量測），結果與 candidate 都在 record，本列不重複；v1.14／v1.15 列所說「正式 evidence 尚未完成」是當時的狀態 | pilot |
+| 2026-11-06 | v1.17 | Checklist 不變（C1–C20）。(1) 回滾邊界：SSSD 重啟、`enable + start SSSD`、重啟前的 confdb drift 檢查與重啟後的三項檢查（SSSD active、`sssctl config-check`、confdb 與檔案一致）原本夾在兩個 block 之間，`systemctl restart sssd` 自己失敗（例如 `--tags C13`／`sssd_hardening` 帶出的重啟）時沒有任何 rescue：新政策留在 sssd.conf、SSSD 可能停著。現在全部在同一個 block、同一個 rescue，任何一步失敗都還原 run 開始時的 sssd.conf、在還原的檔案上重啟 SSSD，再讓 run 失敗；訊息明說哪個 task 失敗、有沒有還原、SSSD 有沒有重啟成功（重啟的結果碼不被吞掉）。block 本身沒有 tag 與 `when:`，每個 task 的 tag 與條件不變，`--tags` 選到的 task 與之前相同，沒設政策時 restart 與 enable + start 照常執行。這個 run 沒有快照時（沒設政策，或帶 `--tags` 而略過 C13）說沒有還原、不重啟。§5 已知限制與 plan 同步改寫。(2) fixture 契約：C15–C17 的 fixture 帳號只由 `freeipa-client-pwexpiry-fixtures.yml` 建立，驗證整份 spec 的 consumer 必須在 verify 之前兩支 fixture 都跑（§2、§7.2）；`playbooks/test/per-host-recording-topology.yml`（`scripts/per-host-recording-topology-test.sh`）原本只跑 `freeipa-client-fixtures.yml`，整份 spec 的 verify 會多出 C15–C17 三個 FAIL，現在補上 pwexpiry fixtures；`scripts/topology-checkmode-test.sh`（`site.yml`）維持刻意不跑 fixture，C15–C17 與 C5／C8 一樣固定樣態、不通過。新增 `TestRegression_FreeipaClientFullSpecConsumersCreateTheirFixtures`（每個驗證整份 spec 的 script 與三支 pwexpiry chain 都要有兩支 fixture，allowlist 內的 script 要仍然沒有 fixture）、`TestRegression_FreeipaClientApplyPlaybook_SSSDRestartIsInsideThePolicyRescue`（結構）與 `TestRegression_FreeipaClientPolicyRescueRuns`（用真的 ansible 與假的 `systemctl` 跑 rescue，涵蓋還原並重啟、還原但重啟失敗、沒有快照三種訊息，plain 與 `--tags` 都跑） | pilot |

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1041,6 +1042,10 @@ func pwexpiryFind(list []pwexpiryTask, prefix string) *pwexpiryTask {
 //   - the rescue of both blocks is `always` and only restores a snapshot that
 //     exists, so a `--tags` run that skipped the snapshot cannot rewrite
 //     sssd.conf from an undefined variable.
+//
+// The restart/start/verify block is locked in more detail by
+// TestRegression_FreeipaClientApplyPlaybook_SSSDRestartIsInsideThePolicyRescue
+// and TestRegression_FreeipaClientPolicyRescueRuns.
 func TestRegression_FreeipaClientApplyPlaybook_PasswordExpiryPolicy(t *testing.T) {
 	pre, tasks := loadPwexpiryPlay(t)
 
@@ -1090,9 +1095,18 @@ func TestRegression_FreeipaClientApplyPlaybook_PasswordExpiryPolicy(t *testing.T
 			continue
 		}
 		blocks++
-		for _, tag := range []string{"C13", "C19", "sssd_hardening"} {
-			if !tk.hasTag(tag) {
-				t.Errorf("block %q must carry %s", tk.Name, tag)
+		if strings.HasPrefix(tk.Name, pwexpiryApplyBlockPrefix) {
+			// The restart/verify block carries no tags and no `when:` of its
+			// own: each task keeps its own (see
+			// TestRegression_FreeipaClientApplyPlaybook_SSSDRestartIsInsideThePolicyRescue).
+			if len(tk.Tags) != 0 || tk.Raw["when"] != nil {
+				t.Errorf("block %q must not carry tags or a block-level when: (tags %v, when %v)", tk.Name, tk.Tags, tk.Raw["when"])
+			}
+		} else {
+			for _, tag := range []string{"C13", "C19", "sssd_hardening"} {
+				if !tk.hasTag(tag) {
+					t.Errorf("block %q must carry %s", tk.Name, tag)
+				}
 			}
 		}
 		for _, r := range tasks {
@@ -1111,7 +1125,7 @@ func TestRegression_FreeipaClientApplyPlaybook_PasswordExpiryPolicy(t *testing.T
 		}
 	}
 	if blocks != 2 {
-		t.Errorf("expected 2 password-expiry blocks with a rescue (write+config-check, post-restart verify), got %d", blocks)
+		t.Errorf("expected 2 password-expiry blocks with a rescue (write+config-check, drift check+restart+start+verify), got %d", blocks)
 	}
 
 	write := pwexpiryFind(tasks, "FreeIPA client — set SSSD ipa_access_order")
@@ -1121,6 +1135,396 @@ func TestRegression_FreeipaClientApplyPlaybook_PasswordExpiryPolicy(t *testing.T
 	lif := write.Raw["ansible.builtin.lineinfile"].(map[string]any)
 	if lif["regexp"] != `^ipa_access_order\s*=` || lif["insertafter"] != `^ipa_domain\s*=` {
 		t.Errorf("ipa_access_order must be replaced as a whole line (regexp+insertafter), got %v", lif)
+	}
+}
+
+// pwexpiryApplyBlockPrefix is the name of the block that holds everything that
+// makes SSSD take the policy file: the confdb drift check, the restart, the
+// enable + start and the three post-restart checks.
+const pwexpiryApplyBlockPrefix = "FreeIPA client — SSSD takes the password-expiry policy"
+
+func pwexpiryRawTags(m map[string]any) []string {
+	var out []string
+	if tags, ok := m["tags"].([]any); ok {
+		for _, x := range tags {
+			if s, ok := x.(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+func pwexpiryRawString(t *testing.T, v any) string {
+	t.Helper()
+	b, err := yaml.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// pwexpiryByPrefix returns the task of list whose name starts with prefix.
+func pwexpiryByPrefix(list any, prefix string) (map[string]any, bool) {
+	l, _ := list.([]any)
+	for _, it := range l {
+		if m, ok := it.(map[string]any); ok {
+			if n, _ := m["name"].(string); strings.HasPrefix(n, prefix) {
+				return m, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// pwexpiryChangesSSSDState reports whether a task starts, restarts or reloads
+// the sssd service, through the systemd/service module or a systemctl command.
+func pwexpiryChangesSSSDState(raw map[string]any) bool {
+	for _, mod := range []string{"ansible.builtin.systemd", "ansible.builtin.service", "ansible.builtin.systemd_service"} {
+		if args, ok := raw[mod].(map[string]any); ok {
+			if name, _ := args["name"].(string); name == "sssd" {
+				switch args["state"] {
+				case "restarted", "started", "reloaded":
+					return true
+				}
+			}
+		}
+	}
+	for _, mod := range []string{"ansible.builtin.command", "ansible.builtin.shell"} {
+		text := strings.Join(toStrings(raw[mod]), " ")
+		if args, ok := raw[mod].(map[string]any); ok {
+			text = strings.Join(toStrings(args["argv"]), " ") + " " + strings.Join(toStrings(args["cmd"]), " ")
+		}
+		if regexp.MustCompile(`systemctl\s+(restart|start|reload)\s+sssd\b`).MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
+func pwexpiryHasString(list []string, want string) bool {
+	for _, x := range list {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
+}
+
+// TestRegression_FreeipaClientApplyPlaybook_SSSDRestartIsInsideThePolicyRescue
+// locks the rescue boundary of the SSSD password-expiry policy (spec section 5,
+// AGENTS.md section 4.0: snapshot -> mutate -> verify is one rescue boundary).
+// A `systemctl restart sssd` that fails, an enable + start that fails or a
+// post-restart check that fails must all reach the rescue that puts the
+// snapshot back; before, the restart and the start sat between the two blocks
+// and a failing restart left the new policy in sssd.conf with SSSD down.
+//
+// Tag semantics stay exactly as they were: the block carries no tags and no
+// `when:`, each task keeps its own, so `--tags C8`/`C2`/`C13`/`C14`/
+// `sssd_hardening` select the same tasks, and the restart and the start still
+// run when no policy is set.
+func TestRegression_FreeipaClientApplyPlaybook_SSSDRestartIsInsideThePolicyRescue(t *testing.T) {
+	_, tasks := loadPwexpiryPlay(t)
+	blk := pwexpiryFind(tasks, pwexpiryApplyBlockPrefix)
+	if blk == nil {
+		t.Fatalf("block %q not found", pwexpiryApplyBlockPrefix)
+	}
+	inBlock, _ := blk.Raw["block"].([]any)
+	rescue, _ := blk.Raw["rescue"].([]any)
+	if len(inBlock) == 0 || len(rescue) == 0 {
+		t.Fatalf("%q must have a block and a rescue (block %d tasks, rescue %d tasks)", blk.Name, len(inBlock), len(rescue))
+	}
+	if len(blk.Tags) != 0 || blk.Raw["when"] != nil {
+		t.Errorf("the block must carry no tags and no block-level when: each task keeps its own (tags %v, when %v)", blk.Tags, blk.Raw["when"])
+	}
+
+	// 1. No start/restart/reload of sssd anywhere in the play outside this
+	// block (or its rescue): that is the shape that left a failed restart
+	// outside every rescue.
+	seen := 0
+	for _, tk := range tasks {
+		if !pwexpiryChangesSSSDState(tk.Raw) {
+			continue
+		}
+		_, inB := findInList(blk.Raw["block"], tk.Name)
+		_, inR := findInList(blk.Raw["rescue"], tk.Name)
+		if !inB && !inR {
+			t.Errorf("task %q starts/restarts sssd outside the rescue of %q: a failure there rolls nothing back", tk.Name, blk.Name)
+		}
+		seen++
+	}
+	if seen < 3 {
+		t.Errorf("expected the restart, the enable + start and the rescue's restart, found %d tasks that change sssd's state", seen)
+	}
+
+	policyGuard := "freeipa_client_pwexpiry_policy != ''"
+	want := []struct {
+		prefix     string
+		tags       []string
+		needPolicy bool
+	}{
+		{"FreeIPA client — does the running SSSD hold the file's ipa_access_order and pam_initgroups_scheme?", []string{"freeipa-client", "C13", "C14", "C19", "C20", "sssd_hardening"}, true},
+		{"FreeIPA client — restart SSSD after wiring responders", []string{"freeipa-client", "C8", "C13", "C14", "C19", "C20", "sssd_hardening"}, false},
+		{"FreeIPA client — enable + start SSSD", []string{"freeipa-client", "C2"}, false},
+		{"FreeIPA client — SSSD is active after the password-expiry policy", []string{"freeipa-client", "C13", "C14", "C19", "C20", "sssd_hardening"}, true},
+		{"FreeIPA client — sssctl config-check once SSSD runs the policy", []string{"freeipa-client", "C13", "C14", "C19", "C20", "sssd_hardening"}, true},
+		{"FreeIPA client — running SSSD now holds the file's ipa_access_order and pam_initgroups_scheme", []string{"freeipa-client", "C13", "C14", "C19", "C20", "sssd_hardening"}, true},
+	}
+	for _, w := range want {
+		task, ok := pwexpiryByPrefix(blk.Raw["block"], w.prefix)
+		if !ok {
+			t.Errorf("task %q must be inside the block of %q", w.prefix, blk.Name)
+			continue
+		}
+		if got := sortedCopy(pwexpiryRawTags(task)); strings.Join(got, ",") != strings.Join(sortedCopy(w.tags), ",") {
+			t.Errorf("task %q keeps its own tags %v, got %v", w.prefix, sortedCopy(w.tags), got)
+		}
+		when := strings.Join(toStrings(task["when"]), "\n")
+		if !strings.Contains(when, "not ansible_check_mode") {
+			t.Errorf("task %q must not run in --check", w.prefix)
+		}
+		if w.needPolicy && !strings.Contains(when, policyGuard) {
+			t.Errorf("task %q must run only when a policy is set (%s), got when: %s", w.prefix, policyGuard, when)
+		}
+		if !w.needPolicy && strings.Contains(when, "freeipa_client_pwexpiry_policy") {
+			t.Errorf("task %q serves C8/C2 and must keep running with no policy set, got when: %s", w.prefix, when)
+		}
+	}
+
+	// 2. The rescue: put the snapshot back, restart on it without hiding the
+	// outcome, then fail with a message that reads that outcome.
+	if len(rescue) != 3 {
+		t.Fatalf("the rescue must be restore, restart, fail (3 tasks), got %d", len(rescue))
+	}
+	var restore, restart, fail map[string]any
+	for i, it := range rescue {
+		m, _ := it.(map[string]any)
+		name, _ := m["name"].(string)
+		if !pwexpiryHasString(pwexpiryRawTags(m), "always") {
+			t.Errorf("rescue task %q must be tagged always (a --tags run filters rescue too)", name)
+		}
+		switch i {
+		case 0:
+			restore = m
+		case 1:
+			restart = m
+		case 2:
+			fail = m
+		}
+	}
+	// restore
+	cp, _ := restore["ansible.builtin.copy"].(map[string]any)
+	if cp == nil || cp["dest"] != "/etc/sssd/sssd.conf" || !strings.Contains(strings.Join(toStrings(cp["content"]), ""), "ipa_pwexpiry_conf_before.content | b64decode") {
+		t.Errorf("rescue task 1 must copy the snapshot back to /etc/sssd/sssd.conf, got %v", restore)
+	}
+	if cp != nil && (cp["owner"] != "root" || cp["group"] != "root" || cp["mode"] != "0600") {
+		t.Errorf("the restored sssd.conf must be root:root 0600, got owner=%v group=%v mode=%v", cp["owner"], cp["group"], cp["mode"])
+	}
+	guard := strings.Join(toStrings(restore["when"]), "\n")
+	for _, w := range []string{"ipa_pwexpiry_conf_before is defined", policyGuard} {
+		if !strings.Contains(guard, w) {
+			t.Errorf("the restore must only run with %q (a skipped snapshot task is still registered, so `is defined` alone is not enough), got when: %s", w, guard)
+		}
+	}
+	// restart on the restored file: registered, never failing the rescue itself
+	cmd, _ := restart["ansible.builtin.command"].(map[string]any)
+	if cmd == nil || strings.Join(toStrings(cmd["argv"]), " ") != "systemctl restart sssd" {
+		t.Errorf("rescue task 2 must run `systemctl restart sssd`, got %v", restart)
+	}
+	if restart["failed_when"] != false {
+		t.Errorf("the restart on the restored file must be failed_when: false so the final message can say what happened, got %v", restart["failed_when"])
+	}
+	reg, _ := restart["register"].(string)
+	if reg == "" {
+		t.Fatal("the restart on the restored file must register its result")
+	}
+	if got := strings.Join(toStrings(restart["when"]), "\n"); got != guard {
+		t.Errorf("restart and restore must share one condition, got %q vs %q", got, guard)
+	}
+	// fail: reads that register and does not claim "restored" unconditionally
+	if _, ok := fail["ansible.builtin.fail"]; !ok {
+		t.Fatalf("rescue task 3 must be ansible.builtin.fail, got %v", fail)
+	}
+	failText := pwexpiryRawString(t, fail)
+	for _, w := range []string{reg, "ipa_pwexpiry_conf_before is defined", "did NOT"} {
+		if !strings.Contains(failText, w) {
+			t.Errorf("the fail message must read %q so it states the real outcome:\n%s", w, failText)
+		}
+	}
+}
+
+// TestRegression_FreeipaClientPolicyRescueRuns runs the REAL rescue tasks of the
+// restart/start/verify block under ansible with a failing task in the block
+// and a fake `systemctl`, both with a plain run and with `--tags
+// sssd_hardening` (rescue is filtered by tags like any other task). It checks
+// the file really is put back, SSSD really is restarted on it, and the failure
+// message states exactly what happened: restored and restarted, restored but
+// SSSD did NOT restart, or nothing restored because no snapshot exists in this
+// run (including the case where the snapshot task was skipped: a skipped task
+// is still registered, so `is defined` alone would wrongly restore).
+func TestRegression_FreeipaClientPolicyRescueRuns(t *testing.T) {
+	ansible, err := exec.LookPath("ansible-playbook")
+	if err != nil {
+		t.Skip("ansible-playbook unavailable")
+	}
+	_, tasks := loadPwexpiryPlay(t)
+	blk := pwexpiryFind(tasks, pwexpiryApplyBlockPrefix)
+	if blk == nil {
+		t.Fatalf("block %q not found", pwexpiryApplyBlockPrefix)
+	}
+	rescueYAML, err := yaml.Marshal(blk.Raw["rescue"])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const original = "[sssd]\nservices = nss, pam\n\n[domain/ipa.example.test]\naccess_provider = ipa\n"
+	const withPolicy = original + "ipa_access_order = expire, pwd_expire_policy_renew\n"
+	const (
+		snapNone    = "no snapshot task ran (a --tags run that skipped C13)"
+		snapSkipped = "snapshot task skipped by its when: (registered as skipped)"
+		snapTaken   = "snapshot taken"
+	)
+	cases := []struct {
+		name      string
+		policy    string
+		snapshot  string
+		restartRC string
+		tags      string
+		restored  bool
+		wantMsg   []string
+		notMsg    []string
+	}{
+		{name: "restored-and-restarted", policy: "renew", snapshot: snapTaken, restartRC: "0", restored: true,
+			wantMsg: []string{"and SSSD restarted on it"}, notMsg: []string{"did NOT", "No snapshot exists"}},
+		{name: "restored-but-sssd-did-not-restart", policy: "renew", snapshot: snapTaken, restartRC: "5", restored: true,
+			wantMsg: []string{"SSSD did NOT restart on it (systemctl restart rc=5)", "journalctl -u sssd"}, notMsg: []string{"and SSSD restarted on it", "No snapshot exists"}},
+		{name: "restored-and-restarted-under-tags", policy: "renew", snapshot: snapTaken, restartRC: "0", tags: "sssd_hardening", restored: true,
+			wantMsg: []string{"and SSSD restarted on it"}, notMsg: []string{"did NOT"}},
+		{name: "restore-did-not-restart-under-tags", policy: "renew", snapshot: snapTaken, restartRC: "5", tags: "sssd_hardening", restored: true,
+			wantMsg: []string{"SSSD did NOT restart on it (systemctl restart rc=5)"}, notMsg: []string{"and SSSD restarted on it"}},
+		{name: "no-snapshot-in-this-run", policy: "renew", snapshot: snapNone, restartRC: "0",
+			wantMsg: []string{"No snapshot exists in this run", "nothing was restored", "journalctl -u sssd"}, notMsg: []string{"put back", "and SSSD restarted on it"}},
+		{name: "no-policy-set", policy: "", snapshot: snapSkipped, restartRC: "0",
+			wantMsg: []string{"No snapshot exists in this run", "nothing was restored"}, notMsg: []string{"put back", "and SSSD restarted on it"}},
+		{name: "no-policy-set-under-tags", policy: "", snapshot: snapNone, restartRC: "0", tags: "sssd_hardening",
+			wantMsg: []string{"No snapshot exists in this run", "nothing was restored"}, notMsg: []string{"put back"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			conf := filepath.Join(dir, "sssd.conf")
+			if err := os.WriteFile(conf, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			fakeBin := filepath.Join(dir, "bin")
+			if err := os.Mkdir(fakeBin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			log := filepath.Join(dir, "systemctl.log")
+			if err := os.WriteFile(filepath.Join(fakeBin, "systemctl"), []byte("#!/bin/sh\necho \"$@\" >> \"$FAKE_SYSTEMCTL_LOG\"\nexit \"${FAKE_SYSTEMCTL_RC:-0}\"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			var rescue []any
+			if err := yaml.Unmarshal(rescueYAML, &rescue); err != nil {
+				t.Fatal(err)
+			}
+			for _, it := range rescue {
+				if cp, ok := it.(map[string]any)["ansible.builtin.copy"].(map[string]any); ok {
+					// The only changes to the real task: where the file lives and
+					// that the test user cannot chown to root (the structure test
+					// locks owner/group root and mode 0600 on the real task).
+					cp["dest"] = conf
+					delete(cp, "owner")
+					delete(cp, "group")
+				}
+			}
+			pre := []any{}
+			switch tc.snapshot {
+			case snapTaken, snapSkipped:
+				snap := map[string]any{"name": "snapshot", "ansible.builtin.slurp": map[string]any{"src": conf},
+					"register": "ipa_pwexpiry_conf_before", "tags": []any{"sssd_hardening"}}
+				if tc.snapshot == snapSkipped {
+					snap["when"] = false
+				}
+				pre = append(pre, snap)
+			}
+			pre = append(pre, map[string]any{"name": "write policy", "ansible.builtin.copy": map[string]any{"dest": conf, "content": withPolicy},
+				"tags": []any{"sssd_hardening"}})
+			play := map[string]any{
+				"hosts": "localhost", "connection": "local", "gather_facts": false,
+				"tasks": append(pre, map[string]any{
+					"name": "restart-block",
+					"block": []any{map[string]any{
+						"name":                 "FreeIPA client — restart SSSD after wiring responders (simulated failure)",
+						"ansible.builtin.fail": map[string]any{"msg": "simulated restart failure"},
+						"tags":                 []any{"sssd_hardening"},
+					}},
+					"rescue": rescue,
+				}),
+			}
+			data, err := yaml.Marshal([]any{play})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pb := filepath.Join(dir, "play.yml")
+			if err := os.WriteFile(pb, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			vars, _ := json.Marshal(map[string]any{"freeipa_client_pwexpiry_policy": tc.policy})
+			args := []string{"-i", "localhost,", pb, "-e", string(vars)}
+			if tc.tags != "" {
+				args = append(args, "--tags", tc.tags)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, ansible, args...)
+			cmd.Env = append(os.Environ(), "PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"FAKE_SYSTEMCTL_LOG="+log, "FAKE_SYSTEMCTL_RC="+tc.restartRC,
+				"ANSIBLE_LOCAL_TEMP="+dir, "ANSIBLE_REMOTE_TEMP="+dir, "ANSIBLE_CACHE_PLUGIN=memory", "ANSIBLE_RETRY_FILES_ENABLED=0")
+			raw, runErr := cmd.CombinedOutput()
+			out := strings.Join(strings.Fields(string(raw)), " ")
+			if i := strings.Index(out, "TASK [FreeIPA client — restart SSSD after wiring"); i > 0 {
+				out = out[i:] // drop the interpreter-discovery warning and the setup tasks
+			}
+			if runErr == nil {
+				t.Fatalf("the run must fail (the block's task failed and the rescue ends in fail):\n%s", out)
+			}
+			after, _ := os.ReadFile(conf)
+			wantFile := withPolicy
+			if tc.restored {
+				wantFile = original
+			}
+			if string(after) != wantFile {
+				t.Errorf("sssd.conf after the failed run = %q, want %q", after, wantFile)
+			}
+			logged, _ := os.ReadFile(log)
+			if tc.restored && strings.TrimSpace(string(logged)) != "restart sssd" {
+				t.Errorf("SSSD must be restarted exactly once, on the restored file; fake systemctl saw %q", logged)
+			}
+			if !tc.restored && len(logged) != 0 {
+				t.Errorf("with no snapshot the rescue must not restart SSSD; fake systemctl saw %q", logged)
+			}
+			if !strings.Contains(out, "simulated restart failure") || !strings.Contains(out, "restart SSSD after wiring responders (simulated failure)") {
+				t.Errorf("the message must name the task that failed:\n%s", out)
+			}
+			for _, w := range tc.wantMsg {
+				if !strings.Contains(out, w) {
+					t.Errorf("the failure message must say %q:\n%s", w, out)
+				}
+			}
+			for _, w := range tc.notMsg {
+				if i := strings.Index(out, "SSSD did not take the password-expiry policy"); i < 0 || strings.Contains(out[i:], w) {
+					t.Errorf("the failure message must not claim %q:\n%s", w, out)
+				}
+			}
+		})
 	}
 }
 

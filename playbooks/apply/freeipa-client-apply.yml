@@ -899,18 +899,30 @@
         - freeipa_client_sssd_offline_credentials_expiration is defined
       tags: [freeipa-client, sssd_hardening]
 
-    # SSSD password-expiry policy (spec C13/C14, plan P1). snapshot ->
-    # preflight the file shape -> write whole lines -> sssctl config-check.
-    # A failure inside THIS block (the preflight, a write, config-check) puts
-    # the snapshot back (rescue is `always` so a --tags run still rolls back)
-    # and nothing has been restarted yet. What follows is NOT covered by this
-    # rescue: the "restart SSSD" task and the "enable + start SSSD" task after
-    # it sit outside every rescue, so a `systemctl restart sssd` that itself
-    # fails leaves sssd.conf on the new policy with SSSD possibly down until
-    # the operator fixes it (known limit, docs/verification/freeipa-client.md
-    # section 5). The line is replaced whole (lineinfile regexp), never
-    # appended, so a second apply is changed=0. Not run in --check: a fresh
-    # host has no sssd.conf yet.
+    # SSSD password-expiry policy (spec C13/C14/C19/C20, plan P1). Two blocks
+    # make one snapshot -> mutate -> verify boundary; nothing that changes or
+    # reads SSSD's state for this policy sits outside a rescue.
+    #
+    # Block 1 (this one): snapshot sssd.conf -> preflight the file shape ->
+    # write whole lines -> `sssctl config-check`. A failure inside it puts the
+    # snapshot back (rescue is `always` so a --tags run still rolls back);
+    # nothing has been restarted yet. The line is replaced whole (lineinfile
+    # regexp), never appended, so a second apply is changed=0. Not run in
+    # --check: a fresh host has no sssd.conf yet.
+    #
+    # Block 2 (below): the confdb drift check, the SSSD restart, enable + start,
+    # and the checks that SSSD is active, accepts the config and holds the
+    # file's values (spec C14/C20). A failure of ANY of them - including a
+    # `systemctl restart sssd` that itself fails - puts the snapshot block 1
+    # took back, restarts SSSD on it so the host keeps its previous login
+    # behaviour, and fails the run saying whether the file was restored and
+    # whether SSSD came up on it. Block 2 has no tags and no `when:` of its own:
+    # every task keeps the tags and conditions it had on its own, so
+    # `--tags C8`, `C2`, `C13`, `C14`, `sssd_hardening` select the same tasks as
+    # before, and the restart and enable + start still run when no policy is set
+    # (they serve C8 and C2). A run with no snapshot (no policy set, or a
+    # --tags run that skipped block 1) has nothing to put back and says so.
+
     - name: "FreeIPA client — SSSD password-expiry policy: snapshot, preflight, write, config-check"
       when:
         - not ansible_check_mode
@@ -1010,82 +1022,83 @@
               SSSD was not restarted.
           tags: [always]
 
-    # Compare what SSSD has loaded (confdb) with what the file says. confdb
-    # is filled from sssd.conf only when SSSD starts, so a file changed by a
-    # previous run that died before the restart (or by hand) shows up here
-    # and triggers the restart below - this is also what makes
-    # `--tags C13`/`--tags C14`/`--tags sssd_hardening` converge on their own.
-    - name: "FreeIPA client — does the running SSSD hold the file's ipa_access_order and pam_initgroups_scheme?"
-      ansible.builtin.shell: |
-        f=$(sed -n 's/^ipa_access_order *= *//p' /etc/sssd/sssd.conf)
-        c=$(ldbsearch -H /var/lib/sss/db/config.ldb -b cn=domain,cn=config -s one ipa_access_order 2>/dev/null | sed -n 's/^ipa_access_order: //p')
-        f2=$(sed -n 's/^pam_initgroups_scheme *= *//p' /etc/sssd/sssd.conf)
-        c2=$(ldbsearch -H /var/lib/sss/db/config.ldb -b cn=pam,cn=config -s base pam_initgroups_scheme 2>/dev/null | sed -n 's/^pam_initgroups_scheme: //p')
-        [ "$f" = "$c" ] && [ "$f2" = "$c2" ]
-      register: ipa_pwexpiry_confdb
-      changed_when: false
-      failed_when: ipa_pwexpiry_confdb.rc not in [0, 1]
-      check_mode: false
-      when:
-        - not ansible_check_mode
-        - freeipa_client_pwexpiry_policy != ''
-      tags: [freeipa-client, C13, C14, C19, C20, sssd_hardening]
-
-    - name: "FreeIPA client — restart SSSD after wiring responders"
-      ansible.builtin.systemd:
-        name: sssd
-        state: restarted
-      when:
-        - not ansible_check_mode
-        - >-
-          (ipa_sssd_services | default({})) is changed or
-          (ipa_sssd_sudo_provider | default({})) is changed or
-          (ipa_sssd_cache_credentials | default({})) is changed or
-          (ipa_sssd_offline_credentials_expiration | default({})) is changed or
-          (ipa_pwexpiry_access_order | default({})) is changed or
-          (ipa_pwexpiry_warning | default({})) is changed or
-          (ipa_pwexpiry_scheme_set | default({})) is changed or
-          (ipa_pwexpiry_scheme_unset | default({})) is changed or
-          ((ipa_pwexpiry_confdb | default({})).rc | default(0)) == 1 or
-          (ipa_sssd_explicit_responder_sockets.results | default([]) |
-           selectattr('changed', 'defined') | selectattr('changed') | list | length > 0)
-      # sssd_hardening / C13 / C14 are on this task because their lineinfile
-      # tasks edit sssd.conf but SSSD only reads it at start: with the tag
-      # missing here, `--tags sssd_hardening` wrote the file and never
-      # restarted (docs/verification/freeipa-client.md C14).
-      tags: [freeipa-client, C8, C13, C14, C19, C20, sssd_hardening]
-
-    - name: "FreeIPA client — enable + start SSSD (survives reboot)"
-      ansible.builtin.systemd:
-        name: sssd
-        state: started
-        enabled: true
-      when: not ansible_check_mode
-      tags: [freeipa-client, C2]
-
-    # After a restart that SUCCEEDED: SSSD must be active, accept the config
-    # and hold the file's value (spec C14/C20). If one of those three checks
-    # fails, this rescue puts the pre-policy file back, restarts SSSD on it so
-    # the host keeps its previous login behaviour, then fails the run. It does
-    # not cover the restart and the enable/start tasks above: a restart that
-    # fails never reaches this block, so nothing is rolled back (known limit,
-    # docs/verification/freeipa-client.md section 5). A `--tags` run that
-    # skipped the snapshot above has nothing to put back and says so.
-    - name: "FreeIPA client — SSSD runs the password-expiry policy it was given"
-      when:
-        - not ansible_check_mode
-        - freeipa_client_pwexpiry_policy != ''
-      tags: [freeipa-client, C13, C14, C19, C20, sssd_hardening]
+    # Block 2, see the comment above block 1. The first task is the confdb drift
+    # check; it is the reason `--tags C13`/`C14`/`sssd_hardening` converge on
+    # their own, the restart below reads its result.
+    - name: "FreeIPA client — SSSD takes the password-expiry policy: drift check, restart, start, verify"
       block:
+        # Compare what SSSD has loaded (confdb) with what the file says. confdb
+        # is filled from sssd.conf only when SSSD starts, so a file changed by a
+        # previous run that died before the restart (or by hand) shows up here
+        # and triggers the restart below - this is also what makes
+        # `--tags C13`/`--tags C14`/`--tags sssd_hardening` converge on their own.
+        - name: "FreeIPA client — does the running SSSD hold the file's ipa_access_order and pam_initgroups_scheme?"
+          ansible.builtin.shell: |
+            f=$(sed -n 's/^ipa_access_order *= *//p' /etc/sssd/sssd.conf)
+            c=$(ldbsearch -H /var/lib/sss/db/config.ldb -b cn=domain,cn=config -s one ipa_access_order 2>/dev/null | sed -n 's/^ipa_access_order: //p')
+            f2=$(sed -n 's/^pam_initgroups_scheme *= *//p' /etc/sssd/sssd.conf)
+            c2=$(ldbsearch -H /var/lib/sss/db/config.ldb -b cn=pam,cn=config -s base pam_initgroups_scheme 2>/dev/null | sed -n 's/^pam_initgroups_scheme: //p')
+            [ "$f" = "$c" ] && [ "$f2" = "$c2" ]
+          register: ipa_pwexpiry_confdb
+          changed_when: false
+          failed_when: ipa_pwexpiry_confdb.rc not in [0, 1]
+          check_mode: false
+          when:
+            - not ansible_check_mode
+            - freeipa_client_pwexpiry_policy != ''
+          tags: [freeipa-client, C13, C14, C19, C20, sssd_hardening]
+
+        - name: "FreeIPA client — restart SSSD after wiring responders"
+          ansible.builtin.systemd:
+            name: sssd
+            state: restarted
+          when:
+            - not ansible_check_mode
+            - >-
+              (ipa_sssd_services | default({})) is changed or
+              (ipa_sssd_sudo_provider | default({})) is changed or
+              (ipa_sssd_cache_credentials | default({})) is changed or
+              (ipa_sssd_offline_credentials_expiration | default({})) is changed or
+              (ipa_pwexpiry_access_order | default({})) is changed or
+              (ipa_pwexpiry_warning | default({})) is changed or
+              (ipa_pwexpiry_scheme_set | default({})) is changed or
+              (ipa_pwexpiry_scheme_unset | default({})) is changed or
+              ((ipa_pwexpiry_confdb | default({})).rc | default(0)) == 1 or
+              (ipa_sssd_explicit_responder_sockets.results | default([]) |
+               selectattr('changed', 'defined') | selectattr('changed') | list | length > 0)
+          # sssd_hardening / C13 / C14 are on this task because their lineinfile
+          # tasks edit sssd.conf but SSSD only reads it at start: with the tag
+          # missing here, `--tags sssd_hardening` wrote the file and never
+          # restarted (docs/verification/freeipa-client.md C14).
+          tags: [freeipa-client, C8, C13, C14, C19, C20, sssd_hardening]
+
+        - name: "FreeIPA client — enable + start SSSD (survives reboot)"
+          ansible.builtin.systemd:
+            name: sssd
+            state: started
+            enabled: true
+          when: not ansible_check_mode
+          tags: [freeipa-client, C2]
+
+        # After the restart: SSSD must be active, accept the config and hold the
+        # file's value (spec C14/C20), only when a policy is set.
         - name: "FreeIPA client — SSSD is active after the password-expiry policy"
           ansible.builtin.command:
             argv: [systemctl, is-active, --quiet, sssd]
           changed_when: false
+          when:
+            - not ansible_check_mode
+            - freeipa_client_pwexpiry_policy != ''
+          tags: [freeipa-client, C13, C14, C19, C20, sssd_hardening]
 
         - name: "FreeIPA client — sssctl config-check once SSSD runs the policy"
           ansible.builtin.command:
             argv: [sssctl, config-check]
           changed_when: false
+          when:
+            - not ansible_check_mode
+            - freeipa_client_pwexpiry_policy != ''
+          tags: [freeipa-client, C13, C14, C19, C20, sssd_hardening]
 
         # SSSD fills confdb as it starts, so the first comparison right after
         # the restart can still see the old values: retry for a few seconds.
@@ -1101,8 +1114,15 @@
           retries: 5
           delay: 2
           changed_when: false
+          when:
+            - not ansible_check_mode
+            - freeipa_client_pwexpiry_policy != ''
+          tags: [freeipa-client, C13, C14, C19, C20, sssd_hardening]
       rescue:
-        - name: "FreeIPA client — put back the pre-policy sssd.conf after the running SSSD rejected the policy"
+        # Every rescue task is `always`: rescue is filtered by --tags like any
+        # other task. A snapshot exists only when block 1 ran in this run with a
+        # policy set; otherwise there is nothing to put back.
+        - name: "FreeIPA client — put back the sssd.conf this run started with after the SSSD restart/start/verify failed"
           ansible.builtin.copy:
             dest: /etc/sssd/sssd.conf
             content: "{{ ipa_pwexpiry_conf_before.content | b64decode }}"
@@ -1110,23 +1130,43 @@
             group: root
             mode: "0600"
           register: ipa_pwexpiry_restored
-          when: ipa_pwexpiry_conf_before is defined
+          when:
+            - ipa_pwexpiry_conf_before is defined
+            - freeipa_client_pwexpiry_policy != ''
           tags: [always]
 
+        # failed_when: false + register: the outcome of this restart decides
+        # what the fail message below may claim.
         - name: "FreeIPA client — restart SSSD on the restored sssd.conf"
-          ansible.builtin.systemd:
-            name: sssd
-            state: restarted
-          when: ipa_pwexpiry_conf_before is defined
+          ansible.builtin.command:
+            argv: [systemctl, restart, sssd]
+          register: ipa_pwexpiry_restart_restored
+          changed_when: ((ipa_pwexpiry_restart_restored | default({})).rc | default(1)) == 0
+          failed_when: false
+          when:
+            - ipa_pwexpiry_conf_before is defined
+            - freeipa_client_pwexpiry_policy != ''
           tags: [always]
 
         - name: "FreeIPA client — fail: SSSD did not take the password-expiry policy"
+          vars:
+            pwexpiry_snapshot_existed: "{{ ipa_pwexpiry_conf_before is defined and freeipa_client_pwexpiry_policy != '' }}"
+            pwexpiry_restart_rc: "{{ (ipa_pwexpiry_restart_restored | default({})).rc | default('none') }}"
           ansible.builtin.fail:
             msg: >-
-              SSSD did not come up holding password-expiry policy '{{ freeipa_client_pwexpiry_policy }}'.
-              {{ 'sssd.conf was restored from the snapshot taken before this run and SSSD restarted on it.'
-                 if ipa_pwexpiry_conf_before is defined else
-                 'No snapshot exists in this run (a --tags run that skipped C13), so nothing was restored; check sssd.conf and journalctl -u sssd by hand.' }}
+              SSSD did not take the password-expiry policy '{{ freeipa_client_pwexpiry_policy | default('') }}':
+              the task '{{ ansible_failed_task.name | default('unknown') }}' failed.
+              {% if not pwexpiry_snapshot_existed | bool %}
+              No snapshot exists in this run (no policy is set, or a --tags run that skipped C13),
+              so nothing was restored and this rescue did not restart SSSD; check sssd.conf and
+              journalctl -u sssd by hand.
+              {% elif pwexpiry_restart_rc | string == '0' %}
+              sssd.conf was put back to the content it had when this run started, and SSSD restarted on it.
+              {% else %}
+              sssd.conf was put back to the content it had when this run started, but SSSD did NOT
+              restart on it (systemctl restart rc={{ pwexpiry_restart_rc }}); SSSD may be down,
+              check systemctl status sssd and journalctl -u sssd.
+              {% endif %}
           tags: [always]
 
     - name: "FreeIPA client — enable socket-activated sudo responder"
