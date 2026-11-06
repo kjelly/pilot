@@ -19,6 +19,9 @@ import gh_runtime  # noqa: E402
 from gh_runtime import GitHubError, Repo  # noqa: E402
 from review_gate import evaluate  # noqa: E402
 from test_gate import B, H, Fake, sample  # noqa: E402
+from scan_stub import CleanScan  # noqa: E402
+
+setUpModule, tearDownModule = CleanScan.up, CleanScan.down
 
 API = json.loads((HERE / 'fixtures' / 'github_api.json').read_text())
 MANIFEST = '.github/pr-evidence.json'

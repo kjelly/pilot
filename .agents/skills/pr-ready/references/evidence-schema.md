@@ -70,7 +70,7 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --p
 python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr 123 --evidence .pr-ready/123/evidence.json --worktree . --wait --ready --restore-sha "$START_SHA" --restore-branch="$START_BRANCH"
 ```
 
-`run_check.py` prints a JSON receipt on stdout and stores it under `--receipt-dir` (default `.pr-ready/receipts`, so pass the per-PR directory) even on failure, returning the command's exit status. Copy the receipt fields into the matching evidence category. `pr_gate.py --worktree` verifies that all referenced logs exist under that checkout directory.
+`run_check.py` prints a JSON receipt on stdout and stores it under `--receipt-dir` (default `.pr-ready/receipts`, so pass the per-PR directory) even on failure, returning the command's exit status. Copy the receipt fields into the matching evidence category. `pr_gate.py --worktree` (required) verifies that all referenced logs exist under that checkout directory and scans every commit of the PR (`baseRefOid..headRefOid`) for secrets; `GATE-PASS` and `READY` carry a value-free `secret_scan` summary, and `--secret-file FILE` (outside the repository, one value per line) adds values to look for.
 
 ## Repository-required target evidence
 

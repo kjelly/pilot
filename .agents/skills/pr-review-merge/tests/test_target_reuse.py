@@ -5,9 +5,12 @@ import unittest
 from unittest import mock
 
 from test_gate import Fake, sample, B, H
+from scan_stub import CleanScan
 from test_target_validation import API, R, ART, RECORD, MANIFEST, REPO, repo_manifest, replay
 import gh_runtime
 from review_gate import evaluate
+
+setUpModule, tearDownModule = CleanScan.up, CleanScan.down
 
 A = "d" * 40
 APP = "playbooks/apply/x.yml"

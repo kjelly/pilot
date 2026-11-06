@@ -7,12 +7,13 @@ remote head exists and is identical. The gate cannot prove semantic correctness.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
@@ -27,6 +28,51 @@ ALLOWED_CATEGORIES = {"regression", "unit", "integration", "lint", "static-analy
 
 class GateError(RuntimeError):
     pass
+
+
+SECRET_SCAN_PATH = Path(__file__).resolve().parents[2] / "_shared" / "scripts" / "secret_scan.py"
+
+
+def load_secret_scan() -> Any:
+    """The shared secret scanner, loaded by path from the `_shared` bundle directory.
+
+    One module name for all three gates, so a process that runs several of them loads it once. A
+    scanner that cannot be loaded is a refusal, never a skipped check (GateError).
+    """
+    name = "pilot_secret_scan"
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(name, SECRET_SCAN_PATH)
+    if spec is None or spec.loader is None or not SECRET_SCAN_PATH.is_file():
+        raise GateError(f"the shared secret scanner is missing: {SECRET_SCAN_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # a scanner that does not load must refuse, whatever the reason
+        sys.modules.pop(name, None)
+        raise GateError(f"the shared secret scanner cannot be loaded ({type(exc).__name__})") from None
+    return module
+
+
+def check_secrets(worktree: Path, base_ref: str, head: str,
+                  secret_files: Sequence[Path] = ()) -> tuple[list[str], dict[str, Any]]:
+    """Blockers and a value-free summary from scanning EVERY commit of base..head.
+
+    History counts, not just HEAD: a later commit that scrubs a value does not remove it from the
+    earlier one. Nothing here is skipped for evidence-only paths, and nothing printed holds a value.
+    """
+    try:
+        scanner = load_secret_scan()
+    except GateError as exc:
+        return [f"Secret scan unavailable: {exc}"], {"status": "ERROR"}
+    try:
+        known = scanner.load_secret_files([str(p) for p in secret_files], worktree)
+    except ValueError as exc:  # SecretScanError
+        return [f"Secret scan refused its --secret-file input: {exc}"], {"status": "ERROR"}
+    result = scanner.scan_range(worktree, base_ref, head, known=known)
+    return scanner.refusal_messages(result), result.summary()
 
 
 def command(argv: list[str], *, cwd: Path | None = None, allow_nonzero_json: bool = False,
@@ -452,7 +498,8 @@ def remote_identity(worktree: Path, remote: str, repo: str) -> bool:
 
 def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
              stage: str = "local", remote: str = "origin",
-             own_pr: int | None = None) -> tuple[list[str], dict[str, Any]]:
+             own_pr: int | None = None,
+             secret_files: Sequence[Path] = ()) -> tuple[list[str], dict[str, Any]]:
     if not REPO.fullmatch(repo) or issue < 1:
         raise GateError("Repo must be OWNER/REPO and issue must be positive")
     evidence_path = evidence_path.expanduser().resolve(strict=True)
@@ -475,6 +522,7 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
         base = ""
     if not branch or branch == base or branch in ("main", "master"):
         errors.append("Issue must use a dedicated non-base branch")
+    secret_summary: dict[str, Any] = {"status": "NOT_RUN", "reason": "no valid base branch"}
     if base:
         try:
             common = git(worktree, "merge-base", f"refs/remotes/{remote}/{base}", "HEAD")
@@ -484,6 +532,10 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
                 errors.append("No Issue-specific commits relative to base")
         except GateError as exc:
             errors.append(str(exc))
+        # Every commit of the branch, right where its base is established: a value that a later commit
+        # replaces is still in the earlier one, and pushing publishes both.
+        blockers, secret_summary = check_secrets(worktree, f"refs/remotes/{remote}/{base}", sha, secret_files)
+        errors.extend(blockers)
     ctx = repo_evidence.Context.load(worktree, sha, f"refs/remotes/{remote}/{base}" if base else None)
     errors.extend(check_evidence(evidence, repo=repo, issue=issue, sha=sha,
                                  branch=branch, base=base, evidence_dir=evidence_path.parent, ctx=ctx))
@@ -513,7 +565,7 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
         errors.append(f"GitHub duplicate/issue validation unavailable: {exc}")
     return errors, {"repo": repo, "issue": issue, "head_sha": sha, "branch": branch, "stage": stage,
                     "issue_resolution": evidence.get("issue_resolution", "fixes"),
-                    "repo_evidence": ctx.report()}
+                    "repo_evidence": ctx.report(), "secret_scan": secret_summary}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -526,11 +578,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--remote", default="origin")
     ap.add_argument("--own-pr", type=int, default=None,
                     help="This Issue's own already-created PR number; never counted as a duplicate (Draft -> Ready re-check)")
+    ap.add_argument("--secret-file", action="append", default=[], type=Path, metavar="FILE",
+                    help="File OUTSIDE the repository with one secret value per line (8+ bytes each) that must "
+                         "appear in no commit, message or path of the branch. Repeatable. Values are never printed.")
     opt = ap.parse_args(argv)
     try:
         errors, info = evaluate(repo=opt.repo, issue=opt.issue, worktree=opt.worktree,
                                 evidence_path=opt.evidence, stage=opt.stage, remote=opt.remote,
-                                own_pr=opt.own_pr)
+                                own_pr=opt.own_pr, secret_files=opt.secret_file)
     except (GateError, OSError) as exc:
         errors, info = [str(exc)], {"repo": opt.repo, "issue": opt.issue}
     value = {"status": "BLOCKED" if errors else "GATE-PASS", **info, "blockers": errors}

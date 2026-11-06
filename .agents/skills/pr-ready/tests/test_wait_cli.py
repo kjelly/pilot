@@ -25,6 +25,7 @@ import base64, json, os, pathlib, re, subprocess, sys
 args = sys.argv[1:]
 root = pathlib.Path(os.environ["FAKE_GH_STATE"])
 sha = os.environ["FAKE_GH_SHA"]
+base = os.environ.get("FAKE_GH_BASE", sha)
 views = root / "views.log"
 count = len(views.read_text().splitlines()) if views.exists() else 0
 index = count if args[:2] == ["pr", "view"] else max(0, count - 1)
@@ -38,7 +39,7 @@ if args[:2] == ["pr", "view"]:
         subprocess.run([sys.executable, str(hook)], check=True)
     pr = {"number": 7, "url": "https://github.com/acme/repo/pull/7", "title": "Fix feature",
           "body": "Reviewed feature change", "headRefOid": sha, "headRefName": "fix-one",
-          "baseRefOid": sha, "baseRefName": "main", "state": "OPEN", "mergeable": "MERGEABLE",
+          "baseRefOid": base, "baseRefName": "main", "state": "OPEN", "mergeable": "MERGEABLE",
           "isDraft": not (root / "ready").exists(), "reviewDecision": "REVIEW_REQUIRED"}
     pr.update(plan.get("pr", {}))
     print(json.dumps(pr))
@@ -87,7 +88,7 @@ elif args[:2] == ["api", "graphql"]:
         field: {"nodes": plan.get(field, []), "pageInfo": {"hasNextPage": False, "endCursor": None}}
     }}}}))
 elif args[0] == "api" and "/git/ref/heads/" in args[-1]:
-    print(json.dumps({"object": {"type": "commit", "sha": plan.get("live_base", plan.get("pr", {}).get("baseRefOid", sha))}}))
+    print(json.dumps({"object": {"type": "commit", "sha": plan.get("live_base", plan.get("pr", {}).get("baseRefOid", base))}}))
 elif args[0] == "api" and "/compare/" in args[-1]:
     base, head = args[-1].split("/compare/")[1].split("...")
     print(json.dumps(plan.get("ancestry", {"status": "identical" if base == head else "ahead",
@@ -143,11 +144,13 @@ class WaitCLITests(unittest.TestCase):
     make_pr = cli_mock.CLIMockTests.make_pr
     evidence_only_pr = cli_mock.CLIMockTests.evidence_only_pr
 
-    def prepare(self, t, plans, *, ancestor=False):
+    def prepare(self, t, plans, *, ancestor=False, adjust=None):
         if ancestor:
             repo, _, _, evidence, env = self.evidence_only_pr(t)
         else:
             repo, _, evidence, env = self.make_pr(t)
+        if adjust is not None:
+            adjust(repo, evidence, env)
         # Match the skill's checkpoint contract; the safe restore helper checks
         # actual Git cleanliness rather than the gate's evidence-path exception.
         with (repo / ".git/info/exclude").open("a") as out:
@@ -167,8 +170,9 @@ class WaitCLITests(unittest.TestCase):
                "--wait", "--ready", "--compact", "--poll-interval", "0.01"]
         return repo, evidence, env, cli
 
-    def run_gate(self, t, plans, *, hook=None, ancestor=False, extra=()):
-        repo, evidence, env, cli = self.prepare(t, plans, ancestor=ancestor)
+    def run_gate(self, t, plans, *, hook=None, ancestor=False, extra=(), adjust=None, env_extra=None):
+        repo, evidence, env, cli = self.prepare(t, plans, ancestor=ancestor, adjust=adjust)
+        env.update(env_extra or {})
         if hook:
             (t / "hook-1.py").write_text("import os, pathlib, subprocess\nr=pathlib.Path(os.environ['WAIT_REPO'])\n" + hook)
         proc = subprocess.run(cli + list(extra), env=env, capture_output=True, text=True, timeout=20)
@@ -900,6 +904,46 @@ class RestoreGuardTests(unittest.TestCase):
                 self.assertEqual(1, len((t / "ready.log").read_text().splitlines()))
                 self.assertEqual("main", (t / "ready-branch").read_text(), "Ready ran on the restored branch")
                 self.assertEqual(branch_after, git(repo, "branch", "--show-current"))
+
+
+class SecretScanWaitTests(unittest.TestCase):
+    """--wait scans the PR's commits once, and what it writes to wait-status.json holds no value."""
+
+    make_pr = cli_mock.CLIMockTests.make_pr
+    evidence_only_pr = cli_mock.CLIMockTests.evidence_only_pr
+    prepare = WaitCLITests.prepare
+    run_gate = WaitCLITests.run_gate
+
+    def test_a_leak_blocks_the_wait_and_no_artifact_holds_the_value(self):
+        value = []
+
+        def leak(repo, evidence, env):
+            value.append(cli_mock.b1(repo, evidence, env)[0])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            proc, events, repo = self.run_gate(t, [plan(PASS, LINT)], adjust=leak)
+            self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual("DRAFT-BLOCKED", events[-1]["status"])
+            self.assertIn("freeipa-secret-attribute", " ".join(events[-1]["errors"]))
+            self.assertFalse((t / "ready").exists())
+            status = (repo / ".pr-ready/7/wait-status.json").read_text()
+            for part in (value[0], value[0][:10], value[0][-10:]):
+                for channel in (proc.stdout, proc.stderr, status):
+                    self.assertNotIn(part, channel)
+
+    def test_the_same_base_and_head_are_scanned_once_across_polls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            trace = t / "git-trace.log"
+            proc, events, _ = self.run_gate(t, [plan(PENDING), plan(PENDING), plan(PENDING), plan(PASS)],
+                                            env_extra={"GIT_TRACE": str(trace)})
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["WAITING-CI", "WAITING-CI", "WAITING-CI", "READY"], [e["status"] for e in events])
+            walks = [line for line in trace.read_text().splitlines() if "dense-combined" in line]
+            self.assertEqual(1, len(walks), "one commit walk for the whole wait, not one per poll")
+            self.assertEqual("CLEAN", events[-1]["secret_scan"]["status"])
+            self.assertEqual(1, events[-1]["secret_scan"]["commits_scanned"], "the PR commit is the one commit in base..head")
 
 
 if __name__ == "__main__":
