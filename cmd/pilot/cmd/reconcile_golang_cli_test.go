@@ -683,6 +683,10 @@ func TestReconcileGolangPlanOutcomes(t *testing.T) {
 			t.Cleanup(func() { newGolangIPAClient = prev })
 			newGolangIPAClient = func(cfg freeiparpc.Config) (*freeiparpc.Client, error) {
 				cfg.ReadOnly = false
+				// A client that may write has a gate (freeiparpc.New): this test
+				// is about the preview's own count of writes, so the gate lets
+				// the one write the test sends through.
+				cfg.WriteGate = func(context.Context, string) error { return nil }
 				c, err := prev(cfg)
 				if err != nil {
 					return nil, err

@@ -207,7 +207,10 @@ func injectDrift(target sshdial.Target, password, user, group string) error {
 	if err != nil {
 		return err
 	}
-	c, err := freeiparpc.New(freeiparpc.Config{FQDN: fqdn, CA: ca, DialContext: d.DialContext})
+	// The drift fixture is test set-up on a disposable server, written through
+	// the Phase 0 client rather than through the engine under test, so its gate
+	// is open: there is no lock to ask.
+	c, err := freeiparpc.New(freeiparpc.Config{FQDN: fqdn, CA: ca, DialContext: d.DialContext, WriteGate: func(context.Context, string) error { return nil }})
 	if err != nil {
 		return err
 	}

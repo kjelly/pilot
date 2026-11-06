@@ -221,9 +221,14 @@ func (f *fakeServer) dial(ctx context.Context, _, _ string) (net.Conn, error) {
 	return d.DialContext(ctx, "tcp", f.srv.Listener.Addr().String())
 }
 
+// openGate lets every write through. The tests that use it are about how the
+// client takes an answer, not about when it may write (gate_test.go is); a
+// test that builds its own gate says so with a mod.
+func openGate(context.Context, string) error { return nil }
+
 func newTestClient(t *testing.T, f *fakeServer, mod ...func(*Config)) *Client {
 	t.Helper()
-	cfg := Config{FQDN: testFQDN, CA: f.ca, DialContext: f.dial, RequestTimeout: 5 * time.Second}
+	cfg := Config{FQDN: testFQDN, CA: f.ca, DialContext: f.dial, RequestTimeout: 5 * time.Second, WriteGate: openGate}
 	for _, m := range mod {
 		m(&cfg)
 	}

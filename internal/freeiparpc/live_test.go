@@ -91,7 +91,7 @@ func setupLive(t *testing.T) *liveEnv {
 	e := &liveEnv{dialer: d, drop: &dropper{dial: d.DialContext}, password: password}
 	if os.Getenv("PILOT_FREEIPA_LIVE_EXPECT") == "forwarding-denied" {
 		e.fqdn = os.Getenv("PILOT_FREEIPA_LIVE_FQDN")
-		e.cfg = Config{FQDN: e.fqdn, CA: newFakeServer(t, "unused.example.test").ca, DialContext: e.drop.DialContext}
+		e.cfg = Config{FQDN: e.fqdn, CA: newFakeServer(t, "unused.example.test").ca, DialContext: e.drop.DialContext, WriteGate: openGate}
 		return e
 	}
 	var err error
@@ -102,7 +102,7 @@ func setupLive(t *testing.T) *liveEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.cfg = Config{FQDN: e.fqdn, CA: ca, DialContext: e.drop.DialContext}
+	e.cfg = Config{FQDN: e.fqdn, CA: ca, DialContext: e.drop.DialContext, WriteGate: openGate}
 	return e
 }
 

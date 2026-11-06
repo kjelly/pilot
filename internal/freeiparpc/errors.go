@@ -90,6 +90,19 @@ func (e *ErrMethodNotAllowed) Error() string {
 	return fmt.Sprintf("freeiparpc: command %q is not in the allowlist", e.Method)
 }
 
+// ErrWriteRefused is a write the client's WriteGate refused: nothing was
+// serialized or sent, and the write did not happen. Err is the gate's reason.
+type ErrWriteRefused struct {
+	Method string
+	Err    error
+}
+
+func (e *ErrWriteRefused) Error() string {
+	return fmt.Sprintf("freeiparpc: write command %q refused by the write gate (not sent): %v", e.Method, e.Err)
+}
+
+func (e *ErrWriteRefused) Unwrap() error { return e.Err }
+
 // notSentError marks a dial failure: the request never left.
 type notSentError struct{ err error }
 
