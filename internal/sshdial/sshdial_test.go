@@ -366,5 +366,44 @@ func TestLockSessionRunsWithAKeepaliveUnlessTheTargetSetsItsOwn(t *testing.T) {
 		if _, ok := option(calls()[0], "ServerAliveInterval"); ok {
 			t.Fatalf("the tunnel's ssh has the lock's keepalive: %q", calls()[0])
 		}
+		if _, ok := option(calls()[0], "ConnectTimeout"); ok {
+			t.Fatalf("the tunnel's ssh has the lock's connect timeout: %q", calls()[0])
+		}
 	})
+}
+
+// The lock's ssh also bounds its TCP connect, unless the Target says how long
+// it should wait: the pilot edit break-glass takes the lock synchronously
+// with no context, and a server that does not answer would otherwise hold the
+// screen for the operating system's connect timeout. The bound is for the
+// connection only: waiting for a busy lock is flock's, and is not touched.
+func TestLockSessionBoundsItsConnectUnlessTheTargetSetsItsOwn(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed")
+	}
+	for name, tc := range map[string]struct {
+		options map[string]string
+		want    string
+	}{
+		"the default":               {nil, "ConnectTimeout=" + lockConnectTimeout},
+		"the target's own value":    {map[string]string{"ConnectTimeout": "7"}, "ConnectTimeout=7"},
+		"unrelated options present": {map[string]string{"StrictHostKeyChecking": "no"}, "ConnectTimeout=" + lockConnectTimeout},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ssh, calls := fakeSSH(t, "local")
+			d := &Dialer{Target: Target{Host: "ipa1.example.test", Options: tc.options}, SSH: ssh}
+			lock, err := d.AcquireLock(context.Background(), LockOptions{Path: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = lock.Release()
+			argv := strings.Join(calls()[0], " ")
+			if !strings.Contains(argv, "-o "+tc.want+" ") {
+				t.Fatalf("argv = %q, want -o %s", argv, tc.want)
+			}
+			if strings.Count(argv, "ConnectTimeout=") != 1 {
+				t.Fatalf("argv = %q: ConnectTimeout must appear exactly once", argv)
+			}
+		})
+	}
 }

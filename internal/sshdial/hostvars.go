@@ -42,8 +42,8 @@ func TargetFromHostVars(host string, vars map[string]any) (Target, error) {
 			return t, fmt.Errorf("%s 設定了 %s；不支援", host, key) // gate: ssh-unsupported-var
 		}
 	}
-	if c, ok := vars["ansible_connection"]; ok && c != nil && c != "ssh" {
-		return t, fmt.Errorf("%s 的 ansible_connection 是 %v；只支援 ssh", host, c) // gate: ssh-connection
+	if c, ok := vars["ansible_connection"]; ok && c != nil && !isSSHConnection(c) {
+		return t, fmt.Errorf("%s 的 ansible_connection 是 %v；只支援 ssh(或同一個外掛的全名 ansible.builtin.ssh)", host, c) // gate: ssh-connection
 	}
 	t.Host = host
 	// A value of another type is refused, not ignored: ignoring ansible_user
@@ -99,6 +99,18 @@ func TargetFromHostVars(host string, vars map[string]any) (Target, error) {
 		return t, fmt.Errorf("%s：%w", host, err) // gate: ssh-validate
 	}
 	return t, nil
+}
+
+// isSSHConnection reports whether an ansible_connection value names the ssh
+// connection plugin: ansible-core resolves `ssh` and its fully qualified name
+// `ansible.builtin.ssh` to the same plugin, so an inventory that spells it the
+// long way connects exactly as the short one does. Everything else (docker,
+// local, paramiko, smart, community.docker.docker, ansible.builtin.local, ...)
+// is another connection and stays refused; a value that is not a string is
+// not the name of anything.
+func isSSHConnection(v any) bool {
+	s, ok := v.(string)
+	return ok && (s == "ssh" || s == "ansible.builtin.ssh")
 }
 
 // expandHome resolves a leading "~" or "~/" the way a login shell would:

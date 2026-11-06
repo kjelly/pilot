@@ -47,6 +47,13 @@ func TestTargetFromHostVars(t *testing.T) {
 		want string // in the error
 	}{
 		{name: "docker connection", vars: map[string]any{"ansible_connection": "docker"}, gate: "ssh-connection", want: "ansible_connection 是 docker"},
+		// ansible.builtin.ssh is the ssh plugin (accepted below); no other
+		// plugin is, whichever way it is spelled.
+		{name: "the local connection spelled with its full name", vars: map[string]any{"ansible_connection": "ansible.builtin.local"}, gate: "ssh-connection", want: "ansible_connection 是 ansible.builtin.local"},
+		{name: "a docker connection spelled with its collection", vars: map[string]any{"ansible_connection": "community.docker.docker"}, gate: "ssh-connection", want: "ansible_connection 是 community.docker.docker"},
+		{name: "paramiko", vars: map[string]any{"ansible_connection": "paramiko_ssh"}, gate: "ssh-connection", want: "ansible_connection 是 paramiko_ssh"},
+		{name: "an ssh-looking name that is not the plugin", vars: map[string]any{"ansible_connection": "ansible.builtin.ssh2"}, gate: "ssh-connection", want: "ansible_connection 是 ansible.builtin.ssh2"},
+		{name: "a connection that is not a string", vars: map[string]any{"ansible_connection": 5}, gate: "ssh-connection", want: "ansible_connection 是 5"},
 		{name: "password", vars: map[string]any{"ansible_ssh_pass": "x"}, gate: "ssh-unsupported-var", want: "設定了 ansible_ssh_pass"},
 		{name: "legacy host alias", vars: map[string]any{"ansible_ssh_host": "10.0.0.1"}, gate: "ssh-unsupported-var", want: "設定了 ansible_ssh_host"},
 		{name: "an option sshdial does not allow", vars: map[string]any{"ansible_ssh_common_args": "-o ProxyCommand=nc"}, gate: "ssh-validate", want: "ProxyCommand"},
@@ -73,6 +80,16 @@ func TestTargetFromHostVars(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, tc.want)
 			}
 		})
+	}
+	// ansible-core resolves `ssh` and `ansible.builtin.ssh` to the same plugin:
+	// an inventory that spells it the long way connects as the short one does
+	// and is accepted the same way (the refusals above are for the other
+	// plugins, not for the spelling).
+	for _, conn := range []string{"ssh", "ansible.builtin.ssh"} {
+		got, err := TargetFromHostVars("ipa-1", map[string]any{"ansible_connection": conn, "ansible_host": "192.0.2.10", "ansible_user": "root"})
+		if err != nil || got.Host != "192.0.2.10" || got.User != "root" {
+			t.Fatalf("ansible_connection %q: %+v, %v", conn, got, err)
+		}
 	}
 	// The options sshdial.Target allows pass through, a jump host among them: a
 	// bastion in front of the FreeIPA server is a supported inventory.

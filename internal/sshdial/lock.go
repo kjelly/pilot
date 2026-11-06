@@ -35,10 +35,19 @@ const (
 	lockServerAliveCountMax = "3"
 )
 
+// lockConnectTimeout bounds how long the lock's ssh waits for the TCP
+// connection, unless the Target sets its own ConnectTimeout. Without it a
+// server that does not answer holds the caller for the operating system's
+// connect timeout (minutes), which is what the pilot edit break-glass does
+// not survive: its call is synchronous, takes the lock without waiting and
+// has no context to cancel. It limits the connection only, never the wait for
+// a busy lock (flock --wait does that) or the time the lock is held.
+const lockConnectTimeout = "30"
+
 // lockTarget is the Target the lock's ssh uses: d.Target, with the keepalive
-// options above for the ones it does not set.
+// options and the connect timeout above for the ones it does not set.
 func (t Target) lockTarget() Target {
-	opts := make(map[string]string, len(t.Options)+2)
+	opts := make(map[string]string, len(t.Options)+3)
 	for k, v := range t.Options {
 		opts[k] = v
 	}
@@ -47,6 +56,9 @@ func (t Target) lockTarget() Target {
 	}
 	if _, ok := opts["ServerAliveCountMax"]; !ok {
 		opts["ServerAliveCountMax"] = lockServerAliveCountMax
+	}
+	if _, ok := opts["ConnectTimeout"]; !ok {
+		opts["ConnectTimeout"] = lockConnectTimeout
 	}
 	t.Options = opts
 	return t
