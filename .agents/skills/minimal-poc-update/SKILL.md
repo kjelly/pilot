@@ -133,7 +133,10 @@ states:
 4. do not document an unexecuted workaround as a verified path;
 5. distinguish normative steps from environment-specific notes;
 6. verify that commands, paths, prompts, and expected persisted values match the
-   current evidence.
+   current evidence;
+7. write no secret value into the runbook or evidence (vault values, passwords of
+   created users, hashes, tokens): name the vault key instead, and check the staged
+   diff before committing (`.agents/skills/_shared/committed-secrets.md`).
 
 After editing, reread the affected sections and compare them against the
 observed-differences ledger.

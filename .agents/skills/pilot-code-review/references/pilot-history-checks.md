@@ -88,6 +88,22 @@ SA/Root 在派 Coder **之前**，Reviewer 在給結論**之前**，都要明列
 與 actual-run evidence 規則為準；舊教學中的預期輸出、逐步手跑或 transcript
 貼法不能凌駕目前的 candidate/test-chain/evidence 規則。
 
+## 秘密不進 Git
+
+規則、檢查指令與外洩後的處理都在 `.agents/skills/_shared/committed-secrets.md`（repo-root 路徑；
+snapshot 內同名）。要點如下：
+
+- 範圍是所有 commit 的檔案與貼到 GitHub 的文字。這包括 `docs/evidence/**` 手寫段落、
+  runbook/spec、`testdata/` 的真實擷取與測試字面值。
+- 拋棄式 lab 帳號的密碼，以及從密碼衍生的值（`ipanthash` 等 hash、Kerberos key、
+  token、cookie），都算秘密。
+- 真實擷取（AGENTS.md §5.6）在寫進 working tree 之前就要遮蔽，原始擷取留在
+  `.verification/` 或 `/tmp`。PR #255 就是把 admin `all` 的 `user_find` 回應原樣放進
+  `testdata/`，連同 lab 使用者的 `ipanthash` 一起 commit 並 push 出去。
+- `--evidence-record` 的 redaction 不涵蓋手寫段落、加密 vault 的值與衍生值。
+- reviewer 要搜尋 `BASE..HEAD` 的每個 commit，不能只看最終 diff。任何 commit 含秘密
+  即為 P0 leaked secret，HEAD 已移除也一樣。
+
 ## 可直接放進 task envelope 的提示詞
 
 ### SA / Coder
@@ -100,6 +116,9 @@ SA/Root 在派 Coder **之前**，Reviewer 在給結論**之前**，都要明列
 > check/apply/verify/idempotency，另測本次 tags、probe-error 與 rollback 邊界。
 > 需要 BASE 對照時還原相同 snapshot。回報 candidate/tree、命令、工具版本、
 > 真實執行/skip 數、counterexample、回復後 effective state、artifact 與限制。
+> commit 的 fixture、evidence record、runbook 都不得含秘密，衍生值與 lab 帳號密碼也一樣：
+> 真實擷取先遮蔽才寫進 repo，commit 前依 `.agents/skills/_shared/committed-secrets.md`
+> 檢查 staged diff。發現已 commit 的秘密時停下並回報 Root，不要只補一個清除 commit。
 > 只使用 Root 指派且已驗證的 checkout（不建立 worktree、不切換 branch）；你不是唯一工作者，不回退別人的改動。只有 Root 操作
 > push/PR lifecycle；未授權 review 不自行啟動 target mutation。
 
@@ -113,3 +132,6 @@ SA/Root 在派 Coder **之前**，Reviewer 在給結論**之前**，都要明列
 > 提出並在已授權範圍執行 vm-target 計畫，否則交 Root 處理；不要把必要而未跑
 > 的情境列為 PASS。回報完整 coverage、file:line/trigger/impact、BASE/HEAD
 > 對照、typed findings、target_validation 理由、驗證層級及明確未測限制。
+> 依 `.agents/skills/_shared/committed-secrets.md` 搜尋 `BASE..HEAD` 每個 commit 的秘密，
+> 包括 fixture、evidence 手寫段落與衍生值。任何 commit 含秘密即為 P0，HEAD 已移除也一樣；
+> finding 只寫名稱與 commit，不寫值。

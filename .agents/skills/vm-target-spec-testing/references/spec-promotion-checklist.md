@@ -16,6 +16,10 @@ when it and [AGENTS.md](../../../../AGENTS.md) disagree, AGENTS.md wins.
       [docs/actual-run-evidence.md](../../../../docs/actual-run-evidence.md)
       §3: tested commit and tree, target and inventory summary, real
       dry-run/apply/verify/idempotency verdicts.
+- [ ] No commit of the change carries a secret: no password (disposable test
+      accounts included), hash, key, token or cookie in the record's
+      hand-written sections, the fixtures or the runbook. Checked as
+      `.agents/skills/_shared/committed-secrets.md` says.
 - [ ] Nothing that affects execution changed after that run
       (actual-run-evidence.md §4); otherwise there is a new candidate and a
       new run.

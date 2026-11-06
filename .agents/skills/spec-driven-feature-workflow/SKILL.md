@@ -168,6 +168,12 @@ more than a clean example — it's where the next reader avoids repeating
 your debugging session. See `docs/runbooks/log-server.md` §5 and
 `docs/runbooks/audit-log-forwarding.md` §5 for the format.
 
+"Real output" means real and redacted. The runbook, the evidence record and any
+fixture captured in step 5 hold no password (a disposable test account's included),
+hash, key, token or cookie. Redact a capture before it enters the repo, and check
+the staged diff before each commit, as `.agents/skills/_shared/committed-secrets.md`
+says.
+
 ## 7. Wire it into the index
 
 Add one line to `docs/README.md`'s 入口地圖 table pointing at the new

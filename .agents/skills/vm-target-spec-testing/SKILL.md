@@ -199,6 +199,11 @@ Quick runs in a dirty worktree are fine while iterating.
    evidence-only commit, then replace the spec's and runbook's last-verified
    summary and link. No transcripts, no links to `.verification/`
    (AGENTS.md §7 link rule).
+7. Before each commit (candidate fixtures in step 1, the record in step 6), check
+   the staged diff as `.agents/skills/_shared/committed-secrets.md` says. pilot
+   masks only `-e` values. It does not mask the sections you write by hand,
+   encrypted vault values, hashes, or passwords of disposable test accounts. A
+   fixture captured from a live service is redacted before it enters the repo.
 
 ## 6. Debugging by hand (not evidence)
 

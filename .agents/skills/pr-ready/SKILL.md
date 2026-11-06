@@ -74,6 +74,14 @@ class, trigger, invariant, fix SHA and regression/counterexample. On the second
 occurrence of a class, send SA to assess related callers/includes/backends before
 another point fix. Verify tests fail for the intended reason when the fix is absent.
 
+Nothing committed or posted carries a secret. That covers fixtures from real
+captures, evidence records (including their hand-written sections), runbooks and
+PR comments. Give every Coder and Reviewer the snapshot path of
+`.agents/skills/_shared/committed-secrets.md`. Root runs its staged-diff check
+before each commit and its commit-range check before each push. A secret found in
+any commit of the PR stops the work until the user decides; a scrubbing commit does
+not close it.
+
 SA/Root must record `target_validation = required | not-needed | blocked` with a
 reason before implementation; Reviewer must re-evaluate it before PASS. If the
 claim depends on native service state, fresh-host ordering, selected tags,

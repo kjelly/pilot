@@ -72,6 +72,13 @@ root-cause class, an observable invariant, a discriminating regression/counterex
 `target_validation = required | not-needed | blocked` plan. A repeated class needs
 a class-wide caller/include/backend assessment, not another syntax special case.
 
+Nothing committed or posted carries a secret. That covers fixtures from real
+captures, evidence records (including their hand-written sections), runbooks and
+PR/Issue text. Give every Coder and Reviewer the snapshot path of
+`.agents/skills/_shared/committed-secrets.md`. Root runs its staged-diff check
+before each commit and its commit-range check before each push. A leaked secret
+stops the work until the user decides.
+
 When correctness depends on fresh-host/task-selection, native service state,
 upgrade/rollback or multi-host behavior, gather candidate-bound vm-target evidence
 as described in the shared reference. Normal apply/verify/`changed=0` is separate

@@ -83,6 +83,13 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   findings. The reviewer records `target_validation = required | not-needed |
   blocked` with the invariant (`target_validation` in the evidence JSON, see
   `references/evidence-contract.md`); `blocked` never becomes `not-needed`.
+- **Secrets in the branch.** Pass the reviewer the snapshot path of
+  `.agents/skills/_shared/committed-secrets.md`. The reviewer searches every commit
+  of `BASE..HEAD`, not only the final diff. A secret in any commit is a leaked
+  secret: P0, blocking, even when HEAD no longer has it. It stays blocking until the
+  user has recorded on the PR that the credential is revoked, rotated or confirmed
+  dead, and how the history is handled. Draft comments name the secret and the
+  commits, never the value.
 - **Mandated actual-run evidence.** `.github/pr-evidence.json` on the base branch
   declares `docs/evidence/**` as evidence-only and requires an `actual-run` record
   for any change to playbooks, specs, contracts, inventory handling or deploy
