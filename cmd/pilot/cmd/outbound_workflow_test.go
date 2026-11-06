@@ -1,7 +1,13 @@
 package cmd
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/kjelly/pilot/internal/contract"
@@ -157,5 +163,108 @@ func TestOutboundWorkflow_ReadinessMissingConfig(t *testing.T) {
 	cfg, err := webhookReadiness(dir)
 	if err != nil || cfg != nil {
 		t.Fatalf("webhookReadiness with no integrations.yaml = (%v, %v), want (nil, nil)", cfg, err)
+	}
+}
+
+// D15 (spec 2026-11-06 phase 2 §6.4): every delivery.Outcome constant is read
+// explicitly, so a new outcome that nobody classified cannot turn into an announced
+// success. The constants are read from the source of the type, not from a list kept
+// here, so adding one fails this test until workflowOutcomeResult has it.
+func TestEveryDeliveryOutcomeIsPublishedExplicitly(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join("..", "..", "..", "internal", "delivery", "transaction.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var declared []string
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs := spec.(*ast.ValueSpec)
+			if id, ok := vs.Type.(*ast.Ident); !ok || id.Name != "Outcome" {
+				continue
+			}
+			for i, name := range vs.Names {
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok {
+					t.Fatalf("%s is not a string literal", name.Name)
+				}
+				v, _ := strconv.Unquote(lit.Value)
+				declared = append(declared, v)
+			}
+		}
+	}
+	if len(declared) < 9 {
+		t.Fatalf("found %d Outcome constants, want at least the 9 there were: the scan is not looking at the type", len(declared))
+	}
+	var listed []string
+	for o := range workflowOutcomeResult {
+		listed = append(listed, string(o))
+	}
+	slices.Sort(declared)
+	slices.Sort(listed)
+	if !slices.Equal(declared, listed) {
+		t.Fatalf("delivery.Outcome constants %v, workflowOutcomeResult has %v: classify the new outcome", declared, listed)
+	}
+}
+
+// The classification, row by row, and the default: an outcome nobody classified is
+// a failure with an unknown consistency, in a mix as well as alone.
+func TestAggregateWorkflowResultClassifiesEveryOutcomeAndFailsTheUnknownOne(t *testing.T) {
+	for _, tc := range []struct {
+		outcome delivery.Outcome
+		want    string
+	}{
+		{delivery.OutcomeSuccess, "success"},
+		{delivery.OutcomePartialSuccess, "success"},
+		{delivery.OutcomeFailed, "failure"},
+		{delivery.OutcomePartialFailed, "failure"},
+		{delivery.OutcomeRolledBack, "failure"},
+		{delivery.OutcomeRollbackFailed, "failure"},
+		{delivery.OutcomeEvidenceFailed, "failure"},
+		{delivery.OutcomeAuthorizationRequired, "failure"},
+		{delivery.OutcomeCancelled, "cancelled"},
+		{delivery.Outcome("an_outcome_added_later"), "failure"},
+		{delivery.Outcome(""), "failure"},
+	} {
+		got, _ := aggregateWorkflowResult([]ComponentDeliveryResult{{ComponentIDs: []string{"c"}, Outcome: tc.outcome}})
+		if got != tc.want {
+			t.Errorf("outcome %q alone: published as %q, want %q", tc.outcome, got, tc.want)
+		}
+	}
+	// In a mix: a failure wins over a cancellation, a cancellation over a success,
+	// and an unknown outcome beside successes makes the whole a failure.
+	for _, tc := range []struct {
+		name     string
+		outcomes []delivery.Outcome
+		want     string
+	}{
+		{"unknown beside a success", []delivery.Outcome{delivery.OutcomeSuccess, "an_outcome_added_later"}, "failure"},
+		{"failure beside a cancellation", []delivery.Outcome{delivery.OutcomeCancelled, delivery.OutcomeFailed}, "failure"},
+		{"cancellation beside a success", []delivery.Outcome{delivery.OutcomeSuccess, delivery.OutcomeCancelled}, "cancelled"},
+		{"partial_failed beside a success", []delivery.Outcome{delivery.OutcomeSuccess, delivery.OutcomePartialFailed}, "failure"},
+	} {
+		var rs []ComponentDeliveryResult
+		for _, o := range tc.outcomes {
+			rs = append(rs, ComponentDeliveryResult{ComponentIDs: []string{"c"}, Outcome: o})
+		}
+		if got, _ := aggregateWorkflowResult(rs); got != tc.want {
+			t.Errorf("%s: published as %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if _, consistency := aggregateWorkflowResult([]ComponentDeliveryResult{{ComponentIDs: []string{"c"}, Outcome: "an_outcome_added_later"}}); consistency != "unknown" {
+		t.Errorf("an unknown outcome has consistency %q, want unknown", consistency)
+	}
+	// partial_failed is the Go writer's: a failure that is partial_or_unknown, with
+	// no confirmed effects (R7).
+	pub, consistency := aggregateWorkflowResult([]ComponentDeliveryResult{{ComponentIDs: []string{"freeipa-identity"}, Outcome: delivery.OutcomePartialFailed, FailedStep: "verify"}})
+	if pub != "failure" || consistency != "partial_or_unknown" {
+		t.Errorf("partial_failed = %s / %s, want failure / partial_or_unknown", pub, consistency)
+	}
+	if got := completedComponentIDs([]ComponentDeliveryResult{{ComponentIDs: []string{"freeipa-identity"}, Outcome: delivery.OutcomePartialFailed}}); len(got) != 0 {
+		t.Errorf("a partial_failed component is listed as completed: %v", got)
 	}
 }
