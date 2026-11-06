@@ -1,0 +1,30 @@
+{
+  "result": {
+    "result": {
+      "gidnumber": [
+        "1927600518"
+      ],
+      "objectclass": [
+        "top",
+        "groupofnames",
+        "nestedgroup",
+        "ipausergroup",
+        "ipaobject",
+        "posixgroup"
+      ],
+      "ipauniqueid": [
+        "a97a856c-d9ef-11f1-bb77-5254001b059e"
+      ],
+      "cn": [
+        "p24cap-ge"
+      ],
+      "dn": "cn=p24cap-ge,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p24cap-ge",
+    "summary": "Added group \"p24cap-ge\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

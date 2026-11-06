@@ -1,0 +1,14 @@
+{
+  "result": null,
+  "error": {
+    "code": 3005,
+    "message": "Unknown option: first",
+    "data": {
+      "option": "first"
+    },
+    "name": "OptionError"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

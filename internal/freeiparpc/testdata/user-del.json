@@ -1,0 +1,15 @@
+{
+  "result": {
+    "result": {
+      "failed": []
+    },
+    "value": [
+      "p24cap-ux"
+    ],
+    "summary": "Deleted user \"p24cap-ux\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

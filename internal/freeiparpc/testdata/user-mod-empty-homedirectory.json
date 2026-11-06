@@ -1,0 +1,14 @@
+{
+  "result": null,
+  "error": {
+    "code": 4205,
+    "message": "missing attribute \"homeDirectory\" required by object class \"posixAccount\"",
+    "data": {
+      "info": "missing attribute \"homeDirectory\" required by object class \"posixAccount\""
+    },
+    "name": "ObjectclassViolation"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

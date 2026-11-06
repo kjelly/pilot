@@ -1,0 +1,21 @@
+{
+  "result": {
+    "result": {
+      "description": [
+        "P24 group one, changed"
+      ],
+      "cn": [
+        "p24cap-g1"
+      ],
+      "gidnumber": [
+        "1927600491"
+      ]
+    },
+    "value": "p24cap-g1",
+    "summary": "Modified group \"p24cap-g1\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

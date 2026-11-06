@@ -1,0 +1,11 @@
+{
+  "result": {
+    "result": true,
+    "value": "p24cap-pwc@IPA.PILOT.INTERNAL",
+    "summary": "Changed password for \"p24cap-pwc@IPA.PILOT.INTERNAL\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

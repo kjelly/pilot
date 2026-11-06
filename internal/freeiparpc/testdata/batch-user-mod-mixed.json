@@ -1,0 +1,111 @@
+{
+  "result": {
+    "count": 4,
+    "results": [
+      {
+        "result": {
+          "homedirectory": [
+            "/home/p24cap-bu1"
+          ],
+          "mail": [
+            "p24cap-bu1@ipa.pilot.internal"
+          ],
+          "uidnumber": [
+            "1927600510"
+          ],
+          "krbprincipalname": [
+            "p24cap-bu1@IPA.PILOT.INTERNAL"
+          ],
+          "loginshell": [
+            "/bin/zsh"
+          ],
+          "krbcanonicalname": [
+            "p24cap-bu1@IPA.PILOT.INTERNAL"
+          ],
+          "uid": [
+            "p24cap-bu1"
+          ],
+          "sn": [
+            "Cap"
+          ],
+          "gidnumber": [
+            "1927600510"
+          ],
+          "givenname": [
+            "P24"
+          ],
+          "nsaccountlock": false,
+          "has_password": false,
+          "has_keytab": false,
+          "memberof_group": [
+            "ipausers"
+          ]
+        },
+        "value": "p24cap-bu1",
+        "summary": "Modified user \"p24cap-bu1\"",
+        "error": null
+      },
+      {
+        "error": "p24cap-nobody: user not found",
+        "error_code": 4001,
+        "error_name": "NotFound",
+        "error_kw": {
+          "reason": "p24cap-nobody: user not found"
+        }
+      },
+      {
+        "error": "no modifications to be performed",
+        "error_code": 4202,
+        "error_name": "EmptyModlist",
+        "error_kw": {}
+      },
+      {
+        "result": {
+          "homedirectory": [
+            "/home/p24cap-bu2"
+          ],
+          "mail": [
+            "p24cap-bu2@ipa.pilot.internal"
+          ],
+          "uidnumber": [
+            "1927600511"
+          ],
+          "krbprincipalname": [
+            "p24cap-bu2@IPA.PILOT.INTERNAL"
+          ],
+          "loginshell": [
+            "/bin/zsh"
+          ],
+          "krbcanonicalname": [
+            "p24cap-bu2@IPA.PILOT.INTERNAL"
+          ],
+          "uid": [
+            "p24cap-bu2"
+          ],
+          "sn": [
+            "Cap"
+          ],
+          "gidnumber": [
+            "1927600511"
+          ],
+          "givenname": [
+            "P24"
+          ],
+          "nsaccountlock": false,
+          "has_password": false,
+          "has_keytab": false,
+          "memberof_group": [
+            "ipausers"
+          ]
+        },
+        "value": "p24cap-bu2",
+        "summary": "Modified user \"p24cap-bu2\"",
+        "error": null
+      }
+    ]
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

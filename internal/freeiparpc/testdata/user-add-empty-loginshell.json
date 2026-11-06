@@ -1,0 +1,78 @@
+{
+  "result": {
+    "result": {
+      "givenname": [
+        "P24"
+      ],
+      "cn": [
+        "P24 Empty"
+      ],
+      "displayname": [
+        "P24 Empty"
+      ],
+      "uidnumber": [
+        "1927600513"
+      ],
+      "krbprincipalname": [
+        "p24cap-ue-loginshell@IPA.PILOT.INTERNAL"
+      ],
+      "uid": [
+        "p24cap-ue-loginshell"
+      ],
+      "ipauniqueid": [
+        "a751de20-d9ef-11f1-af2a-5254001b059e"
+      ],
+      "gidnumber": [
+        "1927600513"
+      ],
+      "krbcanonicalname": [
+        "p24cap-ue-loginshell@IPA.PILOT.INTERNAL"
+      ],
+      "mail": [
+        "p24cap-ue-loginshell@ipa.pilot.internal"
+      ],
+      "gecos": [
+        "P24 Empty"
+      ],
+      "sn": [
+        "Empty"
+      ],
+      "homedirectory": [
+        "/home/p24cap-ue-loginshell"
+      ],
+      "objectclass": [
+        "top",
+        "person",
+        "organizationalperson",
+        "inetorgperson",
+        "inetuser",
+        "posixaccount",
+        "krbprincipalaux",
+        "krbticketpolicyaux",
+        "ipaobject",
+        "ipasshuser",
+        "ipaSshGroupOfPubKeys",
+        "mepOriginEntry",
+        "ipantuserattrs"
+      ],
+      "initials": [
+        "PE"
+      ],
+      "mepmanagedentry": [
+        "cn=p24cap-ue-loginshell,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      ],
+      "has_password": false,
+      "has_keytab": false,
+      "memberof_group": [
+        "ipausers"
+      ],
+      "dn": "uid=p24cap-ue-loginshell,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p24cap-ue-loginshell",
+    "summary": "Added user \"p24cap-ue-loginshell\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

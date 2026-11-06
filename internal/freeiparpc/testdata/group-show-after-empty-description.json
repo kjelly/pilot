@@ -1,0 +1,34 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "top",
+        "groupofnames",
+        "nestedgroup",
+        "ipausergroup",
+        "ipaobject",
+        "posixgroup",
+        "ipantgroupattrs"
+      ],
+      "ipauniqueid": [
+        "a97e043a-d9ef-11f1-9444-5254001b059e"
+      ],
+      "ipantsecurityidentifier": [
+        "S-1-5-21-3998632271-3893472475-798555519-1519"
+      ],
+      "gidnumber": [
+        "1927600519"
+      ],
+      "cn": [
+        "p24cap-ge2"
+      ],
+      "dn": "cn=p24cap-ge2,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p24cap-ge2",
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

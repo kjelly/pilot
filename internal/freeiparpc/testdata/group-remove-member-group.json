@@ -1,0 +1,29 @@
+{
+  "result": {
+    "completed": 1,
+    "failed": {
+      "member": {
+        "user": [],
+        "group": [],
+        "service": [],
+        "idoverrideuser": []
+      }
+    },
+    "result": {
+      "gidnumber": [
+        "1927600496"
+      ],
+      "cn": [
+        "p24cap-mg1"
+      ],
+      "member_group": [
+        "p24cap-mg3"
+      ],
+      "dn": "cn=p24cap-mg1,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    }
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -1,0 +1,73 @@
+{
+  "result": {
+    "count": 3,
+    "results": [
+      {
+        "result": {
+          "objectclass": [
+            "top",
+            "groupofnames",
+            "nestedgroup",
+            "ipausergroup",
+            "ipaobject",
+            "posixgroup"
+          ],
+          "cn": [
+            "p24cap-b1"
+          ],
+          "description": [
+            "P24 batch one"
+          ],
+          "ipauniqueid": [
+            "a526c35e-d9ef-11f1-b746-5254001b059e"
+          ],
+          "gidnumber": [
+            "1927600508"
+          ],
+          "dn": "cn=p24cap-b1,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        },
+        "value": "p24cap-b1",
+        "summary": "Added group \"p24cap-b1\"",
+        "error": null
+      },
+      {
+        "error": "group with name \"p24cap-bg\" already exists",
+        "error_code": 4002,
+        "error_name": "DuplicateEntry",
+        "error_kw": {}
+      },
+      {
+        "result": {
+          "objectclass": [
+            "top",
+            "groupofnames",
+            "nestedgroup",
+            "ipausergroup",
+            "ipaobject",
+            "posixgroup"
+          ],
+          "cn": [
+            "p24cap-b2"
+          ],
+          "description": [
+            "P24 batch two"
+          ],
+          "ipauniqueid": [
+            "a54fde06-d9ef-11f1-bb77-5254001b059e"
+          ],
+          "gidnumber": [
+            "1927600509"
+          ],
+          "dn": "cn=p24cap-b2,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        },
+        "value": "p24cap-b2",
+        "summary": "Added group \"p24cap-b2\"",
+        "error": null
+      }
+    ]
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

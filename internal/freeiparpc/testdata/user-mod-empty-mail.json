@@ -1,0 +1,42 @@
+{
+  "result": {
+    "result": {
+      "sn": [
+        "Cap"
+      ],
+      "givenname": [
+        "P24"
+      ],
+      "uidnumber": [
+        "1927600516"
+      ],
+      "homedirectory": [
+        "/srv/home/p24cap-ue"
+      ],
+      "krbcanonicalname": [
+        "p24cap-ue@IPA.PILOT.INTERNAL"
+      ],
+      "uid": [
+        "p24cap-ue"
+      ],
+      "krbprincipalname": [
+        "p24cap-ue@IPA.PILOT.INTERNAL"
+      ],
+      "gidnumber": [
+        "1927600516"
+      ],
+      "nsaccountlock": false,
+      "has_password": false,
+      "has_keytab": false,
+      "memberof_group": [
+        "ipausers"
+      ]
+    },
+    "value": "p24cap-ue",
+    "summary": "Modified user \"p24cap-ue\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -1,0 +1,15 @@
+{
+  "result": null,
+  "error": {
+    "code": 4203,
+    "message": "Constraint violation: Password reuse not permitted",
+    "data": {
+      "desc": "Constraint violation",
+      "info": "Password reuse not permitted"
+    },
+    "name": "DatabaseError"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}
