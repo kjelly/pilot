@@ -47,10 +47,20 @@ class Fake:
         self.calls = []
         self.live_base = B
         self.ancestor = True
+        # {(base, head): bool}; pairs not listed answer `ancestor`.
+        self.ancestry = {}
 
     def is_ancestor(self, repo, base, head):
         self.calls.append(('is_ancestor', base, head))
-        return self.ancestor
+        return self.ancestry.get((base, head), self.ancestor)
+
+    def merge_base(self, repo, a, b):
+        self.calls.append(('merge_base', a, b))
+        if (a, b) in self.compares and self.compares[(a, b)] is not None:
+            return self.compares[(a, b)]['merge_base']
+        if a == b or self.ancestry.get((a, b), self.ancestor) is True:
+            return a
+        raise GitHubError('merge base unknown to the fake')
 
     def branch_head(self, repo, branch):
         return self.live_base
@@ -91,13 +101,14 @@ class GateTests(unittest.TestCase):
         f = Fake(); f.v['isDraft'] = True
         self.assertEqual(self.gate(gh=f)['decision'], 'SKIP')
 
-    def test_base_ref_mismatch_drafts_even_without_review(self):
+    def test_lagging_base_metadata_alone_is_not_a_draft(self):
+        # HEAD already contains the live tip; only PR Base metadata lags (kjelly/pilot#307).
         f = Fake(); f.live_base = 'c' * 40
-        result = self.gate(data={}, gh=f)
-        self.assertEqual(result['decision'], 'DRAFT')
-        self.assertIn(B, result['reasons'][0])
-        self.assertIn(f.live_base, result['reasons'][0])
-        self.assertIn('pr-ready', result['reasons'][0])
+        result = self.gate(gh=f)
+        self.assertEqual('aligned', result['alignment'])
+        self.assertFalse(result['needs_alignment'])
+        self.assertEqual('MERGE', result['decision'], result['reasons'])
+        self.assertIn(('is_ancestor', 'c' * 40, H), f.calls)
 
     def test_missing_or_malformed_base_name_waits(self):
         for name in (None, '', 7, []):
@@ -132,14 +143,50 @@ class GateTests(unittest.TestCase):
         f.branch_head = unavailable
         self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
 
-    def test_head_missing_latest_base_drafts_without_review(self):
+    def behind(self, pr_files=('pkg/a.go',), base_files=('docs/x.md',)):
         f = Fake(); f.ancestor = False
-        result = self.gate(data={}, gh=f)
-        self.assertEqual(result['decision'], 'DRAFT')
+        f.compares[(B, H)] = {'files': list(pr_files), 'merge_base': 'e' * 40, 'ancestor': False}
+        f.compares[(H, B)] = {'files': list(base_files), 'merge_base': 'e' * 40, 'ancestor': False}
+        return f
+
+    def test_head_behind_with_a_clean_disjoint_merge_goes_to_the_train(self):
+        f = self.behind()
+        result = self.gate(gh=f)
+        self.assertEqual('train', result['alignment'])
         self.assertTrue(result['base_behind'])
-        self.assertIn(H, result['reasons'][0])
-        self.assertIn(B, result['reasons'][0])
+        self.assertTrue(result['needs_alignment'])
+        self.assertEqual('MERGE', result['decision'], result['reasons'])
         self.assertIn(('is_ancestor', B, H), f.calls)
+
+    def test_head_behind_with_overlap_or_conflict_drafts_without_review(self):
+        f = self.behind(base_files=('pkg/a.go', 'docs/x.md'))
+        result = self.gate(data={}, gh=f)
+        self.assertEqual(('DRAFT', 'overlap', ['pkg/a.go']), (result['decision'], result['alignment'], result['overlap']))
+        self.assertIn(H, result['reasons'][0])
+        self.assertIn('both sides changed pkg/a.go', result['reasons'][0])
+        self.assertIn('pr-ready', result['reasons'][0])
+        for mergeable, state in (('CONFLICTING', 'DIRTY'), ('CONFLICTING', 'CLEAN'), ('MERGEABLE', 'DIRTY')):
+            with self.subTest(mergeable=mergeable, state=state):
+                f = self.behind(); f.v['mergeable'] = mergeable; f.v['mergeStateStatus'] = state
+                result = self.gate(data={}, gh=f)
+                self.assertEqual(('DRAFT', 'conflict'), (result['decision'], result['alignment']))
+                self.assertIn('merge conflict', result['reasons'][0])
+
+    def test_head_behind_with_unknown_mergeability_or_file_lists_waits(self):
+        f = self.behind(); f.v['mergeable'] = 'UNKNOWN'
+        result = self.gate(gh=f)
+        self.assertEqual(('WAITING', 'unknown'), (result['decision'], result['alignment']))
+        self.assertIn("'UNKNOWN'", result['reasons'][0])
+        f = self.behind(); del f.compares[(H, B)]
+        result = self.gate(gh=f)
+        self.assertEqual(('WAITING', 'unknown'), (result['decision'], result['alignment']))
+        f = self.behind()
+        def too_many(repo, base, head):
+            raise GitHubError('GitHub lists at most 300 changed files')
+        f.compare = too_many
+        result = self.gate(gh=f)
+        self.assertEqual(('WAITING', 'unknown'), (result['decision'], result['alignment']))
+        self.assertIn('300', result['reasons'][0])
 
     def test_unknown_ancestry_waits(self):
         f = Fake(); f.ancestor = None
@@ -179,8 +226,17 @@ class GateTests(unittest.TestCase):
         self.assertEqual(self.gate(data=e)['decision'], 'WAITING')
 
     def test_stale_base(self):
-        e = sample(); e['base_sha'] = H
-        self.assertEqual(self.gate(data=e)['decision'], 'WAITING')
+        # A reviewed Base that is not on the live base branch does not bind the review.
+        f = Fake(); f.ancestry[('c' * 40, B)] = False
+        e = sample(); e['base_sha'] = 'c' * 40
+        result = self.gate(data=e, gh=f)
+        self.assertEqual(result['decision'], 'WAITING')
+        self.assertIn('is not on live main', ' '.join(result['reasons']))
+
+    def test_older_reviewed_base_on_the_live_branch_still_binds_the_same_head(self):
+        f = Fake(); f.ancestry[('c' * 40, B)] = True
+        e = sample(); e['base_sha'] = 'c' * 40
+        self.assertEqual('MERGE', self.gate(data=e, gh=f)['decision'])
 
     def test_missing_independent_review(self):
         e = sample(); e['independent'] = False

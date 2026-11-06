@@ -231,11 +231,13 @@ class SecretScanIntegration(RealPr):
             for channel in (comment, proc.stdout, proc.stderr, json.dumps(state)):
                 self.assertNotIn(part, channel)
 
-    def test_apply_decision_merges_b2_because_its_re_run_of_the_gate_can_return_merge(self):
+    def test_apply_decision_queues_b2_because_its_re_run_of_the_gate_can_return_merge(self):
+        # MERGE queues the PR for the merge train (kjelly/pilot#307); the train merges it.
         self.use(self.b2)
         proc, out = self.actor(execute=True)
-        self.assertEqual((0, 'MERGED'), (proc.returncode, out['outcome']), proc.stdout + proc.stderr)
-        self.assertEqual(['merge'], self.writes())
+        self.assertEqual((0, 'ENQUEUED'), (proc.returncode, out['outcome']), proc.stdout + proc.stderr)
+        self.assertEqual(['comment'], self.writes())
+        self.assertEqual(['merge-queue'], self.state()['labels'])
 
     def test_without_a_worktree_nothing_is_merged(self):
         self.use(self.b2)

@@ -197,24 +197,28 @@ class TargetReuseRemoteTests(unittest.TestCase):
         del e["target_validation"]["target_reuse"]
         self.assertIn("files outside evidence_only_paths changed: " + OTHER, self.reasons(gh, e))
 
-    def test_stale_pr_base_metadata_does_not_prove_live_base(self):
+    def test_stale_pr_base_metadata_does_not_prove_the_attested_base(self):
+        # PR Base metadata (B) lags a live base (A): HEAD contains A, so this is no alignment problem,
+        # but the attestation must name the base HEAD actually integrates (kjelly/pilot#307).
         gh, e, _ = self.fixture()
         gh.branch_head = lambda repo, name: A
-        r = evaluate(REPO, 42, e, client=gh)
-        self.assertEqual("DRAFT", r["decision"])
-        self.assertIn("differs from live", " ".join(r["reasons"]))
+        gh.files[(MANIFEST, A)] = gh.files[(MANIFEST, B)]  # the policy is read at the live base
+        self.assertIn("target reuse base SHA does not match current base", self.reasons(gh, e))
 
-    def test_fresh_target_attestation_cannot_hide_stale_overall_review_base(self):
+    def test_target_attestation_binds_the_integrated_base(self):
         gh, e, trees = self.fixture()
         current = "e" * 40
         trees[current] = trees[B].copy()
         gh.branch_head = lambda repo, name: current
+        gh.files[(MANIFEST, current)] = gh.files[(MANIFEST, B)]  # the policy is read at the live base
         gh.compares[(current, H)] = {"ancestor": True, "merge_base": current, "files": [ART, APP]}
         gh.compares[(R, current)] = {"ancestor": False, "merge_base": A, "files": [OTHER]}
+        # Attesting the base HEAD contained earlier (B) does not cover the base it contains now.
+        self.assertIn("target reuse base SHA does not match current base", self.reasons(gh, e))
         e["target_validation"]["target_reuse"]["base_sha"] = current
         r = evaluate(REPO, 42, e, client=gh)
-        self.assertEqual("DRAFT", r["decision"])
-        self.assertIn("differs from live", " ".join(r["reasons"]))
+        self.assertEqual("MERGE", r["decision"], r["reasons"])
+        self.assertEqual("aligned", r["alignment"])
 
     def reasons(self, gh, e):
         r = evaluate(REPO, 42, e, client=gh)
@@ -267,13 +271,24 @@ class TargetReuseRemoteTests(unittest.TestCase):
         self.assertEqual("WAITING", r["decision"])
         self.assertIn("requires kind: target-run", " ".join(r["reasons"]))
 
-    def test_stale_independent_review_and_test_receipts_remain_rejected(self):
-        gh, e, _ = self.fixture()
-        stale = copy.deepcopy(e)
-        stale["head_sha"] = R
-        self.assertIn("Stale review evidence: reviewed HEAD/Base does not match GitHub", self.reasons(gh, stale))
-        e["tests"][0]["sha"] = R
-        self.assertIn("Test evidence is not bound to current PR HEAD: unit", self.reasons(gh, e))
+    def test_review_carries_only_across_a_pure_base_import(self):
+        # Reviewed at the candidate R; HEAD = R + the merge of main (OTHER) + the evidence-only record.
+        gh, e, trees = self.fixture()
+        reviewed = copy.deepcopy(e)
+        reviewed["head_sha"] = R
+        reviewed["tests"][0]["sha"] = R
+        r = evaluate(REPO, 42, reviewed, client=gh)
+        self.assertEqual("MERGE", r["decision"], r["reasons"])
+        self.assertEqual("pure-base-import", r["review_reuse"]["method"])
+        # Tests stay bound to the reviewed HEAD.
+        reviewed["tests"][0]["sha"] = H
+        self.assertIn("Test evidence is not bound to the reviewed HEAD: unit", self.reasons(gh, reviewed))
+        # A PR-side edit after the review is not a base import: the review is stale.
+        reviewed["tests"][0]["sha"] = R
+        trees[H][APP] = blob(9)
+        reason = self.reasons(gh, reviewed)
+        self.assertIn("Stale review evidence: reviewed HEAD/Base does not cover GitHub HEAD", reason)
+        self.assertIn("neither evidence-only nor a pure base import: " + APP, reason)
 
     def test_missing_or_truncated_tree_waits(self):
         gh, e, _ = self.fixture()

@@ -46,7 +46,11 @@ The shared verifier checks:
    predating both: a candidate that is itself on the base, or a base that never advanced
    past the candidate's fork, is refused. The remote verifier resolves the live base
    branch too; stale PR `baseRefOid` metadata is not accepted as proof of the current
-   base. The local verifier also refuses a candidate and base with more than one merge
+   base. The Ready and merge gates (`pr-ready`, `pr-review-merge`) use the **integrated
+   base**: the newest base commit HEAD contains (merge base of HEAD and the live tip), since
+   the merge train integrates the live tip before merging (kjelly/pilot#307); at the train's
+   final gate HEAD contains the live tip, so the two coincide. They read the manifest at the
+   live tip. `issue-to-pr` keeps the live base, which HEAD must contain. The local verifier also refuses a candidate and base with more than one merge
    base (criss-cross merges); GitHub's compare API reports a single merge base, so the
    remote verifier cannot see that case and the rejection is enforced locally only.
 2. `execution_paths` lists unique exact regular files, including dependencies.
@@ -239,3 +243,12 @@ reviews are reported with `closure_complete: false` and the entries.
 What remains the reviewer's judgment: that an imported runtime file outside the closure
 is not named by a reference the resolver could not read (a variable path, a computed
 include). A file the closure names, or a path in `rerun_paths`, is never left to it.
+
+## Merge train
+
+After `pr-review-merge` queues a PR, its merge train may push one commit that merges the live
+base tip into the PR (clean merge, every changed file equal to the base). For the target record
+that commit is an ordinary pure base import: the rules above decide whether the record still
+covers the new HEAD, and if not the train returns the PR to Draft for `pr-ready`. The independent
+review carries across it as a pure import of any files (`Context.accepts_pure_import`); check
+receipts never do. Details: `pr-review-merge/references/merge-train.md`.

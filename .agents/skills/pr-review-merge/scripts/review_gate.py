@@ -104,8 +104,8 @@ class RemoteContext(repo_evidence.Context):
     """
 
     def __init__(self, client: Any, repo: Repo, head: str, manifest: dict[str, Any], base: str,
-                 base_name: str | None = None):
-        super().__init__(None, head, manifest, [], [], base)
+                 base_name: str | None = None, *, integrated_base: bool = False):
+        super().__init__(None, head, manifest, [], [], base, integrated_base=integrated_base)
         self.client, self.repo = client, repo
         self.base_name = base_name
 
@@ -113,9 +113,14 @@ class RemoteContext(repo_evidence.Context):
         if not self.base_name:
             raise ValueError("Live base branch name unavailable for target reuse")
         live = self.client.branch_head(self.repo, self.base_name)
-        if live != self.base_ref:
+        # Integrated mode takes the merge base with the live tip itself, so lagging PR metadata
+        # cannot stand in for the base; the strict mode still refuses it.
+        if not self.integrated_base and live != self.base_ref:
             raise ValueError("PR base metadata is stale; independent review base must match live base")
         return live
+
+    def merge_base_of(self, a: str, b: str) -> str | None:
+        return self.client.merge_base(self.repo, a, b)
 
     def comparison(self, base: str, head: str) -> dict[str, Any] | None:
         return self.client.compare(self.repo, base, head)
@@ -152,34 +157,45 @@ def _names_revision(text: str, rev: str) -> bool:
                for token in re.findall(r"(?<![0-9A-Za-z])[0-9a-fA-F]{7,40}(?![0-9A-Za-z])", text))
 
 
+def read_manifest(client: Any, repo: Repo, base: str) -> tuple[dict[str, Any] | None, list[str], dict[str, Any]]:
+    """`.github/pr-evidence.json` at the base commit: (manifest or None, errors, report)."""
+    path = repo_evidence.MANIFEST_PATH
+    base = base.lower()
+    report: dict[str, Any] = {"manifest": "unreadable", "read_at": base}
+    try:
+        raw = client.file_at(repo, path, base)
+    except (GitHubError, ValueError, KeyError) as exc:
+        return None, [f"Cannot read {path} at base {base[:12]}: {exc}"], report
+    if raw is None:
+        report["manifest"] = "absent"
+        return None, [], report
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        report["manifest"] = "invalid"
+        return None, [f"{path} at base {base[:12]} is not valid JSON: {exc}"], report
+    errors = repo_evidence.validate_manifest(manifest)
+    if errors:
+        report["manifest"] = "invalid"
+        return None, [f"{path} at base {base[:12]}: {e}" for e in errors], report
+    report["manifest"] = "loaded"
+    return manifest, [], report
+
+
 def check_target_validation(client: Any, repo: Repo, head: str, base: str,
-                            evidence: dict[str, Any], *, base_name: str | None = None) -> tuple[list[str], dict[str, Any]]:
+                            evidence: dict[str, Any], *, base_name: str | None = None,
+                            integrated_base: bool = False) -> tuple[list[str], dict[str, Any]]:
     """Gaps that keep the PR from MERGE under the base branch's `.github/pr-evidence.json`.
 
     The manifest is read at the PR's base SHA, never the head, so a PR cannot weaken its own
     requirement. No manifest means no requirement. Every gap is a WAITING reason: a missing
     record is a DRAFT only through the reviewer's blocking P1 finding.
     """
-    path = repo_evidence.MANIFEST_PATH
     head, base = head.lower(), base.lower()
-    report: dict[str, Any] = {"manifest": "unreadable", "read_at": base}
-    try:
-        raw = client.file_at(repo, path, base)
-    except (GitHubError, ValueError, KeyError) as exc:
-        return [f"Cannot read {path} at base {base[:12]}: {exc}"], report
-    if raw is None:
-        report["manifest"] = "absent"
-        return [], report
-    try:
-        manifest = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        report["manifest"] = "invalid"
-        return [f"{path} at base {base[:12]} is not valid JSON: {exc}"], report
-    errors = repo_evidence.validate_manifest(manifest)
-    if errors:
-        report["manifest"] = "invalid"
-        return [f"{path} at base {base[:12]}: {e}" for e in errors], report
-    ctx = RemoteContext(client, repo, head, manifest, base, base_name)
+    manifest, errors, report = read_manifest(client, repo, base)
+    if errors or manifest is None:
+        return errors, report
+    ctx = RemoteContext(client, repo, head, manifest, base, base_name, integrated_base=integrated_base)
     report["manifest"] = "loaded"
     tv = evidence.get("target_validation")
     gaps = _check_record(client, repo, head, base, ctx, tv)
@@ -269,7 +285,7 @@ def _test_assessment(tests: Any, expected_head: str) -> tuple[list[str], list[st
             continue
         name, status = test["name"], test.get("status")
         if not isinstance(test.get("sha"), str) or test["sha"].lower() != expected_head.lower():
-            gaps.append(f"Test evidence is not bound to current PR HEAD: {name}")
+            gaps.append(f"Test evidence is not bound to the reviewed HEAD: {name}")
         if status == "FAIL":
             defects.append(f"Test failed: {name}: {test.get('evidence', 'no link provided')}")
         elif status == "PASS":
@@ -315,6 +331,71 @@ def check_base_alignment(client: Any, repo: Repo, number: int, view: dict[str, A
             "base_mismatch": mismatch, "base_behind": behind}
 
 
+def train_alignment(client: Any, repo: Repo, number: int, view: dict[str, Any]) -> dict[str, Any]:
+    """How the PR stands against the live base, for the merge train (kjelly/pilot#307).
+
+    `alignment` is `aligned` (HEAD contains the live tip; lagging PR Base metadata alone is GitHub's
+    to refresh), `train` (behind, but GitHub's test merge is clean and no file changed on both sides
+    since the merge base: the train merges the live tip in and the review still covers the PR's
+    content), `conflict`/`overlap` (a person or `pr-ready` must integrate and re-review), or
+    `unknown` (GitHub has not computed mergeability, or a side changed too many files to list).
+    """
+    out = check_base_alignment(client, repo, number, view)
+    head, live = view["headRefOid"], out["live_base_sha"]
+    contained = client.is_ancestor(repo, live, head) if out["base_mismatch"] else not out["base_behind"]
+    if type(contained) is not bool:
+        raise GitHubError("Base ancestry unavailable")
+    out.update(base_behind=not contained, overlap=[])
+    if contained:
+        out["alignment"] = "aligned"
+        return out
+    mergeable = view.get("mergeable")
+    if mergeable == "CONFLICTING" or view.get("mergeStateStatus") == "DIRTY":
+        out["alignment"] = "conflict"
+        return out
+    if mergeable != "MERGEABLE":
+        out["alignment"] = "unknown"
+        out["alignment_detail"] = f"GitHub mergeability against the live base is {mergeable!r}"
+        return out
+    try:
+        pr_side = client.compare(repo, live, head)
+        base_side = client.compare(repo, head, live)
+    except (GitHubError, ValueError, KeyError) as exc:
+        out["alignment"] = "unknown"
+        out["alignment_detail"] = f"cannot list the files changed since the merge base: {exc}"
+        return out
+    if not pr_side or not base_side:
+        out["alignment"] = "unknown"
+        out["alignment_detail"] = "GitHub could not compare the PR head and the live base"
+        return out
+    out["overlap"] = sorted(set(pr_side["files"]) & set(base_side["files"]))
+    out["alignment"] = "overlap" if out["overlap"] else "train"
+    return out
+
+
+def review_covers(client: Any, repo: Repo, reviewed: Any, head: str, live_base: str,
+                  base_name: str) -> tuple[dict[str, Any] | None, str]:
+    """(reuse record, "") when a review taken at `reviewed` covers `head`: the same commit, or every
+    change since is evidence-only or a pure import from the base (the merge train's integration
+    commit); otherwise (None, reason). Uses the base manifest's evidence-only paths when present."""
+    if not isinstance(reviewed, str) or not SHA.fullmatch(reviewed):
+        return None, "reviewed HEAD is not a full SHA"
+    reviewed = reviewed.lower()
+    if reviewed == head:
+        return {"method": "same-head"}, ""
+    manifest, errors, _ = read_manifest(client, repo, live_base)
+    if errors:
+        return None, "; ".join(errors)
+    ctx = RemoteContext(client, repo, head, manifest or {"schema_version": 1}, live_base, base_name,
+                        integrated_base=True)
+    try:
+        if ctx.accepts_pure_import(reviewed, "review"):
+            return ctx.accepted[-1], ""
+        return None, ctx.review_stale_reason(reviewed)
+    except (GitHubError, ValueError, KeyError) as exc:
+        return None, f"cannot verify the delta since the review: {exc}"
+
+
 def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any = None,
              worktree: Any = None, secret_files: Sequence[Any] = ()) -> dict[str, Any]:
     # Importing from the module allows replacing a client during tests.
@@ -341,18 +422,25 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
         reasons.append("Invalid PR state or missing HEAD/Base SHA")
         return result
 
-    # Operational hand-off: metadata equality alone does not prove HEAD includes main.
+    # Operational hand-off: metadata equality alone does not prove HEAD includes main. A PR behind the
+    # live base that the merge train can integrate (clean test merge, no file changed on both sides)
+    # stays Ready: the train merges the live tip in, waits for CI and merges (kjelly/pilot#307).
     try:
-        result.update(check_base_alignment(client, repo, number, view))
+        result.update(train_alignment(client, repo, number, view))
         base_name, live_base = view["baseRefName"], result["live_base_sha"]
-        if result["base_mismatch"] or result["base_behind"]:
+        result["needs_alignment"] = result["alignment"] == "train"
+        if result["alignment"] in ("conflict", "overlap"):
             result["decision"] = "DRAFT"
-            detail = (f"PR Base SHA {result['base_sha']} differs from live {base_name} SHA {live_base}. "
-                      if result["base_mismatch"] else
-                      f"PR HEAD {result['head_sha']} does not include live {base_name} SHA {live_base}. ")
+            detail = (f"PR HEAD {result['head_sha']} does not include live {base_name} SHA {live_base}, and "
+                      + ("GitHub reports a merge conflict with it. " if result["alignment"] == "conflict" else
+                         "both sides changed " + ", ".join(result["overlap"][:5]) + " since the merge base. "))
             reasons.append(
-                detail + "Use pr-ready to reconcile the base state and integrate the verified latest base, "
+                detail + "The merge train cannot integrate it: use pr-ready to integrate the verified latest base, "
                 "then rerun affected validation/CI and independent review on the updated HEAD/Base before Ready.")
+            return result
+        if result["alignment"] == "unknown":
+            reasons.append(f"PR HEAD does not include live {base_name} SHA {live_base} and the merge train "
+                           f"cannot classify it yet: {result.get('alignment_detail', 'unknown')}")
             return result
     except (GitHubError, ValueError, KeyError) as exc:
         reasons.append(f"Unable to verify live base branch: {exc}")
@@ -364,10 +452,23 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
         reasons.append("Missing/invalid review evidence, repository, or PR number")
         return result
     if not isinstance(evidence.get("head_sha"), str) or not isinstance(evidence.get("base_sha"), str) or \
-       evidence["head_sha"].lower() != result["head_sha"].lower() or \
-       evidence["base_sha"].lower() != result["base_sha"].lower():
-        reasons.append("Stale review evidence: reviewed HEAD/Base does not match GitHub")
+            not SHA.fullmatch(evidence["head_sha"]) or not SHA.fullmatch(evidence["base_sha"]):
+        reasons.append("Stale review evidence: reviewed HEAD/Base missing or not full SHAs")
         return result
+    reviewed_head, reviewed_base = evidence["head_sha"].lower(), evidence["base_sha"].lower()
+    try:
+        # The reviewed base must be on the base branch: the PR's Base then, or an ancestor of the live tip.
+        base_known = reviewed_base in (result["base_sha"].lower(), live_base) or \
+            client.is_ancestor(repo, reviewed_base, live_base) is True
+        reuse, why = review_covers(client, repo, reviewed_head, result["head_sha"].lower(), live_base, base_name) \
+            if base_known else (None, f"reviewed Base {reviewed_base[:12]} is not on live {base_name}")
+    except (GitHubError, ValueError, KeyError) as exc:
+        reuse, why = None, f"cannot verify the reviewed Base: {exc}"
+    if reuse is None:
+        reasons.append(f"Stale review evidence: reviewed HEAD/Base does not cover GitHub HEAD ({why})")
+        return result
+    if reuse.get("method") != "same-head":
+        result["review_reuse"] = reuse
     if evidence.get("reviewer_id") != "prm-reviewer" or evidence.get("independent") is not True:
         reasons.append("An independent prm-reviewer review is required")
         return result
@@ -414,7 +515,8 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
                     continue
                 text += f" | Disputed in {disputed}; new evidence: {new.strip()}"
             defects.append(text)
-    test_defects, test_gaps, tested = _test_assessment(evidence.get("tests"), result["head_sha"])
+    # Reviewer tests ran on the reviewed HEAD; after a pure base import CI on HEAD covers the integration.
+    test_defects, test_gaps, tested = _test_assessment(evidence.get("tests"), reviewed_head)
     defects.extend(test_defects)
     missing.extend(test_gaps)
     if evidence.get("verdict") == "BLOCK" and not defects and not repeated_disputes:
@@ -456,7 +558,8 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
 
     # Actual-run record the base branch's .github/pr-evidence.json mandates: gaps are WAITING.
     target_gaps, result["target_validation"] = check_target_validation(
-        client, repo, result["head_sha"], result["base_sha"], evidence, base_name=view.get("baseRefName"))
+        client, repo, result["head_sha"], live_base, evidence, base_name=view.get("baseRefName"),
+        integrated_base=True)
     missing.extend(target_gaps)
 
     # Every commit of the PR, scanned locally by the PR's own SHAs. A leaked secret is a DRAFT even when
