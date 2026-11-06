@@ -27,6 +27,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/kjelly/pilot/internal/livehooks"
 )
 
 // DefaultSupportedAPIVersions are the FreeIPA API versions this package was
@@ -141,6 +143,9 @@ func New(cfg Config) (*Client, error) {
 			if err != nil {
 				return nil, &notSentError{err}
 			}
+			// Nothing in a binary built without the identity_live_hooks tag
+			// (internal/livehooks): the live driver's way to hold an answer back.
+			raw = livehooks.WrapConn(raw)
 			hctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			tc := tls.Client(raw, tlsConfig)
@@ -215,7 +220,7 @@ func (c *Client) count(f func(*Stats)) {
 // post sends one request. Every request carries the Referer FreeIPA
 // requires for /ipa/session/*.
 func (c *Client) post(ctx context.Context, path, contentType, accept string, body []byte) (*http.Response, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(livehooks.RequestContext(ctx), http.MethodPost, c.base+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
 	}

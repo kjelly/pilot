@@ -12,6 +12,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/freeiparpc"
 	"github.com/kjelly/pilot/internal/identitylock"
+	"github.com/kjelly/pilot/internal/livehooks"
 )
 
 // The Go writer (spec §7). Execute carries out a plan under a lock the run already
@@ -344,6 +345,7 @@ func (r *runner) run() error {
 			errors.New("the authorization cache entry ran but its record could not be written: nothing was written"))
 	}
 	r.opts.Gate.open(r.held)
+	livehooks.Pause(r.ctx, "after_entry") // the live driver's stop (D31); nothing without the tag
 
 	obs2, err := Observe(r.ctx, r.rpc, r.opts.Desired.Principal)
 	if err != nil {

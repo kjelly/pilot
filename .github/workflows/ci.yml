@@ -75,6 +75,16 @@ jobs:
       - name: go build
         run: go build ./...
 
+      # The live driver of the Go identity reconcile builds pilot with this tag
+      # (internal/livehooks, spec 2026-11-06 phase 2 D31); it is not part of the
+      # released binary, so nothing else compiles it. Without this step the stop
+      # points could rot unnoticed until the next live run.
+      - name: go build, vet and test with the live-driver hooks
+        run: |
+          go build -tags identity_live_hooks ./...
+          go vet -tags identity_live_hooks ./internal/livehooks/ ./internal/identityreconcile/ ./internal/freeiparpc/ ./cmd/...
+          go test -count=1 -tags identity_live_hooks ./internal/livehooks/
+
       - name: Select Go packages
         env:
           PILOT_TEST_SHARD: ${{ matrix.group }}

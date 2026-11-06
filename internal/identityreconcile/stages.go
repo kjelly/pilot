@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kjelly/pilot/internal/freeiparpc"
+	"github.com/kjelly/pilot/internal/livehooks"
 )
 
 // The stages (spec §7.3): each runs its operations in batches of at most the batch
@@ -25,6 +26,7 @@ func (r *runner) runStages() {
 		if len(idxs) == 0 {
 			continue
 		}
+		livehooks.Pause(r.ctx, "before_stage:"+s.String()) // the live driver's stop (D31)
 		switch s {
 		case S4:
 			r.runPasswords(idxs)
@@ -174,6 +176,7 @@ func (r *runner) sendBatch(s Stage, items []pending) {
 	r.batches[s]++
 	n := r.batches[s]
 	id := fmt.Sprintf("%s-b%d", s, n)
+	livehooks.Pause(r.ctx, fmt.Sprintf("before_batch:%s:%d", s, n)) // the live driver's stop (D31)
 	if !r.beforeSending(s, n, id, items) {
 		return
 	}
@@ -181,6 +184,7 @@ func (r *runner) sendBatch(s Stage, items []pending) {
 	for i, it := range items {
 		cmds[i] = it.cmd
 	}
+	livehooks.Arm(fmt.Sprintf("after_send:%s:%d", s, n)) // holds this request's answer (D31)
 	got, err := r.rpc.Batch(r.ctx, cmds)
 	switch {
 	case err != nil && refusedBeforeSending(err):
@@ -214,9 +218,11 @@ func (r *runner) sendOne(s Stage, it pending) {
 	n := r.batches[s]
 	id := fmt.Sprintf("%s-c%d", s, n)
 	items := []pending{it}
+	livehooks.Pause(r.ctx, fmt.Sprintf("before_batch:%s:%d", s, n)) // the live driver's stop (D31)
 	if !r.beforeSending(s, n, id, items) {
 		return
 	}
+	livehooks.Arm(fmt.Sprintf("after_send:%s:%d", s, n)) // holds this request's answer (D31)
 	raw, err := r.rpc.Call(r.ctx, it.cmd)
 	if err != nil && refusedBeforeSending(err) {
 		r.stopAt(s, "the client refused to send: "+err.Error())
