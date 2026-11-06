@@ -208,7 +208,18 @@ var deployCmd = &cobra.Command{
 (--check --diff)，最後才真正執行 ansible-playbook，過程全程印出真實輸出。
 
 這是 DELIVERY.md 手動組指令的替代路徑，行為完全一致(同一套 stage/confirm
-gate、同一份 Playbook 對照表)——熟悉 Ansible 的人仍可以照 DELIVERY.md 手動執行。`,
+gate、同一份 Playbook 對照表)——熟悉 Ansible 的人仍可以照 DELIVERY.md 手動執行。
+
+選到 freeipa-identity 時(deploy 與 reconcile 的 ansible engine，含 --preview-only)，
+會在任何 playbook、ssh、依賴 apply 或預覽之前，先檢查 FreeIPA server 的
+/etc/ipa 鎖能不能經 inventory 取得(與取鎖本身同一套規則)；取不到(docker 或
+local connection、ProxyCommand、密碼、pilot 的 ssh 不接受的 -o)就拒絕並指出是
+哪個 hostvar，--preview-only 與 --force 的結果一致。這個檢查透過 ansible-inventory
+讀 inventory(不帶 vault 密碼)，所以 group_vars 有 contract 的明文 secret、或整份
+group_vars 被 vault 加密，會在取鎖前被拒絕(secret 放在 .vault/main.yaml)；只靠
+-e @file、ansible.cfg 的 ssh_args 或 ANSIBLE_SSH_ARGS 提供的連線設定，檢查看不到。
+--ask-vault-pass／--ask-become-pass 的密碼提示發生在取鎖之後(在 ansible-playbook
+內)，輸入密碼的時間算在持鎖時間裡。`,
 	RunE: runDeploy,
 }
 
@@ -1776,6 +1787,60 @@ func promptReconcileExecutionAuthorization(plannedPlaybooks int) (*deploymentAut
 	return &deploymentAuthorization{Preflight: preflight, Preview: preview}, nil
 }
 
+// precheckIdentityDeploy is the no-ssh half of the identity lock for a deploy
+// or a reconcile run: when playbook is the identity apply playbook, the
+// freeipa-server host the run would lock must be one the lock can be taken
+// through (checkIdentityLockTarget). Any other playbook is not asked.
+//
+// The hosts are the candidates of the resolved scope (--limit and target_group
+// honored) before availability dropped any: the host the apply step locks is
+// one of them, and the contract's exactly-one cardinality fails a run with
+// more at its own preflight anyway, only later.
+func precheckIdentityDeploy(ctx context.Context, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string) error {
+	if !identitylock.IsApplyPlaybook(playbook) {
+		return nil
+	}
+	applied, _, scope, _, _, err := resolveDeploymentScope(ctx, catalog, components, inv, limit, extraVars, false)
+	if err != nil {
+		return err
+	}
+	// Non-nil even when empty: none resolved is "0 hosts", refused, not "resolve
+	// the group again".
+	hosts := append([]string{}, deploymentCandidateHosts(applied, scope)...)
+	return checkIdentityLockTarget(ctx, identityLockRequest{Inventory: inv, Hosts: hosts})
+}
+
+// precheckIdentityBatch runs precheckIdentityDeploy for every request of a
+// reconcile or deploy batch that is the identity playbook, before the batch
+// shows its plan and asks the operator to authorize it.
+func precheckIdentityBatch(ctx context.Context, requests []catalogDeploymentRequest) error {
+	for _, request := range requests {
+		if !identitylock.IsApplyPlaybook(request.playbook) {
+			continue
+		}
+		root, err := resolveContractRoot("")
+		if err != nil {
+			return err
+		}
+		loader, err := contract.NewLoader(root)
+		if err != nil {
+			return err
+		}
+		catalog, err := loader.LoadDefaultCatalog()
+		if err != nil {
+			return fmt.Errorf("load contract catalog before deployment: %w", err)
+		}
+		components, err := componentsForPlaybook(ctx, catalog, request.playbook, request.inv, request.limit, request.tags, request.componentHints)
+		if err != nil {
+			return err
+		}
+		if err := precheckIdentityDeploy(ctx, catalog, components, request.playbook, request.inv, request.limit, request.extraVars); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // executeRecordedDeploymentWithAuthorizationResult (design spec §28.3's
 // pattern) aggregates the approved apply dependency chain's
 // ComponentDeliveryResults with the
@@ -1797,6 +1862,15 @@ func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runne
 		return DeploymentExecutionResult{}, fmt.Errorf("load contract catalog before deployment: %w", err)
 	}
 	components, err := componentsForPlaybook(ctx, catalog, playbook, inv, limit, tags, componentHints)
+	if err != nil {
+		return DeploymentExecutionResult{}, err
+	}
+	// First, before the plan is shown or confirmed, before preflight, the
+	// freeipa-server dependency, any preview and any ssh: the identity playbook
+	// runs under the server's /etc/ipa lock, and an inventory the lock cannot be
+	// taken through is refused here instead of after all of that. --preview-only
+	// gets the same answer --force would (see checkIdentityLockTarget).
+	err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars)
 	if err != nil {
 		return DeploymentExecutionResult{}, err
 	}
@@ -4071,6 +4145,13 @@ func executeCatalogBatch(ctx context.Context, runner *ansible.Runner, out io.Wri
 	// Outbound webhook readiness (INV-3): an invalid integrations.yaml or
 	// unready store fails the whole reconcile before any mutation.
 	if _, err := webhookReadiness(requests[0].workspaceDir); err != nil {
+		return err
+	}
+	// Before anything is planned or asked: a request for the identity playbook
+	// whose lock the inventory cannot give is refused before the operator is
+	// shown a plan to authorize (see checkIdentityLockTarget).
+	err := precheckIdentityBatch(ctx, requests)
+	if err != nil {
 		return err
 	}
 	plans := make([]reconcileExecutionPlan, len(requests))

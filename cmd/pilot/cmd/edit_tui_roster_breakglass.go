@@ -161,6 +161,12 @@ func pushBreakglassActivateTicket(r *editRouterModel, dir, path, name, duration,
 		if err != nil {
 			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
 		}
+		// Refused here, before anything is read or run, when the inventory
+		// cannot give the lock (see checkIdentityLockTarget).
+		lock, err := tuiIdentityLockFor(context.Background(), accessGovernanceInventoryPath(dir))
+		if err != nil {
+			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
+		}
 		activation, err := accessgrants.Activate(context.Background(), accessgrants.ActivateOptions{
 			RosterFile:  path,
 			Inventory:   accessGovernanceInventoryPath(dir),
@@ -171,7 +177,7 @@ func pushBreakglassActivateTicket(r *editRouterModel, dir, path, name, duration,
 			Ticket:      ticket,
 			ActivatedBy: activatedByCurrentUser(),
 			Now:         time.Now(),
-			Lock:        tuiIdentityLock(accessGovernanceInventoryPath(dir)),
+			Lock:        lock,
 		})
 		if err != nil {
 			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
@@ -191,13 +197,17 @@ func pushBreakglassDeactivateConfirm(r *editRouterModel, dir, path, name string)
 		if m.Canceled() || m.Selected() == 1 {
 			return pushBreakglassDetail(r, dir, path, name, "")
 		}
+		lock, err := tuiIdentityLockFor(context.Background(), accessGovernanceInventoryPath(dir))
+		if err != nil {
+			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
+		}
 		if err := accessgrants.Deactivate(context.Background(), accessgrants.DeactivateOptions{
 			RosterFile: path,
 			Inventory:  accessGovernanceInventoryPath(dir),
 			StateDir:   resolveStateDir(accessStateFiles...),
 			Name:       name,
 			Now:        time.Now(),
-			Lock:       tuiIdentityLock(accessGovernanceInventoryPath(dir)),
+			Lock:       lock,
 		}); err != nil {
 			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
 		}

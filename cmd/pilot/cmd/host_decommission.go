@@ -81,15 +81,33 @@ var hostDecommissionShowCmd = &cobra.Command{
 var hostDecommissionApplyCmd = &cobra.Command{
 	Use:   "apply",
 	Short: "Apply a previously planned host decommission (spec.md §10.3). Only a zero-blocker plan can execute — any component with no registered decommission provider still blocks",
-	Args:  cobra.NoArgs,
-	RunE:  runHostDecommissionApplyCmd,
+	Long: `pilot host decommission apply runs the steps of a persisted plan. A plan with a
+FreeIPA client has a last, central step that runs the identity apply playbook
+under the FreeIPA server's /etc/ipa lock (waiting up to 30 minutes for another
+pilot run to give it back).
+
+` + identityLockHelp + `
+
+For apply that check is made before the approval is recorded and before the
+client is uninstalled. 'pilot host decommission plan' prints the same refusal as
+a warning on stderr; it does not block the plan.`,
+	Args: cobra.NoArgs,
+	RunE: runHostDecommissionApplyCmd,
 }
 
 var hostDecommissionResumeCmd = &cobra.Command{
 	Use:   "resume",
 	Short: "Resume a host decommission after a failure/interruption (spec.md §10.4)",
-	Args:  cobra.NoArgs,
-	RunE:  runHostDecommissionResumeCmd,
+	Long: `pilot host decommission resume continues an interrupted apply. Its last step
+runs the identity apply playbook under the FreeIPA server's /etc/ipa lock.
+
+` + identityLockHelp + `
+
+For resume that check is made before any step. A plan whose converge step already
+ran is checked all the same: an inventory that stopped being lockable since is
+refused, not skipped.`,
+	Args: cobra.NoArgs,
+	RunE: runHostDecommissionResumeCmd,
 }
 
 func init() {
@@ -178,6 +196,15 @@ func runHostDecommissionPlanCmd(cmd *cobra.Command, _ []string) error {
 	if !hostDecommissionPlanJSON {
 		printHostDecommissionStageNeeds(out, dir, plan)
 	}
+	// A plan that apply would refuse is said so now, on stderr (the JSON on
+	// stdout is untouched). It is a warning and not a blocker on purpose: a
+	// blocker is part of what the plan hash and the freshness re-derivation
+	// compare, and this one depends on connection variables of the inventory
+	// that are no part of the plan's recorded external state, so it would turn
+	// a change of those into plan_stale and make a plan nobody can apply look
+	// like a plan that is merely out of date. apply and resume refuse it
+	// themselves, before their first step (runHostDecommissionApply).
+	warnIfDecommissionIsUnlockable(cmd.Context(), cmd.ErrOrStderr(), dir, plan)
 
 	// Exit behavior per spec.md §10.1: a successful, unblocked plan is
 	// success (nil); a valid-but-blocked plan is a non-zero structured
@@ -452,22 +479,38 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 		if err := checkHostDecommissionStage(dir, plan, auth); err != nil {
 			return nil, err
 		}
-		if err := ds.RecordApproval(plan.ID, plan.PlanHash, decommissionActor(), "approve", reason, now); err != nil {
-			return nil, fmt.Errorf("record approval: %w", err)
-		}
-		if err := decommission.RequireApproval(ds, plan.ID, plan.PlanHash, plan.Environment); err != nil {
-			return nil, err
-		}
 	}
 
 	// The SAME provider registry `plan` used must be rebuilt here — the
 	// freshness re-derivation inside Apply/Finalize re-runs PlanHost
 	// against it, and a plan that was executable because a provider WAS
 	// registered would otherwise stale-reject as soon as that provider
-	// vanished from freshness's view (spec.md §28/INV-3).
+	// vanished from freshness's view (spec.md §28/INV-3). It is built before
+	// the approval is recorded, so that what refuses a run does so before it
+	// leaves anything behind, and it regenerates inventory.yml, which the lock
+	// precheck below reads.
 	provs, err := buildHostDecommissionProviders(dir, plan.Host.Name, catalog, os.Stderr, auth)
 	if err != nil {
 		return nil, err
+	}
+
+	if plan.Status != decommission.PlanStatusCompleted {
+		// Before the first step, and before the approval: the converge step is
+		// the last of the plan and runs under the FreeIPA server's /etc/ipa lock,
+		// so an inventory the lock cannot be taken through is refused only after
+		// the client has been uninstalled and the roster entry tombstoned, a
+		// partial state nobody can finish. An already completed plan replays its
+		// receipt and runs nothing.
+		err = precheckHostDecommissionIdentityLock(ctx, dir, plan)
+		if err != nil {
+			return nil, err
+		}
+		if err := ds.RecordApproval(plan.ID, plan.PlanHash, decommissionActor(), "approve", reason, now); err != nil {
+			return nil, fmt.Errorf("record approval: %w", err)
+		}
+		if err := decommission.RequireApproval(ds, plan.ID, plan.PlanHash, plan.Environment); err != nil {
+			return nil, err
+		}
 	}
 
 	return decommission.Apply(ctx, decommission.ApplyInput{
@@ -599,7 +642,7 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 		ServerStageArgs:       scope.ArgsFunc(scope.RoleHosts(stageRoleFreeIPAServer)),
 		// The central converge runs freeipa-identity-apply.yml, so it runs under
 		// the FreeIPA server's /etc/ipa lock; the read-only queries do not.
-		IdentityLock: newIdentityLock(identityLockRequest{Inventory: invPath, Wait: identityLockWaitDefault, Progress: os.Stderr, Runtime: &runtime}),
+		IdentityLock: newIdentityLock(hostDecommissionIdentityLockRequest(invPath, runtime)),
 	})
 
 	// Wazuh agent (spec.md §37 Phase 4, HD14) — registered unconditionally,
@@ -702,6 +745,57 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 	}
 
 	return result, nil
+}
+
+// hostDecommissionIdentityLockRequest is the lock request of the converge
+// step: the workspace's generated inventory, the default wait and the
+// workspace's Ansible runtime (the decommission runner has its own). The
+// provider registry builds its Acquirer from it and the precheck of apply and
+// resume asks the same question of it, so they cannot differ.
+func hostDecommissionIdentityLockRequest(invPath string, runtime deployAnsibleRuntime) identityLockRequest {
+	return identityLockRequest{Inventory: invPath, Wait: identityLockWaitDefault, Progress: os.Stderr, Runtime: &runtime}
+}
+
+// planHasIdentityConverge reports whether a plan runs the central
+// freeipa-identity-apply.yml converge step: the one step of a decommission that
+// takes the FreeIPA server's /etc/ipa lock.
+func planHasIdentityConverge(plan *decommission.Plan) bool {
+	for _, component := range plan.Components {
+		for _, step := range component.Steps {
+			if step.Provider == providers.FreeIPAClientProviderID && step.Action == providers.ActionFreeIPAIdentityApplyConverge {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// precheckHostDecommissionIdentityLock refuses a plan with an identity
+// converge step when the inventory its lock would be taken through cannot give
+// it (checkIdentityLockTarget). A plan without that step is not asked. dir's
+// inventory.yml is the one buildHostDecommissionProviders generated.
+func precheckHostDecommissionIdentityLock(ctx context.Context, dir string, plan *decommission.Plan) error {
+	if !planHasIdentityConverge(plan) {
+		return nil
+	}
+	runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
+	if err != nil {
+		return fmt.Errorf("prepare ansible runtime for host decommission: %w", err)
+	}
+	return checkIdentityLockTarget(ctx, hostDecommissionIdentityLockRequest(filepath.Join(dir, "inventory.yml"), runtime))
+}
+
+// warnIfDecommissionIsUnlockable tells the operator, after `plan`, that apply
+// and resume will refuse a plan whose converge step needs a lock the
+// inventory cannot give (precheckHostDecommissionIdentityLock). A blocked plan
+// cannot be applied anyway and says nothing.
+func warnIfDecommissionIsUnlockable(ctx context.Context, w io.Writer, dir string, plan *decommission.Plan) {
+	if plan.Blocked() {
+		return
+	}
+	if err := precheckHostDecommissionIdentityLock(ctx, dir, plan); err != nil {
+		fmt.Fprintf(w, "⚠️  apply／resume 會拒絕這份計畫(它的 freeipa-identity 收斂步驟需要 FreeIPA server 的 /etc/ipa 鎖，而這份 inventory 取不到它；plan 不改動任何東西，所以只是警告)：%v\n", err)
+	}
 }
 
 // hostDecommissionFreeIPAExtraArgs passes only FILE REFERENCES to Ansible;

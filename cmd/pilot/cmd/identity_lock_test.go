@@ -360,15 +360,20 @@ func TestProductionIdentityLockStopsWaitingWhenCancelled(t *testing.T) {
 // The TUI funnel does not wait and says where to go instead.
 func TestTUIIdentityLockDoesNotWaitAndPointsAtTheCommandThatDoes(t *testing.T) {
 	var got []identityLockRequest
-	prev := newIdentityLock
-	t.Cleanup(func() { newIdentityLock = prev })
+	prev, prevCheck := newIdentityLock, identityLockPrecheck
+	t.Cleanup(func() { newIdentityLock, identityLockPrecheck = prev, prevCheck })
+	identityLockPrecheck = func(context.Context, identityLockRequest) error { return nil }
 	newIdentityLock = func(req identityLockRequest) identitylock.Acquirer {
 		got = append(got, req)
 		return func(context.Context) (*identitylock.Held, error) {
 			return nil, fmt.Errorf("busy: %w", sshdial.ErrLockBusy)
 		}
 	}
-	_, err := tuiIdentityLock("/ws/inventory.yml")(context.Background())
+	acquire, err := tuiIdentityLockFor(context.Background(), "/ws/inventory.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = acquire(context.Background())
 	if len(got) != 1 || got[0].Wait != 0 || got[0].Inventory != "/ws/inventory.yml" || got[0].Progress != nil {
 		t.Fatalf("request = %+v: the TUI must not wait and has nowhere to show progress", got)
 	}
@@ -379,7 +384,11 @@ func TestTUIIdentityLockDoesNotWaitAndPointsAtTheCommandThatDoes(t *testing.T) {
 	newIdentityLock = func(identityLockRequest) identitylock.Acquirer {
 		return func(context.Context) (*identitylock.Held, error) { return nil, errors.New("ssh: no route") }
 	}
-	_, err = tuiIdentityLock("/ws/inventory.yml")(context.Background())
+	acquire, err = tuiIdentityLockFor(context.Background(), "/ws/inventory.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = acquire(context.Background())
 	if err == nil || strings.Contains(err.Error(), "pilot access breakglass") {
 		t.Fatalf("err = %v", err)
 	}

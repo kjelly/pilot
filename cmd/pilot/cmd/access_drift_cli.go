@@ -45,7 +45,11 @@ subject/target/service attribute drift for HBAC/sudo rules is not covered
 --repair-managed additionally reconciles any drift found, via the same
 apply path 'pilot access reconcile --once' uses (§13) — it never touches
 anything outside Pilot's own managed namespace. The repair step itself still
-reads the admin password from the roster only.
+reads the admin password from the roster only. It takes the FreeIPA server's
+/etc/ipa lock around the repair, and checks the lock can be taken before it
+probes (so an inventory it cannot lock is refused even when there is no drift).
+
+` + identityLockHelp + `
 
 The probe reads the FreeIPA admin password from the vault vars file's
 ipa_admin_password first (the same order 'pilot deploy' uses), then from the
@@ -120,12 +124,18 @@ func runAccessDriftCmd(cmd *cobra.Command, args []string) error {
 		return printDriftReport(out, report)
 	}
 
+	// Refused before the read-only probe, the repair or any ssh when the
+	// inventory cannot give the lock (see checkIdentityLockTarget).
+	lock, err := identityLockFor(cmd.Context(), identityLockRequest{Inventory: accessDriftInventory, Wait: identityLockWaitDefault, Progress: cmd.ErrOrStderr()})
+	if err != nil {
+		return err
+	}
 	before, plan, result, err := accessgrants.RepairManaged(cmd.Context(), driftOpts, accessgrants.ReconcileOptions{
 		RosterFile: readPath,
 		Inventory:  accessDriftInventory,
 		StateDir:   resolveStateDir(accessStateFiles...),
 		Now:        time.Now(),
-		Lock:       newIdentityLock(identityLockRequest{Inventory: accessDriftInventory, Wait: identityLockWaitDefault, Progress: cmd.ErrOrStderr()}),
+		Lock:       lock,
 	})
 	if perr := printDriftReport(out, before); perr != nil {
 		return perr

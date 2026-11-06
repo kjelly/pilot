@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,7 +24,7 @@ import (
 // server lose each other's authorization cache obligation
 // (identity_lock_interleaving_test.go reproduces both interleavings).
 //
-// A lock a new caller can leave out is no lock, so the lint has five parts:
+// A lock a new caller can leave out is no lock, so the lint has six parts:
 //
 //  1. every reference to the playbook in non-test code is on a list that says
 //     what it is (a funnel that locks, or data that reaches one);
@@ -40,7 +41,15 @@ import (
 //     `ansible-playbook` is out of reach for any lint (spec R3);
 //  5. executeDeploymentTransaction refuses the identity playbook at run time
 //     when it was handed no lock (TestExecuteDeploymentRefusesTheIdentityPlaybookWithoutALock),
-//     the one thing (1) cannot see: a caller that builds its own options.
+//     the one thing (1) cannot see: a caller that builds its own options;
+//  6. every funnel also runs the no-ssh precheck of its lock target
+//     (checkIdentityLockTarget) first, before its first execution call and, for
+//     the ones that ask or record something, before that: the lock-time refusal
+//     of an inventory comes too late (spec §4.2, "在任何 ansible-playbook 之前拒絕").
+//     The entry points that call a funnel (identityPrecheckFunnels) are on a list
+//     with what must come before what, a call of a funnel from a function that is
+//     not on it fails, and the places that build a lock's Acquirer directly are
+//     counted.
 //
 // The functions below take the sources as a map so the same code runs on the
 // real tree and on the synthetic and mutated sources that prove it can fail.
@@ -247,7 +256,11 @@ type lockFunnel struct {
 	Acquire  callMatcher
 	Execute  callMatcher
 	Before   []callMatcher // calls that must also come after the lock
-	Requires string        // when set, the lock call must be unconditional (top level of the body) unless it sits in `if <Requires> {`
+	Requires string        // when set, the lock call must be unconditional (top level of the body) unless it sits in `if <Requires> {` (compared as source text: an identifier or a condition)
+	// Nested is for a funnel whose lock call sits in a closure the function hands
+	// to something else (a TUI screen's handler): the branch check cannot look
+	// into it, only the order of the calls is checked.
+	Nested bool
 }
 
 // callMatcher matches a call expression by the shape of what it calls.
@@ -298,6 +311,216 @@ var identityLockFunnels = []lockFunnel{
 		Before:   []callMatcher{{"options.PrepareApply", "sel:PrepareApply"}},
 		Requires: "identity",
 	},
+}
+
+// identityPrecheckFunnels is part 6: the entry points that reach a funnel, and
+// what each does first. Acquire is the no-ssh precheck (checkIdentityLockTarget,
+// reached through identityLockFor, tuiIdentityLockFor, or a function that
+// wraps it); Execute is the first thing the entry does that runs, asks or
+// changes something; Before are the other things that must come after it. The
+// funnels of identityLockFunnels refuse an inventory at the moment they take the
+// lock, which for most of them is late: a decommission's converge step runs
+// after the client is uninstalled and the roster entry tombstoned, a deploy's
+// after preflight, the freeipa-server dependency and the `--check`, a drift
+// repair's after its probe.
+var identityPrecheckFunnels = []lockFunnel{
+	{
+		File: "cmd/pilot/cmd/identity_lock.go", Func: "identityLockFor",
+		Acquire: callMatcher{"checkIdentityLockTarget", "ident:checkIdentityLockTarget"},
+		Execute: callMatcher{"newIdentityLock", "ident:newIdentityLock"},
+	},
+	{
+		File: "cmd/pilot/cmd/access_cli.go", Func: "runAccessReconcileCmd",
+		Acquire: callMatcher{"identityLockFor", "ident:identityLockFor"},
+		Execute: callMatcher{"accessgrants.ReconcileOnce", "method:accessgrants.ReconcileOnce"},
+	},
+	{
+		File: "cmd/pilot/cmd/access_breakglass_cli.go", Func: "runAccessBreakglassActivateCmd",
+		Acquire: callMatcher{"identityLockFor", "ident:identityLockFor"},
+		Execute: callMatcher{"accessgrants.Activate", "method:accessgrants.Activate"},
+	},
+	{
+		File: "cmd/pilot/cmd/access_breakglass_cli.go", Func: "runAccessBreakglassDeactivateCmd",
+		Acquire: callMatcher{"identityLockFor", "ident:identityLockFor"},
+		Execute: callMatcher{"accessgrants.Deactivate", "method:accessgrants.Deactivate"},
+	},
+	{
+		File: "cmd/pilot/cmd/access_drift_cli.go", Func: "runAccessDriftCmd",
+		Acquire: callMatcher{"identityLockFor", "ident:identityLockFor"},
+		Execute: callMatcher{"accessgrants.RepairManaged", "method:accessgrants.RepairManaged"},
+	},
+	{
+		File: "cmd/pilot/cmd/identity_drift_cli.go", Func: "runIdentityDriftCmd",
+		Acquire: callMatcher{"identityLockFor", "ident:identityLockFor"},
+		Execute: callMatcher{"accessgrants.RepairManaged", "method:accessgrants.RepairManaged"},
+	},
+	{
+		File: "cmd/pilot/cmd/edit_tui_roster_breakglass.go", Func: "pushBreakglassActivateTicket", Nested: true,
+		Acquire: callMatcher{"tuiIdentityLockFor", "ident:tuiIdentityLockFor"},
+		Execute: callMatcher{"accessgrants.Activate", "method:accessgrants.Activate"},
+	},
+	{
+		File: "cmd/pilot/cmd/edit_tui_roster_breakglass.go", Func: "pushBreakglassDeactivateConfirm", Nested: true,
+		Acquire: callMatcher{"tuiIdentityLockFor", "ident:tuiIdentityLockFor"},
+		Execute: callMatcher{"accessgrants.Deactivate", "method:accessgrants.Deactivate"},
+	},
+	{
+		// A plan already completed replays its receipt and runs nothing: the
+		// precheck is for the plans that go on to run steps, and comes before the
+		// approval is recorded.
+		File: "cmd/pilot/cmd/host_decommission.go", Func: "runHostDecommissionApply",
+		Acquire:  callMatcher{"precheckHostDecommissionIdentityLock", "ident:precheckHostDecommissionIdentityLock"},
+		Execute:  callMatcher{"decommission.Apply", "method:decommission.Apply"},
+		Before:   []callMatcher{{"ds.RecordApproval", "sel:RecordApproval"}},
+		Requires: "plan.Status != decommission.PlanStatusCompleted",
+	},
+	{
+		// Before the plan is rendered or the operator is asked, before the
+		// freeipa-server dependency is applied, before any core run.
+		File: "cmd/pilot/cmd/deploy.go", Func: "executeRecordedDeploymentWithAuthorizationResult",
+		Acquire: callMatcher{"precheckIdentityDeploy", "ident:precheckIdentityDeploy"},
+		Execute: callMatcher{"applyDeploymentDependencyChain", "ident:applyDeploymentDependencyChain"},
+		Before: []callMatcher{
+			{"renderReconcileExecutionPlan", "ident:renderReconcileExecutionPlan"},
+			{"promptReconcileExecutionAuthorization", "ident:promptReconcileExecutionAuthorization"},
+			{"executeRecordedDeploymentCore", "ident:executeRecordedDeploymentCore"},
+		},
+	},
+	{
+		// The batch (pilot reconcile, a multi-component pilot deploy) shows its
+		// plan and asks for one authorization for everything in it.
+		File: "cmd/pilot/cmd/deploy.go", Func: "executeCatalogBatch",
+		Acquire: callMatcher{"precheckIdentityBatch", "ident:precheckIdentityBatch"},
+		Execute: callMatcher{"promptReconcileExecutionAuthorization", "ident:promptReconcileExecutionAuthorization"},
+		Before: []callMatcher{
+			{"prepareReconcileExecutionPlan", "ident:prepareReconcileExecutionPlan"},
+			{"executeRecordedDeploymentWithAuthorizationResult", "ident:executeRecordedDeploymentWithAuthorizationResult"},
+		},
+	},
+}
+
+// A funnel is reached only through the entry points above. protectedCalls are the
+// calls that run one: made from a function that is not listed, they would run
+// a funnel without the precheck, which the list cannot see. Core is allowed
+// from the dependency chain too: freeipa-identity is no component's dependency
+// (identityContractProblems), so what the chain applies is never the identity
+// playbook.
+type protectedCall struct {
+	Call    callMatcher
+	Allowed []string // "file func"
+}
+
+var identityProtectedCalls = []protectedCall{
+	{callMatcher{"executeRecordedDeploymentCore", "ident:executeRecordedDeploymentCore"}, []string{
+		"cmd/pilot/cmd/deploy.go executeRecordedDeploymentWithAuthorizationResult",
+		"cmd/pilot/cmd/deploy.go applyDeploymentDependencyChain",
+	}},
+	{callMatcher{"accessgrants.ReconcileOnce", "method:accessgrants.ReconcileOnce"}, []string{"cmd/pilot/cmd/access_cli.go runAccessReconcileCmd"}},
+	{callMatcher{"accessgrants.RepairManaged", "method:accessgrants.RepairManaged"}, []string{
+		"cmd/pilot/cmd/access_drift_cli.go runAccessDriftCmd",
+		"cmd/pilot/cmd/identity_drift_cli.go runIdentityDriftCmd",
+	}},
+	{callMatcher{"accessgrants.Activate", "method:accessgrants.Activate"}, []string{
+		"cmd/pilot/cmd/access_breakglass_cli.go runAccessBreakglassActivateCmd",
+		"cmd/pilot/cmd/edit_tui_roster_breakglass.go pushBreakglassActivateTicket",
+	}},
+	{callMatcher{"accessgrants.Deactivate", "method:accessgrants.Deactivate"}, []string{
+		"cmd/pilot/cmd/access_breakglass_cli.go runAccessBreakglassDeactivateCmd",
+		"cmd/pilot/cmd/edit_tui_roster_breakglass.go pushBreakglassDeactivateConfirm",
+	}},
+	{callMatcher{"decommission.Apply", "method:decommission.Apply"}, []string{"cmd/pilot/cmd/host_decommission.go runHostDecommissionApply"}},
+}
+
+// identityLockBuilders are the places that build a funnel's Acquirer by calling
+// newIdentityLock themselves, with how many calls each makes. The others get
+// theirs from identityLockFor, which makes the precheck first. These two cannot:
+// the deploy runner learns the host it locks in two steps (the candidates for
+// the precheck, the included hosts after availability for the lock), and the
+// decommission provider registry is built for plan as well, which does not
+// lock. Each has its precheck on identityPrecheckFunnels.
+var identityLockBuilders = []struct {
+	File   string
+	Count  int
+	Reason string
+}{
+	{"cmd/pilot/cmd/identity_lock.go", 1, "identityLockFor: the precheck, then the Acquirer"},
+	{"cmd/pilot/cmd/deploy.go", 1, "executeRecordedDeploymentCore builds the apply step's Acquirer from the included hosts; precheckIdentityDeploy (called first by executeRecordedDeploymentWithAuthorizationResult) asks about the candidates"},
+	{"cmd/pilot/cmd/host_decommission.go", 1, "buildHostDecommissionProviders builds the converge step's Acquirer from hostDecommissionIdentityLockRequest; precheckHostDecommissionIdentityLock (called by runHostDecommissionApply) asks the same request"},
+}
+
+// enclosingFuncs lists, for every call in file that m matches, the name of the
+// top-level function it sits in (closures included).
+func enclosingFuncs(file *ast.File, m callMatcher) []string {
+	var out []string
+	for _, decl := range file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok || fd.Body == nil {
+			continue
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok && m.matches(call) {
+				out = append(out, fd.Name.Name)
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// precheckProblems is part 6.
+func precheckProblems(t *testing.T, src lockSources) []string {
+	t.Helper()
+	problems := funnelProblems(t, src, identityPrecheckFunnels)
+	fset := token.NewFileSet()
+	// A protected call from a function that is not on the list.
+	for _, name := range sortedKeys(src) {
+		if strings.HasPrefix(name, "internal/accessgrants/") || strings.HasPrefix(name, "internal/decommission/") {
+			continue // the packages that define the funnels
+		}
+		file := parseLockSource(t, fset, name, src[name])
+		for _, pc := range identityProtectedCalls {
+			for _, fn := range enclosingFuncs(file, pc.Call) {
+				if !slices.Contains(pc.Allowed, name+" "+fn) {
+					problems = append(problems, name+" "+fn+": calls "+pc.Call.Desc+" but is not on the list of entry points that run the precheck first (identityPrecheckFunnels, identityProtectedCalls): add it to both, with the precheck before the call, or it would run a funnel with the lock checked only when it is taken")
+				}
+			}
+		}
+	}
+	// Every allowed caller still makes its call, so a stale entry does not hide a
+	// moved one.
+	for _, pc := range identityProtectedCalls {
+		for _, allowed := range pc.Allowed {
+			file, fn, _ := strings.Cut(allowed, " ")
+			text, ok := src[file]
+			if !ok {
+				problems = append(problems, allowed+": the file is gone: update identityProtectedCalls")
+				continue
+			}
+			if !slices.Contains(enclosingFuncs(parseLockSource(t, fset, file, text), pc.Call), fn) {
+				problems = append(problems, allowed+": no longer calls "+pc.Call.Desc+": drop the entry or find where the call went")
+			}
+		}
+	}
+	// Where an Acquirer is built without identityLockFor.
+	build := callMatcher{"newIdentityLock", "ident:newIdentityLock"}
+	counts := map[string]int{}
+	for _, name := range sortedKeys(src) {
+		counts[name] = len(enclosingFuncs(parseLockSource(t, fset, name, src[name]), build))
+	}
+	listed := map[string]bool{}
+	for _, b := range identityLockBuilders {
+		listed[b.File] = true
+		if counts[b.File] != b.Count {
+			problems = append(problems, b.File+": calls newIdentityLock "+strconv.Itoa(counts[b.File])+" times, the list says "+strconv.Itoa(b.Count)+": a funnel that builds its own Acquirer needs its precheck on identityPrecheckFunnels, then update identityLockBuilders ("+b.Reason+")")
+		}
+	}
+	for name, n := range counts {
+		if n > 0 && !listed[name] {
+			problems = append(problems, name+": calls newIdentityLock directly: go through identityLockFor, which runs the precheck first (or list it in identityLockBuilders with its precheck)")
+		}
+	}
+	sort.Strings(problems)
+	return problems
 }
 
 // funcBody finds the body of a function or method, or of the closure assigned
@@ -397,7 +620,7 @@ func lockIsUnconditional(body *ast.BlockStmt, m callMatcher, cond string) bool {
 		if !ok {
 			continue
 		}
-		if id, ok := ifs.Cond.(*ast.Ident); ok && id.Name == cond && ifs.Else == nil && has(ifs.Body.List) {
+		if types.ExprString(ifs.Cond) == cond && ifs.Else == nil && has(ifs.Body.List) {
 			return true
 		}
 	}
@@ -439,7 +662,7 @@ func funnelProblems(t *testing.T, src lockSources, funnels []lockFunnel) []strin
 				problems = append(problems, where+": "+b.Desc+" is called before the lock is taken")
 			}
 		}
-		if locks && !lockIsUnconditional(body, f.Acquire, f.Requires) {
+		if locks && !f.Nested && !lockIsUnconditional(body, f.Acquire, f.Requires) {
 			problems = append(problems, where+": the lock is taken behind a branch that can skip it")
 		}
 	}
@@ -627,8 +850,8 @@ func entryProblems(t *testing.T, src lockSources) []string {
 }
 
 // seamProblems: the test seams of the lock exist for tests. Non-test code
-// does not assign newIdentityLock or newIdentityLockDialer, and nothing but a
-// test imports the fake.
+// does not assign newIdentityLock, newIdentityLockDialer or
+// identityLockPrecheck, and nothing but a test imports the fake.
 func seamProblems(t *testing.T, src lockSources) []string {
 	t.Helper()
 	var problems []string
@@ -646,7 +869,7 @@ func seamProblems(t *testing.T, src lockSources) []string {
 				return true
 			}
 			for _, lhs := range as.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok && (id.Name == "newIdentityLock" || id.Name == "newIdentityLockDialer") {
+				if id, ok := lhs.(*ast.Ident); ok && (id.Name == "newIdentityLock" || id.Name == "newIdentityLockDialer" || id.Name == "identityLockPrecheck") {
 					problems = append(problems, name+": assigns "+id.Name+", a test seam: production code builds the lock through it, it does not replace it")
 				}
 			}
@@ -667,6 +890,7 @@ func allIdentityLockProblems(t *testing.T, src lockSources) []string {
 	all = append(all, refusalProblems(t, src)...)
 	all = append(all, entryProblems(t, src)...)
 	all = append(all, seamProblems(t, src)...)
+	all = append(all, precheckProblems(t, src)...)
 	return all
 }
 
@@ -865,6 +1089,72 @@ func applyPlan(lock Acquirer, runner R) {
 			t.Fatalf("problems = %v, want exactly the Reconcile and the decommission literal", p)
 		}
 	})
+	// Part 6's own mechanics, on synthetic sources.
+	t.Run("a precheck behind a condition that is not the required one", func(t *testing.T) {
+		src := lockSources{"cmd/pilot/cmd/host_decommission.go": "package cmd\nfunc runHostDecommissionApply(plan P) {\n\tif plan.Status != Other {\n\t\tprecheckHostDecommissionIdentityLock(ctx)\n\t}\n\tds.RecordApproval()\n\tdecommission.Apply(ctx)\n}\n"}
+		funnel := []lockFunnel{{
+			File: "cmd/pilot/cmd/host_decommission.go", Func: "runHostDecommissionApply",
+			Acquire:  callMatcher{"precheck", "ident:precheckHostDecommissionIdentityLock"},
+			Execute:  callMatcher{"decommission.Apply", "method:decommission.Apply"},
+			Requires: "plan.Status != decommission.PlanStatusCompleted",
+		}}
+		if p := funnelProblems(t, src, funnel); len(p) != 1 || !strings.Contains(p[0], "behind a branch") {
+			t.Fatalf("problems = %v, want the branch refusal", p)
+		}
+		src["cmd/pilot/cmd/host_decommission.go"] = "package cmd\nfunc runHostDecommissionApply(plan P) {\n\tif plan.Status != decommission.PlanStatusCompleted {\n\t\tprecheckHostDecommissionIdentityLock(ctx)\n\t}\n\tdecommission.Apply(ctx)\n}\n"
+		if p := funnelProblems(t, src, funnel); len(p) != 0 {
+			t.Fatalf("the allowed condition is reported: %v", p)
+		}
+	})
+	t.Run("a nested funnel is checked for order only", func(t *testing.T) {
+		funnel := []lockFunnel{{
+			File: "cmd/pilot/cmd/edit_tui_roster_breakglass.go", Func: "push", Nested: true,
+			Acquire: callMatcher{"tuiIdentityLockFor", "ident:tuiIdentityLockFor"},
+			Execute: callMatcher{"accessgrants.Activate", "method:accessgrants.Activate"},
+		}}
+		good := lockSources{"cmd/pilot/cmd/edit_tui_roster_breakglass.go": "package cmd\nfunc push() {\n\treturn transition(func() {\n\t\tlock, _ := tuiIdentityLockFor(ctx)\n\t\taccessgrants.Activate(ctx, lock)\n\t})\n}\n"}
+		if p := funnelProblems(t, good, funnel); len(p) != 0 {
+			t.Fatalf("the good nested funnel is reported: %v", p)
+		}
+		late := lockSources{"cmd/pilot/cmd/edit_tui_roster_breakglass.go": "package cmd\nfunc push() {\n\treturn transition(func() {\n\t\taccessgrants.Activate(ctx)\n\t\ttuiIdentityLockFor(ctx)\n\t})\n}\n"}
+		if p := funnelProblems(t, late, funnel); len(p) == 0 || !strings.Contains(p[0], "after accessgrants.Activate") {
+			t.Fatalf("problems = %v, want the order refusal", p)
+		}
+	})
+	t.Run("a protected call from a function that is not listed", func(t *testing.T) {
+		src := lockSources{
+			"cmd/pilot/cmd/access_cli.go": "package cmd\nfunc runAccessReconcileCmd() {\n\taccessgrants.ReconcileOnce(ctx)\n}\nfunc runAccessReconcileOther() {\n\taccessgrants.ReconcileOnce(ctx)\n}\n",
+		}
+		p := precheckProblems(t, src)
+		joined := strings.Join(p, "\n")
+		if !strings.Contains(joined, "runAccessReconcileOther: calls accessgrants.ReconcileOnce but is not on the list") {
+			t.Fatalf("problems = %v, want the unlisted caller", p)
+		}
+		if strings.Contains(joined, "runAccessReconcileCmd: calls") {
+			t.Fatalf("the listed caller is reported as unlisted: %v", p)
+		}
+	})
+	t.Run("a stale protected-call entry", func(t *testing.T) {
+		src := lockSources{"cmd/pilot/cmd/access_cli.go": "package cmd\nfunc runAccessReconcileCmd() {}\n"}
+		if p := precheckProblems(t, src); !slices.ContainsFunc(p, func(s string) bool { return strings.Contains(s, "no longer calls accessgrants.ReconcileOnce") }) {
+			t.Fatalf("problems = %v, want the stale entry", p)
+		}
+	})
+	t.Run("a second direct Acquirer builder in a listed file", func(t *testing.T) {
+		src := lockSources{"cmd/pilot/cmd/deploy.go": "package cmd\nfunc a() {\n\tnewIdentityLock(r)\n}\nfunc b() {\n\tnewIdentityLock(r)\n}\n"}
+		p := precheckProblems(t, src)
+		if !slices.ContainsFunc(p, func(s string) bool {
+			return strings.Contains(s, "cmd/pilot/cmd/deploy.go: calls newIdentityLock 2 times, the list says 1")
+		}) {
+			t.Fatalf("problems = %v, want the count refusal", p)
+		}
+	})
+	t.Run("the precheck seam replaced by production code", func(t *testing.T) {
+		src := lockSources{"cmd/pilot/cmd/new.go": "package cmd\nfunc init() { identityLockPrecheck = nil }\n"}
+		if p := seamProblems(t, src); len(p) != 1 || !strings.Contains(p[0], "test seam") {
+			t.Fatalf("problems = %v", p)
+		}
+	})
 	t.Run("no refusal in executeDeploymentTransaction", func(t *testing.T) {
 		src := lockSources{"cmd/pilot/cmd/deploy.go": "package cmd\nfunc executeDeploymentTransaction() error {\n\treturn nil\n}\n"}
 		if p := refusalProblems(t, src); len(p) != 1 || !strings.Contains(p[0], "no `if ... options.IdentityLock == nil") {
@@ -919,20 +1209,88 @@ func TestIdentityLockLintFailsOnMutationsOfTheRealFunnels(t *testing.T) {
 			"no `if ... options.IdentityLock == nil",
 		},
 		"the access command builds its options without the lock": {
-			"cmd/pilot/cmd/access_cli.go", "\t\tLock:       newIdentityLock(identityLockRequest{Inventory: accessReconcileInventory, Wait: identityLockWaitDefault, Progress: cmd.ErrOrStderr()}),\n", "",
+			"cmd/pilot/cmd/access_cli.go", "\t\tLock:       lock,\n", "",
 			"ReconcileOptions literal without Lock",
 		},
 		"the TUI builds its options without the lock": {
-			"cmd/pilot/cmd/edit_tui_roster_breakglass.go", "\t\t\tLock:        tuiIdentityLock(accessGovernanceInventoryPath(dir)),\n", "",
+			"cmd/pilot/cmd/edit_tui_roster_breakglass.go", "\t\t\tLock:        lock,\n", "",
 			"ActivateOptions literal without Lock",
 		},
 		"the decommission config is built without the lock": {
-			"cmd/pilot/cmd/host_decommission.go", "\t\tIdentityLock: newIdentityLock(identityLockRequest{Inventory: invPath, Wait: identityLockWaitDefault, Progress: os.Stderr, Runtime: &runtime}),\n", "",
+			"cmd/pilot/cmd/host_decommission.go", "\t\tIdentityLock: newIdentityLock(hostDecommissionIdentityLockRequest(invPath, runtime)),\n", "",
 			"FreeIPAClientProviderConfig literal without IdentityLock",
 		},
 		"a new unlisted literal": {
 			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "var sneakyPlaybook = \"playbooks/apply/freeipa-identity-apply.yml\"\n\nvar accessReconcileEffects",
 			"not on the funnel list",
+		},
+		// Part 6: the precheck every funnel runs first. Each case takes it out of
+		// one entry point, or puts it where it no longer comes first.
+		"identityLockFor without the precheck": {
+			"cmd/pilot/cmd/identity_lock.go", "err := checkIdentityLockTarget(ctx, req)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn newIdentityLock(req), nil", "return newIdentityLock(req), nil",
+			"no call of checkIdentityLockTarget",
+		},
+		"access reconcile without the precheck": {
+			"cmd/pilot/cmd/access_cli.go", "lock, err := identityLockFor(cmd.Context(), identityLockRequest{Inventory: accessReconcileInventory,", "lock, err := wrapLock(cmd.Context(), identityLockRequest{Inventory: accessReconcileInventory,",
+			"runAccessReconcileCmd: runs the playbook (accessgrants.ReconcileOnce) without taking the lock: no call of identityLockFor",
+		},
+		"breakglass activate without the precheck": {
+			"cmd/pilot/cmd/access_breakglass_cli.go", "lock, err := identityLockFor(cmd.Context(), identityLockRequest{Inventory: accessBreakglassActivateInventory,", "lock, err := wrapLock(cmd.Context(), identityLockRequest{Inventory: accessBreakglassActivateInventory,",
+			"runAccessBreakglassActivateCmd: runs the playbook (accessgrants.Activate) without taking the lock: no call of identityLockFor",
+		},
+		"breakglass deactivate without the precheck": {
+			"cmd/pilot/cmd/access_breakglass_cli.go", "lock, err := identityLockFor(cmd.Context(), identityLockRequest{Inventory: accessBreakglassDeactivateInventory,", "lock, err := wrapLock(cmd.Context(), identityLockRequest{Inventory: accessBreakglassDeactivateInventory,",
+			"runAccessBreakglassDeactivateCmd: runs the playbook (accessgrants.Deactivate) without taking the lock: no call of identityLockFor",
+		},
+		"access drift repair without the precheck": {
+			"cmd/pilot/cmd/access_drift_cli.go", "lock, err := identityLockFor(cmd.Context(), identityLockRequest{Inventory: accessDriftInventory,", "lock, err := wrapLock(cmd.Context(), identityLockRequest{Inventory: accessDriftInventory,",
+			"runAccessDriftCmd: runs the playbook (accessgrants.RepairManaged) without taking the lock: no call of identityLockFor",
+		},
+		"identity drift repair without the precheck": {
+			"cmd/pilot/cmd/identity_drift_cli.go", "lock, err := identityLockFor(cmd.Context(), identityLockRequest{Inventory: identityDriftInventory,", "lock, err := wrapLock(cmd.Context(), identityLockRequest{Inventory: identityDriftInventory,",
+			"runIdentityDriftCmd: runs the playbook (accessgrants.RepairManaged) without taking the lock: no call of identityLockFor",
+		},
+		"the TUI activation without the precheck": {
+			"cmd/pilot/cmd/edit_tui_roster_breakglass.go", "// cannot give the lock (see checkIdentityLockTarget).\n\t\tlock, err := tuiIdentityLockFor(", "// cannot give the lock (see checkIdentityLockTarget).\n\t\tlock, err := wrapLock(",
+			"pushBreakglassActivateTicket: runs the playbook (accessgrants.Activate) without taking the lock: no call of tuiIdentityLockFor",
+		},
+		"the decommission apply without the precheck": {
+			"cmd/pilot/cmd/host_decommission.go", "err = precheckHostDecommissionIdentityLock(ctx, dir, plan)", "err = nil",
+			"runHostDecommissionApply: runs the playbook (decommission.Apply) without taking the lock: no call of precheckHostDecommissionIdentityLock",
+		},
+		"the decommission precheck after the approval": {
+			"cmd/pilot/cmd/host_decommission.go",
+			"\t\terr = precheckHostDecommissionIdentityLock(ctx, dir, plan)\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t\tif err := ds.RecordApproval(plan.ID, plan.PlanHash, decommissionActor(), \"approve\", reason, now); err != nil {\n\t\t\treturn nil, fmt.Errorf(\"record approval: %w\", err)\n\t\t}\n",
+			"\t\tif err := ds.RecordApproval(plan.ID, plan.PlanHash, decommissionActor(), \"approve\", reason, now); err != nil {\n\t\t\treturn nil, fmt.Errorf(\"record approval: %w\", err)\n\t\t}\n\t\terr = precheckHostDecommissionIdentityLock(ctx, dir, plan)\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n",
+			"ds.RecordApproval is called before the lock is taken",
+		},
+		"the deploy precheck removed": {
+			"cmd/pilot/cmd/deploy.go", "err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars)", "err = nil",
+			"executeRecordedDeploymentWithAuthorizationResult: runs the playbook (applyDeploymentDependencyChain) without taking the lock: no call of precheckIdentityDeploy",
+		},
+		"the deploy precheck behind a branch": {
+			"cmd/pilot/cmd/deploy.go", "err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars)", "if len(components) > 1 {\n\t\terr = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars)\n\t}",
+			"the lock is taken behind a branch that can skip it",
+		},
+		"the batch precheck removed": {
+			"cmd/pilot/cmd/deploy.go", "err := precheckIdentityBatch(ctx, requests)", "var err error",
+			"executeCatalogBatch: runs the playbook (promptReconcileExecutionAuthorization) without taking the lock: no call of precheckIdentityBatch",
+		},
+		"a new entry point that runs a funnel": {
+			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "func sneakyReconcile(ctx context.Context, o accessgrants.ReconcileOptions) {\n\t_, _, _ = accessgrants.ReconcileOnce(ctx, o)\n}\n\nvar accessReconcileEffects",
+			"sneakyReconcile: calls accessgrants.ReconcileOnce but is not on the list of entry points",
+		},
+		"a new caller of the deploy core": {
+			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "func sneakyCore() {\n\t_ = executeRecordedDeploymentCore()\n}\n\nvar accessReconcileEffects",
+			"sneakyCore: calls executeRecordedDeploymentCore but is not on the list of entry points",
+		},
+		"a new Acquirer built without the precheck": {
+			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "func sneakyLock() {\n\t_ = newIdentityLock(identityLockRequest{})\n}\n\nvar accessReconcileEffects",
+			"cmd/pilot/cmd/access_cli.go: calls newIdentityLock directly",
+		},
+		"the precheck seam replaced by production code": {
+			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "func init() { identityLockPrecheck = nil }\n\nvar accessReconcileEffects",
+			"a test seam",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

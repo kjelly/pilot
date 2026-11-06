@@ -100,7 +100,10 @@ func TestTUIBreakglassFunnelsAskForNoWait(t *testing.T) {
 	roster := writeAccessCLIFixture(t, accessBreakglassCLIFixtureRoster)
 	// The TUI calls the accessgrants API with these options: reproduce them with
 	// the acquirer the TUI code builds.
-	lock := tuiIdentityLock(env.inv)
+	lock, err := tuiIdentityLockFor(context.Background(), env.inv)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := accessgrants.Activate(context.Background(), accessgrants.ActivateOptions{
 		RosterFile: roster, Inventory: env.inv, StateDir: t.TempDir(), Name: "infra-emergency",
 		Duration: 30 * time.Minute, Reason: "t", Ticket: "T-1", Lock: lock,

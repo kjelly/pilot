@@ -132,6 +132,19 @@ func deploymentAppliedHosts(applied []contract.Contract, scope delivery.Scope, i
 	return uniqueSortedHosts(hosts)
 }
 
+// deploymentCandidateHosts lists the hosts a deployment run could change
+// before availability has dropped any of them: deploymentAppliedHosts with
+// every host of the scope counted as included. The hosts of the run itself are
+// a subset of it, so a check made on the candidates (the identity lock's
+// precheck) covers the host the run will lock.
+func deploymentCandidateHosts(applied []contract.Contract, scope delivery.Scope) []string {
+	var all []string
+	for _, hosts := range scope.HostsByRole {
+		all = append(all, hosts...)
+	}
+	return deploymentAppliedHosts(applied, scope, all)
+}
+
 // appliedBeforeConsumer reports whether a deploy applies dep's provider
 // before its consumer: required sameHosts dependencies always, and required
 // providerEndpoint dependencies marked applyBeforeConsumer when
