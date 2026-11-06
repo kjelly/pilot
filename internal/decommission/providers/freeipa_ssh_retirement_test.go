@@ -71,7 +71,8 @@ func TestFreeIPAProvider_RetirementAliasSurvivesPlanSerialization(t *testing.T) 
 		return &ansible.Result{}, nil
 	}}
 	p.cfg.Executor = exec
-	if err := step.Execute(context.Background()); err != nil {
+	// The converge runs inside a run whose owner holds the identity lock.
+	if err := step.Execute(heldIdentityLock(t)); err != nil {
 		t.Fatal(err)
 	}
 	if len(exec.calls) != 1 {
