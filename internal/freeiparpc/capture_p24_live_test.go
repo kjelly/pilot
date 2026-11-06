@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -36,7 +37,10 @@ import (
 //	go test ./internal/freeiparpc -run '^TestLiveCaptureP24$' -count=1 -v
 //
 // TestCaptureDirMatchesFixtures then compares the new directory with the
-// committed fixtures.
+// committed fixtures (PILOT_FREEIPA_CAPTURE_COMPARE=<that directory>
+// go test ./internal/freeiparpc -run '^TestCaptureDirMatchesFixtures$'):
+// the same set of fixtures, the same answers once the values that differ
+// from one run to the next (identifiers, numbers, times) are masked.
 //
 // What it does to the server, and undoes: every object it creates is named
 // p24cap-*, the password policies it needs are one per test group (the
@@ -55,7 +59,7 @@ import (
 // p24CapPasswordPrefix starts every password the harness sends, so that a
 // scan of the fixture directory can find one without knowing its value
 // (TestFixtureDirectoryHoldsNoPassword).
-const p24CapPasswordPrefix = "P24Cap"
+const p24CapPasswordPrefix = "P24Pw"
 
 const p24CapPrefix = "p24cap-"
 
@@ -357,6 +361,45 @@ func (p *p24Capture) sweep() {
 	}
 }
 
+// p24Fixtures is every fixture the harness writes, sorted: the harness checks
+// its own output against it, TestCaptureDirMatchesFixtures compares a new run
+// with it, and TestEveryWriteCaptureHasAFact makes sure each has an assertion.
+var p24Fixtures = []string{
+	"batch-delete-mixed", "batch-group-add-duplicate", "batch-members-mixed", "batch-show-one-missing",
+	"batch-user-mod-mixed", "group-add-duplicate", "group-add-duplicate-case",
+	"group-add-duplicate-private-group", "group-add-empty-description", "group-add-marker",
+	"group-add-marker-duplicate", "group-add-member-group", "group-add-member-group-already",
+	"group-add-member-group-cycle", "group-add-member-group-itself", "group-add-member-group-missing",
+	"group-add-member-groups-two", "group-add-member-to-missing-group", "group-del", "group-del-not-found",
+	"group-del-with-members", "group-find-after-batch", "group-find-marker", "group-mod-description",
+	"group-mod-empty-description", "group-mod-no-change", "group-mod-not-found",
+	"group-remove-member-from-missing-group", "group-remove-member-group", "group-remove-member-group-mixed",
+	"group-remove-member-group-no-such-entry", "group-remove-member-no-such-entry", "group-remove-member-users",
+	"group-show-after-empty-description", "group-show-after-member-group-del", "group-show-after-preserve",
+	"group-show-after-recreate", "group-show-after-user-del", "group-show-before-member-group-del",
+	"group-show-before-recreate", "group-show-before-user-del", "group-show-cycle", "group-show-marker",
+	"group-show-marker-changed", "group-show-members", "group-show-private-group-after-user-del",
+	"passwd-empty-password", "passwd-few-classes", "passwd-not-found", "passwd-reuse-rejected",
+	"passwd-short-password", "passwd-success", "passwd-success-again", "passwd-success-maxlife0",
+	"pwpolicy-show-classes4", "pwpolicy-show-global-at-capture", "pwpolicy-show-history3",
+	"pwpolicy-show-maxlife0", "user-add-all-options", "user-add-default-mail", "user-add-duplicate-preserved",
+	"user-add-empty-displayname", "user-add-empty-givenname", "user-add-empty-homedirectory",
+	"user-add-empty-loginshell", "user-add-empty-mail", "user-add-empty-sn", "user-add-mail-two",
+	"user-add-unknown-option-display-name", "user-add-unknown-option-first", "user-del", "user-del-not-found",
+	"user-del-preserve", "user-del-preserved", "user-disable-not-found", "user-enable-not-found",
+	"user-mod-empty-displayname", "user-mod-empty-givenname", "user-mod-empty-homedirectory",
+	"user-mod-empty-loginshell", "user-mod-empty-mail", "user-mod-empty-mail-list", "user-mod-empty-sn",
+	"user-mod-fields", "user-mod-loginshell-no-change", "user-mod-loginshell-only", "user-mod-mail-case",
+	"user-mod-mail-replace", "user-mod-mail-same", "user-mod-mail-same-string", "user-mod-mail-two",
+	"user-mod-mail-two-reordered", "user-mod-not-found", "user-show-after-batch",
+	"user-show-after-empty-mail-list", "user-show-after-empty-mods", "user-show-after-loginshell-only",
+	"user-show-after-mail-replace", "user-show-after-member-group-del", "user-show-after-passwd",
+	"user-show-after-passwd-again", "user-show-after-passwd-maxlife0", "user-show-after-permanent-delete",
+	"user-show-after-recreate", "user-show-after-rejected-passwd", "user-show-all-options",
+	"user-show-before-member-group-del", "user-show-before-recreate", "user-show-before-rejected-passwd",
+	"user-show-disabled", "user-show-member", "user-show-no-password", "user-show-preserved",
+}
+
 func liveCaptureDir(t *testing.T) string {
 	t.Helper()
 	dir := os.Getenv("PILOT_FREEIPA_CAPTURE_DIR")
@@ -399,6 +442,9 @@ func TestLiveCaptureP24(t *testing.T) {
 	p.captureEmptyValues()
 
 	t.Logf("%d fixtures written; %d secret-bearing values replaced by the placeholder", len(p.order), p.redact)
+	if written := slices.Sorted(slices.Values(p.order)); !slices.Equal(written, p24Fixtures) {
+		t.Fatalf("the harness wrote %v, but p24Fixtures lists %v", written, p24Fixtures)
+	}
 	// The one-time passwords must be in no file of the capture directory.
 	if hits := scanDirForLiterals(t, dir, p.secrets); len(hits) != 0 {
 		t.Fatalf("a password the harness sent is in %v", hits)
@@ -438,7 +484,7 @@ func (p *p24Capture) captureUserFields() {
 	}), "user-mod-fields")
 	p.need(p.rpc("user-mod-loginshell-only", "user_mod", []any{u1}, map[string]any{"loginshell": "/bin/sh"}), "user-mod-loginshell-only")
 	p.need(p.showAll("user-show-after-loginshell-only", "user_show", u1), "user-show-after-loginshell-only")
-	p.wantErr(p.rpc("user-mod-no-change", "user_mod", []any{u1}, map[string]any{"loginshell": "/bin/sh"}), "EmptyModlist", "user-mod-no-change")
+	p.wantErr(p.rpc("user-mod-loginshell-no-change", "user_mod", []any{u1}, map[string]any{"loginshell": "/bin/sh"}), "EmptyModlist", "user-mod-loginshell-no-change")
 	p.wantErr(p.rpc("user-mod-not-found", "user_mod", []any{capUser("nobody")}, map[string]any{"loginshell": "/bin/sh"}), "NotFound", "user-mod-not-found")
 	p.wantErr(p.rpc("user-enable-not-found", "user_enable", []any{capUser("nobody")}, nil), "NotFound", "user-enable-not-found")
 	p.wantErr(p.rpc("user-disable-not-found", "user_disable", []any{capUser("nobody")}, nil), "NotFound", "user-disable-not-found")
