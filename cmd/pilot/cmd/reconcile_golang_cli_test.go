@@ -387,6 +387,70 @@ func TestReconcileGolangWorkspaceFailures(t *testing.T) {
 	}
 }
 
+// Issue #273, spec §2.2 step 4: a password, ssh_keys or membership that is not
+// a mapping (and the other wrong types the roster validator lets through) used
+// to be read as "not declared", which for a group is an authoritative group
+// with no members and, once the engine writes, the removal of every direct
+// member. Each row is a roster that passes inventory.ValidateRoster, so the
+// refusal is the adapter's (gate roster-adapter): exit 1 with the field and the
+// roster object named, nothing dialed, nothing sent to FreeIPA, no plan, and no
+// value in the error.
+func TestReconcileGolangRefusesWrongTypedRosterValues(t *testing.T) {
+	const sentinel = "pw-sentinel-not-a-real-secret"
+	base := strings.Replace(captureRoster, "%s", "/bin/sh", 1)
+	withUserField := func(user, field string) string {
+		return strings.Replace(base, "{name: "+user+", ", "{name: "+user+", "+field+", ", 1)
+	}
+	withGroup := func(membership string) string {
+		return base + "groups:\n  - {name: team-a, category: team, membership: " + membership + "}\n"
+	}
+	for _, tc := range []struct {
+		name, roster, gate, want string
+	}{
+		{name: "password is a string", roster: withUserField("p1-nopw", `password: "`+sentinel+`"`), gate: "roster-adapter",
+			want: "users[2] (p1-nopw): password must be a mapping, not string"},
+		{name: "password.initial is a number", roster: withUserField("p1-nopw", "password: {initial: 7}"), gate: "roster-adapter",
+			want: "users[2] (p1-nopw): password: initial must be a string, not int"},
+		{name: "ssh_keys is a list", roster: withUserField("p1-keys", `ssh_keys: ["`+sentinel+`"]`), gate: "roster-adapter",
+			want: "users[0] (p1-keys): ssh_keys must be a mapping, not []interface {}"},
+		{name: "ssh_keys.authoritative is a string", roster: withUserField("p1-keys", `ssh_keys: {authoritative: "no"}`), gate: "roster-adapter",
+			want: "users[0] (p1-keys): ssh_keys: authoritative must be true or false"},
+		{name: "membership is a list of members", roster: withGroup("[p1-self]"), gate: "roster-adapter",
+			want: "groups[0] (team-a): membership must be a mapping, not []interface {}"},
+		{name: "membership is a string", roster: withGroup(`"p1-self"`), gate: "roster-adapter",
+			want: "groups[0] (team-a): membership must be a mapping, not string"},
+		{name: "users is a string", roster: "schema_version: 3\nusers: " + sentinel + "\n", gate: "roster-adapter",
+			want: "users must be a list, not string"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("gate: %s", tc.gate)
+			f := newFakeIPA(t, "p1-self")
+			targets := withFakeDialer(t, f)
+			dir := golangWorkspace(t, tc.roster, nil)
+			plan := filepath.Join(dir, "p.json")
+			out, err := runReconcileCLI(t, previewArgs("--plan-out", plan)...)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || processExitCode(err) != 1 {
+				t.Fatalf("err = %v (exit %d), want %q and exit 1\n%s", err, processExitCode(err), tc.want, out)
+			}
+			if len(*targets) != 0 {
+				t.Fatalf("built a tunnel: %+v", *targets)
+			}
+			if paths, methods := f.requests(); len(paths)+len(methods) != 0 {
+				t.Fatalf("sent %v %v to FreeIPA", paths, methods)
+			}
+			assertNoLogin(t, f)
+			noPlan(t, plan)
+			if strings.Contains(out, "唯讀預覽（不寫入 FreeIPA）") || strings.Contains(out, "plan JSON：") {
+				t.Fatalf("a refused roster printed a preview:\n%s", out)
+			}
+			assertNoSecretAnywhere(t, err, out, plan)
+			if strings.Contains(err.Error(), sentinel) || strings.Contains(out, sentinel) {
+				t.Fatalf("the refusal shows the value it refused: %v", err)
+			}
+		})
+	}
+}
+
 // withRosterServer is the capture roster declaring freeipa.server as the given
 // YAML value.
 func withRosterServer(value string) string {

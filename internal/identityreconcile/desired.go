@@ -80,7 +80,10 @@ var inScopeSections = map[string]bool{"schema_version": true, "freeipa": true, "
 
 // FromRoster builds the desired state from a roster that already passed
 // inventory.ValidateRoster. It rejects what the playbook would read
-// through Ansible's own coercions (spec §5.1): Go does not repeat them.
+// through Ansible's own coercions (spec §5.1): Go does not repeat them. A
+// value of the wrong type is refused with its field and object, never read
+// as "not declared": inventory.ValidateRoster reads such a value as absent
+// (asMap returns nil) and lets the roster through.
 func FromRoster(root map[string]any) (Desired, error) {
 	var d Desired
 	rawVersion, ok := root["schema_version"]
@@ -115,37 +118,41 @@ func FromRoster(root map[string]any) (Desired, error) {
 		d.Principal = s
 	}
 
-	for i, raw := range listOf(root["users"]) {
-		u, _ := raw.(map[string]any)
-		name, _ := u["name"].(string)
-		where := fmt.Sprintf("users[%d] (%s)", i, name)
-		state, err := stringOr(u, "state", "present")
+	users, err := rosterEntries(root, "users")
+	if err != nil {
+		return d, err
+	}
+	for i, e := range users {
+		where := fmt.Sprintf("users[%d] (%s)", i, e.name)
+		state, err := stringOr(e.fields, "state", "present")
 		if err != nil {
 			return d, fmt.Errorf("%s: %w", where, err)
 		}
 		if state == "absent" {
-			d.AbsentUsers = append(d.AbsentUsers, name)
+			d.AbsentUsers = append(d.AbsentUsers, e.name)
 			continue
 		}
-		du, err := desiredUser(u, name, state)
+		du, err := desiredUser(e.fields, e.name, state)
 		if err != nil {
 			return d, fmt.Errorf("%s: %w", where, err)
 		}
 		d.Users = append(d.Users, du)
 	}
-	for i, raw := range listOf(root["groups"]) {
-		g, _ := raw.(map[string]any)
-		name, _ := g["name"].(string)
-		where := fmt.Sprintf("groups[%d] (%s)", i, name)
-		state, err := stringOr(g, "state", "present")
+	groups, err := rosterEntries(root, "groups")
+	if err != nil {
+		return d, err
+	}
+	for i, e := range groups {
+		where := fmt.Sprintf("groups[%d] (%s)", i, e.name)
+		state, err := stringOr(e.fields, "state", "present")
 		if err != nil {
 			return d, fmt.Errorf("%s: %w", where, err)
 		}
 		if state == "absent" {
-			d.AbsentGroups = append(d.AbsentGroups, name)
+			d.AbsentGroups = append(d.AbsentGroups, e.name)
 			continue
 		}
-		dg, err := desiredGroup(g, name)
+		dg, err := desiredGroup(e.fields, e.name)
 		if err != nil {
 			return d, fmt.Errorf("%s: %w", where, err)
 		}
@@ -156,8 +163,8 @@ func FromRoster(root map[string]any) (Desired, error) {
 			d.NotInScope = append(d.NotInScope, section)
 		}
 	}
-	for _, u := range listOf(root["users"]) {
-		if m, ok := u.(map[string]any); ok && m["authentication"] != nil {
+	for _, e := range users {
+		if e.fields["authentication"] != nil {
 			d.NotInScope = append(d.NotInScope, "users[].authentication")
 			break
 		}
@@ -196,33 +203,63 @@ func desiredUser(u map[string]any, name, state string) (DesiredUser, error) {
 	if du.Enabled, err = boolOr(u, "enabled", state != "disabled"); err != nil {
 		return du, err
 	}
-	if pw, ok := u["password"].(map[string]any); ok {
-		du.HasInitialPassword = pw["initial"] != nil
-		if du.PreserveExisting, err = boolOr(pw, "preserve_existing", true); err != nil {
-			return du, fmt.Errorf("password: %w", err)
-		}
-		if _, err = boolOr(pw, "force_change", false); err != nil {
-			return du, fmt.Errorf("password: %w", err)
-		}
+	// password, ssh_keys and (below) membership are refused when they are not
+	// mappings, not read as undeclared: for membership that reading is "an
+	// authoritative group with no members", which a writing engine turns into
+	// removing every direct member. The message names the type, never the
+	// value: a password written as a string must not reach an error.
+	pw, err := optionalMapping(u, "password")
+	if err != nil {
+		return du, err
 	}
-	if keys, ok := u["ssh_keys"].(map[string]any); ok {
-		if values, present := keys["values"]; present && values != nil {
-			list, ok := values.([]any)
-			if !ok {
-				return du, fmt.Errorf("ssh_keys.values must be a list")
-			}
-			du.SSHKeys = []string{}
-			for _, k := range list {
-				s, _ := k.(string)
-				norm, err := NormalizeSSHKey(s)
-				if err != nil {
-					du.SSHKeysInvalid++
-					continue
-				}
-				du.SSHKeys = appendUnique(du.SSHKeys, norm)
-			}
-			sort.Strings(du.SSHKeys)
+	if initial, present := pw["initial"]; present && initial != nil {
+		// The value is never loaded (a plan carries no password), but its
+		// type is checked: a number, boolean or list is not a password, and
+		// a Go engine that writes must not guess how Ansible would turn it
+		// into one (spec §5.1: Go does not repeat Ansible's coercions).
+		if _, ok := initial.(string); !ok {
+			return du, fmt.Errorf("password: initial must be a string, not %T", initial)
 		}
+		du.HasInitialPassword = true
+	}
+	if du.PreserveExisting, err = boolOr(pw, "preserve_existing", true); err != nil {
+		return du, fmt.Errorf("password: %w", err)
+	}
+	if _, err = boolOr(pw, "force_change", false); err != nil {
+		return du, fmt.Errorf("password: %w", err)
+	}
+	keys, err := optionalMapping(u, "ssh_keys")
+	if err != nil {
+		return du, err
+	}
+	// inventory.ValidateRoster refuses a literal false, but its
+	// boolFieldDefault answers the default for any value that is not a bool,
+	// so a string passes it; the playbook runs `| bool` on the value.
+	authoritative, err := boolOr(keys, "authoritative", true)
+	if err != nil {
+		return du, fmt.Errorf("ssh_keys: %w", err)
+	}
+	if !authoritative {
+		return du, fmt.Errorf("ssh_keys: authoritative must be true: the declared keys replace the live set")
+	}
+	if values, present := keys["values"]; present && values != nil {
+		list, ok := values.([]any)
+		if !ok {
+			return du, fmt.Errorf("ssh_keys.values must be a list")
+		}
+		du.SSHKeys = []string{}
+		for _, k := range list {
+			// A value that is not a string is not a key: it is counted as
+			// an invalid one and the plan blocks on it, not dropped.
+			s, _ := k.(string)
+			norm, err := NormalizeSSHKey(s)
+			if err != nil {
+				du.SSHKeysInvalid++
+				continue
+			}
+			du.SSHKeys = appendUnique(du.SSHKeys, norm)
+		}
+		sort.Strings(du.SSHKeys)
 	}
 	return du, nil
 }
@@ -239,7 +276,10 @@ func desiredGroup(g map[string]any, name string) (DesiredGroup, error) {
 	if dg.Type, err = stringOr(g, "type", "posix"); err != nil {
 		return dg, err
 	}
-	m, _ := g["membership"].(map[string]any)
+	m, err := optionalMapping(g, "membership")
+	if err != nil {
+		return dg, err
+	}
 	if dg.Authoritative, err = boolOr(m, "authoritative", true); err != nil {
 		return dg, fmt.Errorf("membership: %w", err)
 	}
@@ -343,9 +383,41 @@ func wholeNumber(v any) (int64, bool) {
 	return 0, false
 }
 
-func listOf(v any) []any {
-	l, _ := v.([]any)
-	return l
+// rosterEntry is one element of the roster's users or groups list: a mapping
+// with a string name.
+type rosterEntry struct {
+	fields map[string]any
+	name   string
+}
+
+// rosterEntries is root[key] (users or groups) as its entries: absent and
+// null are an empty list; any other type, an element that is not a mapping
+// and a name that is not a string are errors, not an object skipped or
+// read with an empty name. inventory.ValidateRoster refuses the elements
+// first (a name that does not match its pattern), but not a list of another
+// type, and this must not depend on what the validator happens to refuse.
+func rosterEntries(root map[string]any, key string) ([]rosterEntry, error) {
+	raw, present := root[key]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a list, not %T", key, raw)
+	}
+	out := make([]rosterEntry, 0, len(list))
+	for i, item := range list {
+		fields, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d] must be a mapping, not %T", key, i, item)
+		}
+		name, ok := fields["name"].(string)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d]: name must be a string, not %T", key, i, fields["name"])
+		}
+		out = append(out, rosterEntry{fields: fields, name: name})
+	}
+	return out, nil
 }
 
 func empty(v any) bool {
