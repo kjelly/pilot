@@ -831,6 +831,8 @@ class _Scan:
             self.error("cannot count the commits of the range")
             return res
         expected = int(counted.stdout.strip())
+        if self._history_is_cut(base, head):
+            return res
         self.catfile = _CatFile(self.repo)
         try:
             self._load_exemptions(base)  # a failure is an error; findings simply stay unexempted
@@ -855,6 +857,38 @@ class _Scan:
                        f"clone; fetch it (git fetch origin) or name another one, and run the scan again")
             return None
         return sha
+
+    def _history_is_cut(self, base: str, head: str) -> bool:
+        """True (and an error recorded) when a commit of base..head is a boundary of a shallow clone:
+        its parents are missing, so the range git reports is shorter than the branch really is and a
+        commit that held a secret may be out of sight. A shallow clone whose cut lies below the range
+        is fine."""
+        flag = _run_git(self.repo, "rev-parse", "--is-shallow-repository")
+        if flag.returncode == 0 and flag.stdout.strip() == b"false":
+            return False
+        where = _run_git(self.repo, "rev-parse", "--git-path", "shallow")
+        raw = where.stdout.decode("utf-8", "surrogateescape").strip()
+        try:
+            if where.returncode or not raw:
+                raise OSError
+            boundary = Path(self.repo, raw).read_bytes().split()  # an absolute `raw` wins over the repo
+        except FileNotFoundError:
+            return False  # a repository with no shallow file is not shallow
+        except OSError:
+            self.error("shallow clone: the repository's shallow file cannot be read; run git fetch "
+                       "--unshallow before scanning")
+            return True
+        if not boundary:
+            return False
+        listed = _run_git(self.repo, "rev-list", f"{base}..{head}", "--")
+        if listed.returncode:
+            self.error("cannot list the commits of the range")
+            return True
+        if set(boundary) & set(listed.stdout.split()):
+            self.error("shallow clone: the history of this branch is cut here, so commits of the range "
+                       "are missing; run git fetch --unshallow before scanning")
+            return True
+        return False
 
     def _load_exemptions(self, base: str) -> bool:
         res = self.result

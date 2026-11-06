@@ -92,6 +92,10 @@ reading the staged diff (below) is the check:
 - a cookie jar in the Netscape tab-separated form (only a `Cookie:`/`Set-Cookie:` header or
   `ipa_session=` is recognised).
 
+A branch the scan cannot see whole is refused, never passed: in a shallow clone whose cut falls inside
+`BASE..HEAD` the commits below the cut are missing and a leak could be out of sight, so that is an
+error. Run `git fetch --unshallow` and scan again.
+
 The three gates run it over every commit of the branch and refuse it on any finding:
 `issue_gate.py` (also `create_pr.py`, `mark_ready.py`), `pr_gate.py` and
 `review_gate.py` (also `apply_decision.py`). Evidence-only paths such as `docs/evidence/**` are

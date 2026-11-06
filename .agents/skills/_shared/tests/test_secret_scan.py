@@ -817,6 +817,66 @@ class FailClosed(RangeFixture):
                 self.assertTrue(scan.refusal_messages(result))
                 self.assertEqual("ERROR", scan.ScanResult(base="x", head="y", errors=["e"]).status)
 
+    # -- a shallow clone ----------------------------------------------------------------------------
+
+    def leak_then_scrub(self) -> tuple[str, str, str]:
+        """On top of two commits of history: `leak` adds a header with a credential, `scrub` replaces it.
+        Returns (history tip, leak, scrub); the history tip is the base of the range."""
+        self.r.git("switch", "-q", "main")
+        self.r.write("h1.txt", "one\n")
+        self.r.commit("history one")
+        self.r.write("h2.txt", "two\n")
+        tip = self.r.commit("history two")
+        self.r.git("switch", "-q", "-c", "topic", "main")
+        self.r.write("notes.txt", f"Authorization: Bearer {fx.mixed(40)}\n")
+        leak = self.r.commit("leak")
+        self.r.write("notes.txt", "Authorization: Bearer <redacted>\n")
+        return tip, leak, self.r.commit("scrub")
+
+    def shallow_clone(self, depth: int, name: str, *, base_depth: int | None = None, base: str = "") -> Path:
+        dest = self.r.base / name
+        env = self.r.env
+        subprocess.run(["git", "clone", "-q", f"--depth={depth}", "--branch", "topic", f"file://{self.r.path}", str(dest)],
+                       check=True, capture_output=True, env=env)
+        if base_depth:  # fetch the base on its own, as a gate does for origin/main
+            subprocess.run(["git", "-C", str(dest), "fetch", "-q", f"--depth={base_depth}", "origin", base],
+                           check=True, capture_output=True, env=env)
+        return dest
+
+    def git_out(self, repo: Path, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
+                              env=self.r.env).stdout.strip()
+
+    def test_a_shallow_clone_that_cuts_the_branch_is_an_error_not_a_clean_scan(self):
+        tip, leak, scrub = self.leak_then_scrub()
+        full = scan.scan_range(self.r.path, tip, scrub)
+        self.assertEqual(("FOUND", 2), (full.status, full.commits), "premise: the full history leaks in commit 1")
+        # depth 1 holds only `scrub`; the base is fetched on its own: `scrub` is a boundary whose parent is missing.
+        cut = self.shallow_clone(1, "cut", base_depth=1, base=tip)
+        self.assertEqual("true", self.git_out(cut, "rev-parse", "--is-shallow-repository"))
+        self.assertEqual("1", self.git_out(cut, "rev-list", "--count", f"{tip}..HEAD"),
+                         "premise: git itself reports a one-commit range, the leak is out of sight")
+        result = scan.scan_range(cut, tip, "HEAD")
+        self.assertEqual("ERROR", result.status, result.to_json())
+        self.assertIn("shallow clone", " ".join(result.errors))
+        self.assertIn("unshallow", " ".join(result.errors))
+        self.assertTrue(scan.error_messages(result))
+        # Control: unshallowed, the same clone scans the whole range and finds the leak.
+        subprocess.run(["git", "-C", str(cut), "fetch", "-q", "--unshallow", "origin"], check=True, capture_output=True,
+                       env=self.r.env)
+        again = scan.scan_range(cut, tip, "HEAD")
+        self.assertEqual(("FOUND", 2), (again.status, again.commits), again.to_json())
+
+    def test_a_shallow_clone_whose_cut_lies_below_the_range_is_scanned(self):
+        tip, leak, scrub = self.leak_then_scrub()
+        # depth 3 = scrub, leak and the history tip: the cut (history one, parents of the tip) is below the range.
+        deep = self.shallow_clone(3, "deep")
+        self.assertEqual("true", self.git_out(deep, "rev-parse", "--is-shallow-repository"))
+        result = scan.scan_range(deep, tip, "HEAD")
+        self.assertEqual(("FOUND", 2), (result.status, result.commits), result.to_json())
+        self.assertEqual([], result.errors)
+        self.assertEqual(leak, result.findings[0].commit)
+
     def test_a_revision_that_looks_like_an_option_is_refused(self):
         self.assertEqual("ERROR", self.scan(base="--output=/tmp/x").status)
 
