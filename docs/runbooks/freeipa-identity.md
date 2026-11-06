@@ -350,7 +350,9 @@ ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（�
    「尚未開始」（沒有任何步驟執行、approval 保留），用 `pilot host decommission resume --id <plan>`（會等鎖，最多 30
    分鐘）或重新進入畫面繼續。一輪開始之後掉鎖（網路中斷約 45 秒、ssh 結束）：執行中的 playbook 被殺，這一輪以 `lock lost`
    結束、不啟動下一個步驟；client 可能已部分或全部解除 enrollment，要重跑，之後能不能 `resume` 取決於 workspace 是否
-   有效（`ipa_client_fqdn`）。已完成的 plan 重跑只重播 receipt，不取鎖。
+   有效（`ipa_client_fqdn`）。掉鎖若發生在 finalize 之後（receipt 已記錄），這一輪仍以非 0 結束，因為它沒有持有鎖到結束；
+   但訊息寫的是「下架已完成」，並說明同時執行的 identity 作業可能讓 client 的授權快取沒被刷新（client 在 SSSD 快取過期前
+   可能仍沿用被下架主機的授權），不會叫你重跑。已完成的 plan 重跑只重播 receipt，不取鎖。
 
 ### 4.4 只跑一部分（tags）
 

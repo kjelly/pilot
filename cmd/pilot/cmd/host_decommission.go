@@ -583,18 +583,56 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 		StartedAt:      now,
 		Store:          ds,
 	})
-	if held != nil {
-		// Whatever Apply ended with: a run whose lock was lost did not run under it
-		// (see accessgrants.applyPlan), and what the loss cancelled would otherwise
-		// be reported as a bare "context canceled".
-		if lostErr := held.Check(); lostErr != nil {
-			if err != nil {
-				return nil, fmt.Errorf("host decommission %s stopped: %w (the run ended with: %v)", plan.ID, lostErr, err)
-			}
-			return nil, fmt.Errorf("host decommission %s: %w", plan.ID, lostErr)
-		}
+	return decommissionRunEnd(held, plan.ID, result, err)
+}
+
+// lockLostAfterCompletionError is what a run ends with when decommission.Apply
+// finished and recorded the receipt, and the identity lock turned out to have
+// been lost while the run went on. It wraps identitylock.ErrLockLost (so
+// errors.Is works and the command still exits non-zero: the run did not hold
+// the lock to its end, which is what the lock is for) but does not repeat that
+// error's own text, "FreeIPA may be partially reconciled; rerun": here the
+// decommission is finished, and saying it may be partial, or telling the
+// operator to rerun it, would be false.
+type lockLostAfterCompletionError struct {
+	planID string
+	host   string
+	lost   error // wraps identitylock.ErrLockLost
+}
+
+func (e *lockLostAfterCompletionError) Error() string {
+	return fmt.Sprintf("host decommission %s completed: its receipt is recorded, and `pilot host decommission apply` again replays it without running anything. "+
+		"But the FreeIPA identity lock on %s was lost while the run was going, so the part of the run after the loss was not protected from a concurrent identity run: "+
+		"an overlapping run may have left the clients' authorization caches unrefreshed, so a client can keep the decommissioned host's authorization until its SSSD cache expires. "+
+		"This is reported as a failure because the run did not hold the lock to its end", e.planID, e.host)
+}
+
+func (e *lockLostAfterCompletionError) Unwrap() error { return e.lost }
+
+// decommissionRunEnd is what runHostDecommissionApply returns once
+// decommission.Apply has returned while the run held the identity lock (held is
+// nil when it took none). Whatever Apply ended with, a run whose lock was lost did
+// not run under it (see accessgrants.applyPlan), and what the loss cancelled
+// would otherwise be reported as a bare "context canceled". The text of the
+// failure says what is true of this run: a run Apply did not finish may be
+// partial, and one whose receipt is recorded is finished and replays its receipt
+// (lockLostAfterCompletionError). The result goes back with that error so a
+// caller (the TUI) can tell the host is gone from hosts.yml.
+func decommissionRunEnd(held *identitylock.Held, planID string, result *decommission.FinalizeResult, err error) (*decommission.FinalizeResult, error) {
+	if held == nil {
+		return result, err
 	}
-	return result, err
+	lostErr := held.Check()
+	if lostErr == nil {
+		return result, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("host decommission %s stopped: %w (the run ended with: %v)", planID, lostErr, err)
+	}
+	if result != nil && result.Status == "completed" && result.Receipt != nil {
+		return result, &lockLostAfterCompletionError{planID: planID, host: held.Host, lost: lostErr}
+	}
+	return nil, fmt.Errorf("host decommission %s: %w", planID, lostErr)
 }
 
 // buildHostDecommissionProviders constructs the live decommission

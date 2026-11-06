@@ -257,7 +257,21 @@ func pushDecommissionExecute(r *editRouterModel, dir, path string, hf *inventory
 	catalog, _ := loadContractCatalogBestEffort()
 	ctx := withIdentityLockProgress(withIdentityLockWait(context.Background(), 0), io.Discard)
 	result, err := runHostDecommissionApply(ctx, ds, plan, dir, catalog, "confirmed via pilot edit TUI (typed exact host name)", auth)
+	return pushDecommissionOutcome(r, dir, path, hf, name, plan, result, err)
+}
+
+// pushDecommissionOutcome shows what runHostDecommissionApply returned.
+func pushDecommissionOutcome(r *editRouterModel, dir, path string, hf *inventory.HostsFile, name string, plan *decommission.Plan, result *decommission.FinalizeResult, err error) tea.Cmd {
 	if err != nil {
+		var lostAfter *lockLostAfterCompletionError
+		if errors.As(err, &lostAfter) {
+			// Finished, with its receipt, and the lock was lost while it ran: the
+			// host is already gone from hosts.yml (Finalize), so the mirror follows
+			// it (a later save of the mirror must not bring a decommissioned host
+			// back), and the banner says what the exit code of the CLI says.
+			removeHost(hf, name)
+			return pushHostList(r, dir, path, hf, fmt.Sprintf("⚠️  主機 %q 的下架已完成（plan=%s，receipt 已記錄），但執行中 FreeIPA identity 鎖遺失：同時執行的 identity 作業可能讓 client 的授權快取沒被刷新；重跑只會重播 receipt。", name, plan.ID))
+		}
 		if errors.Is(err, sshdial.ErrLockBusy) {
 			return pushDecommissionLockBusy(r, dir, path, hf, name, plan)
 		}
