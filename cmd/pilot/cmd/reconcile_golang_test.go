@@ -35,26 +35,35 @@ import (
 func TestValidateReconcileEngineFlags(t *testing.T) {
 	identity := []string{"freeipa-identity"}
 	for _, tc := range []struct {
-		name                  string
-		engine                string
-		preview, force        bool
-		components            []string
-		actions, planOut, err string
+		name                                        string
+		engine                                      string
+		preview, force                              bool
+		components                                  []string
+		actions, planOut, scope, resultOut, wantErr string
 	}{
 		{name: "ansible default", engine: "ansible", preview: true, components: identity},
 		{name: "golang preview", engine: "golang", preview: true, components: identity, planOut: "p.json"},
-		{name: "unknown engine", engine: "go", preview: true, components: identity, err: "--engine 只能是"},
-		{name: "golang without preview", engine: "golang", components: identity, err: "只提供預覽"},
-		{name: "golang with force", engine: "golang", force: true, components: identity, err: "只提供預覽"},
-		{name: "golang other component", engine: "golang", preview: true, components: []string{"dns"}, err: "只處理 --component freeipa-identity"},
-		{name: "golang two components", engine: "golang", preview: true, components: []string{"freeipa-identity", "dns"}, err: "只處理"},
-		{name: "golang no component", engine: "golang", preview: true, err: "只處理"},
-		{name: "golang with actions", engine: "golang", preview: true, components: identity, actions: "s.json", err: "--actions"},
-		{name: "plan-out without golang", engine: "ansible", preview: true, components: identity, planOut: "p.json", err: "--plan-out"},
+		{name: "golang preview, scope named", engine: "golang", preview: true, components: identity, scope: "users-groups"},
+		{name: "golang apply, users-groups", engine: "golang", force: true, components: identity, scope: "users-groups", resultOut: "r.json"},
+		{name: "unknown engine", engine: "go", preview: true, components: identity, wantErr: "--engine 只能是"},
+		{name: "golang without a mode", engine: "golang", components: identity, wantErr: "不支援互動"},
+		{name: "golang force without a scope", engine: "golang", force: true, components: identity, wantErr: "需要 --scope"},
+		{name: "golang with an unknown scope", engine: "golang", force: true, components: identity, scope: "all", wantErr: "--scope 只能是"},
+		{name: "golang with the mixed scope, not yet", engine: "golang", force: true, components: identity, scope: "full", wantErr: "還沒有提供"},
+		{name: "golang preview of the mixed scope, not yet", engine: "golang", preview: true, components: identity, scope: "full", wantErr: "還沒有提供"},
+		{name: "golang other component", engine: "golang", preview: true, components: []string{"dns"}, wantErr: "只處理 --component freeipa-identity"},
+		{name: "golang two components", engine: "golang", preview: true, components: []string{"freeipa-identity", "dns"}, wantErr: "只處理"},
+		{name: "golang no component", engine: "golang", preview: true, wantErr: "只處理"},
+		{name: "golang with actions", engine: "golang", preview: true, components: identity, actions: "s.json", wantErr: "--actions"},
+		{name: "plan-out without golang", engine: "ansible", preview: true, components: identity, planOut: "p.json", wantErr: "--plan-out"},
+		{name: "scope without golang", engine: "ansible", preview: true, components: identity, scope: "users-groups", wantErr: "--scope 只能與"},
+		{name: "result-out without golang", engine: "ansible", force: true, components: identity, resultOut: "r.json", wantErr: "--result-out 只能與"},
+		{name: "result-out of a preview", engine: "golang", preview: true, components: identity, resultOut: "r.json", wantErr: "只能與 --force"},
+		{name: "plan-out of an apply", engine: "golang", force: true, components: identity, scope: "users-groups", planOut: "p.json", wantErr: "--result-out"},
 	} {
-		err := validateReconcileEngineFlags(tc.engine, tc.preview, tc.force, tc.components, tc.actions, tc.planOut)
-		if tc.err == "" && err != nil || tc.err != "" && (err == nil || !strings.Contains(err.Error(), tc.err)) {
-			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.err)
+		err := validateReconcileEngineFlags(tc.engine, tc.preview, tc.force, tc.components, tc.actions, tc.planOut, tc.scope, tc.resultOut)
+		if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.wantErr)
 		}
 	}
 }
@@ -170,6 +179,9 @@ type fakeIPA struct {
 	hang     map[string]bool   // JSON-RPC methods the server never answers (until the test ends)
 	stop     chan struct{}     // closed when the test ends, to release hung requests
 	onHang   func(string)      // called, with the method, when a request the server never answers arrives
+	// respond, when set, sees each JSON-RPC request first and may answer it itself (the
+	// stateful scenarios of the apply tests); ok false leaves it to the captured answers.
+	respond func(method string, params []any) (body string, ok bool)
 }
 
 // replay answers with a captured status, headers and body (the .status,
@@ -273,6 +285,12 @@ func (f *fakeIPA) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if f.respond != nil {
+		if body, ok := f.respond(req.Method, req.Params); ok {
+			_, _ = w.Write([]byte(body))
+			return
+		}
+	}
 	key := req.Method
 	if req.Method == "user_find" && opts["preserved"] == true {
 		key = "user_find/preserved"

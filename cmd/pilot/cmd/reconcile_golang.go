@@ -34,14 +34,27 @@ const (
 	reconcileEngineGolang  = identityreconcile.EngineName
 )
 
-// golangPreviewBlockedExitCode is the exit code of a Go preview that
-// produced a plan holding blocked objects (spec §2.3); any other failure
-// exits 1.
-const golangPreviewBlockedExitCode = 3
+// The exit codes of the Go engine that are more than "it failed" (spec §6.3, D14): 3
+// is a plan with blocked objects (zero writes), 4 is a run whose every operation was
+// applied and verified and only the authorization cache obligation is owed. Every other
+// failure exits 1.
+const (
+	golangPreviewBlockedExitCode = 3
+	golangUnsettledExitCode      = 4
+)
+
+// The values of --scope: the users and groups alone (no playbook runs), or the mixed run
+// (the Go writer for users and groups, the identity playbook for the rest; P2-7).
+const (
+	reconcileScopeUsersGroups = identityreconcile.ScopeUsersGroups
+	reconcileScopeFull        = "full"
+)
 
 var (
-	reconcileEngineFlag  string
-	reconcilePlanOutFlag string
+	reconcileEngineFlag    string
+	reconcilePlanOutFlag   string
+	reconcileScopeFlag     string
+	reconcileResultOutFlag string
 )
 
 // golangDialer is the SSH side of the Go engine: sshdial.Dialer, replaced
@@ -57,18 +70,23 @@ type golangDialer interface {
 
 var newGolangDialer = func(t sshdial.Target) golangDialer { return &sshdial.Dialer{Target: t} }
 
-// newGolangIPAClient builds the JSON-RPC client of the preview: the
-// constructor of the client, replaced in tests that wrap it. The preview
-// asks it for a read-only client and nothing else.
+// newGolangIPAClient builds the JSON-RPC client of the Go engine: the constructor
+// of the client, replaced in tests that wrap it. The preview asks it for a read-only
+// client; the apply for one with a WriteGate and nothing else.
 var newGolangIPAClient = freeiparpc.New
 
 // validateReconcileEngineFlags rejects every combination the Go engine
-// does not support before anything is read (spec §2.1).
-func validateReconcileEngineFlags(engine string, previewOnly, force bool, components []string, actions, planOut string) error {
+// does not support before anything is read (spec §2.1, §8.1).
+func validateReconcileEngineFlags(engine string, previewOnly, force bool, components []string, actions, planOut, scope, resultOut string) error {
 	switch engine {
 	case reconcileEngineAnsible:
-		if planOut != "" {
+		switch {
+		case planOut != "":
 			return fmt.Errorf("--plan-out 只能與 --engine %s 一起使用", reconcileEngineGolang) // gate: engine-plan-out
+		case scope != "":
+			return fmt.Errorf("--scope 只能與 --engine %s 一起使用", reconcileEngineGolang) // gate: engine-scope
+		case resultOut != "":
+			return fmt.Errorf("--result-out 只能與 --engine %s 一起使用", reconcileEngineGolang) // gate: engine-result-out
 		}
 		return nil
 	case reconcileEngineGolang:
@@ -78,10 +96,22 @@ func validateReconcileEngineFlags(engine string, previewOnly, force bool, compon
 	switch {
 	case actions != "":
 		return fmt.Errorf("--engine %s 不能與 --actions 同時使用", reconcileEngineGolang) // gate: engine-actions
-	case force || !previewOnly:
-		return fmt.Errorf("--engine %s 目前只提供預覽：請加 --preview-only，不要加 --force", reconcileEngineGolang) // gate: engine-preview-only
+	case !previewOnly && !force:
+		return fmt.Errorf("--engine %s 不支援互動：請加 --preview-only(唯讀預覽)或 --force(套用)", reconcileEngineGolang) // gate: engine-preview-only
 	case len(components) != 1 || components[0] != "freeipa-identity":
 		return fmt.Errorf("--engine %s 只處理 --component freeipa-identity 的使用者與群組", reconcileEngineGolang) // gate: engine-component
+	case force && previewOnly:
+		return nil // refused right after, for both engines (ansible-force-and-preview-only)
+	case scope != "" && scope != reconcileScopeUsersGroups && scope != reconcileScopeFull:
+		return fmt.Errorf("--scope 只能是 %s 或 %s：%q", reconcileScopeUsersGroups, reconcileScopeFull, scope) // gate: engine-scope-value
+	case force && scope == "":
+		return fmt.Errorf("--engine %s --force 需要 --scope %s 或 %s：套用的範圍要明講", reconcileEngineGolang, reconcileScopeUsersGroups, reconcileScopeFull) // gate: engine-scope-required
+	case scope == reconcileScopeFull:
+		return fmt.Errorf("--scope %s(混合執行：Go 寫 users／groups，其餘交給 identity playbook)還沒有提供：目前只有 --scope %s", reconcileScopeFull, reconcileScopeUsersGroups) // gate: engine-scope-full
+	case resultOut != "" && !force:
+		return fmt.Errorf("--result-out 只能與 --force 一起使用(預覽的結果是 --plan-out)") // gate: engine-result-out-needs-force
+	case planOut != "" && force:
+		return fmt.Errorf("--plan-out 是預覽的輸出；--force 的結果(含第一份與入口之後的 plan)在 --result-out") // gate: engine-plan-out-with-force
 	}
 	return nil
 }
@@ -117,23 +147,34 @@ func runReconcileGolangPreview(cmd *cobra.Command) error {
 	return &golangPreviewError{err: err, code: 1} // gate: exit-code-1
 }
 
+// golangSignalContext is the context of a Go engine run: it ends on SIGINT, SIGTERM and
+// SIGHUP like --timeout does (every child process is killed with what it started and the
+// session logged out, spec §2.5). The first signal cancels; the second, with the default
+// action restored, ends pilot at once. Only the Go engine: the Ansible engine's handlers do
+// not all observe their context (see withServiceCommandSignals). The children run in their
+// own session (withIsolatedChildren), so the terminal's signals reach only pilot, which is why
+// SIGHUP is handled too, unless it was ignored at start (nohup): Notify would turn that
+// ignore off. The returned stop releases the handlers.
+func golangSignalContext(cmd *cobra.Command, runtime deployAnsibleRuntime) (context.Context, context.CancelFunc) {
+	signals := []os.Signal{os.Interrupt, syscall.SIGTERM}
+	if !signal.Ignored(syscall.SIGHUP) {
+		signals = append(signals, syscall.SIGHUP)
+	}
+	sigCtx, stop := signal.NotifyContext(withIsolatedChildren(withDeployAnsibleRuntime(cmd.Context(), runtime)), signals...)
+	context.AfterFunc(sigCtx, stop)
+	return sigCtx, stop
+}
+
 func golangPreview(cmd *cobra.Command) error {
 	out := cmd.OutOrStdout()
-	planOut := ""
-	if reconcilePlanOutFlag != "" {
-		abs, err := filepath.Abs(expandHomeDir(reconcilePlanOutFlag))
-		if err != nil {
-			return err // gate: plan-out-abs
-		}
-		if _, err := os.Lstat(abs); err == nil {
-			return fmt.Errorf("--plan-out %s 已存在；不覆寫", abs) // gate: plan-out-exists
-		}
-		// Fail now, not after the whole read: the file is written last.
-		if info, err := os.Stat(filepath.Dir(abs)); err != nil || !info.IsDir() {
-			return fmt.Errorf("--plan-out %s 的上層目錄 %s 不存在或不是目錄", abs, filepath.Dir(abs)) // gate: plan-out-dir
-		}
-		planOut = abs
+	// The file is created now and written last: a path that exists, or whose directory
+	// does not, is refused before anything is read, and a preview that fails after that
+	// leaves no file (a write that fails removes the one it started: #274).
+	planOut, err := reserveOutput("--plan-out", reconcilePlanOutFlag)
+	if err != nil {
+		return err // gate: preview-plan-out
 	}
+	defer planOut.discard()
 	timeout, err := parseDeployTimeout(reconcileTimeoutFlag)
 	if err != nil {
 		return err // gate: timeout-parse
@@ -142,134 +183,28 @@ func golangPreview(cmd *cobra.Command) error {
 	if err != nil {
 		return err // gate: runtime-prepare
 	}
-	// Ctrl-C, SIGTERM and SIGHUP end the preview like --timeout does: every
-	// child process is killed with what it started and the session logged
-	// out (spec §2.5). The first signal cancels; the second, with the default
-	// action restored, ends pilot at once. Only the Go preview: the Ansible
-	// engine's handlers do not all observe their context (see
-	// withServiceCommandSignals). The children run in their own session
-	// (withIsolatedChildren), so the terminal's signals reach only pilot,
-	// which is why SIGHUP is handled too, unless it was ignored at start
-	// (nohup): Notify would turn that ignore off.
-	signals := []os.Signal{os.Interrupt, syscall.SIGTERM}
-	if !signal.Ignored(syscall.SIGHUP) {
-		signals = append(signals, syscall.SIGHUP)
-	}
-	sigCtx, stop := signal.NotifyContext(withIsolatedChildren(withDeployAnsibleRuntime(cmd.Context(), runtime)), signals...)
+	sigCtx, stop := golangSignalContext(cmd, runtime)
 	defer stop()
-	context.AfterFunc(sigCtx, stop)
 	ctx, cancel := context.WithTimeout(sigCtx, timeout)
 	defer cancel()
 
-	inv := workspacePath(reconcileDirFlag, reconcileInventoryFlag)
-	if err := validateFileExists(inv); err != nil {
-		return err // gate: inventory-missing
-	}
-	if err := inventoryCurrentWithHosts(inv); err != nil {
-		return err // gate: inventory-vs-hosts
-	}
-	snapshot, err := loadDeployInventorySnapshot(ctx, inv)
+	prep, err := golangPreflight(ctx, runtime)
 	if err != nil {
-		return err // gate: ansible-inventory
+		return err // gate: preview-preflight
 	}
-	violations, err := validateDeploymentCompletenessSnapshot(inv, snapshot)
-	if err != nil {
-		return err // gate: completeness-error
-	}
-	if len(violations) > 0 {
-		return formatCompletenessViolations(violations) // gate: completeness
-	}
-	hosts, err := resolvePatternHosts(ctx, inv, "freeipa-server", limitFlag)
-	if err != nil {
-		return err // gate: list-hosts
-	}
-	if len(hosts) != 1 {
-		return fmt.Errorf("freeipa-identity 需要剛好一台 freeipa-server 主機(contract hostCardinality: exactly-one)，--limit %q 之後有 %d 台：%v", limitFlag, len(hosts), hosts) // gate: exactly-one-server
-	}
-	host := hosts[0]
-	stage, err := golangPreviewStage(host, snapshot.Groups, stageFlag, stagingAttestedHoursFlag)
-	if err != nil {
-		return err // gate: stage-gate
-	}
-	hostVars := snapshot.HostVars[host]
-
-	rosterPath, _ := hostVars["freeipa_roster_file"].(string)
-	if strings.TrimSpace(rosterPath) == "" {
-		return fmt.Errorf("%s 沒有設定 freeipa_roster_file", host) // gate: roster-file-unset
-	}
-	rosterPath = resolveRosterPath(filepath.Dir(inv), rosterPath)
-	rosterData, err := readSecretVarsFile(ctx, rosterPath, runtime.Env)
-	if err != nil {
-		return fmt.Errorf("讀取 roster: %w", err) // gate: roster-read
-	}
-	var root map[string]any
-	if err := yaml.Unmarshal(rosterData, &root); err != nil {
-		return fmt.Errorf("解析 roster %s: %w", rosterPath, err) // gate: roster-yaml
-	}
-	desired, err := identityreconcile.FromRosterWithForms(root, rosterData)
-	if err != nil {
-		return fmt.Errorf("roster %s: %w", rosterPath, err) // gate: roster-adapter
-	}
-	declaredServer, err := rosterServer(root)
-	if err != nil {
-		return fmt.Errorf("roster %s: %w", rosterPath, err) // gate: roster-server-type
-	}
-	var vaultData []byte
-	if varsFile := defaultVaultFile(inv); varsFile != "" {
-		if vaultData, err = readSecretVarsFile(ctx, varsFile, runtime.Env); err != nil {
-			return fmt.Errorf("讀取 vault vars 檔: %w", err) // gate: vault-vars-read
-		}
-	}
-	password, err := inventory.ResolveIPAAdminPassword(vaultData, rosterData)
-	if err != nil {
-		return err // gate: admin-password
-	}
-	target, err := sshdial.TargetFromHostVars(host, hostVars)
-	if err != nil {
-		return fmt.Errorf("--engine %s 不支援這台主機的 SSH 連線設定：%w", reconcileEngineGolang, err) // gate: ssh-target
-	}
-
-	dialer := newGolangDialer(target)
+	dialer := newGolangDialer(prep.target)
 	// The first deferred call here, so the last to run: after the logout
 	// and CloseIdleConnections it ends what is still running, among it a
 	// tunnel whose TLS handshake a net/http dial goroutine still waits on
 	// once the logout gave up, and returns when each ssh is reaped: no ssh
 	// is left when the preview returns (spec §2.5).
 	defer dialer.Close()
-	fqdn, err := dialer.FQDN(ctx)
+	session, err := golangConnect(ctx, prep, dialer, freeiparpc.Config{ReadOnly: true})
 	if err != nil {
-		return fmt.Errorf("讀取 %s 的 FQDN: %w", host, err) // gate: fqdn-read
+		return err // gate: preview-connect
 	}
-	if declaredServer != "" && !strings.EqualFold(declaredServer, fqdn) {
-		return fmt.Errorf("roster freeipa.server 是 %s，但 %s 的 hostname -f 是 %s", declaredServer, host, fqdn) // gate: roster-server
-	}
-	ca, err := dialer.CA(ctx)
-	if err != nil {
-		return fmt.Errorf("讀取 %s 的 IPA CA: %w", host, err) // gate: ca-read
-	}
-	client, err := newGolangIPAClient(freeiparpc.Config{FQDN: fqdn, CA: ca, DialContext: dialer.DialContext, ReadOnly: true})
-	if err != nil {
-		return err // gate: client-new
-	}
-	// After the logout: ends the idle tunnel with a TLS close_notify. It is not
-	// what guarantees that no ssh -W is left: for a dial still in progress it
-	// only cancels the dial's context and returns, and net/http ends that
-	// connection later in a goroutine of its own. dialer.Close does (above).
-	defer client.CloseIdleConnections()
-	if err := client.Login(ctx, desired.Principal, password); err != nil {
-		return fmt.Errorf("登入 FreeIPA: %w", err) // gate: login
-	}
-	defer func() {
-		// Not ctx: the session must end after Ctrl-C and after --timeout too;
-		// bounded, since the server may be what is not answering.
-		lctx, done := context.WithTimeout(context.WithoutCancel(ctx), golangLogoutTimeout)
-		defer done()
-		_ = client.Logout(lctx)
-	}()
-	server, err := client.CheckServer(ctx)
-	if err != nil {
-		return err // gate: check-server
-	}
+	defer session.close()
+	client, desired := session.client, prep.desired
 	observedAt := time.Now()
 	obs, err := identityreconcile.Observe(ctx, client, desired.Principal)
 	if err != nil {
@@ -282,26 +217,195 @@ func golangPreview(cmd *cobra.Command) error {
 		// has no plan to show.
 		return fmt.Errorf("內部錯誤：預覽送出了 %d 個寫入", stats.Writes) // gate: writes-guard
 	}
-	doc := identityreconcile.NewDocument(desired, obs, plan,
-		identityreconcile.Target{
-			InventoryHost: host, FQDN: fqdn, Destination: sshdial.DefaultDestination,
-			SSH: identityreconcile.SSHTarget{Host: target.Host, Port: target.Port, User: target.User},
-		},
-		identityreconcile.Server{Version: server.ServerVersion, APIVersion: server.APIVersion},
+	doc := identityreconcile.NewDocument(desired, obs, plan, session.target(prep), session.serverInfo(),
 		pilotRevision(), observedAt,
 		identityreconcile.Stats{HTTPRequests: stats.HTTPRequests, Reads: stats.Reads, Writes: stats.Writes, Relogins: stats.Relogins, ReadRetries: stats.ReadRetries},
 	)
-	printGolangPreview(out, doc, stage)
-	if planOut != "" {
-		if err := writeGolangPlan(planOut, doc); err != nil {
-			return err // gate: plan-write
+	printGolangPreview(out, doc, prep.stage)
+	if planOut != nil {
+		data, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return err // gate: plan-marshal
 		}
-		fmt.Fprintf(out, "plan JSON：%s\n", planOut)
+		if err := commitOutput(planOut, append(data, '\n')); err != nil {
+			return err // gate: preview-plan-commit
+		}
+		fmt.Fprintf(out, "plan JSON：%s\n", planOut.path)
 	}
 	if doc.Result == identityreconcile.ResultBlocked {
 		return &golangPreviewError{err: fmt.Errorf("--engine %s 預覽：%d 個物件被阻擋，見上方清單", reconcileEngineGolang, len(doc.Blocked)), code: golangPreviewBlockedExitCode} // gate: blocked-plan
 	}
 	return nil
+}
+
+// golangPrep is what the preview and the apply both know before they connect: the one
+// FreeIPA server the roster is for, the stage, the desired state and the credentials to
+// reach it, from the workspace alone (spec §2.2 steps 1 to 6).
+type golangPrep struct {
+	inv            string
+	host           string
+	stage          string
+	groups         map[string][]string
+	hostVars       map[string]any
+	rosterData     []byte
+	desired        identityreconcile.Desired
+	declaredServer string
+	password       string
+	target         sshdial.Target
+}
+
+// golangPreflight is steps 1 to 6 of spec §2.2: nothing is sent to FreeIPA and no ssh
+// is started. The preview and the apply share it, so a refusal means the same in both.
+func golangPreflight(ctx context.Context, runtime deployAnsibleRuntime) (*golangPrep, error) {
+	inv := workspacePath(reconcileDirFlag, reconcileInventoryFlag)
+	if err := validateFileExists(inv); err != nil {
+		return nil, err // gate: inventory-missing
+	}
+	if err := inventoryCurrentWithHosts(inv); err != nil {
+		return nil, err // gate: inventory-vs-hosts
+	}
+	snapshot, err := loadDeployInventorySnapshot(ctx, inv)
+	if err != nil {
+		return nil, err // gate: ansible-inventory
+	}
+	violations, err := validateDeploymentCompletenessSnapshot(inv, snapshot)
+	if err != nil {
+		return nil, err // gate: completeness-error
+	}
+	if len(violations) > 0 {
+		return nil, formatCompletenessViolations(violations) // gate: completeness
+	}
+	hosts, err := resolvePatternHosts(ctx, inv, "freeipa-server", limitFlag)
+	if err != nil {
+		return nil, err // gate: list-hosts
+	}
+	if len(hosts) != 1 {
+		return nil, fmt.Errorf("freeipa-identity 需要剛好一台 freeipa-server 主機(contract hostCardinality: exactly-one)，--limit %q 之後有 %d 台：%v", limitFlag, len(hosts), hosts) // gate: exactly-one-server
+	}
+	host := hosts[0]
+	stage, err := golangPreviewStage(host, snapshot.Groups, stageFlag, stagingAttestedHoursFlag)
+	if err != nil {
+		return nil, err // gate: stage-gate
+	}
+	hostVars := snapshot.HostVars[host]
+
+	rosterPath, _ := hostVars["freeipa_roster_file"].(string)
+	if strings.TrimSpace(rosterPath) == "" {
+		return nil, fmt.Errorf("%s 沒有設定 freeipa_roster_file", host) // gate: roster-file-unset
+	}
+	rosterPath = resolveRosterPath(filepath.Dir(inv), rosterPath)
+	rosterData, err := readSecretVarsFile(ctx, rosterPath, runtime.Env)
+	if err != nil {
+		return nil, fmt.Errorf("讀取 roster: %w", err) // gate: roster-read
+	}
+	var root map[string]any
+	if err := yaml.Unmarshal(rosterData, &root); err != nil {
+		return nil, fmt.Errorf("解析 roster %s: %w", rosterPath, err) // gate: roster-yaml
+	}
+	desired, err := identityreconcile.FromRosterWithForms(root, rosterData)
+	if err != nil {
+		return nil, fmt.Errorf("roster %s: %w", rosterPath, err) // gate: roster-adapter
+	}
+	declaredServer, err := rosterServer(root)
+	if err != nil {
+		return nil, fmt.Errorf("roster %s: %w", rosterPath, err) // gate: roster-server-type
+	}
+	var vaultData []byte
+	if varsFile := defaultVaultFile(inv); varsFile != "" {
+		if vaultData, err = readSecretVarsFile(ctx, varsFile, runtime.Env); err != nil {
+			return nil, fmt.Errorf("讀取 vault vars 檔: %w", err) // gate: vault-vars-read
+		}
+	}
+	password, err := inventory.ResolveIPAAdminPassword(vaultData, rosterData)
+	if err != nil {
+		return nil, err // gate: admin-password
+	}
+	target, err := sshdial.TargetFromHostVars(host, hostVars)
+	if err != nil {
+		return nil, fmt.Errorf("--engine %s 不支援這台主機的 SSH 連線設定：%w", reconcileEngineGolang, err) // gate: ssh-target
+	}
+	return &golangPrep{
+		inv: inv, host: host, stage: stage, groups: snapshot.Groups, hostVars: hostVars, rosterData: rosterData,
+		desired: desired, declaredServer: declaredServer, password: password, target: target,
+	}, nil
+}
+
+// golangSession is a logged-in connection to the FreeIPA server of a run.
+type golangSession struct {
+	client *freeiparpc.Client
+	fqdn   string
+	server freeiparpc.ServerInfo
+	ending []func()
+}
+
+// close ends the session the way the preview always did: the logout first (bounded, and
+// on a context that outlives Ctrl-C and --timeout), then the idle connections. The dialer
+// is the caller's and ends after this.
+func (s *golangSession) close() {
+	for i := len(s.ending) - 1; i >= 0; i-- {
+		s.ending[i]()
+	}
+	s.ending = nil
+}
+
+func (s *golangSession) target(prep *golangPrep) identityreconcile.Target {
+	return identityreconcile.Target{
+		InventoryHost: prep.host, FQDN: s.fqdn, Destination: sshdial.DefaultDestination,
+		SSH: identityreconcile.SSHTarget{Host: prep.target.Host, Port: prep.target.Port, User: prep.target.User},
+	}
+}
+
+func (s *golangSession) serverInfo() identityreconcile.Server {
+	return identityreconcile.Server{Version: s.server.ServerVersion, APIVersion: s.server.APIVersion}
+}
+
+// golangConnect is steps 7 to 12 of spec §2.2: the server's name from the ssh that is
+// about to carry the tunnel, the CA, the client, the login and the version check. cfg has
+// what differs between the preview (ReadOnly) and the apply (its WriteGate); the rest of it
+// is filled in here. A failure ends what was started before it.
+func golangConnect(ctx context.Context, prep *golangPrep, dialer golangDialer, cfg freeiparpc.Config) (_ *golangSession, err error) {
+	s := &golangSession{}
+	defer func() {
+		if err != nil {
+			s.close()
+		}
+	}()
+	s.fqdn, err = dialer.FQDN(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("讀取 %s 的 FQDN: %w", prep.host, err) // gate: fqdn-read
+	}
+	if prep.declaredServer != "" && !strings.EqualFold(prep.declaredServer, s.fqdn) {
+		return nil, fmt.Errorf("roster freeipa.server 是 %s，但 %s 的 hostname -f 是 %s", prep.declaredServer, prep.host, s.fqdn) // gate: roster-server
+	}
+	ca, err := dialer.CA(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("讀取 %s 的 IPA CA: %w", prep.host, err) // gate: ca-read
+	}
+	cfg.FQDN, cfg.CA, cfg.DialContext = s.fqdn, ca, dialer.DialContext
+	s.client, err = newGolangIPAClient(cfg)
+	if err != nil {
+		return nil, err // gate: client-new
+	}
+	// After the logout: ends the idle tunnel with a TLS close_notify. It is not
+	// what guarantees that no ssh -W is left: for a dial still in progress it
+	// only cancels the dial's context and returns, and net/http ends that
+	// connection later in a goroutine of its own. dialer.Close does (the caller's).
+	s.ending = append(s.ending, s.client.CloseIdleConnections)
+	if err := s.client.Login(ctx, prep.desired.Principal, prep.password); err != nil {
+		return nil, fmt.Errorf("登入 FreeIPA: %w", err) // gate: login
+	}
+	s.ending = append(s.ending, func() {
+		// Not ctx: the session must end after Ctrl-C and after --timeout too;
+		// bounded, since the server may be what is not answering.
+		lctx, done := context.WithTimeout(context.WithoutCancel(ctx), golangLogoutTimeout)
+		defer done()
+		_ = s.client.Logout(lctx)
+	})
+	s.server, err = s.client.CheckServer(ctx)
+	if err != nil {
+		return nil, err // gate: check-server
+	}
+	return s, nil
 }
 
 // inventoryCurrentWithHosts fails when a sibling hosts.yml renders to a
@@ -458,20 +562,4 @@ func printGolangPreview(out io.Writer, doc identityreconcile.Document, stage str
 		fmt.Fprintf(out, "ℹ️  不在 Go engine 範圍（由 Ansible engine 處理）：%s\n", strings.Join(sections, ", "))
 	}
 	fmt.Fprintf(out, "讀取：%d 個 HTTP 請求、%d 個讀取、%d 個寫入\n", doc.Stats.HTTPRequests, doc.Stats.Reads, doc.Stats.Writes)
-}
-
-func writeGolangPlan(path string, doc identityreconcile.Document) error {
-	data, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return err // gate: plan-marshal
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return fmt.Errorf("--plan-out: %w", err) // gate: plan-open
-	}
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		_ = f.Close()
-		return err // gate: plan-write-bytes
-	}
-	return f.Close() // gate: plan-close
 }

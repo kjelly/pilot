@@ -90,6 +90,8 @@ var identityLockReferences = []lockReference{
 		Reason: "ReconcileOnce hands the default playbook to applyPlan, the funnel"},
 	{File: "internal/accessgrants/breakglass.go", Token: "ref:DefaultPlaybook", Count: 2, Role: "funnel input",
 		Reason: "Activate and Deactivate hand the default playbook to applyPlan, the funnel"},
+	{File: "cmd/pilot/cmd/reconcile_golang_apply.go", Token: "ref:identitylock.AuthCachePlaybook", Count: 1, Role: "funnel",
+		Reason: "runGoAuthCacheEntry runs the entry playbook on the host whose /etc/ipa lock the run holds, under a context bound to that lock; it takes the *identitylock.Held (entryProblems), and runGolangApplyUnderLock, the only caller, is reached only from golangApply after the lock"},
 	{File: "internal/identitylock/identitylock.go", Token: "lit:playbooks/apply/freeipa-identity-apply.yml", Count: 1, Role: "data",
 		Reason: "the definition of the name the funnels and this lint are keyed on"},
 	{File: "internal/identitylock/identitylock.go", Token: "lit:playbooks/apply/freeipa-identity-auth-cache.yml", Count: 1, Role: "data",
@@ -322,6 +324,15 @@ var identityLockFunnels = []lockFunnel{
 		Requires: "needsLock",
 	},
 	{
+		// The Go writer's lock is the run's: taken after the preflight and the no-ssh
+		// precheck, before the first connection, held through runGolangApplyUnderLock (the
+		// entry playbook and every write) and given back after it. Unconditional: the
+		// users-groups scope has no path without the lock.
+		File: "cmd/pilot/cmd/reconcile_golang_apply.go", Func: "golangApply",
+		Acquire: callMatcher{"the run's lock acquirer", "ident:acquire"},
+		Execute: callMatcher{"runGolangApplyUnderLock", "ident:runGolangApplyUnderLock"},
+	},
+	{
 		// The apply closure: after every confirmation (announce), before
 		// PrepareApply and the command (execute). Conditional only on the
 		// playbook being the identity one.
@@ -398,6 +409,14 @@ var identityPrecheckFunnels = []lockFunnel{
 		Requires: "needsLock",
 	},
 	{
+		// The Go writer: the precheck (identityLockFor) comes before the dialer is made
+		// and before the lock is taken or anything is connected to.
+		File: "cmd/pilot/cmd/reconcile_golang_apply.go", Func: "golangApply",
+		Acquire: callMatcher{"identityLockFor", "ident:identityLockFor"},
+		Execute: callMatcher{"newGolangDialer", "ident:newGolangDialer"},
+		Before:  []callMatcher{{"runGolangApplyUnderLock", "ident:runGolangApplyUnderLock"}},
+	},
+	{
 		// Before the plan is rendered or the operator is asked, before the
 		// freeipa-server dependency is applied, before any core run.
 		File: "cmd/pilot/cmd/deploy.go", Func: "executeRecordedDeploymentWithAuthorizationResult",
@@ -452,6 +471,8 @@ var identityProtectedCalls = []protectedCall{
 		"cmd/pilot/cmd/edit_tui_roster_breakglass.go pushBreakglassDeactivateConfirm",
 	}},
 	{callMatcher{"decommission.Apply", "method:decommission.Apply"}, []string{"cmd/pilot/cmd/host_decommission.go runHostDecommissionApply"}},
+	{callMatcher{"runGolangApplyUnderLock", "ident:runGolangApplyUnderLock"}, []string{"cmd/pilot/cmd/reconcile_golang_apply.go golangApply"}},
+	{callMatcher{"identityreconcile.Execute", "method:identityreconcile.Execute"}, []string{"cmd/pilot/cmd/reconcile_golang_apply.go runGolangApplyUnderLock"}},
 }
 
 // identityLockBuilders are the places that build a funnel's Acquirer by calling
@@ -894,6 +915,52 @@ func entryProblems(t *testing.T, src lockSources) []string {
 	return problems
 }
 
+// writerProblems: a function that calls the Go writer (identityreconcile.Execute) must take the
+// *identitylock.Held of the run it is part of. Execute refuses a context with no lock, but a
+// caller that takes no Held cannot have one to put there on purpose.
+func writerProblems(t *testing.T, src lockSources) []string {
+	t.Helper()
+	var problems []string
+	fset := token.NewFileSet()
+	call := callMatcher{"identityreconcile.Execute", "method:identityreconcile.Execute"}
+	for _, name := range sortedKeys(src) {
+		if strings.HasPrefix(name, "internal/identityreconcile/") {
+			continue // the definition
+		}
+		file := parseLockSource(t, fset, name, src[name])
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			calls := false
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if c, ok := n.(*ast.CallExpr); ok && call.matches(c) {
+					calls = true
+				}
+				return true
+			})
+			if !calls {
+				continue
+			}
+			takesHeld := false
+			for _, p := range fd.Type.Params.List {
+				if star, ok := p.Type.(*ast.StarExpr); ok {
+					if sel, ok := star.X.(*ast.SelectorExpr); ok && sel.Sel.Name == "Held" {
+						if x, ok := sel.X.(*ast.Ident); ok && x.Name == "identitylock" {
+							takesHeld = true
+						}
+					}
+				}
+			}
+			if !takesHeld {
+				problems = append(problems, name+" "+fd.Name.Name+": calls the Go writer (identityreconcile.Execute) without taking a *identitylock.Held: every write of the engine is made under the run's /etc/ipa lock")
+			}
+		}
+	}
+	return problems
+}
+
 // seamProblems: the test seams of the lock exist for tests. Non-test code
 // does not assign newIdentityLock, newIdentityLockDialer or
 // identityLockPrecheck, and nothing but a test imports the fake.
@@ -934,6 +1001,7 @@ func allIdentityLockProblems(t *testing.T, src lockSources) []string {
 	all = append(all, optionLiteralProblems(t, src)...)
 	all = append(all, refusalProblems(t, src)...)
 	all = append(all, entryProblems(t, src)...)
+	all = append(all, writerProblems(t, src)...)
 	all = append(all, seamProblems(t, src)...)
 	all = append(all, precheckProblems(t, src)...)
 	return all
@@ -1301,6 +1369,44 @@ func TestIdentityLockLintFailsOnMutationsOfTheRealFunnels(t *testing.T) {
 		"the TUI builds its options without the lock": {
 			"cmd/pilot/cmd/edit_tui_roster_breakglass.go", "\t\t\tLock:        lock,\n", "",
 			"ActivateOptions literal without Lock",
+		},
+		// The Go writer (P2-6): its lock is the run's, taken after the precheck and before the
+		// first connection, and everything that writes or runs the entry takes the Held.
+		"the Go apply takes no lock": {
+			"cmd/pilot/cmd/reconcile_golang_apply.go", "held, err := acquire(sigCtx)", "held, err := noLock(sigCtx)",
+			"golangApply: runs the playbook (runGolangApplyUnderLock) without taking the lock: no call of the run's lock acquirer",
+		},
+		"the Go apply runs before it takes the lock": {
+			"cmd/pilot/cmd/reconcile_golang_apply.go", "\theld, err := acquire(sigCtx)\n", "\t_, _ = runGolangApplyUnderLock(sigCtx, nil, prep, nil, cmd, runtime, timeout)\n\theld, err := acquire(sigCtx)\n",
+			"takes the lock (the run's lock acquirer) after runGolangApplyUnderLock",
+		},
+		"the Go apply takes the lock only for some hosts": {
+			"cmd/pilot/cmd/reconcile_golang_apply.go", "\theld, err := acquire(sigCtx)\n", "\tvar held *identitylock.Held\n\tif prep.host != \"\" {\n\t\theld, err = acquire(sigCtx)\n\t}\n",
+			"golangApply: the lock is taken behind a branch that can skip it",
+		},
+		"the Go apply without the precheck": {
+			"cmd/pilot/cmd/reconcile_golang_apply.go", "acquire, err := identityLockFor(sigCtx, identityLockRequest{", "acquire, err := wrapLock(sigCtx, identityLockRequest{",
+			"golangApply: runs the playbook (newGolangDialer) without taking the lock: no call of identityLockFor",
+		},
+		"the Go apply makes its dialer before the precheck": {
+			"cmd/pilot/cmd/reconcile_golang_apply.go", "\tacquire, err := identityLockFor(", "\t_ = newGolangDialer(prep.target)\n\tacquire, err := identityLockFor(",
+			"takes the lock (identityLockFor) after newGolangDialer",
+		},
+		"the entry runner takes no Held": {
+			"cmd/pilot/cmd/reconcile_golang_apply.go", "func runGoAuthCacheEntry(ctx context.Context, held *identitylock.Held, root string,", "func runGoAuthCacheEntry(ctx context.Context, root string,",
+			"runGoAuthCacheEntry: runs the auth-cache entry playbook without taking a *identitylock.Held",
+		},
+		"the writer's caller takes no Held": {
+			"cmd/pilot/cmd/reconcile_golang_apply.go", "func runGolangApplyUnderLock(ctx context.Context, held *identitylock.Held, prep", "func runGolangApplyUnderLock(ctx context.Context, prep",
+			"runGolangApplyUnderLock: calls the Go writer (identityreconcile.Execute) without taking a *identitylock.Held",
+		},
+		"a new caller of the Go writer": {
+			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "func sneakyWrite(ctx context.Context, c *freeiparpc.Client) {\n\t_, _ = identityreconcile.Execute(ctx, c, identityreconcile.Options{})\n}\n\nvar accessReconcileEffects",
+			"sneakyWrite: calls identityreconcile.Execute but is not on the list of entry points",
+		},
+		"a new caller of the Go apply under the lock": {
+			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "func sneakyApply() {\n\t_, _ = runGolangApplyUnderLock(ctx, held, prep, d, cmd, rt, t)\n}\n\nvar accessReconcileEffects",
+			"sneakyApply: calls runGolangApplyUnderLock but is not on the list of entry points",
 		},
 		"a new unlisted literal": {
 			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "var sneakyPlaybook = \"playbooks/apply/freeipa-identity-apply.yml\"\n\nvar accessReconcileEffects",

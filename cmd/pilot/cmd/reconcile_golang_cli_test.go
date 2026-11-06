@@ -55,6 +55,13 @@ func resetReconcileFlags() {
 // tree, in the workspace and data directory the test set up.
 func runReconcileCLI(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	return runReconcileCLIContext(t, context.Background(), args...)
+}
+
+// runReconcileCLIContext is runReconcileCLI under ctx: the context the command's signal context
+// is derived from, so cancelling it is the first Ctrl-C.
+func runReconcileCLIContext(t *testing.T, ctx context.Context, args ...string) (string, error) {
+	t.Helper()
 	before := dataDir
 	resetReconcileFlags()
 	t.Cleanup(func() {
@@ -70,7 +77,7 @@ func runReconcileCLI(t *testing.T, args ...string) (string, error) {
 	rootCmd.SetArgs(append([]string{"reconcile"}, args...))
 	rootCmd.SetOut(&out)
 	rootCmd.SetErr(&out)
-	err := rootCmd.ExecuteContext(context.Background())
+	err := rootCmd.ExecuteContext(ctx)
 	return out.String(), err
 }
 
@@ -211,9 +218,16 @@ func TestReconcileGolangFlagMatrix(t *testing.T) {
 		gate string
 		want string
 	}{
-		{name: "golang without --preview-only", args: []string{"--engine", "golang", "--component", "freeipa-identity"}, gate: "engine-preview-only,entry-engine-flags", want: "目前只提供預覽"},
-		{name: "golang with --preview-only and --force", args: previewArgs("--force"), gate: "engine-preview-only", want: "目前只提供預覽"},
-		{name: "golang with --force only", args: []string{"--engine", "golang", "--force", "--component", "freeipa-identity"}, gate: "engine-preview-only", want: "目前只提供預覽"},
+		{name: "golang without --preview-only or --force", args: []string{"--engine", "golang", "--component", "freeipa-identity"}, gate: "engine-preview-only,entry-engine-flags", want: "不支援互動"},
+		{name: "golang with --preview-only and --force", args: previewArgs("--force", "--scope", "users-groups"), gate: "ansible-force-and-preview-only", want: "--force 不能與 --preview-only 同時使用"},
+		{name: "golang with --force and no --scope", args: []string{"--engine", "golang", "--force", "--component", "freeipa-identity"}, gate: "engine-scope-required", want: "需要 --scope"},
+		{name: "golang with an unknown --scope", args: []string{"--engine", "golang", "--force", "--scope", "everything", "--component", "freeipa-identity"}, gate: "engine-scope-value", want: "--scope 只能是"},
+		{name: "golang with --scope full, not yet", args: []string{"--engine", "golang", "--force", "--scope", "full", "--component", "freeipa-identity"}, gate: "engine-scope-full", want: "還沒有提供"},
+		{name: "golang preview with --scope full, not yet", args: previewArgs("--scope", "full"), gate: "engine-scope-full", want: "還沒有提供"},
+		{name: "--scope without golang", args: []string{"--preview-only", "--component", "freeipa-identity", "--scope", "users-groups"}, gate: "engine-scope", want: "--scope 只能與 --engine golang"},
+		{name: "--result-out without golang", args: []string{"--force", "--component", "freeipa-identity", "--result-out", "r.json"}, gate: "engine-result-out", want: "--result-out 只能與 --engine golang"},
+		{name: "--result-out of a preview", args: previewArgs("--result-out", "r.json"), gate: "engine-result-out-needs-force", want: "只能與 --force"},
+		{name: "--plan-out of an apply", args: []string{"--engine", "golang", "--force", "--scope", "users-groups", "--component", "freeipa-identity", "--plan-out", "p.json"}, gate: "engine-plan-out-with-force", want: "--result-out"},
 		{name: "golang without --component", args: []string{"--engine", "golang", "--preview-only"}, gate: "engine-component", want: "只處理 --component freeipa-identity"},
 		{name: "golang with another component", args: []string{"--engine", "golang", "--preview-only", "--component", "dns"}, gate: "engine-component", want: "只處理 --component freeipa-identity"},
 		{name: "golang with two components", args: previewArgs("--component", "dns"), gate: "engine-component", want: "只處理 --component freeipa-identity"},
@@ -261,24 +275,24 @@ func TestReconcileGolangPlanOutIsCheckedFirst(t *testing.T) {
 		// plan returns the --plan-out argument, given the workspace.
 		plan func(t *testing.T, dir string) string
 	}{
-		{name: "the file exists", gate: "plan-out-exists", want: "已存在；不覆寫", plan: func(t *testing.T, dir string) string {
+		{name: "the file exists", gate: "output-exists,preview-plan-out", want: "已存在；不覆寫", plan: func(t *testing.T, dir string) string {
 			path := filepath.Join(dir, "p.json")
 			if err := os.WriteFile(path, []byte("keep"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			return path
 		}},
-		{name: "the file is a dangling symlink", gate: "plan-out-exists", want: "已存在；不覆寫", plan: func(t *testing.T, dir string) string {
+		{name: "the file is a dangling symlink", gate: "output-exists", want: "已存在；不覆寫", plan: func(t *testing.T, dir string) string {
 			path := filepath.Join(dir, "p.json")
 			if err := os.Symlink(filepath.Join(dir, "nowhere"), path); err != nil {
 				t.Fatal(err)
 			}
 			return path
 		}},
-		{name: "its directory does not exist", gate: "plan-out-dir", want: "上層目錄", plan: func(t *testing.T, dir string) string {
+		{name: "its directory does not exist", gate: "output-dir", want: "上層目錄", plan: func(t *testing.T, dir string) string {
 			return filepath.Join(dir, "missing", "p.json")
 		}},
-		{name: "its directory is a file", gate: "plan-out-dir", want: "不存在或不是目錄", plan: func(t *testing.T, dir string) string {
+		{name: "its directory is a file", gate: "output-dir", want: "不存在或不是目錄", plan: func(t *testing.T, dir string) string {
 			parent := filepath.Join(dir, "afile")
 			if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
@@ -325,7 +339,7 @@ func TestReconcileGolangWorkspaceFailures(t *testing.T) {
 			writePrivateFile(t, blocker, "a file where the data directory would go")
 			dataDir = filepath.Join(blocker, "data")
 		}},
-		{name: "ansible-inventory fails", gate: "ansible-inventory", want: "ansible-inventory --list", setup: func(t *testing.T, _ string) {
+		{name: "ansible-inventory fails", gate: "ansible-inventory,preview-preflight", want: "ansible-inventory --list", setup: func(t *testing.T, _ string) {
 			fakeTool(t, "ansible-inventory", "echo '[ERROR]: synthetic inventory failure' >&2\nexit 1")
 		}},
 		{name: "a plaintext secret in group_vars is refused before ansible-inventory runs", gate: "ansible-inventory", want: "ipa_admin_password", setup: func(t *testing.T, dir string) {
@@ -538,7 +552,7 @@ func TestReconcileGolangSessionAndObserveFailures(t *testing.T) {
 		paths   []string // the request paths in order, when nothing is answered as JSON-RPC (nil: none)
 		methods []string // the JSON-RPC methods answered, in order, ending with the logout when there was a session
 	}{
-		{name: "the FQDN cannot be read", gate: "fqdn-read",
+		{name: "the FQDN cannot be read", gate: "fqdn-read,preview-connect",
 			fault: func() { golangDialerFaults.fqdnErr = errors.New("synthetic hostname -f failure") },
 			want:  []string{"讀取 ipa-1 的 FQDN", "synthetic hostname -f failure"}},
 		{name: "the IPA CA cannot be read", gate: "ca-read",
@@ -652,27 +666,27 @@ func TestReconcileGolangPlanOutcomes(t *testing.T) {
 		gate string
 		run  func(t *testing.T)
 	}{
-		{name: "a plan file that appears mid-run is kept", gate: "plan-write,plan-open", run: func(t *testing.T) {
+		{name: "the plan file is created before anything is read and removed when no plan is written", gate: "client-new", run: func(t *testing.T) {
 			f := newFakeIPA(t, "p1-self")
 			withFakeDialer(t, f)
 			dir := golangWorkspace(t, strings.Replace(captureRoster, "%s", "/bin/sh", 1), nil)
 			plan := filepath.Join(dir, "p.json")
 			prev := newGolangIPAClient
 			t.Cleanup(func() { newGolangIPAClient = prev })
+			existedWhenTheClientWasBuilt := false
 			newGolangIPAClient = func(cfg freeiparpc.Config) (*freeiparpc.Client, error) {
-				writePrivateFile(t, plan, "keep")
-				return prev(cfg)
+				info, serr := os.Stat(plan)
+				existedWhenTheClientWasBuilt = serr == nil && info.Mode().Perm() == 0o600 && info.Size() == 0
+				return nil, errors.New("the client could not be built")
 			}
 			out, err := runReconcileCLI(t, previewArgs("--plan-out", plan)...)
-			if err == nil || !strings.Contains(err.Error(), "--plan-out:") || processExitCode(err) != 1 {
+			if err == nil || !strings.Contains(err.Error(), "the client could not be built") || processExitCode(err) != 1 {
 				t.Fatalf("err = %v (exit %d)\n%s", err, processExitCode(err), out)
 			}
-			if data, _ := os.ReadFile(plan); string(data) != "keep" {
-				t.Fatalf("the plan replaced a file that appeared mid-run: %q", data)
+			if !existedWhenTheClientWasBuilt {
+				t.Fatal("the --plan-out file was not there, empty and 0600, when the run went on to connect: it is created before anything is read")
 			}
-			if strings.Contains(out, "plan JSON：") {
-				t.Fatalf("announced a plan file it did not write:\n%s", out)
-			}
+			noPlan(t, plan)
 			assertNoSecretAnywhere(t, err, out, plan)
 		}},
 		{name: "a client that sent a write has no plan to show", gate: "writes-guard", run: func(t *testing.T) {

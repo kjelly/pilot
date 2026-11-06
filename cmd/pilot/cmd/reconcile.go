@@ -28,6 +28,26 @@ var (
 // reconcileStdinIsTerminal is a variable so tests can simulate a missing TTY.
 var reconcileStdinIsTerminal = func() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 
+// golangEngineHelp is what pilot reconcile --help says of --engine golang: one text, since
+// the exit codes and the webhook reading are what an operator or a subscriber has to know
+// before the first --force (spec §6.2, §6.3, §8.6).
+const golangEngineHelp = `--engine golang --component freeipa-identity 只處理 roster 的使用者與群組(其餘 section
+仍由 Ansible engine 處理)：
+  --preview-only            唯讀預覽，不取鎖、不寫入；--scope 預設 users-groups，--plan-out 存 plan。
+  --force --scope users-groups   套用。不執行任何 playbook：取得 FreeIPA server 的 /etc/ipa 鎖，
+                            有寫入時先經入口 playbook 記下「授權快取義務」，再由 Go 寫入並重讀驗證；
+                            --result-out 存這一輪的結果(plan、逐項結果、驗證、義務)，--lock-wait 設
+                            等鎖的時間。
+結束碼：0 成功(全部完成並驗證，且沒有義務未結清)；1 失敗(含結果不明、部分套用)；3 plan 有被阻擋的
+物件(零寫入)；4 每個 Go 操作都已完成並驗證，只剩授權快取義務未結清。
+義務未結清是 users-groups scope 有寫入就會有的結果：它不執行 playbook，client 在 SSSD 快取過期前可能
+仍沿用舊授權；下一次選到 identity 或 client-cache 的 apply 或完整 apply 會刷新所有 enrolled client
+(ipa_identity_refresh_sssd_cache 為 false 時要先改回 true)。這一輪對外的 operation.result 因此是
+failure(failure.class verify_failed，application_consistency partial_or_unknown，沒有 confirmed_effects)：
+訂閱 webhook 的人要用 run 的 metadata(engine、scope)與 identity.auth_cache 事件解讀，不能當成「identity
+同步失敗」。只有沒有寫入、探測讀到沒有義務的一輪才是 success。鎖只約束 pilot 自己的程式碼路徑，
+手動執行的 ansible-playbook 不受它約束。`
+
 // reconcileCmd is the day-2 counterpart to deploy: it intentionally lists
 // only catalog entries whose apply playbook declares a declarative reconcile
 // capability. A future nginx-config entry must first have its own contract,
@@ -39,6 +59,8 @@ var reconcileCmd = &cobra.Command{
 
 它沿用 pilot deploy 的 contract、preflight、stage gate、preview 與確認流程，
 但只列出明確標示為 day-2 reconciler 的元件；不會重新執行全站部署。
+
+` + golangEngineHelp + `
 
 ` + identityLockDeployHelp,
 	Args: cobra.NoArgs,
@@ -57,15 +79,17 @@ func init() {
 	reconcileCmd.Flags().BoolVar(&reconcilePreviewOnlyFlag, "preview-only", false, "不顯示互動提示：各欄位採用預設值，只預覽(--check --diff)計畫中的每一支 playbook，全部不套用；每一支都實際預覽通過才以結束碼 0 結束(目標主機全部是無法連線的 optional 主機而延後的 playbook 算沒有預覽)；需要 --component")
 	reconcileCmd.Flags().StringVar(&limitFlag, "limit", "", "只對這些主機(或 Ansible 的主機樣式)執行，等同回答「要限定只套用到某台主機嗎？」；--force/--preview-only 也適用")
 	reconcileCmd.Flags().StringVar(&stageFlag, "stage", "", "直接指定 stage(sandbox、staging、prod)，不再詢問；在指令列指定 staging/prod 即視為確認；--force/--preview-only 沒帶 --stage 時一律是 sandbox")
-	reconcileCmd.Flags().StringVar(&reconcileEngineFlag, "engine", reconcileEngineAnsible, "調和引擎：ansible(預設)或 golang。golang 目前只能與 --preview-only --component freeipa-identity 一起使用，唯讀預覽使用者與群組，不寫入 FreeIPA")
-	reconcileCmd.Flags().StringVar(&reconcilePlanOutFlag, "plan-out", "", "--engine golang：把 plan JSON 寫到這個新檔案(0600，已存在時拒絕)")
+	reconcileCmd.Flags().StringVar(&reconcileEngineFlag, "engine", reconcileEngineAnsible, "調和引擎：ansible(預設)或 golang。golang 只能與 --component freeipa-identity 一起使用，處理使用者與群組：--preview-only 唯讀預覽，--force --scope users-groups 套用(不執行 playbook；授權快取義務未結清時結束碼 4，見 pilot reconcile --help)")
+	reconcileCmd.Flags().StringVar(&reconcilePlanOutFlag, "plan-out", "", "--engine golang --preview-only：把 plan JSON 寫到這個新檔案(0600，已存在時拒絕；寫入失敗時移除)")
+	reconcileCmd.Flags().StringVar(&reconcileScopeFlag, "scope", "", "--engine golang：users-groups(只有使用者與群組，不執行 playbook)。--force 必填；--preview-only 預設 users-groups。full(混合執行)還沒有提供")
+	reconcileCmd.Flags().StringVar(&reconcileResultOutFlag, "result-out", "", "--engine golang --force：把這一輪的結果(pilot.identity-apply/v1：plan、逐項結果、驗證、授權快取義務)寫到這個新檔案(0600；已存在時在任何寫入之前拒絕；沒有進到第一次讀取的失敗不寫，寫入失敗時移除)")
 	reconcileCmd.Flags().StringVar(&reconcileLockWaitFlag, "lock-wait", "", "套用 freeipa-identity 前，FreeIPA server 的 /etc/ipa 鎖被另一輪執行持有時最多等多久(Go duration，例如 30m；0 表示忙碌就立即失敗；預設 30m，約一輪完整 identity 執行的時間)；預覽不持鎖，與 --preview-only 同用會被拒絕。鎖只約束 pilot 自己的程式碼路徑，手動執行的 ansible-playbook 不受它約束")
 	reconcileCmd.Flags().StringVar(&stagingAttestedHoursFlag, "staging-attested-within-hours", "", "--stage prod 必填：上次 staging 驗證距今幾小時(0-168)")
 	rootCmd.AddCommand(reconcileCmd)
 }
 
 func runReconcile(cmd *cobra.Command, _ []string) error {
-	if err := validateReconcileEngineFlags(reconcileEngineFlag, reconcilePreviewOnlyFlag, reconcileForceFlag, reconcileComponentFlags, reconcileActionsPath, reconcilePlanOutFlag); err != nil {
+	if err := validateReconcileEngineFlags(reconcileEngineFlag, reconcilePreviewOnlyFlag, reconcileForceFlag, reconcileComponentFlags, reconcileActionsPath, reconcilePlanOutFlag, reconcileScopeFlag, reconcileResultOutFlag); err != nil {
 		return err // gate: entry-engine-flags
 	}
 	if reconcileForceFlag && reconcilePreviewOnlyFlag {
@@ -93,6 +117,9 @@ func runReconcile(cmd *cobra.Command, _ []string) error {
 		return runStandalonePromptWorkflow(cmd, "reconcile", reconcileActionsPath, reconcilePresentation, reconcileTracePath) // gate: ansible-actions-dispatch
 	}
 	if reconcileEngineFlag == reconcileEngineGolang {
+		if reconcileForceFlag {
+			return runReconcileGolangApply(cmd) // gate: entry-golang-apply-dispatch
+		}
 		return runReconcileGolangPreview(cmd) // gate: entry-golang-dispatch
 	}
 	if (reconcileForceFlag || reconcilePreviewOnlyFlag) && len(reconcileComponentFlags) == 0 {
