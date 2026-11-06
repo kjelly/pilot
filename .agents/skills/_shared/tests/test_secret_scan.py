@@ -447,13 +447,6 @@ class History(RangeFixture):
         self.r.commit("binary")
         self.assertClean(self.scan())
 
-    def test_a_very_long_line_is_scanned_in_windows(self):
-        token = fx.mixed(40)
-        line = "x" * (scan.LINE_WINDOW + 500) + f" Authorization: Bearer {token}\n"
-        self.r.write("long.txt", line)
-        self.r.commit("long line")
-        self.assertEqual([(scan.AUTHORIZATION, "long.txt")], self.classes(self.scan()))
-
     def test_an_empty_range_is_clean(self):
         result = scan.scan_range(self.r.path, self.base, self.base)
         self.assertClean(result)
@@ -463,6 +456,166 @@ class History(RangeFixture):
         self.r.write("data.txt", "".join(f"{fx.mixed(40)} {i}\n" for i in range(500)))
         self.r.commit("lots of random-looking lines, no secret class")
         self.assertClean(self.scan())
+
+
+class LongLines(RangeFixture):
+    """A diff line longer than one window (scan.LINE_WINDOW) is read in windows. What lies past the first
+    window must be seen even when that line is the only or the last added line of its hunk: the hunk's
+    counters reach zero with the first window, the line goes on."""
+
+    def filler(self, length: int) -> str:
+        # Words and spaces: no trigger word and, unlike a run of `x`, not a bare base64 line, so a window
+        # of it is silent. Only the secret (or its absence) decides what the scan reports.
+        return ("lorem ipsum dolor " * (length // 18 + 1))[:length]
+
+    def first_window(self, body: str, *, parents: int = 1) -> bytes:
+        """The bytes of the first window of the diff line `+body` (prefix included)."""
+        return ("+" * parents + body).encode()[:scan.LINE_WINDOW]
+
+    def commit_body(self, body: str, name: str = "long.txt", *, newline: bool = True) -> str:
+        self.r.write(name, body + ("\n" if newline else ""))
+        return self.r.commit("a long line")
+
+    # -- a header class past the first window ------------------------------------------------------
+
+    def test_a_header_past_the_first_window_of_the_only_added_line_is_found(self):
+        token = fx.mixed(40)
+        words = self.filler(scan.LINE_WINDOW + 5000)
+        body = words + f" Authorization: Bearer {token}"
+        self.assertIsNone(scan._TRIGGER.search(self.first_window(body)), "premise: the first window is silent")
+        self.assertGreater(len(body), scan.LINE_WINDOW, "premise: the line needs more than one window")
+        leak = self.commit_body(body)
+        result = self.scan()
+        self.assertEqual([(scan.AUTHORIZATION, "long.txt")], self.classes(result))
+        self.assertEqual(leak, result.findings[0].commit)
+        self.assertEqual(1, result.findings[0].line)
+        self.assertNotIn(token, self.dump(result))
+        # Control: the same long line with a placeholder is clean.
+        self.r.git("switch", "-q", "-c", "control", self.base)
+        self.commit_body(words + " Authorization: Bearer <redacted>")
+        self.assertClean(self.scan())
+
+    def test_the_same_secret_is_found_wherever_the_long_line_sits_in_its_hunk(self):
+        token = fx.mixed(40)
+        body = self.filler(scan.LINE_WINDOW + 777) + f" Authorization: Bearer {token}"
+        short = f"Cookie: sid={fx.mixed(40)}"
+        for name, lines in {"only line": [body], "last of several": ["alpha", "beta", body],
+                            "no newline at end of file": [body],
+                            "followed by another file": [body]}.items():
+            with self.subTest(name=name):
+                self.setUp()
+                text = "\n".join(lines) + ("" if name == "no newline at end of file" else "\n")
+                self.r.write("long.txt", text)
+                if name == "followed by another file":
+                    self.r.write("zzz-after.txt", short + "\n")
+                leak = self.r.commit("long line")
+                result = self.scan()
+                expected = [(scan.AUTHORIZATION, "long.txt")]
+                if name == "followed by another file":
+                    expected = sorted(expected + [(scan.COOKIE, "zzz-after.txt")])
+                self.assertEqual(expected, self.classes(result))
+                self.assertEqual({leak}, {f.commit for f in result.findings})
+                self.assertEqual(len(lines), next(f.line for f in result.findings if f.path == "long.txt"))
+
+    def test_lines_after_a_long_one_keep_their_numbers_and_a_second_hunk_is_still_parsed(self):
+        cookie = f"Cookie: sid={fx.mixed(40)}"
+        self.r.write("m.txt", "keep one\nold two\nkeep three\nold four\nkeep five\n")
+        self.r.commit("a file with two spots to change")
+        before = self.r.out("rev-parse", "HEAD")
+        body = self.filler(scan.LINE_WINDOW + 100) + f" Authorization: Bearer {fx.mixed(40)}"
+        self.r.write("m.txt", f"keep one\n{body}\nkeep three\n{cookie}\nkeep five\n")
+        self.r.commit("two hunks, the first one ends with a long line")
+        result = self.scan(base=before)
+        self.assertEqual({(scan.AUTHORIZATION, 2), (scan.COOKIE, 4)}, {(f.cls, f.line) for f in result.findings})
+        self.assertEqual([], result.errors)
+
+    def test_the_tail_of_a_removed_long_line_is_not_this_commits(self):
+        body = self.filler(scan.LINE_WINDOW + 500) + f" Authorization: Bearer {fx.mixed(40)}"
+        leak = self.commit_body(body)
+        self.assertEqual("FOUND", self.scan().status, "premise: the commit that adds it is found")
+        self.r.write("long.txt", "short\n")
+        self.r.commit("remove the long line")
+        self.assertClean(self.scan(base=leak))
+
+    # -- known values past and across the window boundary ------------------------------------------
+
+    def straddling(self, value: str, inside_first: int) -> str:
+        """A body whose first window ends `inside_first` bytes into `value`."""
+        offset = scan.LINE_WINDOW - 1 - inside_first
+        body = self.filler(offset) + value + self.filler(4000)
+        line = ("+" + body).encode()
+        self.assertNotIn(value.encode(), line[:scan.LINE_WINDOW], "premise: the first window lacks the whole value")
+        self.assertNotIn(value.encode(), line[scan.LINE_WINDOW:], "premise: the second window lacks the whole value")
+        self.assertIn(value.encode(), line)
+        return body
+
+    def test_a_known_value_past_the_first_window_is_found(self):
+        value = fx.mixed(24)
+        body = self.filler(scan.LINE_WINDOW + 3000) + f" {value} " + self.filler(100)
+        self.assertNotIn(value.encode(), self.first_window(body))
+        self.assertIsNone(scan._TRIGGER.search(self.first_window(body)), "premise: nothing but the value matters")
+        leak = self.commit_body(body)
+        result = self.scan(known=[value.encode()])
+        self.assertEqual([(scan.KNOWN_VALUE, "long.txt")], self.classes(result))
+        self.assertEqual(leak, result.findings[0].commit)
+        self.assertNotIn(value, self.dump(result))
+        # Controls: the same history without that value on the list, and a different value on it.
+        self.assertClean(self.scan())
+        self.assertClean(self.scan(known=[fx.mixed(24).encode()]))
+
+    def test_a_known_value_split_across_two_windows_is_found(self):
+        value = fx.mixed(24)
+        for inside_first in (1, len(value) // 2, len(value) - 1):
+            with self.subTest(inside_first=inside_first):
+                self.setUp()
+                self.commit_body(self.straddling(value, inside_first))
+                result = self.scan(known=[value.encode()])
+                self.assertEqual([(scan.KNOWN_VALUE, "long.txt")], self.classes(result))
+                self.assertClean(self.scan())
+
+    def test_a_known_value_longer_than_the_default_overlap_is_found_when_split(self):
+        value = fx.mixed(3 * scan.WINDOW_OVERLAP)
+        self.assertGreater(len(value), scan.WINDOW_OVERLAP + 1)
+        self.commit_body(self.straddling(value, len(value) // 2))
+        self.assertEqual([(scan.KNOWN_VALUE, "long.txt")], self.classes(self.scan(known=[value.encode()])))
+        # Control: another value of that length, split the same way, is not reported.
+        self.assertClean(self.scan(known=[fx.mixed(len(value)).encode()]))
+
+    def test_a_value_that_is_too_long_to_window_is_refused(self):
+        too_long = b"k" * (scan.MAX_KNOWN_LENGTH + 1)
+        self.r.write("a.txt", "a\n")
+        self.r.commit("a")
+        result = self.scan(known=[too_long])
+        self.assertEqual("ERROR", result.status)
+        self.assertNotIn("k" * 20, self.dump(result))
+        self.assertClean(self.scan(known=[b"k" * scan.MAX_KNOWN_LENGTH]))
+
+    # -- the work stays bounded --------------------------------------------------------------------
+
+    def test_trigger_text_of_a_file_too_large_to_read_back_is_judged_in_batches(self):
+        # Small windows make the large-file path cheap: a 150 KiB line is several windows, and a file
+        # past MAX_CONTEXT_BYTES is judged from its trigger windows instead of from the whole blob.
+        seen: list[int] = []
+        original = scan._Collector.window
+
+        def watch(collector, body, number):
+            original(collector, body, number)
+            seen.append(collector.trigger_bytes)
+
+        words = lambda n: ("lorem ipsum cookie dolor " * (n // 25 + 1))[:n]  # noqa: E731  (a trigger word in every window)
+        lines = [words(70_000) + f" Authorization: Bearer {fx.mixed(40)}" + words(70_000)]
+        lines += [words(150_000) for _ in range(6)]
+        lines += [words(140_000) + f" Cookie: sid={fx.mixed(40)}"]
+        self.r.write("big.txt", "\n".join(lines) + "\n")
+        self.r.commit("a large file")
+        limits = {"LINE_WINDOW": 64 << 10, "MAX_CONTEXT_BYTES": 256 << 10, "MAX_TRIGGER_BYTES": 400 << 10}
+        with mock.patch.multiple(scan, **limits), mock.patch.object(scan._Collector, "window", watch):
+            result = self.scan()
+        self.assertEqual([], result.errors)
+        self.assertEqual([(scan.AUTHORIZATION, "big.txt"), (scan.COOKIE, "big.txt")], self.classes(result))
+        # The first secret was judged when a batch was dropped, the last one at the end of the file.
+        self.assertLessEqual(max(seen), limits["MAX_TRIGGER_BYTES"] + limits["LINE_WINDOW"] + scan.WINDOW_OVERLAP)
+        self.assertGreater(len(seen), 8, "premise: the file went through several windows")
 
 
 class KnownValues(RangeFixture):

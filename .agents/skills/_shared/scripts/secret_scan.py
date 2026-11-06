@@ -61,7 +61,9 @@ PLACEHOLDER = "AAAAAAAAAAAAAAAAAAAAAA=="
 MIN_KNOWN_LENGTH = 8
 MAX_CONTEXT_BYTES = 16 << 20     # a file larger than this is judged on its added trigger lines only
 LINE_WINDOW = 2 << 20            # a diff line longer than this is read in windows
-WINDOW_OVERLAP = 4096
+WINDOW_OVERLAP = 4096            # bytes of the previous window that the next one starts with
+MAX_KNOWN_LENGTH = 1 << 16       # a --secret-file value longer than this is refused (windows overlap by its length)
+MAX_TRIGGER_BYTES = 2 * MAX_CONTEXT_BYTES  # trigger text kept per file before it is judged and dropped
 MAX_LISTED = 12                  # findings spelled out in a gate message
 MAX_REPORTED = 500               # findings kept in a result
 
@@ -379,9 +381,10 @@ def scan_text(path: str, text: bytes | str, added_lines: Iterable[int] | None = 
 
 def load_secret_files(paths: Iterable[str | os.PathLike[str]], worktree: str | os.PathLike[str] | None) -> list[bytes]:
     """The values in --secret-file files (one per line; read as bytes, one trailing CR stripped,
-    blank lines ignored). A file must be a regular file outside the repository, and a value shorter
-    than 8 bytes is refused: such a value would match half of the repository. Errors name the file
-    and line number, never a value."""
+    blank lines ignored). A file must be a regular file outside the repository, a value shorter
+    than 8 bytes is refused (it would match half of the repository) and so is one longer than 64 KiB
+    (a very long added line is read in windows that overlap by the longest value, so that a value
+    split across two windows is still found). Errors name the file and line number, never a value."""
     root = Path(os.path.realpath(worktree)) if worktree is not None else None
     values: list[bytes] = []
     for raw in paths:
@@ -408,6 +411,9 @@ def load_secret_files(paths: Iterable[str | os.PathLike[str]], worktree: str | o
             if len(line) < MIN_KNOWN_LENGTH:
                 raise SecretScanError(f"secret file {name} line {number}: a value shorter than "
                                       f"{MIN_KNOWN_LENGTH} bytes would match ordinary text; refusing it")
+            if len(line) > MAX_KNOWN_LENGTH:
+                raise SecretScanError(f"secret file {name} line {number}: a value longer than "
+                                      f"{MAX_KNOWN_LENGTH} bytes is not a credential this scan can window; refusing it")
             values.append(line)
     return list(dict.fromkeys(values))
 
@@ -508,9 +514,11 @@ class _CatFile:
         self.proc = subprocess.Popen(_git_base(repo) + ["cat-file", "--batch"], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=_git_env())
 
-    def read(self, spec: str, *, limit: int = MAX_CONTEXT_BYTES) -> tuple[str, bytes | None]:
-        """(type, content); content is None when the object is missing or larger than `limit`."""
+    def read(self, spec: str, *, limit: int | None = None) -> tuple[str, bytes | None]:
+        """(type, content); content is None when the object is missing or larger than `limit`
+        (MAX_CONTEXT_BYTES unless given)."""
         assert self.proc.stdin is not None and self.proc.stdout is not None
+        limit = MAX_CONTEXT_BYTES if limit is None else limit
         if "\n" in spec or "\0" in spec:
             return "missing", None
         self.proc.stdin.write(spec.encode("utf-8", "surrogateescape") + b"\n")
@@ -631,8 +639,10 @@ class _Collector:
         self.known_lines: list[int] = []
         self.hunk: dict[str, Any] | None = None
         self.tail = b""
-        self.line_added = False
+        self.line_added = False   # the line being read (all of its windows) is an added line
         self.line_number = 0
+        self.trigger_bytes = 0
+        self.judged: dict[tuple[str, int], None] = {}
 
     def start_commit(self, sha: str) -> None:
         self.finish_file()
@@ -660,15 +670,10 @@ class _Collector:
         if new_count == 0 and not any(old_counts):
             self.hunk = None
 
-    def content_line(self, raw: bytes, continuation: bool) -> None:
-        """One line of the current hunk (already known to be inside one)."""
+    def content_line(self, raw: bytes) -> None:
+        """The first (or only) window of a line of the current hunk (already known to be inside one)."""
         hunk = self.hunk
         assert hunk is not None
-        if continuation:
-            if self.line_added:
-                self.window(self.tail + raw, self.line_number)
-                self.tail = raw[-WINDOW_OVERLAP:]
-            return
         n = hunk["parents"]
         if raw.startswith(b"\\"):
             return  # "\ No newline at end of file"
@@ -688,28 +693,58 @@ class _Collector:
             hunk["line"] += 1
         self.line_added = added
         self.line_number = number
-        self.tail = body[-WINDOW_OVERLAP:]
+        self.tail = body[-self.scan.overlap:]
         if added:
             self.added.append(number)
             self.window(body, number)
+        # The hunk may end with this line, but the line may go on in more windows: continue_line() does
+        # not depend on the hunk, so a secret past the first window of the last line is still read.
         if hunk["new"] <= 0 and not any(c > 0 for c in hunk["old"]):
             self.hunk = None
+
+    def continue_line(self, raw: bytes) -> None:
+        """A further window of the line being read. Only an added line's windows are examined, each
+        starting with the end of the previous one so that a value split across two is still seen."""
+        if not self.line_added:
+            return
+        data = self.tail + raw.rstrip(b"\n")
+        self.tail = data[-self.scan.overlap:]
+        self.window(data, self.line_number)
 
     def window(self, body: bytes, number: int) -> None:
         pattern = self.scan.known_pattern
         if pattern is not None and pattern.search(body):
             self.known_lines.append(number)
         if _TRIGGER.search(body):
-            self.trigger_lines.append((number, body[:LINE_WINDOW]))
+            self.trigger_lines.append((number, body))
+            self.trigger_bytes += len(body)
+            if self.trigger_bytes > MAX_TRIGGER_BYTES:
+                # Only a file that is too large to be read back whole gets here (the added text of one
+                # that can be is far smaller): judge what is held now and let it go, so memory stays bounded.
+                self.judged.update(self.judge_triggers(self.trigger_lines))
+                self.trigger_lines, self.trigger_bytes = [], 0
+
+    @staticmethod
+    def judge_triggers(triggers: list[tuple[int, bytes]]) -> dict[tuple[str, int], None]:
+        """Classify trigger windows on their own (one per line of the joined text)."""
+        hits: dict[tuple[str, int], None] = {}
+        if triggers:
+            joined = b"\n".join(body for _, body in triggers)
+            for first, last, cls in classify(joined):
+                index = min(max(first, 1), len(triggers)) - 1
+                hits[(cls, triggers[index][0])] = None
+        return hits
 
     def finish_file(self) -> None:
-        added, triggers, known_lines = self.added, self.trigger_lines, self.known_lines
+        added, triggers, known_lines, judged = self.added, self.trigger_lines, self.known_lines, self.judged
         path = self.path
-        self.added, self.trigger_lines, self.known_lines = [], [], []
+        self.added, self.trigger_lines, self.known_lines, self.judged = [], [], [], {}
+        self.trigger_bytes = 0
         self.hunk = None
+        self.line_added = False
         if path is None or not added:
             return
-        hits: dict[tuple[str, int], None] = {}
+        hits: dict[tuple[str, int], None] = dict(judged)
         for number in known_lines:
             hits[(KNOWN_VALUE, number)] = None
         if triggers:
@@ -724,10 +759,7 @@ class _Collector:
                     if line is not None:
                         hits[(cls, line)] = None
             else:
-                joined = b"\n".join(body for _, body in triggers)
-                for first, last, cls in classify(joined):
-                    index = min(max(first, 1), len(triggers)) - 1
-                    hits[(cls, triggers[index][0])] = None
+                hits.update(self.judge_triggers(triggers))
         for (cls, line) in hits:
             self.scan.add(self.commit, path, line, cls)
 
@@ -738,6 +770,9 @@ class _Scan:
         self.repo, self.base, self.head = repo, base, head
         self.known = list(known)
         self.known_pattern = _known_regex(self.known)
+        # A very long line is read in windows that share this many bytes: a known value is at most this
+        # long plus one, so one split across two windows still lies whole inside the second.
+        self.overlap = max(WINDOW_OVERLAP, max(map(len, self.known), default=0) - 1)
         self.exemption_arg = exemptions
         self.result = ScanResult(base=base, head=head, known_values=len(self.known))
         self.catfile: _CatFile
@@ -766,6 +801,10 @@ class _Scan:
         res = self.result
         if not Path(self.repo).is_dir():
             self.error(f"repository {self.repo} does not exist")
+            return res
+        if self.overlap >= MAX_KNOWN_LENGTH:
+            self.error(f"a supplied secret value is longer than {MAX_KNOWN_LENGTH} bytes; "
+                       "a scan cannot window a line around it")
             return res
         base = self._resolve(self.base, "base")
         head = self._resolve(self.head, "head")
@@ -849,10 +888,14 @@ class _Scan:
     def _consume(self, stream: Any) -> None:
         col = _Collector(self)
         for raw, continuation in _read_windows(stream):
-            if col.hunk is not None:
-                col.content_line(raw, continuation)
-                continue
             if continuation:
+                # The rest of a line longer than one window. Whether the hunk is still open does not
+                # matter: the last line of a hunk may be the long one, and its tail is still content.
+                col.continue_line(raw)
+                continue
+            col.line_added = False
+            if col.hunk is not None:
+                col.content_line(raw)
                 continue
             if raw.startswith(b"\x01C "):
                 sha = raw[3:].strip().decode("ascii", "replace")

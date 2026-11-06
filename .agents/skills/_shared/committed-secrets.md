@@ -102,7 +102,7 @@ that does not load, an unusable `--secret-file`) refuses; it never skips.
    Exit status 0 is clean, 1 means findings, 2 means the scan could not complete (for
    example a base commit you have not fetched). Anything but 0 stops the push.
 3. To look for the values you know of (the vault, generated lab passwords), put them one per line in a
-   file **outside** the repository (each at least 8 bytes), and add `--secret-file`. The scanner
+   file **outside** the repository (each between 8 bytes and 64 KiB), and add `--secret-file`. The scanner
    matches the bytes in added lines, commit messages and paths, and names a file and line, never the
    value. The gates take the same option. Do not type the value on a command line.
 
