@@ -223,7 +223,11 @@ func TestSelfLockoutAtEveryStageBoundary(t *testing.T) {
 		{"S8 editors deleted", base(), Desired{AbsentGroups: []string{"editors"}}, "would delete the group editors", "editors"},
 		{"S8 trust admins deleted", base(), Desired{AbsentGroups: []string{"trust admins"}}, "would delete the group trust admins", "trust admins"},
 		{"S8 another group deleted", base(), Desired{AbsentGroups: []string{"ops"}}, "", ""},
-		{"S8 a user that has the name of a protected group is deleted: it is a user, not the group", base(), Desired{AbsentUsers: []string{"editors"}}, "", ""},
+		{"S8 a user that has the name of a protected group is deleted: it is a user, not the group", func() liveState {
+			s := base()
+			s.users = append(s.users, lu("editors", false))
+			return s
+		}(), Desired{AbsentUsers: []string{"editors"}}, "", ""},
 		// S4: the login's own password.
 		{"S4 the login's own password reset", resetState,
 			Desired{Users: []DesiredUser{passwordUser(login, false)}},

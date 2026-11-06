@@ -270,9 +270,34 @@ func TestFromRosterWithFormsRecordsTheFormsAndFailsWithEitherStep(t *testing.T) 
 	if _, err := FromRosterWithForms(root, []byte("users: [")); err == nil {
 		t.Error("bytes that are not a roster were accepted")
 	}
+	// With no user to look for, the bytes are still the roster's and must be one.
+	if _, err := FromRosterWithForms(roster(t, "schema_version: 3\n"), []byte("users: [")); err == nil {
+		t.Error("bytes that are not a roster were accepted for a roster with no users")
+	}
 	if _, err := FromRosterWithForms(map[string]any{"users": "not a list"}, []byte(doc)); err == nil {
 		t.Error("a root that is not a roster was accepted")
 	}
 }
 
 var _ = freeiparpc.Command{}
+
+// The result file is made empty again before every run; when it cannot be, nothing
+// runs: a playbook handed a path that cannot be a new empty file could be read back as
+// whatever is there.
+func TestAuthCacheOutputRunDoesNotRunWhenTheFileCannotBeMadeEmpty(t *testing.T) {
+	out, err := NewAuthCacheOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := out.Close(); err != nil { // the directory is gone: the file cannot be made again
+		t.Fatal(err)
+	}
+	ran := false
+	_, err = out.Run(context.Background(), AuthCacheWant{Action: AuthCacheProbe, Host: "ipa-1", FQDN: testFQDN}, func(context.Context, string) (int, error) {
+		ran = true
+		return 0, nil
+	})
+	if err == nil || ran || !strings.Contains(err.Error(), "authorization cache result file") {
+		t.Fatalf("err = %v, ran %v", err, ran)
+	}
+}
