@@ -172,7 +172,7 @@ python3 "$SNAP/.agents/skills/pr-review-merge/scripts/review_gate.py" --repo OWN
 
 `--worktree` is the checkout that holds the PR's commits; add `--secret-file FILE` (outside the repository, one value per line, each 8+ bytes) to look for values you know of. Both are passed to the actor below as well.
 
-This command reads GitHub state and outputs structured JSON, no mutation. If the
+This command reads GitHub state and, for the secret scan, the local repository, and outputs structured JSON; no mutation. If the
 result is `MERGE` or `DRAFT`, first complete the shared contract's safe restore
 and verify the starting branch/SHA. Restore failure leaves the PR unchanged
 (WAITING). After restoration, rerun this live gate with the saved PR HEAD/Base
