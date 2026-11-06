@@ -1,6 +1,6 @@
 # Verification Spec — wazuh-fim（Wazuh agent：檔案完整性監控 FIM + auditd who-data）
 
-> 版本：v1.2
+> 版本：v1.4
 > 對齊規範：pilot 通用 config-only 服務規範；註冊目標為
 > `docs/verification/wazuh-manager.md`（Wazuh 中央伺服器），兩份 spec 搭配構成
 > 一組 Shape 3（agent+server）；`wazuh-manager.md` 再選填轉送至
@@ -27,6 +27,8 @@
 | `wazuh_manager_host` | 中央 Wazuh manager（`wazuh-manager` 角色）的 IP 或 FQDN；套用時會被 pin 進 `/etc/hosts` 的 `wazuh-manager` 別名，並用於 agent 註冊（`agent-auth`） | 否 | 空字串（不註冊） |
 | `wazuh_fim_directories` | FIM whodata 監控的目錄清單（list）；**可依主機覆寫**，讓不同主機監控不同路徑（例：web 主機加 `/var/www`，DB 主機加 `/etc/mysql`） | 否 | `["/etc", "/boot"]` |
 | `wazuh_repo_channel` | `packages.wazuh.com` apt repo 版本 channel | 否 | `4.x` |
+| `wazuh_version` | 選填共同 release；新安裝固定該版本，既有升級另需單次授權 | 否 | 未設定（保留相容既有 agent；新安裝採觀察到的 manager release，無 manager 時 4.14.1） |
+| `wazuh_manager_inventory_host` | 與 enrollment endpoint 精確對應、可 SSH 探測原生版本的 inventory host | 否 | inventory `wazuh-manager` group 唯一 host |
 
 > **`wazuh_manager_host` 選填**：跟 `audit-log-forwarding.md` 的 `siem_forward_host`
 > 同一個設計理由——manager 不一定先於 agent 存在。未提供時，apply 仍會安裝
@@ -60,9 +62,105 @@
 
 ## 2. Checklist
 
+### 版本與受控升級驗收契約（Issue #244）
+
+manager 的有效版本是相容性上限；repository 的最新版本不是部署目標。
+有 manager 時，套用前必須從 inventory 中明確對應的 manager 主機讀取有效版本；
+探測錯誤、模糊對應或已安裝 agent 較新，都必須在設定、註冊與重啟之前拒絕。
+一般套用保留相容的既有 agent；新安裝固定完整套件版本。
+共同目標 `wazuh_version` 選填；升級另需單次 `wazuh_upgrade=true` 授權。
+既有 agent 的版本變更還必須觀察到明確對應的 manager；省略 enrollment endpoint
+不能讓 row-only 套用繞過原有中央連線的相容性上限。無 manager 的一般保留與新安裝仍可使用。
+一般套用保留 Debian / RedHat family 支援，包含 Ubuntu 22.04；4.14.x agent
+升級目標為 4.14.9-1，禁止自動降級。升級平台驗收涵蓋 Ubuntu 24.04
+amd64 / AlmaLinux 9 x86_64，其他平台與 Ubuntu 22.04 的實跑範圍須由各自
+candidate evidence 明列，不能把程式相容性當作已完成實機驗證。
+
+先備妥可重裝的舊套件，再停止 agent 並冷備份 `/var/ossec`、enrollment key、
+設定與服務狀態；備份未驗證不得替換套件。失敗需恢復原套件、資料與服務，
+確認原 identity；恢復失敗不可報成功。未完成的持久交易阻止一般套用。
+舊套件 metadata 仍顯示相同版本時，回復也必須真正重新安裝留存的舊套件，
+不能讓 package module 的 already-present 成為省略回復的理由。Debian 的
+no-download reinstall 使用該留存檔的 native cache basename 與同一個 private
+cache directory，原生計畫不得順便設定其他 package；EL 同版本使用 reinstall，
+新版退回舊版使用 downgrade，兩者都沿用已驗證的 private policy／artifact。
+root-only 備份保留於 `/var/backups/pilot/wazuh`，不自動清除。
+受控交易只接受可由冷 tar 備份後刪除、重建的 layout：`/var/ossec` 必須是
+真實目錄，既有 `/etc/hosts` 與版本 pin 必須是 regular single-link file，全部
+祖先不得為 symlink。選取來源本身或其子樹有 mount（包含同裝置 bind mount）時，
+在 reserve 與停機之前拒絕；不支援刪除、重建 mount root。
+備份 store 可位於獨立的一般 filesystem，但不得有 subtree/bind ancestry、
+子 mount、或與來源互為實體 alias。來源 layout 在 staging、冷備份前與回復前重驗。
+檢查涵蓋所有選取樹的每個 lstat entry：內部 symlink 的完整解析目標必須留在
+capture set；每組 regular-file inode 的所有 hardlink 名稱都必須被捕捉。未知外部
+資料 alias、FIFO/device 或不完整 inode group 直接拒絕，不能只備份連結本身。
+元件的 `/etc/audit/plugins.d/af_wazuh.conf` 與 `/var/ossec/etc/af_wazuh.conf`
+是明列的共同 capture set，回復須重建並驗證原兩個名稱的 hardlink identity。
+live 外部 runtime 只支援已確認的 `/var/ossec/queue/sockets/audit`：記錄並保留
+該 socket 與三個真實祖先目錄的 device/inode/security metadata，以及 auditd、
+audisp listener 的 PID/start/exe/argv、boot 與 kernel audit settings。其他外部
+endpoint／writer 直接拒絕。回復時只 prune 其他 persistent objects；sealed archive
+不得置換 socket 或把祖先轉成 alias。套件替換、回復重播與原服務啟動後都重驗。
+boot／listener／anchor 改變時保留 journal 並拒絕自動回復，不猜測 HUP／respawn。
+啟用 audit plugin 卻缺少健康 endpoint 的舊主機，須先完成明確的前置修復。
+套件 staging 目錄及其祖先也須通過型別與 alias 檢查；留存套件只從精確的
+root-only transaction directory 使用，回復不寫回 global package cache。
+Debian 交易同時冷備份 `/usr/sbin/policy-rc.d` 的內容、metadata 或不存在狀態。
+安裝時的暫時101 hook 只在同 owner／phase 下生效；installer 返回後必須以 sealed
+原狀清理，並在 native 成功 proof 前驗證。若 audit boot／endpoint 已變而阻止
+資料回復，確認舊 installer 工作停止後，仍可獨立恢復這個 global hook；component
+journal 繼續保留失敗狀態。未知 foreign hook drift 必須拒絕覆寫。
+升級期間 agent 暫停收送事件。交易驗收必須有 candidate-bound target evidence；
+原 C1–C9 的成功不代表版本交易已被驗證。
+有保留 audit endpoint 的交易，提交還須觀察已安裝 binary 對應的實際 syscheck
+process、它與原 listener 的 connected stream 及原 kernel who-data watches。
+這些是本機提交條件，不等同事件送達；正式 candidate／失敗回復驗收另須在
+明示的測試 fixture 產生新 nonce，於 manager index 驗證新的 who-data event 與
+audit user/process attribution。產品流程不自行寫入任意操作者監控目錄來造事件。
+完成套用後，Debian 以 native dpkg／APT hold 防止 ordinary updater 漂移，
+保留 APT preference 作為額外限制；不宣稱 preference 能壓過外部更高 priority。
+EL 依賴啟用的全域 DNF versionlock plugin 與精確 owned rule，原生 resolving
+transaction 必須證明規則有效；其他 package 的 lock 不得被移除或停用。
+versionlock dependency 安裝屬一般準備，失敗的 Wazuh 升級不移除新引入的 dependency；
+升級原狀指的是準備完成後 admission 的套件、資料及 hold／lock／設定快照，
+不是整台主機回到 invocation 前。準備前記錄 plugin presence，遇 disabled、redirected、
+foreign Wazuh ownership，或尚未安裝 plugin 卻已有待啟用的 lock 規則時先拒絕。
+升級只對 Wazuh 使用同一份 fingerprinted private policy 與已驗證的留存套件；
+同版本有不同 authenticated payload hash、非官方 provider 或 unknown plugin context
+均拒絕。回復保留原 hold／owned-rule／foreign-rule／設定及不存在狀態。
+APT 的明示套件替換可能清除 hold，交易須重新設定並驗證 hold 後才可完成；
+不宣稱授權套件替換的每個瞬間都有 hold。
+持久升級交易只接受已安裝且已 enrolled 的 agent；新安裝維持一般 exact-version
+安裝與既有 enrollment retry 契約，不建立升級 journal，也不宣稱提供 fresh rollback。
+
+所有 Wazuh 套用（包含一般設定、新安裝、升級與回復）都在第一個主機 mutation
+與共享 coordinator copy 之前取得同一個 host-wide writer owner，涵蓋同主機
+central、agent 與 `/etc/hosts`，直到設定、服務、原生驗證及 rescue 結束才釋放。
+取得 owner 後重新讀取套件與 manager 事實，先前的讀取不能當成 mutation 授權。
+manager 版本讀取使用共享 reader lock，允許正常 fleet forks 同時觀察穩定版本；
+中央 writer 或未完成中央交易會拒絕外部讀取。同主機 agent writer 不變更中央版本，
+因此不阻止穩定 manager readers。尚未結束的 agent journal 只允許相同 owner
+執行指定階段的自身驗證。
+
+controller 被中斷時 writer marker 保留，即使是沒有升級 journal 的一般套用。
+操作者須先透過 writer-inspect 動作確認 owner 與 journal，確認前次 controller
+及遠端 package/Compose 工作都已停止，再以單次 `wazuh_writer_resume_owner`
+指定同一 UUID，並明示 `wazuh_confirm_previous_operation_stopped=true`。
+若有升級 journal，`wazuh_recovery_owner` 也必須是同一 owner；不可換 token、
+按 PID 猜測、等待 TTL 或強制刪掉未知 marker。沒有未完成 journal 時，一般失敗
+可在所有 mutator/rescue 結束後釋放 owner，之後依原 retry 契約重跑。
+回復舊版不存在的 pin 時，刪除及 parent directory fsync 必須先於 restored phase；
+重播與完成回復還須驗證 pin 的存在/不存在及內容。
+
+此 ownership 契約只協調本版 Wazuh entrypoints；其他角色的重疊維護、舊版
+controller 與外部 root 編輯仍需由操作者維持獨占資源時段，不能宣稱已自動隔離。
+受控套件交易的獨占時段也包含 apt/dnf 的自動更新工作；操作者須先讓它們停止，
+本流程不自動停用主機的 updater 排程。installing／recovering journal 涵蓋套件替換
+及重新建立 native guard 的間隔，中斷時只可同 owner 明確回復。
+
 | ID  | Category  | Check                                                                 | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|
-| C1  | package   | `wazuh-agent` 已安裝                                                   | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q wazuh-agent >/dev/null; else dpkg-query -W -f='${Status}\n' wazuh-agent 2>/dev/null | grep -qx 'install ok installed'; fi |
+| C1  | package   | `wazuh-agent` 已安裝                                                   | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q wazuh-agent >/dev/null; else dpkg-query -W -f='${Status}\n' wazuh-agent 2>/dev/null | grep -qxE '(install|hold) ok installed'; fi |
 | C2  | package   | `auditd`／EL `audit` 已安裝（who-data provider 依賴）                   | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q audit >/dev/null; else dpkg-query -W -f='${Status}\n' auditd 2>/dev/null | grep -qx 'install ok installed'; fi |
 | C3  | service   | `wazuh-agent.service` 為 active                                        | 0        | systemctl is-active wazuh-agent >/dev/null 2>&1; echo $? |
 | C4  | service   | `auditd.service` 為 active                                             | 0        | systemctl is-active auditd >/dev/null 2>&1; echo $? |
@@ -71,8 +169,9 @@
 | C7  | register  | `/etc/hosts` 已 pin `wazuh-manager` 別名                               | 0        | getent hosts wazuh-manager >/dev/null 2>&1; echo $? |
 | C8  | register  | `ossec.conf` 的 `<address>` 指向 `wazuh-manager` 別名                  | 0        | grep -qE '<address>wazuh-manager</address>' /var/ossec/etc/ossec.conf; echo $? |
 | C9  | register  | 已完成向 manager 註冊（`client.keys` 非空）                             | 0        | sh -c 'test -s /var/ossec/etc/client.keys && echo 0 || echo 1' |
+| C10 | functional | 套件與 native agent release 相同、exact package 受 pin 保護、服務 active、沒有未完成交易 | 0 | sh -c 'if test -f /etc/debian_version; then wazuh_family=Debian; elif test -f /etc/redhat-release; then wazuh_family=RedHat; else exit 1; fi; /usr/local/sbin/pilot-wazuh-transaction agent-verify --family "$wazuh_family" >/dev/null && echo 0 || echo 1' |
 
-> C1–C9 全部用**正邏輯 rc**（`; echo $?` 或原生 rc），C9 用
+> C1–C10 全部用**正邏輯 rc**（`; echo $?` 或原生 rc），C9 用
 > `sh -c '... && echo 0 || echo 1'` 讓外層指令恆回 0，避免「未註冊」的合法
 > FAIL 判定結果被 ansible ad-hoc 誤判成 task FAILED（見
 > `verification-spec-template.md` 陷阱 1）。
@@ -88,23 +187,30 @@
 > 本 spec，是跨主機 Shape 3 cross-check，做法見
 > `docs/runbooks/wazuh-fim.md` §4（在這台觸發變更、去 manager 讀 alerts 驗證、
 > 再去 log-server 讀檔驗證轉送）。
+> C10 的確切 shell 已在 disposable Ubuntu 24.04 與 AlmaLinux 9 的 4.14.1
+> native agent 上探測過；正式驗收須以各 candidate 的 target evidence 證明目前契約。
+> 此 row 驗證本機有效版本、pin 與可用性；manager 上限及遠端 identity 另由
+> apply 的跨主機 probe 與 topology evidence 驗證，不能由 C10 單獨推論。
+> 一般／fresh／既有主機的 C10-only 套用在 writer 內執行 stable agent-verify；
+> 版本交易以相同 native version、pin、active proof 加 identity／registry 驗證後
+> 才提交，不在 commit 後增加新的可失敗操作。獨立 verify 的 C10 另驗 idle state。
 
 ## 3. 證據收集
 
 - 工具：`go run ./cmd/pilot vm-target verify --name wazuh-fim docs/verification/wazuh-fim.md`
 - 輸出格式：`.verification/wazuh-fim-<UTC>.{ndjson,md}`
-- 預期 row 數：9（C1–C9）
+- 預期 row 數：10（C1–C10）
 
 ## 4. PASS / FAIL 規則
 
-- 全部 C1–C9 `status=pass` → **PASS**
+- 全部 C1–C10 `status=pass` → **PASS**
 - 任一 `status=fail` → **FAIL**，列出 fail id + actual + want
 
 ## 5. 例外與已知偏差
 
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
-| C7, C8, C9 | 這三條的前提是套用時提供了 `wazuh_manager_host`（見 §1.5，選填）。若 manager 尚未存在、套用時未帶這個變數，playbook 會跳過 `/etc/hosts` pin 與註冊，C7–C9 在 `pilot verify` 會回報 `fail`——這是**預期行為**，不是 bug：此時應只驗證 C1–C6（本機 FIM 規則 + 服務），待 manager 就緒、補跑一次 apply 帶上 `wazuh_manager_host` 後再驗全部 9 條 | 無 manager 的獨立部署 / manager 尚未就緒的過渡期 | 補上 `wazuh_manager_host` 並重新 apply 後即解除 |
+| C7, C8, C9 | 這三條的前提是套用時提供了 `wazuh_manager_host`（見 §1.5，選填）。若 manager 尚未存在、套用時未帶這個變數，playbook 會跳過 `/etc/hosts` pin 與註冊，C7–C9 在 `pilot verify` 會回報 `fail`——這是**預期行為**，不是 bug：此時應驗證 C1–C6 與 C10（本機 FIM 規則、服務與 native version/pin），待 manager 就緒、補跑一次 apply 帶上 `wazuh_manager_host` 後再驗全部 10 條 | 無 manager 的獨立部署 / manager 尚未就緒的過渡期 | 補上 `wazuh_manager_host` 並重新 apply 後即解除 |
 | C9 | 本 spec 只驗證「client.keys 非空」（agent 端已取得憑證），**不**驗證「manager 端也認得這把憑證、連線真的建立成功」——那需要去 manager 端跑 `agent_control -l` 或看 `wazuh-remoted` 的連線狀態，屬於跨主機 Shape 3 cross-check，做法見 `docs/runbooks/wazuh-fim.md` §4 | 所有環境 | 永久（設計如此，非暫時偏差） |
 | C5 | 只驗證「至少一個目錄設定 whodata」，不驗證特定站台實際監控的路徑清單是否符合預期（那是逐主機的 `wazuh_fim_directories` 設定責任，見 §1.5）；若要確保某台主機**一定**監控了某個特定路徑，需要另外針對該主機寫查核（例如部署後手動 `grep` 確認），不在本通用 spec 範圍內 | 所有環境 | 永久（設計如此，非暫時偏差） |
 | — | Enrollment 使用開放式註冊（manager 端 `use_password=no` 出廠預設），見 `wazuh-manager.md` §5 對應說明 | sandbox / demo | 正式站台上線前檢討 |
@@ -115,7 +221,7 @@
 
 | Spec ID | Apply task | 備註 |
 |---------|------------|------|
-| C1 | `add wazuh apt repo + GPG key` → `install wazuh-agent` | apt-only |
+| C1 | Debian APT／RedHat DNF repository + signed exact `wazuh-agent` install family | 共用 manager 相容性 gate；既有版本保留、明示升級及 native package protection |
 | C2 | `install auditd` | who-data provider=audit 的執行期依賴 |
 | C3 | `ensure wazuh-agent enabled+started` | 只在設定檔真的變更或剛完成註冊時才重啟 |
 | C4 | `ensure auditd enabled+started` | — |
@@ -126,7 +232,7 @@
 
 ## 7. SOP
 
-### 7.1 標準情境：manager 已存在（註冊啟用，驗證全部 9 條）
+### 7.1 標準情境：manager 已存在（註冊啟用，驗證全部 10 條）
 
 ```bash
 MANAGER_IP=$(go run ./cmd/pilot vm-target show-inventory --name wazuh-manager \
@@ -171,7 +277,7 @@ go run ./cmd/pilot vm-target exec --name wazuh-fim -- \
 ```bash
 go run ./cmd/pilot vm-target run --name wazuh-fim \
     playbooks/apply/wazuh-fim-apply.yml
-# verify 時 C7-C9 預期 fail（見 §5），只看 C1-C6 是否全 pass
+# verify 時 C7-C9 預期 fail（見 §5），檢查 C1-C6 與 C10 是否全 pass
 
 # 之後 manager 就緒：
 go run ./cmd/pilot vm-target run --name wazuh-fim \
@@ -183,6 +289,9 @@ go run ./cmd/pilot vm-target run --name wazuh-fim \
 > playbook 的 `hosts:` 預設 `wazuh-fim` 與該 host key 同名，不需要
 > `-e target_group=` override（同 `log-server.md`/`audit-log-forwarding.md` 的設計）。
 
+目前 candidate-bound 多平台／跨主機 actual-run 結果見
+[evidence](../evidence/wazuh-manager/LATEST.md)；本機 C10 不代替 agent transport 或實際 who-data event 驗收。
+
 ## 8. 變更紀錄
 
 | 日期 | 版本 | 變更 | 變更者 |
@@ -190,3 +299,4 @@ go run ./cmd/pilot vm-target run --name wazuh-fim \
 | 2026-07-06 | v1.0 | 初版：Wazuh agent FIM（`/etc`、`/boot` whodata）+ auditd who-data provider + 向 `wazuh-manager.md` 註冊 | sre |
 | 2026-07-06 | v1.1 | `wazuh_fim_directories` 改為可依主機覆寫的變數清單（不同主機可監控不同路徑），預設仍是 `["/etc", "/boot"]`；對應把 C5/C6（原本各自綁死 `/etc`/`/boot` 字面值）合併成單一「至少一個 whodata 目錄」的通用檢查，原 C7-C10 遞補成 C6-C9（row 數 10 → 9），見 §1.5、§2 的重排說明 | sre |
 | 2026-07-22 | v1.2 | C1/C2 package probe 改為 Ubuntu dpkg 與 EL rpm 雙平台；相同候選指令已在 Ubuntu 24.04 與 AlmaLinux 9 的目標 inventory 實跑通過 | sre |
+| 2026-11-04 | Issue #244 | 原生 installed/candidate 必須相容於實際 manager；fresh exact signed package、穩態 APT hold／DNF versionlock，明示升級保留 cold data/config、enrollment、audit endpoint 與同 owner recovery；C10 驗本機版本與 protection，完整鏈路另以 target evidence 驗收。 | sre |

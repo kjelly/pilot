@@ -8,6 +8,7 @@ playbooks:
   apply: playbooks/apply/wazuh-manager-apply.yml
 regressionTests:
   - internal/spec/wazuh_manager_regression_test.go
+  - internal/spec/wazuh_version_transaction_test.go
   - internal/spec/wazuh_alert_delivery_regression_test.go
   - internal/spec/wazuh_secret_output_regression_test.go
   - internal/spec/wazuh_rotation_acl_regression_test.go
@@ -34,6 +35,8 @@ groupVars:
   - {name: siem_relp_cert_pem, type: string, required: false, secret: false}
   - {name: siem_relp_key_pem, type: string, required: false, secret: true}
   - {name: wazuh_docker_version, type: string, required: false, default: "4.14.1", secret: false}
+  - {name: wazuh_version, type: string, required: false, secret: false}
+  - {name: wazuh_ack_rsyslog_downtime_and_replay, type: boolean, required: false, default: false, secret: false}
 endpoints:
   - {name: agent, scheme: tcp, port: 1514}
   - {name: agentAuth, scheme: tcp, port: 1515}
@@ -48,7 +51,7 @@ endpoints:
 stagePolicy: {variable: stage, default: sandbox}
 evidenceRequirement: {targetTest: topology, idempotency: required}
 lifecycle:
-  backup: {provider: restic, paths: [/var/ossec]}
+  backup: {provider: restic, paths: [/opt/pilot/wazuh-docker, /var/backups/pilot/wazuh]}
 traceability:
   mode: rowTags
   tag: {kind: bare}

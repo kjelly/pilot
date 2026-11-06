@@ -11,6 +11,17 @@
 #
 # Interface (docs/superpowers/specs/2026-09-14-apt-repository-fault-tolerance-spec.md §14):
 #   pilot_apt_packages            : list[str], required
+#   pilot_apt_versions            : optional {package: exact Debian version}
+#   pilot_apt_stage_only          : download/reinstall only; never install
+#   pilot_apt_allow_downgrade     : default false; recovery must opt in
+#   pilot_apt_policy_rc_d         : optional service-start policy during install
+#   pilot_apt_recovery_artifact   : retained .deb from an owned recovering agent
+#                                  manifest; never downloads or trusts caller hashes
+#   pilot_apt_installation_artifact: retained .deb from an owned installing agent
+#   pilot_apt_wazuh_owner        : optional exact Wazuh-only held-change authority
+#   pilot_apt_wazuh_source       : optional declared official Wazuh APT source
+#   pilot_apt_reinstall_retained : recovering Wazuh artifact must reinstall even
+#                                 when old package metadata still appears installed
 #   pilot_apt_component            : str, required (evidence/log label only)
 #   pilot_apt_policy               : tolerant|strict|offline, default tolerant
 #   pilot_apt_required_sources     : list of
@@ -33,9 +44,11 @@
 #     refresh, so "candidate exists" alone proves nothing on that path.
 #   * every apt-get network step (update, download probe) has a wall-clock
 #     bound, so a stalled mirror/proxy ends in FATAL instead of a hung play.
-#   * exactly one real `ansible.builtin.apt` install task, at the bottom
-#     of this file, never wrapped in ignore_errors — an in-scope failure
-#     still fails the play.
+#   * one ordinary `ansible.builtin.apt` install task, never wrapped in
+#     ignore_errors. Owned recovery alone uses a native no-download reinstall
+#     of the same authenticated retained bytes, because the module skips an
+#     equal installed version. Its owner/phase/plan and global hook are checked
+#     by the coordinator; failure still fails the play.
 #   * every non-offline, non-ready path ends in either "proceed to the
 #     final install" or an explicit `ansible.builtin.fail` (never a
 #     silent fall-through) so a required-source failure is always fatal.
@@ -52,6 +65,13 @@
       - pilot_apt_packages | length > 0
       - pilot_apt_component is defined
       - pilot_apt_component | length > 0
+      - (pilot_apt_versions | default({})) is mapping
+      - (pilot_apt_versions | default({})).keys() | difference(pilot_apt_packages) | length == 0
+      - not (pilot_apt_recovery_artifact is defined and pilot_apt_installation_artifact is defined)
+      - pilot_apt_wazuh_owner is not defined or (pilot_apt_packages == ['wazuh-agent'] and (pilot_apt_versions | default({})).keys() | list == ['wazuh-agent'])
+      - not (pilot_apt_reinstall_retained | default(false) | bool) or (pilot_apt_recovery_artifact is defined and pilot_apt_wazuh_owner is defined and pilot_apt_policy_rc_d | default(0) | int == 101)
+      - not (pilot_apt_stage_only | default(false) | bool) or (pilot_apt_policy | default('tolerant')) != 'offline'
+      - not (pilot_apt_stage_only | default(false) | bool) or (pilot_apt_packages | difference((pilot_apt_versions | default({})).keys()) | length == 0)
       - (pilot_apt_policy | default('tolerant')) in ['tolerant', 'strict', 'offline']
       - (pilot_apt_required_sources | default([]) | selectattr('class', 'equalto', 'pilot') | list
          | rejectattr('source_file', 'defined') | list | length) == 0
@@ -78,6 +98,30 @@
     _pilot_apt_stale_metadata: false
     _pilot_apt_stale_unrecovered: false
     pilot_apt_download_probe_result: {}
+    _pilot_apt_missing: []
+    _pilot_apt_versions: "{{ pilot_apt_versions | default({}) }}"
+    _pilot_apt_stage_only: "{{ pilot_apt_stage_only | default(false) | bool }}"
+    _pilot_apt_artifact: "{{ pilot_apt_recovery_artifact | default(pilot_apt_installation_artifact | default('')) }}"
+    _pilot_apt_has_candidate: "{{ pilot_apt_recovery_artifact is defined or pilot_apt_installation_artifact is defined }}"
+    _pilot_apt_mode: "{{ 'retained_artifact' if (pilot_apt_recovery_artifact is defined or pilot_apt_installation_artifact is defined) else 'cache_hit' }}"
+
+- name: "APT package install ({{ pilot_apt_component }}) — verify private recovery authority and artifact"
+  ansible.builtin.script:
+    cmd: >-
+      ../files/apt-exact-stage.py {{ '--recovery-cache' if (pilot_apt_reinstall_retained | default(false) | bool) else '--recovery' if pilot_apt_recovery_artifact is defined else '--installation' }} {{ _pilot_apt_artifact | quote }}
+      {{ _pilot_apt_versions | to_json | quote }}
+    executable: python3
+  changed_when: false
+  when: _pilot_apt_artifact | length > 0
+
+- name: "APT package install ({{ pilot_apt_component }}) — validate exact package versions"
+  ansible.builtin.assert:
+    that:
+      - item.key is match('^[a-z0-9][a-z0-9+.-]*(:[a-z0-9]+)?$')
+      - item.value is string
+      - item.value is match('^[0-9][a-zA-Z0-9.+:~_-]*$')
+    fail_msg: "apt-package-install: invalid exact package/version requirement"
+  loop: "{{ _pilot_apt_versions | dict2items }}"
 
 - name: "APT package install ({{ pilot_apt_component }}) — read installed-package facts"
   ansible.builtin.package_facts:
@@ -86,7 +130,20 @@
 
 - name: "APT package install ({{ pilot_apt_component }}) — compute missing packages"
   ansible.builtin.set_fact:
-    _pilot_apt_missing: "{{ pilot_apt_packages | reject('in', ansible_facts.packages.keys() | list) | list }}"
+    _pilot_apt_missing: >-
+      {{ _pilot_apt_missing +
+         [item + ('=' + _pilot_apt_versions[item] if item in _pilot_apt_versions else '')] }}
+  loop: "{{ pilot_apt_packages }}"
+  vars:
+    _pilot_apt_base_name: "{{ item.split(':')[0] }}"
+    _pilot_apt_matching_installed: >-
+      {{ (ansible_facts.packages.get(_pilot_apt_base_name, [])
+          | selectattr('arch', 'equalto', item.split(':')[1]) | list)
+         if ':' in item else ansible_facts.packages.get(_pilot_apt_base_name, []) }}
+  when: >-
+    _pilot_apt_stage_only or (pilot_apt_reinstall_retained | default(false) | bool) or _pilot_apt_matching_installed | length == 0
+    or (item in _pilot_apt_versions and
+        _pilot_apt_versions[item] not in (_pilot_apt_matching_installed | map(attribute='version') | list))
 
 - name: "APT package install ({{ pilot_apt_component }}) — SUCCESS(already_present)"
   ansible.builtin.debug:
@@ -98,24 +155,38 @@
 - name: "APT package install ({{ pilot_apt_component }}) — resolve a candidate, refreshing only if required"
   when: _pilot_apt_missing | length > 0
   block:
+    - name: "APT package install ({{ pilot_apt_component }}) — validate exact-version cache paths before any installer"
+      ansible.builtin.script:
+        cmd: "../files/apt-exact-stage.py --cache-preflight"
+        executable: python3
+      changed_when: false
+      check_mode: false
+      when:
+        - _pilot_apt_versions | length > 0
+        - _pilot_apt_artifact | length == 0
+
     - name: "APT package install ({{ pilot_apt_component }}) — apt-cache policy for missing packages (one per package: apt-cache silently OMITS an entirely-unknown package from combined output instead of printing 'Candidate: (none)', which would false-positive a joined multi-package query)"
       ansible.builtin.command:
-        cmd: "apt-cache policy {{ item }}"
+        argv: [apt-cache, "{{ 'show' if '=' in item else 'policy' }}", "{{ item }}"]
       loop: "{{ _pilot_apt_missing }}"
       loop_control:
         label: "{{ item }}"
       register: _pilot_apt_cache_check
       changed_when: false
+      failed_when: false
       check_mode: false
+      when: _pilot_apt_artifact | length == 0
 
     - name: "APT package install ({{ pilot_apt_component }}) — determine candidate availability"
       ansible.builtin.set_fact:
         _pilot_apt_has_candidate: >-
           {{ (_pilot_apt_cache_check.results
+              | selectattr('rc', 'equalto', 0)
               | rejectattr('stdout', 'search', 'Candidate: \(none\)')
               | selectattr('stdout', 'truthy')
               | list | length) == (_pilot_apt_missing | length) }}
         _pilot_apt_mode: cache_hit
+      when: _pilot_apt_artifact | length == 0
 
     # Stale-metadata probe (spec.md §5 tolerant: "install 顯示 metadata
     # stale → global refresh → retry install"); see apt-download-probe.yml.
@@ -126,6 +197,7 @@
       when:
         - _pilot_apt_has_candidate
         - _pilot_apt_policy != 'offline'
+        - _pilot_apt_artifact | length == 0
 
     - name: "APT package install ({{ pilot_apt_component }}) — cached candidate download 404 means stale metadata (take the refresh path)"
       ansible.builtin.set_fact:
@@ -166,18 +238,20 @@
 
         - name: "APT package install ({{ pilot_apt_component }}) — re-check candidate after global refresh (one apt-cache policy per package; see cache-first check above for why)"
           ansible.builtin.command:
-            cmd: "apt-cache policy {{ item }}"
+            argv: [apt-cache, "{{ 'show' if '=' in item else 'policy' }}", "{{ item }}"]
           loop: "{{ _pilot_apt_missing }}"
           loop_control:
             label: "{{ item }}"
           register: _pilot_apt_cache_check
           changed_when: false
+          failed_when: false
           check_mode: false
 
         - name: "APT package install ({{ pilot_apt_component }}) — determine post-global-refresh candidate"
           ansible.builtin.set_fact:
             _pilot_apt_has_candidate: >-
               {{ (_pilot_apt_cache_check.results
+                  | selectattr('rc', 'equalto', 0)
                   | rejectattr('stdout', 'search', 'Candidate: \(none\)')
                   | selectattr('stdout', 'truthy')
                   | list | length) == (_pilot_apt_missing | length) }}
@@ -235,12 +309,13 @@
 
             - name: "APT package install ({{ pilot_apt_component }}) — re-check candidate after scoped refresh (one apt-cache policy per package; see cache-first check above for why)"
               ansible.builtin.command:
-                cmd: "apt-cache policy {{ item }}"
+                argv: [apt-cache, "{{ 'show' if '=' in item else 'policy' }}", "{{ item }}"]
               loop: "{{ _pilot_apt_missing }}"
               loop_control:
                 label: "{{ item }}"
               register: _pilot_apt_cache_check
               changed_when: false
+              failed_when: false
               check_mode: false
               when: pilot_apt_scoped_refresh_result.required_sources_healthy
 
@@ -249,6 +324,7 @@
                 _pilot_apt_has_candidate: >-
                   {{ pilot_apt_scoped_refresh_result.required_sources_healthy and
                      (_pilot_apt_cache_check.results
+                      | selectattr('rc', 'equalto', 0)
                       | rejectattr('stdout', 'search', 'Candidate: \(none\)')
                       | selectattr('stdout', 'truthy')
                       | list | length) == (_pilot_apt_missing | length) }}
@@ -289,18 +365,103 @@
             - not _pilot_apt_has_candidate
             - not (_pilot_apt_policy == 'tolerant')
 
-    - name: "APT package install ({{ pilot_apt_component }}) — install (single sanctioned mutation point, no ignore_errors)"
-      ansible.builtin.apt:
-        name: "{{ _pilot_apt_missing }}"
-        state: present
-      environment:
-        DEBIAN_FRONTEND: noninteractive
-      register: _pilot_apt_install
-      until: >-
-        _pilot_apt_install is success or
-        not ((_pilot_apt_install.msg | default('')) is search('Could not (get|open) lock|Unable to lock'))
-      retries: "{{ pilot_apt_lock_retries | default(6) }}"
-      delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
+    - name: "APT package install ({{ pilot_apt_component }}) — download exact artifacts after a refreshed candidate"
+      ansible.builtin.include_tasks: apt-download-probe.yml
+      vars:
+        pilot_apt_probe_stage: resolved_exact
+      when:
+        - _pilot_apt_versions | length > 0
+        - _pilot_apt_artifact | length == 0
+        - (pilot_apt_download_probe_result.rc | default(-1)) != 0
+        - _pilot_apt_policy != 'offline'
+
+    - name: "APT package install ({{ pilot_apt_component }}) — exact staging requires a successful authenticated download"
+      ansible.builtin.assert:
+        that:
+          - (pilot_apt_download_probe_result.rc | default(-1)) == 0
+        fail_msg: "apt-package-install: staging failed; no package mutation was attempted"
+      when:
+        - _pilot_apt_versions | length > 0
+        - _pilot_apt_artifact | length == 0
+        - _pilot_apt_policy != 'offline'
+
+    - name: "APT package install ({{ pilot_apt_component }}) — verify staged exact package identity and metadata SHA256"
+      ansible.builtin.script:
+        cmd: >-
+          ../files/apt-exact-stage.py {{ _pilot_apt_versions | to_json | quote }}
+          {{ ('--wazuh-source ' + (pilot_apt_wazuh_source | quote)) if pilot_apt_wazuh_source is defined else '' }}
+        executable: python3
+      register: pilot_apt_staged_packages
+      changed_when: false
+      when:
+        - _pilot_apt_versions | length > 0
+        - _pilot_apt_artifact | length == 0
+
+    - name: "APT package install ({{ pilot_apt_component }}) — authorize only the retained Wazuh held-package transaction"
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-apt-plan, --family, Debian, --owner, "{{ pilot_apt_wazuh_owner }}", --version, "{{ _pilot_apt_versions['wazuh-agent'] }}", --artifact, "{{ _pilot_apt_artifact }}"]
+      changed_when: false
+      no_log: true
+      when:
+        - pilot_apt_wazuh_owner is defined
+        - not _pilot_apt_stage_only
+
+    - name: "APT package install ({{ pilot_apt_component }}) — owned policy hook and package boundary"
+      when: not _pilot_apt_stage_only
+      block:
+        - name: "APT package install ({{ pilot_apt_component }}) — prepare the owned service-start policy"
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-hook-prepare, --family, Debian, --owner, "{{ pilot_apt_wazuh_owner }}"]
+          changed_when: false
+          no_log: true
+          when: pilot_apt_wazuh_owner is defined
+
+        - name: "APT package install ({{ pilot_apt_component }}) — install (ordinary sanctioned mutation point, no ignore_errors)"
+          ansible.builtin.apt:
+            name: "{{ _pilot_apt_missing if _pilot_apt_artifact | length == 0 else omit }}"
+            deb: "{{ _pilot_apt_artifact if _pilot_apt_artifact | length > 0 else omit }}"
+            state: present
+            allow_downgrade: "{{ pilot_apt_allow_downgrade | default(false) | bool }}"
+            allow_change_held_packages: "{{ pilot_apt_wazuh_owner is defined }}"
+            force_apt_get: "{{ true if pilot_apt_wazuh_owner is defined else omit }}"
+            install_recommends: "{{ false if pilot_apt_wazuh_owner is defined else omit }}"
+            fail_on_autoremove: "{{ true if pilot_apt_wazuh_owner is defined else omit }}"
+            policy_rc_d: "{{ pilot_apt_policy_rc_d | default(omit) }}"
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          register: _pilot_apt_install
+          until: >-
+            _pilot_apt_install is success or
+            not ((_pilot_apt_install.msg | default('')) is search('Could not (get|open) lock|Unable to lock'))
+          retries: "{{ pilot_apt_lock_retries | default(6) }}"
+          delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
+          when: not (pilot_apt_reinstall_retained | default(false) | bool)
+
+        - name: "APT package install ({{ pilot_apt_component }}) — force only the retained owned recovery package"
+          ansible.builtin.command:
+            argv: [timeout, --kill-after=30, "{{ (pilot_apt_download_timeout_seconds | default(900)) | string }}", apt-get, -y, -o, DPkg::Lock::Timeout=60, -o, APT::Get::AllowUnauthenticated=false, -o, "Dpkg::Options::=--force-confdef", -o, "Dpkg::Options::=--force-confold", -o, "Dir::Cache::archives={{ _pilot_apt_artifact | dirname }}/", -o, APT::Keep-Downloaded-Packages=true, --no-download, --no-install-recommends, --no-remove, --allow-change-held-packages, --allow-downgrades, --reinstall, install, "{{ _pilot_apt_artifact }}"]
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          register: _pilot_apt_reinstall
+          # Reported from apt's own transaction summary (LC_ALL=C via Ansible): a run
+          # that upgraded, installed, reinstalled or downgraded nothing prints
+          # "0 upgraded, 0 newly installed, 0 to remove and N not upgraded."; any other
+          # summary, or unfamiliar output, stays changed (fail safe).
+          changed_when: (_pilot_apt_reinstall.stdout | default('')) is not search('(?m)^0 upgraded, 0 newly installed, 0 to remove and [0-9]+ not upgraded[.]$')
+          until: >-
+            _pilot_apt_reinstall is success or
+            not ((_pilot_apt_reinstall.stderr | default('')) is search('Could not (get|open) lock|Unable to lock'))
+          retries: "{{ pilot_apt_lock_retries | default(6) }}"
+          delay: "{{ pilot_apt_lock_delay_seconds | default(10) }}"
+          no_log: true
+          when: pilot_apt_reinstall_retained | default(false) | bool
+      always:
+        - name: "APT package install ({{ pilot_apt_component }}) — restore the sealed original global policy hook"
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-hook-cleanup, --family, Debian, --owner, "{{ pilot_apt_wazuh_owner }}", --confirm-previous-stopped]
+          changed_when: false
+          no_log: true
+          when: pilot_apt_wazuh_owner is defined
 
     - name: "APT package install ({{ pilot_apt_component }}) — SUCCESS"
       ansible.builtin.debug:

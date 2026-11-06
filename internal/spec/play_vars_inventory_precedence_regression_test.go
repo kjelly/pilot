@@ -436,11 +436,14 @@ func isDefaultsTask(name string) bool {
 }
 
 // pickTasks returns, in order, the pre_tasks and tasks of play whose name
-// matches keep, without no_log so their results can be printed.
+// matches keep, including setters nested in ownership/recovery blocks. This
+// isolated defaults harness intentionally extracts the setters themselves;
+// lifecycle/condition ordering is covered by the full task-graph controls.
+// Remove no_log so their results can be printed.
 func pickTasks(play map[string]any, keep func(name string) bool) []any {
 	var picked []any
-	for _, section := range []string{"pre_tasks", "tasks"} {
-		tasks, _ := play[section].([]any)
+	var walk func([]any)
+	walk = func(tasks []any) {
 		for _, task := range tasks {
 			m, _ := task.(map[string]any)
 			if name, _ := m["name"].(string); keep(name) {
@@ -452,9 +455,48 @@ func pickTasks(play map[string]any, keep func(name string) bool) []any {
 				}
 				picked = append(picked, c)
 			}
+			for _, section := range []string{"block", "rescue", "always"} {
+				children, _ := m[section].([]any)
+				walk(children)
+			}
 		}
 	}
+	for _, section := range []string{"pre_tasks", "tasks"} {
+		tasks, _ := play[section].([]any)
+		walk(tasks)
+	}
 	return picked
+}
+
+func TestPickDefaultsTasksInsideOwnershipBlocks(t *testing.T) {
+	var play map[string]any
+	if err := yaml.Unmarshal([]byte(`pre_tasks:
+  - name: Resolve inventory-overridable defaults before
+    ansible.builtin.set_fact: {a: 1}
+tasks:
+  - name: ownership
+    block:
+      - name: nested ownership
+        block:
+          - name: Resolve inventory-overridable defaults inside
+            no_log: true
+            ansible.builtin.set_fact: {b: 2}
+    always:
+      - name: unrelated cleanup
+        ansible.builtin.debug: {msg: cleanup}
+`), &play); err != nil {
+		t.Fatal(err)
+	}
+	tasks := pickTasks(play, isDefaultsTask)
+	if len(tasks) != 2 {
+		t.Fatalf("picked %d default setters, want both top-level and nested setters", len(tasks))
+	}
+	for i, want := range []string{"Resolve inventory-overridable defaults before", "Resolve inventory-overridable defaults inside"} {
+		task := tasks[i].(map[string]any)
+		if task["name"] != want || task["no_log"] != nil {
+			t.Fatalf("extracted setter %d: %v", i, task)
+		}
+	}
 }
 
 // loadFirstPlay reads the first play of playbooks/apply/<playbook>.

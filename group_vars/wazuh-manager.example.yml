@@ -43,6 +43,12 @@ siem_forward_host: ""
 #  audit-log-forwarding group 時,這個值也會用在它的 rsyslog TCP 轉送,而那
 #  個埠必須等於 log-server 的 siem_receiver_tcp_port。
 # wazuh_docker_version: "4.14.1"
+# Optional common release shared with agents; conflicts with an explicitly
+# different wazuh_docker_version are rejected. Existing installations require
+# one-time wazuh_upgrade=true to change release; only 4.14.1 -> 4.14.9 is supported.
+# wazuh_version: "4.14.9"
+# Controlled upgrade stops all three containers and retains a complete cold
+# backup under /var/backups/pilot/wazuh. Normal apply never cleans backups.
 
 # Host rsyslog imfile ships real alerts.json over the existing transport.
 # C11 checks local loaded state; wazuh-alert-delivery.md checks the actual receiver file.
@@ -51,3 +57,12 @@ siem_forward_host: ""
 # siem_relp_server_name: logs.example.test
 # Supply siem_relp_ca_pem / siem_relp_cert_pem / siem_relp_key_pem from private inputs.
 # Never put private-key PEM in this example or a committed inventory.
+
+
+# One admitted shared rsyslog/socket downtime + possible current-file replay.
+# Cooperatively exclude other rsyslog roles, package/policy maintenance and
+# external service/socket changes for the full operation and interrupted recovery.
+# Same-owner journal recovery reuses admission; a later ordinary re-enable of a
+# disabled restored reader needs a NEW explicit ACK. It certifies local custody,
+# not remote delivery. No queue is discarded.
+wazuh_ack_rsyslog_downtime_and_replay: false

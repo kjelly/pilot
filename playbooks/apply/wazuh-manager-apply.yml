@@ -76,6 +76,19 @@
     # clients cannot avoid using.
     wazuh_dashboard_host_port: 8443
   pre_tasks:
+    - name: "Gate: common and legacy Wazuh release inputs agree"
+      ansible.builtin.assert:
+        that:
+          - >-
+            (wazuh_version | default('') | length == 0)
+            or (wazuh_docker_version | default('') | length == 0)
+            or wazuh_version == wazuh_docker_version
+          - wazuh_upgrade | default(false) | string | lower in ['true', 'false']
+          - wazuh_recover | default(false) | string | lower in ['true', 'false']
+          - wazuh_ack_rsyslog_downtime_and_replay | default(false) | string | lower in ['true', 'false']
+        fail_msg: "Wazuh version inputs conflict, or wazuh_upgrade is not a boolean"
+      tags: [always]
+
     - name: "Gate: staging or prod requires explicit confirm"
       ansible.builtin.assert:
         that:
@@ -110,7 +123,7 @@
     # group_vars/<role>.example.yml). They are defaulted here instead of in
     # the play's vars:, which outrank group_vars/host_vars and silently
     # replaced the operator's value (AGENTS.md §4.5 point 3); -e still wins.
-    # siem_forward_port is rendered into host rsyslog's omfwd action and shared with audit-log-forwarding's
+    # siem_forward_port is rendered into syslog_output's <port> and shared with audit-log-forwarding's
     # sender on hosts in both groups: 2514.0, 0x9C4, a leading zero or 70000 would be read
     # differently or not at all. Checked before the fallback below so that 0
     # is refused instead of silently becoming 514; unset, null and "" mean
@@ -131,498 +144,1107 @@
           written in decimal without a sign, a fraction or leading zeros. Leave it unset for 514.
       tags: [always]
 
-    - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
-      ansible.builtin.set_fact:
-        # Empty or null falls back to 514, as in audit-log-forwarding-apply.yml.
-        siem_forward_port: "{{ siem_forward_port | default('514', true) }}"
-        wazuh_docker_version: "{{ wazuh_docker_version | default('4.14.1') }}"
-        siem_forward_transport: "{{ siem_forward_transport | default('tcp') }}"
-        siem_relp_port: "{{ siem_relp_port | default(20514) }}"
-      tags: [always]
-
-    # Auto-fallback for the common single-inventory case: if the caller left
-    # siem_forward_host genuinely unset (no -e/group_vars/host_vars) and
-    # this inventory happens to define a log-server group, use that host's
-    # own connection address instead of silently leaving forwarding
-    # disabled. `pilot deploy`'s single-component wizard already offers
-    # this as an interactive prompt (deploy_catalog.go's wazuh-manager
-    # AutoHostVars); this makes a site-wide `playbooks/site.yml` run (which
-    # does not carry that wizard-level convenience) get the same default,
-    # mirroring restic-backup-apply.yml's own "Auto-detect backup
-    # destination host from this inventory's seaweedfs-s3 group" task.
-    - name: "Auto-detect SIEM forward host from this inventory's log-server group"
-      ansible.builtin.set_fact:
-        siem_forward_host: >-
-          {{ hostvars[(groups.get('log-server', []) | first)]['ansible_host']
-             | default(groups.get('log-server', []) | first, true) }}
-      when: >-
-        (siem_forward_host | default('') | length == 0)
-        and (groups.get('log-server', []) | length > 0)
-      tags: [always]
-
-    - name: "Gate: detect SELinux independently of optional Python bindings"
-      ansible.builtin.stat:
-        path: /sys/fs/selinux/enforce
-        get_checksum: false
-      register: wazuh_selinux_filesystem
-      check_mode: false
-      tags: [always]
-
-    - name: "Gate: Wazuh forwarding uses a supported host reader"
+    - name: "Gate: interrupted writer resume requires its exact owner and stopped-operation confirmation"
       ansible.builtin.assert:
         that:
-          - not (siem_forwarding_enabled | bool) or ansible_distribution == 'Ubuntu'
-          - not (siem_forwarding_enabled | bool) or not wazuh_selinux_filesystem.stat.exists
-        fail_msg: "The Wazuh host imfile reader currently supports Ubuntu without SELinux; standalone manager deployment remains available."
+          - wazuh_writer_resume_owner | default('') | length == 0 or wazuh_writer_resume_owner is match('^[a-f0-9]{32}$')
+          - wazuh_confirm_previous_operation_stopped | default(false) | string | lower in ['true', 'false']
+          - not (wazuh_recover | default(false) | bool) or wazuh_writer_resume_owner | default('') | length > 0
+          - not ansible_check_mode or not (wazuh_recover | default(false) | bool)
+        fail_msg: "Use the exact interrupted writer owner; recovery never takes over another operation"
       tags: [always]
 
-    - name: "Gate: validate Wazuh forwarding transport and mTLS inputs"
-      ansible.builtin.include_tasks:
-        file: tasks/rsyslog-relp-inputs.yml
-        apply:
-          tags: [always]
-      vars:
-        siem_tls_role: wazuh-sender
-        siem_tls_enabled: "{{ siem_forwarding_enabled | bool and siem_forward_transport == 'relp' }}"
-      tags: [always]
-
-    - name: "Gate: siem_forward_port matches the inventory log-server's siem_receiver_tcp_port"
-      ansible.builtin.assert:
-        that:
-          - >-
-            ((siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port) | string)
-            == (siem_forward_receiver_port | string)
-          - >-
-            siem_forward_transport != 'tcp' or
-            not (hostvars[siem_forward_log_server].siem_receiver_relp_enabled | default(false) | bool)
-          - >-
-            siem_forward_transport != 'relp' or
-            (hostvars[siem_forward_log_server].siem_receiver_relp_enabled | default(false) | bool)
-        fail_msg: >-
-          {{ inventory_hostname }} requires {{ siem_forward_transport }} to
-          {{ siem_forward_host }}:{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }},
-          but log-server {{ siem_forward_log_server }} has port {{ siem_forward_receiver_port }}.
-          Match the selected transport's port on both sides and enable the receiver's RELP listener for RELP.
-      vars:
-        siem_forward_target_name: "{{ (siem_forward_host | string | lower).rstrip('.') }}"
-        siem_forward_log_server: "{% for h in groups.get('log-server', []) if siem_forward_target_name in ([h, hostvars[h].ansible_host | default(h, true), hostvars[h].ansible_fqdn | default(''), hostvars[h].ansible_nodename | default('')] | map('string') | map('lower') | map('regex_replace', '[.]$', '') | list) %}{% if loop.first %}{{ h }}{% endif %}{% endfor %}"
-        siem_forward_receiver_port: "{{ (hostvars[siem_forward_log_server].siem_relp_port | default(20514) if siem_forward_transport == 'relp' else hostvars[siem_forward_log_server].siem_receiver_tcp_port | default('514', true)) if siem_forward_log_server else '' }}"
-      when:
-        - siem_forwarding_enabled | bool
-        # An empty for-loop renders as None, not "", in ansible-core 2.19.
-        - (siem_forward_log_server | default('', true)) | length > 0
-      tags: [always]
-    - name: "Reset per-run ACL journal completion state"
-      ansible.builtin.set_fact:
-        wazuh_acl_journal_committed: false
-        wazuh_acl_journal: {}
-        wazuh_acl_restore_result: {}
-        wazuh_apparmor_result: {}
-        wazuh_reload_pending: {skipped: true}
-        wazuh_live_config: {skipped: true}
-        wazuh_forward_snapshot: {results: []}
-        wazuh_forward_snapshot_stat: {results: []}
-        wazuh_rescue_syntax: {skipped: true}
-        wazuh_heartbeat_preflight: {skipped: true}
-      tags: [always]
-
-    # Same fail-early gate as keycloak-db-apply.yml — a missing docker
-    # engine should fail here with a clear message, not five tasks later
-    # inside the compose module.
-    - name: "Pre-flight: docker engine is up (spec docs/verification/docker.md)"
-      ansible.builtin.command: docker info
-      register: docker_pre
-      changed_when: false
-      # check_mode: false makes this run for real even under --check, so a
-      # missing engine fails here with a clear message instead of five tasks
-      # later inside the compose module — but on a from-scratch host being
-      # site-wide-previewed before its first real apply, docker itself was
-      # never actually installed (docker-apply.yml defers the install to the
-      # real apply too), so rc!=0 here is expected and must not fail the
-      # mandatory check-mode gate.
-      failed_when: docker_pre.rc != 0 and not ansible_check_mode
-      check_mode: false
-
-    - name: "Wazuh: install native RELP preflight prerequisites before configuration changes"
-      tags: [C10, C11]
-      ansible.builtin.include_tasks:
-        file: tasks/apt-package-install.yml
-        apply:
-          tags: [C10, C11]
-      vars:
-        pilot_apt_packages: [rsyslog, rsyslog-relp, openssl]
-        pilot_apt_component: wazuh-heartbeat-preflight
-      when: not ansible_check_mode and siem_forwarding_enabled | bool and siem_forward_transport == 'relp'
-
-    - name: "Wazuh: refuse foreign immark and unsupported heartbeat before Wazuh or TLS mutation"
-      tags: [C10, C11]
-      no_log: true
-      diff: false
-      ansible.builtin.script: "../files/pilot-wazuh-heartbeat preflight {{ 'relp' if siem_forwarding_enabled | bool and siem_forward_transport == 'relp' else 'retire' }}"
-      register: wazuh_heartbeat_preflight
-      changed_when: false
-      failed_when: false
-      when: not ansible_check_mode
-
-    - name: "Gate: Wazuh requires exclusive native heartbeat support for RELP"
-      tags: [always]
-      ansible.builtin.assert:
-        that: (wazuh_heartbeat_preflight.rc | default(-1)) == 0
-        fail_msg: >-
-          Wazuh requires exclusive immark ownership within its managed reader;
-          enabled RELP additionally requires native support for its fixed five-second
-          named-action heartbeat. Foreign/unknown/loaded-only ownership or unsupported
-          native configuration was refused before Wazuh/TLS changes. Preserve
-          operator configuration and use a supported rsyslog pair.
-      # The selected script must publish a fresh result. The always reset
-      # prevents a previous play's registered value from gating C1-only runs.
-      when:
-        - not ansible_check_mode
-        - wazuh_heartbeat_preflight is defined
-        - not (wazuh_heartbeat_preflight.skipped | default(false) | bool)
-  tasks:
-    - name: "Step 0: Report whether SIEM forwarding is enabled this run"
-      ansible.builtin.debug:
-        msg: >-
-          {{ 'siem_forward_host=' + siem_forward_host + ' — forwarding will be configured (spec C10-C11).'
-             if siem_forwarding_enabled
-             else 'siem_forward_host not provided — disabling the managed imfile forwarder; only local alerting + CVE scanning (C1-C9) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN> once a log server exists to add forwarding.' }}
-
-    # Official hard requirement of the wazuh-indexer (OpenSearch) image —
-    # the one host-level knob this role cannot containerize (spec §5).
-    - name: "Step 1: Set vm.max_map_count=262144 (indexer requirement, persistent)"
-      ansible.posix.sysctl:
-        name: vm.max_map_count
-        value: "262144"
-        sysctl_set: true
-        state: present
-
-    # Steps 2-5 build the real on-disk docker-compose project (download,
-    # unpack, generate certs); state directory created in Step 2 doesn't
-    # really exist under check mode, so get_url/unarchive/command fail
-    # outright on a from-scratch host rather than merely simulating. Deferred
-    # to the real apply, same pattern as the docker preflight above.
-    - name: "Step 2: Ensure {{ wazuh_docker_root }} exists"
-      ansible.builtin.file:
-        path: "{{ wazuh_docker_root }}"
-        state: directory
-        mode: "0755"
-      when: not ansible_check_mode
-
-    - name: "Step 3: Download the official wazuh-docker release bundle (spec C1-C3)"
-      tags: [C1, C2, C3]
-      ansible.builtin.get_url:
-        url: "https://github.com/wazuh/wazuh-docker/archive/refs/tags/v{{ wazuh_docker_version }}.tar.gz"
-        dest: "{{ wazuh_docker_tarball }}"
-        mode: "0644"
-      when: not ansible_check_mode
-
-    - name: "Step 4: Unpack the release bundle (spec C1-C3)"
-      tags: [C1, C2, C3]
-      ansible.builtin.unarchive:
-        src: "{{ wazuh_docker_tarball }}"
-        dest: "{{ wazuh_docker_root }}"
-        remote_src: true
-        creates: "{{ wazuh_single_node_dir }}/docker-compose.yml"
-      when: not ansible_check_mode
-
-    # Step 4b: remap the dashboard off host port 443 (spec C1) — the official
-    # compose file ships `- 443:5601` under the dashboard service, which
-    # collides with reverse-proxy/nginx on any host running both roles. Runs
-    # after the unpack (the file doesn't exist before it) and before compose
-    # up (Step 8), so the remapped port is what actually gets bound.
-    # ansible.builtin.replace is naturally idempotent — a rerun after the
-    # port is already remapped matches nothing and reports unchanged.
-    - name: "Step 4b: Remap the dashboard off host port 443 (avoids reverse-proxy/nginx conflict)"
-      tags: [C1]
-      ansible.builtin.replace:
-        path: "{{ wazuh_single_node_dir }}/docker-compose.yml"
-        regexp: '^(\s*-\s*)443:5601\s*$'
-        replace: '\g<1>{{ wazuh_dashboard_host_port }}:5601'
-      when: not ansible_check_mode
-
-    # One-shot official cert generator (wazuh/wazuh-certs-generator) —
-    # builds the full TLS chain into config/wazuh_indexer_ssl_certs/.
-    # Idempotent via `creates` on the root CA it emits. Long-ish on first
-    # run (pulls the generator image).
-    - name: "Step 5: Generate the indexer TLS cert chain (official generator; spec C1-C3)"
-      tags: [C1, C2, C3]
+    - name: "Allocate an independent owner for this Wazuh apply"
       ansible.builtin.command:
-        cmd: docker compose -f generate-indexer-certs.yml run --rm generator
-        chdir: "{{ wazuh_single_node_dir }}"
-        creates: "{{ wazuh_single_node_dir }}/config/wazuh_indexer_ssl_certs/root-ca.pem"
-      when: not ansible_check_mode
+        argv: [python3, -c, "import uuid; print(uuid.uuid4().hex)"]
+      register: wazuh_writer_uuid
+      changed_when: false
+      check_mode: false
+      tags: [always]
 
-
-    # Steps 6-11 configure/compose-up/health-check the project built above;
-    # none of that exists on a fresh host when Steps 2-5 were skipped in
-    # check mode, so the whole block (and its rescue) is deferred too — same
-    # convention as wazuh-fim-apply.yml's post-install config block.
-    - when: not ansible_check_mode
+    - name: "Reset this play's writer ownership and completion state"
+      ansible.builtin.set_fact:
+        wazuh_writer_owner: "{{ wazuh_writer_resume_owner | default(wazuh_writer_uuid.stdout, true) }}"
+        wazuh_writer_claimed: false
+        wazuh_finish_host: false
+        wazuh_reader_enable_admitted: false
+        wazuh_reader_enable_committed: false
+        wazuh_preview_allocation: not-dispatched
+        wazuh_preview_settled: true
+        wazuh_preview_cleanup_attempted: false
+        wazuh_preview_assets: {}
+        wazuh_preview_directory: {}
+        wazuh_preview_cleanup: {}
+        wazuh_preview_failed: false
+        wazuh_preview_central_dispatched: false
+        wazuh_preview_admit_dispatched: false
+        wazuh_central_transaction: {}
+        wazuh_reader_preview_admit: {}
+        wazuh_reader_admit: {}
+      tags: [always]
+  tasks:
+    - name: "Own all Wazuh mutations on this host through their final proofs"
       block:
-        - name: "Snapshot: inspect files before Wazuh forwarding mutation"
+        - name: "Claim the host-wide Wazuh writer before any shared coordinator copy or mutation"
+          ansible.builtin.script:
+            cmd: >-
+              files/wazuh-transaction.py
+              {{ 'writer-resume' if (wazuh_writer_resume_owner | default('') | length > 0) else 'writer-claim' }}
+              --component central --owner {{ wazuh_writer_owner | quote }}
+              --mode {{ 'recover' if (wazuh_recover | default(false) | bool) else 'apply' }}
+              {{ '--confirm-previous-stopped' if (wazuh_confirm_previous_operation_stopped | default(false) | bool) else '' }}
+            executable: python3
+          changed_when: false
+          check_mode: false
           tags: [always]
-          ansible.builtin.stat:
-            path: "{{ item }}"
-          loop:
-            - /etc/hosts
-            - "{{ wazuh_manager_conf }}"
-            - /etc/rsyslog.d/31-pilot-wazuh.conf
-            - /etc/rsyslog.d/pilot-wazuh/profile.json
-            - /etc/apparmor.d/local/usr.sbin.rsyslogd
-          register: wazuh_forward_snapshot_stat
 
-        - name: "Snapshot: retain existing configuration content"
-          tags: [always]
-          no_log: true
-          diff: false
-          ansible.builtin.slurp:
-            src: "{{ item.item }}"
-          loop: "{{ wazuh_forward_snapshot_stat.results | selectattr('stat.exists') | list }}"
-          register: wazuh_forward_snapshot
-
-        - name: "Snapshot: retain forwarding presence for disable transition"
-          tags: [always]
+        - name: "Record only this play's successful writer claim"
           ansible.builtin.set_fact:
-            wazuh_forward_had_config: "{{ wazuh_forward_snapshot_stat.results[2].stat.exists }}"
-
-        - name: "Step 5b: Resolve siem_forward_host for the /etc/hosts pin (spec C10)"
+            wazuh_writer_claimed: true
           tags: [always]
+
+        - name: "Resolve inventory-overridable defaults without shadowing group_vars/host_vars"
+          ansible.builtin.set_fact:
+            # Empty or null falls back to 514, as in audit-log-forwarding-apply.yml.
+            siem_forward_port: "{{ siem_forward_port | default('514', true) }}"
+            wazuh_docker_version: "{{ wazuh_docker_version | default(wazuh_version | default('4.14.1', true), true) }}"
+          tags: [always]
+
+        # Auto-fallback for the common single-inventory case: if the caller left
+        # siem_forward_host genuinely unset (no -e/group_vars/host_vars) and
+        # this inventory happens to define a log-server group, use that host's
+        # own connection address instead of silently leaving forwarding
+        # disabled. `pilot deploy`'s single-component wizard already offers
+        # this as an interactive prompt (deploy_catalog.go's wazuh-manager
+        # AutoHostVars); this makes a site-wide `playbooks/site.yml` run (which
+        # does not carry that wizard-level convenience) get the same default,
+        # mirroring restic-backup-apply.yml's own "Auto-detect backup
+        # destination host from this inventory's seaweedfs-s3 group" task.
+        # Forwarding inputs retain the incoming host rsyslog defaults.
+        - name: "Resolve forwarding transport defaults under the Wazuh writer"
+          ansible.builtin.set_fact:
+            siem_forward_transport: "{{ siem_forward_transport | default('tcp') }}"
+            siem_relp_port: "{{ siem_relp_port | default(20514) }}"
+          tags: [always]
+
+        - name: "Auto-detect SIEM forward host from this inventory's log-server group"
+          ansible.builtin.set_fact:
+            siem_forward_host: >-
+              {{ hostvars[(groups.get('log-server', []) | first)]['ansible_host']
+                 | default(groups.get('log-server', []) | first, true) }}
+          when: >-
+            (siem_forward_host | default('') | length == 0)
+            and (groups.get('log-server', []) | length > 0)
+          tags: [always]
+
+        # Same fail-early gate as keycloak-db-apply.yml — a missing docker
+        # engine should fail here with a clear message, not five tasks later
+        # inside the compose module.
+        - name: "Pre-flight: docker engine is up (spec docs/verification/docker.md)"
+          ansible.builtin.command: docker info
+          register: docker_pre
+          changed_when: false
+          # check_mode: false makes this run for real even under --check, so a
+          # missing engine fails here with a clear message instead of five tasks
+          # later inside the compose module — but on a from-scratch host being
+          # site-wide-previewed before its first real apply, docker itself was
+          # never actually installed (docker-apply.yml defers the install to the
+          # real apply too), so rc!=0 here is expected and must not fail the
+          # mandatory check-mode gate.
+          failed_when: docker_pre.rc != 0 and not ansible_check_mode
+          check_mode: false
+          tags: [always]
+        - name: "Install the root-owned Wazuh transaction coordinator"
+          ansible.builtin.copy:
+            src: files/wazuh-transaction.py
+            dest: /usr/local/sbin/pilot-wazuh-transaction
+            owner: root
+            group: root
+            mode: "0700"
+          tags: [always]
+
+        # Control-code dependency only: install under the host writer even
+        # when an incompatible old fleet prevents ordinary old-version apply.
+        # These copies do not migrate forwarding config/TLS/services.
+        - name: "Validate exact control-code destinations before any reader helper copy"
+          ansible.builtin.script:
+            cmd: "files/wazuh-transaction.py reader-tools-check --owner {{ wazuh_writer_owner | quote }}"
+            executable: python3
+          register: wazuh_reader_tool_scope
+          changed_when: false
+          check_mode: false
+          tags: [always]
+
+        - name: "Prepare the root-controlled reader proof helper directory"
+          ansible.builtin.file:
+            path: /usr/local/libexec
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+          when: not ansible_check_mode and ((wazuh_reader_tool_scope.stdout | from_json).create_directory | bool)
+          tags: [always]
+
+        - name: "Install tracked reader inspection/proof code before version admission"
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../files/{{ item }}"
+            dest: "/usr/local/libexec/{{ item }}"
+            owner: root
+            group: root
+            mode: "0755"
+          loop: [pilot-wazuh-heartbeat, pilot-wazuh-delivery, pilot-siem-relp-check]
+          when: not ansible_check_mode
+          tags: [always]
+
+        - name: "Allocate this invocation's local replay acknowledgement identity"
+          ansible.builtin.command:
+            argv: [python3, -c, "import uuid; print(uuid.uuid4().hex)"]
+          register: wazuh_reader_operation
+          changed_when: false
+          check_mode: false
+          tags: [always]
+
+        - name: "Reset this play's actual forwarding selection"
+          ansible.builtin.set_fact:
+            pilot_wazuh_reader_selected: false
+          tags: [always]
+
+        - name: "Mark selected forwarding intent without granting container authority"
+          ansible.builtin.set_fact:
+            pilot_wazuh_reader_selected: true
+          tags: [C10, C11]
+
+        # The reset above is the unselected baseline and the C10/C11 mark is the only
+        # thing that can change it. Every always-tagged gate below reads the settled
+        # value, so no --tags selection leaves it missing or stale (AGENTS 4.4).
+        - name: "Settle the selected-forwarding fact for always-tagged consumers"
+          ansible.builtin.set_fact:
+            pilot_wazuh_reader_selected: "{{ pilot_wazuh_reader_selected is defined and (pilot_wazuh_reader_selected | bool) }}"
+          tags: [always]
+
+        - name: "Reset this invocation's bound receiver transport"
+          ansible.builtin.set_fact:
+            wazuh_receiver_bound_address: ""
+          tags: [always]
+
+        - name: "Bind selected forwarding transport independently from TLS identity"
           ansible.builtin.include_tasks:
-            file: tasks/resolve-hosts-alias-target.yml
+            file: tasks/wazuh-endpoint-resolve.yml
             apply:
               tags: [always]
           vars:
-            hosts_alias_target_host: "{{ siem_forward_host | default('') }}"
-          when: siem_forwarding_enabled | bool
-
-        - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host | default('') }} in /etc/hosts (spec C10)"
-          tags: [C10, C11]
-          ansible.builtin.lineinfile:
-            path: /etc/hosts
-            regexp: '\s{{ siem_forward_alias }}$'
-            line: "{{ hosts_alias_resolved_ip }}\t{{ siem_forward_alias }}"
-            state: present
-          when: siem_forwarding_enabled | bool
-
-        - name: "Step 7: Remove the legacy managed UDP syslog_output on migration or disable"
-          tags: [C11]
-          no_log: true
-          diff: false
-          ansible.builtin.blockinfile:
-            path: "{{ wazuh_manager_conf }}"
-            marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
-            state: absent
-          register: siem_forward_conf_result
-
-        - name: "Step 7a: Retire the managed development-only delivery localfile"
-          tags: [C11]
-          no_log: true
-          diff: false
-          ansible.builtin.blockinfile:
-            path: "{{ wazuh_manager_conf }}"
-            marker: "<!-- {mark} PILOT WAZUH DELIVERY PROBE -->"
-            state: absent
-
-        # Spec: docs/verification/wazuh-manager.md C1, C2, C3
-        # First run pulls ~3-4GB of official images and boots the indexer
-        # for the first time (index bootstrap ~1 minute) — the waits below
-        # absorb that.
-        - name: "Step 8: Compose up the official single-node project (spec C1-C3)"
-          tags: [C1, C2, C3]
-          community.docker.docker_compose_v2:
-            project_src: "{{ wazuh_single_node_dir }}"
-            project_name: "{{ wazuh_compose_project }}"
-            state: present
-          register: wazuh_compose_result
-
-        # /wazuh-config-mount/etc/ossec.conf is injected at container creation.
-        # Drift comparison covers migration, disable and interrupted earlier runs.
-        - name: "Step 9: Read the live manager configuration"
-          tags: [C11]
-          no_log: true
-          diff: false
-          ansible.builtin.command: docker exec single-node-wazuh.manager-1 cat /var/ossec/etc/ossec.conf
-          register: wazuh_live_config
-          changed_when: false
-          retries: 12
-          delay: 5
-          until: wazuh_live_config.rc == 0
-
-        - name: "Step 9a: Recreate the manager when managed configuration drifted"
-          tags: [C11]
-          community.docker.docker_compose_v2:
-            project_src: "{{ wazuh_single_node_dir }}"
-            project_name: "{{ wazuh_compose_project }}"
-            state: present
-            recreate: always
-            services: [wazuh.manager]
-          when: >-
-            'ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward)' in wazuh_live_config.stdout
-            or 'PILOT WAZUH DELIVERY PROBE' in wazuh_live_config.stdout
-
-        - name: "Step 9b: Verify legacy UDP forwarding is absent in the live configuration"
-          tags: [C11]
-          no_log: true
-          diff: false
-          ansible.builtin.command: docker exec single-node-wazuh.manager-1 cat /var/ossec/etc/ossec.conf
-          register: wazuh_live_converged
-          changed_when: false
-          retries: 24
-          delay: 5
-          until: >-
-            wazuh_live_converged.rc == 0
-            and 'ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward)' not in wazuh_live_converged.stdout
-            and 'PILOT WAZUH DELIVERY PROBE' not in wazuh_live_converged.stdout
-
-        - name: "Step 9c: Configure isolated host imfile forwarding"
-          tags: [C10, C11]
-          ansible.builtin.include_tasks:
-            file: tasks/wazuh-alert-forward.yml
-            apply:
-              tags: [C10, C11]
-
-        - name: "Step 10: Wait for agent port 1514/tcp (wazuh-remoted; spec C5)"
-          tags: [C5, C6]
-          ansible.builtin.wait_for:
-            port: 1514
-            host: 127.0.0.1
-            timeout: 300
-
-        # 401-without-credentials proves OpenSearch + the security plugin
-        # finished bootstrapping, not merely that the container exists
-        # (spec C4). First boot takes ~1 minute.
-        - name: "Step 11: Wait for the indexer HTTPS API to answer 401 (spec C4)"
-          tags: [C4]
-          ansible.builtin.uri:
-            url: "https://127.0.0.1:9200"
-            validate_certs: false
-            status_code: 401
-          register: wazuh_indexer_ready
-          until: wazuh_indexer_ready.status == 401
-          retries: 60
-          delay: 5
-
-        - name: "Record that the ACL transaction completed successfully"
+            wazuh_endpoint_value: "{{ siem_forward_host }}"
+            wazuh_endpoint_manager: ""
+          when: (pilot_wazuh_reader_selected | bool) and (siem_forwarding_enabled | bool) and not (wazuh_recover | default(false) | bool)
           tags: [always]
+
+        - name: "Retain the receiver address before version and receipt admission"
           ansible.builtin.set_fact:
-            wazuh_acl_journal_committed: true
+            wazuh_receiver_bound_address: "{{ wazuh_endpoint_address }}"
+          when: (pilot_wazuh_reader_selected | bool) and (siem_forwarding_enabled | bool) and not (wazuh_recover | default(false) | bool)
+          tags: [always]
 
-      rescue:
-        - name: "ROLLBACK — restore the previous files with their original metadata"
+        - name: "Bind desired forwarding and tracked proof code to this version inspection"
+          ansible.builtin.set_fact:
+            wazuh_preview_coordinator_hash: "{{ lookup('file', playbook_dir ~ '/files/wazuh-transaction.py', rstrip=False) | hash('sha256') }}"
+            wazuh_reader_tools:
+              pilot-wazuh-delivery: "{{ lookup('file', playbook_dir ~ '/../files/pilot-wazuh-delivery', rstrip=False) | hash('sha256') }}"
+              pilot-siem-relp-check: "{{ lookup('file', playbook_dir ~ '/../files/pilot-siem-relp-check', rstrip=False) | hash('sha256') }}"
+            wazuh_reader_checker_hash: "{{ lookup('file', playbook_dir ~ '/../files/pilot-wazuh-heartbeat', rstrip=False) | hash('sha256') }}"
+          no_log: true
+          tags: [always]
+
+        - name: "Record allocation intent before dispatching any transient effect"
+          ansible.builtin.set_fact:
+            wazuh_preview_allocation: dispatched-unknown
+            wazuh_preview_settled: false
+            wazuh_preview_prefix: "/run/pilot-wazuh-preview-{{ wazuh_writer_owner }}-{{ wazuh_reader_operation.stdout }}-"
+          when: ansible_check_mode
+          tags: [always]
+
+        - name: "Allocate an exclusive transient desired-tool preview scope"
+          ansible.builtin.tempfile:
+            state: directory
+            path: /run
+            prefix: "pilot-wazuh-preview-{{ wazuh_writer_owner }}-{{ wazuh_reader_operation.stdout }}-"
+          register: wazuh_preview_directory
+          check_mode: false
+          changed_when: false
+          when: ansible_check_mode
+          tags: [always]
+
+        - name: "Require an explicit successful allocation response"
+          ansible.builtin.assert:
+            that:
+              - wazuh_preview_directory is mapping
+              - not (wazuh_preview_directory.failed | default(false))
+              - not (wazuh_preview_directory.skipped | default(false))
+              - not (wazuh_preview_directory.unreachable | default(false))
+              - wazuh_preview_directory.path is string
+              - wazuh_preview_directory.path.startswith(wazuh_preview_prefix)
+            quiet: true
+          when: ansible_check_mode
+          tags: [always]
+
+        - name: "Pin this invocation's transient directory before any staged copy"
+          ansible.builtin.stat:
+            path: "{{ wazuh_preview_directory.path }}"
+            follow: false
+            get_checksum: false
+          register: wazuh_preview_stat
+          when: ansible_check_mode
+          tags: [always]
+
+        - name: "Require complete native allocation identity before creating a capability"
+          ansible.builtin.assert:
+            that:
+              - wazuh_preview_stat is mapping
+              - not (wazuh_preview_stat.failed | default(false))
+              - not (wazuh_preview_stat.skipped | default(false))
+              - not (wazuh_preview_stat.unreachable | default(false))
+              - wazuh_preview_stat.stat.exists is sameas true
+              - wazuh_preview_stat.stat.isdir is sameas true
+              - wazuh_preview_stat.stat.islnk is sameas false
+              - wazuh_preview_stat.stat.dev is integer
+              - wazuh_preview_stat.stat.inode is integer
+              - wazuh_preview_stat.stat.uid is integer
+              - wazuh_preview_stat.stat.gid is integer
+              - wazuh_preview_stat.stat.mode == '0700'
+            quiet: true
+          when: ansible_check_mode
+          tags: [always]
+
+        - name: "Bind preview scope identity and exact desired member fingerprints"
+          ansible.builtin.set_fact:
+            wazuh_preview_assets:
+              schema: 1
+              kind: WAZUH_PREVIEW_TOOLS
+              owner: "{{ wazuh_writer_owner }}"
+              operation: "{{ wazuh_reader_operation.stdout }}"
+              path: "{{ wazuh_preview_directory.path }}"
+              identity: "{{ [wazuh_preview_stat.stat.dev, wazuh_preview_stat.stat.inode, wazuh_preview_stat.stat.uid, wazuh_preview_stat.stat.gid, wazuh_preview_stat.stat.mode | int(base=8)] }}"
+              tools: "{{ wazuh_reader_tools | combine({'pilot-wazuh-heartbeat': wazuh_reader_checker_hash}) }}"
+          when: ansible_check_mode
           tags: [always]
           no_log: true
-          diff: false
+
+        - name: "Authenticate the empty transient scope header before any staged copy"
+          ansible.builtin.script:
+            cmd: >-
+              ../files/pilot-wazuh-delivery preview-pin {{ wazuh_preview_assets | to_json | quote }}
+            executable: python3
+          register: wazuh_preview_pin
+          changed_when: false
+          check_mode: false
+          when: ansible_check_mode
+          no_log: true
+          tags: [always]
+
+        - name: "Accept only the exact authenticated allocation binding"
+          ansible.builtin.assert:
+            that:
+              - wazuh_preview_pin.rc is integer and wazuh_preview_pin.rc is not boolean and wazuh_preview_pin.rc == 0
+              - not (wazuh_preview_pin.failed | default(false))
+              - not (wazuh_preview_pin.skipped | default(false))
+              - not (wazuh_preview_pin.unreachable | default(false))
+              - (wazuh_preview_pin.stdout | from_json).schema is integer and (wazuh_preview_pin.stdout | from_json).schema is not boolean
+              - ((wazuh_preview_pin.stdout | from_json).identity | select('integer') | list | length) == 5
+              - (wazuh_preview_pin.stdout | from_json) == {'schema':1,'kind':'WAZUH_PREVIEW_PIN','owner':wazuh_writer_owner,'operation':wazuh_reader_operation.stdout,'path':wazuh_preview_assets.path,'identity':wazuh_preview_assets.identity,'source_sha256':wazuh_reader_tools['pilot-wazuh-delivery']}
+            quiet: true
+          when: ansible_check_mode
+          no_log: true
+          tags: [always]
+
+        - name: "Record the positively pinned allocation before member copies"
+          ansible.builtin.set_fact:
+            wazuh_preview_allocation: scope-pinned
+          when: ansible_check_mode
+          tags: [always]
+
+        - name: "Stage the exact desired preview tools without deploying installed assets"
           ansible.builtin.copy:
-            dest: "{{ item.item.item }}"
-            content: "{{ item.content | b64decode }}"
-            owner: "{{ item.item.stat.uid }}"
-            group: "{{ item.item.stat.gid }}"
-            mode: "{{ item.item.stat.mode }}"
-          loop: "{{ wazuh_forward_snapshot.results | default([]) }}"
-          when: item.content is defined
-
-        - name: "ROLLBACK — remove only newly created configuration files"
+            src: "{{ playbook_dir }}/../files/{{ item }}"
+            dest: "{{ wazuh_preview_assets.path }}/{{ item }}"
+            owner: root
+            group: root
+            mode: "0700"
+          loop: [pilot-wazuh-delivery, pilot-wazuh-heartbeat, pilot-siem-relp-check]
+          check_mode: false
+          changed_when: false
+          when: ansible_check_mode
           tags: [always]
-          ansible.builtin.file:
-            path: "{{ item.item }}"
-            state: absent
-          loop: "{{ wazuh_forward_snapshot_stat.results | default([]) | rejectattr('stat.exists') | list }}"
+          no_log: true
 
-        - name: "ROLLBACK — restore original ACLs only on the captured objects"
+        - name: "Build the secret-free selected reader request"
+          ansible.builtin.set_fact:
+            wazuh_reader_request:
+              selected: "{{ pilot_wazuh_reader_selected | bool }}"
+              enabled: "{{ siem_forwarding_enabled | bool }}"
+              host: "{{ siem_forward_host | default('') }}"
+              address: "{{ wazuh_receiver_bound_address }}"
+              transport: "{{ siem_forward_transport }}"
+              port: "{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }}"
+              peer: "{{ siem_relp_server_name | default('') }}"
+              tls:
+                ca.pem: "{{ siem_relp_ca_pem | default('') | hash('sha256') }}"
+                cert.pem: "{{ siem_relp_cert_pem | default('') | hash('sha256') }}"
+                key.pem: "{{ siem_relp_key_pem | default('') | hash('sha256') }}"
+              tools: "{{ wazuh_reader_tools }}"
+          no_log: true
           tags: [always]
-          ansible.builtin.command:
-            argv:
-              - /usr/local/libexec/pilot-wazuh-acl
-              - restore
-              - "{{ wazuh_acl_journal.path }}"
-          register: wazuh_acl_restore_result
+
+        - name: "Reset this play's selected manager replacement plan"
+          ansible.builtin.set_fact:
+            pilot_wazuh_manager_install_planned: false
+          tags: [always]
+
+        - name: "Mark this run's selected Wazuh manager installation plan"
+          ansible.builtin.set_fact:
+            pilot_wazuh_manager_install_planned: true
+          tags: [C1, C2, C3]
+
+        - name: "Record whether this invocation dispatches a readonly central preview"
+          ansible.builtin.set_fact:
+            wazuh_preview_central_dispatched: "{{ ansible_check_mode and docker_pre.rc == 0 }}"
+          tags: [always]
+
+        - name: "Inspect compatibility or execute the explicitly authorized central upgrade"
+          ansible.builtin.script:
+            cmd: >-
+              files/wazuh-transaction.py central --version {{ wazuh_version | default('') | quote }}
+              --legacy {{ wazuh_docker_version | quote }}
+              --owner {{ wazuh_writer_owner | quote }}
+              --reader-desired-json {{ wazuh_reader_request | to_json | quote }}
+              --reader-checker-sha256 {{ wazuh_reader_checker_hash | quote }}
+              {{ '--ack-rsyslog-downtime-and-replay' if (wazuh_ack_rsyslog_downtime_and_replay | default(false) | bool) else '' }}
+              {{ '--upgrade' if ((wazuh_upgrade | default(false) | bool) and pilot_wazuh_manager_install_planned is defined and pilot_wazuh_manager_install_planned) else '' }}
+              {{ ('--preview --operation ' ~ (wazuh_reader_operation.stdout | quote) ~ ' --preview-tools-json ' ~ (wazuh_preview_assets | to_json | quote)) if ansible_check_mode else '' }}
+              {{ '--recover' if (wazuh_recover | default(false) | bool) else '' }}
+            executable: python3
+          register: wazuh_central_transaction
+          changed_when: >-
+            not ansible_check_mode and
+            (wazuh_central_transaction.stdout | from_json).changed | bool
+          check_mode: false
+          when: not ansible_check_mode or docker_pre.rc == 0
+          tags: [always]
+          no_log: true
+
+        - name: "Record whether the central runtime probe was legitimately deferred"
+          ansible.builtin.set_fact:
+            pilot_wazuh_manager_preview_fresh: >-
+              {{ ansible_check_mode and
+                 ((wazuh_central_transaction is skipped) or
+                  ((wazuh_central_transaction.stdout | default('{}') | from_json).fresh | default(false))
+                  or ((wazuh_central_transaction.stdout | default('{}') | from_json).planned_upgrade | default(false))) }}
+          tags: [always]
+
+        - name: "Gate: a fresh central stack requires selected container installation tasks"
+          ansible.builtin.assert:
+            that:
+              - pilot_wazuh_manager_install_planned is defined and pilot_wazuh_manager_install_planned
+            fail_msg: "Fresh Wazuh central tasks require C1/C2/C3 container installation to be selected"
           when:
-            - wazuh_acl_journal is defined
-            - wazuh_acl_journal.path is defined
-
-        - name: "ROLLBACK — restore the Wazuh transport material"
+            - not (wazuh_central_transaction is skipped)
+            - (wazuh_central_transaction.stdout | from_json).fresh | default(false)
           tags: [always]
-          ansible.builtin.include_tasks:
-            file: tasks/rsyslog-relp-restore.yml
-            apply:
+
+        - name: "Retain the active Compose directory after a controlled patch upgrade"
+          ansible.builtin.set_fact:
+            wazuh_single_node_dir: "{{ (wazuh_central_transaction.stdout | from_json).directory }}"
+          when:
+            - not ansible_check_mode
+            - (wazuh_central_transaction.stdout | from_json).directory is defined
+          tags: [always]
+
+        - name: "Finish the version-only transaction after verified upgrade or recovery"
+          ansible.builtin.set_fact:
+            wazuh_finish_host: true
+          when:
+            - not ansible_check_mode
+            - >-
+              ((wazuh_central_transaction.stdout | from_json).changed | bool)
+              or (wazuh_recover | default(false) | bool)
+          tags: [always]
+
+        - name: "Apply the selected Wazuh tasks only after policy is recomputed under ownership"
+          when: not wazuh_finish_host
+          block:
+            - name: "Admit selected ordinary enable against any pending local replay receipt"
+              ansible.builtin.command:
+                argv: >-
+                  {{ ['/usr/local/sbin/pilot-wazuh-transaction', 'reader-enable-admit',
+                      '--owner', wazuh_writer_owner, '--operation', wazuh_reader_operation.stdout]
+                     + (['--ack-rsyslog-downtime-and-replay']
+                        if (wazuh_ack_rsyslog_downtime_and_replay | default(false) | bool) else [])
+                     + (['--preview'] if ansible_check_mode else []) }}
+              register: wazuh_reader_admit
+              changed_when: false
+              check_mode: false
+              when:
+                - not ansible_check_mode
+                - pilot_wazuh_reader_selected | bool
+                - siem_forwarding_enabled | bool
+                - not pilot_wazuh_manager_preview_fresh
+              no_log: true
               tags: [always]
+
+            - name: "Record selected readonly replay preview dispatch before execution"
+              ansible.builtin.set_fact:
+                wazuh_preview_admit_dispatched: true
+              when:
+                - ansible_check_mode
+                - pilot_wazuh_reader_selected | bool
+                - siem_forwarding_enabled | bool
+                - not pilot_wazuh_manager_preview_fresh
+              tags: [always]
+
+            - name: "Preview selected ordinary enable with the desired coordinator and tool closure"
+              ansible.builtin.script:
+                cmd: >-
+                  files/wazuh-transaction.py reader-enable-admit --preview
+                  --owner {{ wazuh_writer_owner | quote }} --operation {{ wazuh_reader_operation.stdout | quote }}
+                  --reader-desired-json {{ wazuh_reader_request | to_json | quote }}
+                  --reader-checker-sha256 {{ wazuh_reader_checker_hash | quote }}
+                  --preview-tools-json {{ wazuh_preview_assets | to_json | quote }}
+                  {{ '--ack-rsyslog-downtime-and-replay' if (wazuh_ack_rsyslog_downtime_and_replay | default(false) | bool) else '' }}
+                executable: python3
+              register: wazuh_reader_preview_admit
+              check_mode: false
+              changed_when: false
+              when:
+                - ansible_check_mode
+                - pilot_wazuh_reader_selected | bool
+                - siem_forwarding_enabled | bool
+                - not pilot_wazuh_manager_preview_fresh
+              no_log: true
+              tags: [always]
+
+            - name: "Remember this invocation's selected local enable admission"
+              ansible.builtin.set_fact:
+                wazuh_reader_enable_admitted: true
+              when:
+                - not ansible_check_mode
+                - pilot_wazuh_reader_selected | bool
+                - siem_forwarding_enabled | bool
+                - not pilot_wazuh_manager_preview_fresh
+              tags: [always]
+
+            - name: "Gate: detect SELinux independently of optional Python bindings"
+              ansible.builtin.stat:
+                path: /sys/fs/selinux/enforce
+                get_checksum: false
+              register: wazuh_selinux_filesystem
+              check_mode: false
+              tags: [always]
+
+            - name: "Gate: Wazuh forwarding uses a supported host reader"
+              ansible.builtin.assert:
+                that:
+                  - not (siem_forwarding_enabled | bool) or ansible_distribution == 'Ubuntu'
+                  - not (siem_forwarding_enabled | bool) or not wazuh_selinux_filesystem.stat.exists
+                fail_msg: "The Wazuh host imfile reader currently supports Ubuntu without SELinux; standalone manager deployment remains available."
+              tags: [always]
+
+            - name: "Gate: validate Wazuh forwarding transport and mTLS inputs"
+              ansible.builtin.include_tasks:
+                file: tasks/rsyslog-relp-inputs.yml
+                apply:
+                  tags: [always]
+              vars:
+                siem_tls_role: wazuh-sender
+                siem_tls_enabled: "{{ siem_forwarding_enabled | bool and siem_forward_transport == 'relp' }}"
+              tags: [always]
+
+            - name: "Gate: siem_forward_port matches the inventory log-server's siem_receiver_tcp_port"
+              ansible.builtin.assert:
+                that:
+                  - >-
+                    ((siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port) | string)
+                    == (siem_forward_receiver_port | string)
+                  - >-
+                    siem_forward_transport != 'tcp' or
+                    not (hostvars[siem_forward_log_server].siem_receiver_relp_enabled | default(false) | bool)
+                  - >-
+                    siem_forward_transport != 'relp' or
+                    (hostvars[siem_forward_log_server].siem_receiver_relp_enabled | default(false) | bool)
+                fail_msg: >-
+                  {{ inventory_hostname }} requires {{ siem_forward_transport }} to
+                  {{ siem_forward_host }}:{{ siem_relp_port if siem_forward_transport == 'relp' else siem_forward_port }},
+                  but log-server {{ siem_forward_log_server }} has port {{ siem_forward_receiver_port }}.
+                  Match the selected transport's port on both sides and enable the receiver's RELP listener for RELP.
+              vars:
+                siem_forward_target_name: "{{ (siem_forward_host | string | lower).rstrip('.') }}"
+                siem_forward_log_server: "{% for h in groups.get('log-server', []) if siem_forward_target_name in ([h, hostvars[h].ansible_host | default(h, true), hostvars[h].ansible_fqdn | default(''), hostvars[h].ansible_nodename | default('')] | map('string') | map('lower') | map('regex_replace', '[.]$', '') | list) %}{% if loop.first %}{{ h }}{% endif %}{% endfor %}"
+                siem_forward_receiver_port: "{{ (hostvars[siem_forward_log_server].siem_relp_port | default(20514) if siem_forward_transport == 'relp' else hostvars[siem_forward_log_server].siem_receiver_tcp_port | default('514', true)) if siem_forward_log_server else '' }}"
+              when:
+                - siem_forwarding_enabled | bool
+                # An empty for-loop renders as None, not "", in ansible-core 2.19.
+                - (siem_forward_log_server | default('', true)) | length > 0
+              tags: [always]
+            - name: "Reset per-run ACL journal completion state"
+              ansible.builtin.set_fact:
+                wazuh_acl_journal_committed: false
+                wazuh_acl_journal: {}
+                wazuh_acl_restore_result: {}
+                wazuh_apparmor_result: {}
+                wazuh_reload_pending: {skipped: true}
+                wazuh_live_config: {skipped: true}
+                wazuh_forward_snapshot: {results: []}
+                wazuh_forward_snapshot_stat: {results: []}
+                wazuh_rescue_syntax: {skipped: true}
+                wazuh_heartbeat_preflight: {skipped: true}
+              tags: [always]
+
+            - name: "Wazuh: install native RELP preflight prerequisites before configuration changes"
+              tags: [C10, C11]
+              ansible.builtin.include_tasks:
+                file: tasks/apt-package-install.yml
+                apply:
+                  tags: [C10, C11]
+              vars:
+                pilot_apt_packages: [rsyslog, rsyslog-relp, openssl]
+                pilot_apt_component: wazuh-heartbeat-preflight
+              when: not ansible_check_mode and siem_forwarding_enabled | bool and siem_forward_transport == 'relp'
+
+            - name: "Wazuh: refuse foreign immark and unsupported heartbeat before Wazuh or TLS mutation"
+              tags: [C10, C11]
               no_log: true
               diff: false
-          when:
-            - siem_tls_snapshot_role is defined
-            - siem_tls_snapshot_role == 'wazuh-sender'
+              ansible.builtin.script: "../files/pilot-wazuh-heartbeat preflight {{ 'relp' if siem_forwarding_enabled | bool and siem_forward_transport == 'relp' else 'retire' }}"
+              register: wazuh_heartbeat_preflight
+              changed_when: false
+              failed_when: false
+              when: not ansible_check_mode
 
-        - name: "ROLLBACK — reload restored AppArmor permissions"
-          tags: [always]
-          ansible.builtin.command: apparmor_parser -r /etc/apparmor.d/usr.sbin.rsyslogd
-          when:
-            - wazuh_apparmor_result is defined
-            - wazuh_apparmor_result is changed
+            - name: "Gate: Wazuh requires exclusive native heartbeat support for RELP"
+              tags: [always]
+              ansible.builtin.assert:
+                that: (wazuh_heartbeat_preflight.rc | default(-1)) == 0
+                fail_msg: >-
+                  Wazuh requires exclusive immark ownership within its managed reader;
+                  enabled RELP additionally requires native support for its fixed five-second
+                  named-action heartbeat. Foreign/unknown/loaded-only ownership or unsupported
+                  native configuration was refused before Wazuh/TLS changes. Preserve
+                  operator configuration and use a supported rsyslog pair.
+              # The selected script must publish a fresh result. The always reset
+              # prevents a previous play's registered value from gating C1-only runs.
+              when:
+                - not ansible_check_mode
+                - wazuh_heartbeat_preflight is defined
+                - not (wazuh_heartbeat_preflight.skipped | default(false) | bool)
+            - name: "Step 0: Report whether SIEM forwarding is enabled this run"
+              ansible.builtin.debug:
+                msg: >-
+                  {{ 'siem_forward_host=' + siem_forward_host + ' — forwarding will be configured (spec C10-C11).'
+                     if siem_forwarding_enabled
+                     else 'siem_forward_host not provided — disabling the managed imfile forwarder; only local alerting + CVE scanning (C1-C9) will be configured. Re-run with -e siem_forward_host=<log-server IP/FQDN> once a log server exists to add forwarding.' }}
 
-        - name: "ROLLBACK — validate the restored rsyslog configuration"
+            # Official hard requirement of the wazuh-indexer (OpenSearch) image —
+            # the one host-level knob this role cannot containerize (spec §5).
+            - name: "Step 1: Set vm.max_map_count=262144 (indexer requirement, persistent)"
+              ansible.posix.sysctl:
+                name: vm.max_map_count
+                value: "262144"
+                sysctl_set: true
+                state: present
+
+            # Steps 2-5 build the real on-disk docker-compose project (download,
+            # unpack, generate certs); state directory created in Step 2 doesn't
+            # really exist under check mode, so get_url/unarchive/command fail
+            # outright on a from-scratch host rather than merely simulating. Deferred
+            # to the real apply, same pattern as the docker preflight above.
+            - name: "Step 2: Ensure {{ wazuh_docker_root }} exists"
+              ansible.builtin.file:
+                path: "{{ wazuh_docker_root }}"
+                state: directory
+                mode: "0755"
+              when: not ansible_check_mode
+
+            - name: "Step 3: Download the official wazuh-docker release bundle (spec C1-C3)"
+              tags: [C1, C2, C3]
+              ansible.builtin.get_url:
+                url: "https://github.com/wazuh/wazuh-docker/archive/refs/tags/v{{ wazuh_docker_version }}.tar.gz"
+                dest: "{{ wazuh_docker_tarball }}"
+                mode: "0644"
+              when: not ansible_check_mode
+
+            - name: "Step 4: Unpack the release bundle (spec C1-C3)"
+              tags: [C1, C2, C3]
+              ansible.builtin.unarchive:
+                src: "{{ wazuh_docker_tarball }}"
+                dest: "{{ wazuh_docker_root }}"
+                remote_src: true
+                creates: "{{ wazuh_single_node_dir }}/docker-compose.yml"
+              when: not ansible_check_mode
+
+            # Step 4b: remap the dashboard off host port 443 (spec C1) — the official
+            # compose file ships `- 443:5601` under the dashboard service, which
+            # collides with reverse-proxy/nginx on any host running both roles. Runs
+            # after the unpack (the file doesn't exist before it) and before compose
+            # up (Step 8), so the remapped port is what actually gets bound.
+            # ansible.builtin.replace is naturally idempotent — a rerun after the
+            # port is already remapped matches nothing and reports unchanged.
+            - name: "Step 4b: Remap the dashboard off host port 443 (avoids reverse-proxy/nginx conflict)"
+              tags: [C1]
+              ansible.builtin.replace:
+                path: "{{ wazuh_single_node_dir }}/docker-compose.yml"
+                regexp: '^(\s*-\s*)443:5601\s*$'
+                replace: '\g<1>{{ wazuh_dashboard_host_port }}:5601'
+              when: not ansible_check_mode
+
+            # One-shot official cert generator (wazuh/wazuh-certs-generator) —
+            # builds the full TLS chain into config/wazuh_indexer_ssl_certs/.
+            # Idempotent via `creates` on the root CA it emits. Long-ish on first
+            # run (pulls the generator image).
+            - name: "Step 5: Generate the indexer TLS cert chain (official generator; spec C1-C3)"
+              tags: [C1, C2, C3]
+              ansible.builtin.command:
+                cmd: docker compose -f generate-indexer-certs.yml run --rm generator
+                chdir: "{{ wazuh_single_node_dir }}"
+                creates: "{{ wazuh_single_node_dir }}/config/wazuh_indexer_ssl_certs/root-ca.pem"
+              when: not ansible_check_mode
+
+
+            # Steps 6-11 configure/compose-up/health-check the project built above;
+            # none of that exists on a fresh host when Steps 2-5 were skipped in
+            # check mode, so the whole block (and its rescue) is deferred too — same
+            # convention as wazuh-fim-apply.yml's post-install config block.
+            - when: not ansible_check_mode
+              block:
+                - name: "Snapshot: inspect files before Wazuh forwarding mutation"
+                  tags: [always]
+                  ansible.builtin.stat:
+                    path: "{{ item }}"
+                  loop:
+                    - /etc/hosts
+                    - "{{ wazuh_manager_conf }}"
+                    - /etc/rsyslog.d/31-pilot-wazuh.conf
+                    - /etc/rsyslog.d/pilot-wazuh/profile.json
+                    - /etc/apparmor.d/local/usr.sbin.rsyslogd
+                  register: wazuh_forward_snapshot_stat
+
+                - name: "Snapshot: retain existing configuration content"
+                  tags: [always]
+                  no_log: true
+                  diff: false
+                  ansible.builtin.slurp:
+                    src: "{{ item.item }}"
+                  loop: "{{ wazuh_forward_snapshot_stat.results | selectattr('stat.exists') | list }}"
+                  register: wazuh_forward_snapshot
+
+                - name: "Snapshot: retain forwarding presence for disable transition"
+                  tags: [always]
+                  ansible.builtin.set_fact:
+                    wazuh_forward_had_config: "{{ wazuh_forward_snapshot_stat.results[2].stat.exists }}"
+
+                - name: "Step 5b: Resolve siem_forward_host for the /etc/hosts pin (spec C10)"
+                  tags: [always]
+                  ansible.builtin.set_fact:
+                    hosts_alias_resolved_ip: "{{ wazuh_receiver_bound_address }}"
+                  when: siem_forwarding_enabled | bool
+
+                - name: "Step 6: Pin {{ siem_forward_alias }} -> {{ siem_forward_host | default('') }} in /etc/hosts (spec C10)"
+                  tags: [C10, C11]
+                  ansible.builtin.lineinfile:
+                    path: /etc/hosts
+                    regexp: '\s{{ siem_forward_alias }}$'
+                    line: "{{ hosts_alias_resolved_ip }}\t{{ siem_forward_alias }}"
+                    state: present
+                  when: siem_forwarding_enabled | bool
+
+                - name: "Step 7: Remove the legacy managed UDP syslog_output on migration or disable"
+                  tags: [C11]
+                  no_log: true
+                  diff: false
+                  ansible.builtin.blockinfile:
+                    path: "{{ wazuh_manager_conf }}"
+                    marker: "<!-- {mark} ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward) -->"
+                    state: absent
+                  register: siem_forward_conf_result
+
+                - name: "Step 7a: Retire the managed development-only delivery localfile"
+                  tags: [C11]
+                  no_log: true
+                  diff: false
+                  ansible.builtin.blockinfile:
+                    path: "{{ wazuh_manager_conf }}"
+                    marker: "<!-- {mark} PILOT WAZUH DELIVERY PROBE -->"
+                    state: absent
+
+                # Spec: docs/verification/wazuh-manager.md C1, C2, C3
+                # First run pulls ~3-4GB of official images and boots the indexer
+                # for the first time (index bootstrap ~1 minute) — the waits below
+                # absorb that.
+                - name: "Step 8: Compose up the official single-node project (spec C1-C3)"
+                  tags: [C1, C2, C3]
+                  community.docker.docker_compose_v2:
+                    project_src: "{{ wazuh_single_node_dir }}"
+                    project_name: "{{ wazuh_compose_project }}"
+                    state: present
+                  register: wazuh_compose_result
+
+                # /wazuh-config-mount/etc/ossec.conf is injected at container creation.
+                # Drift comparison covers migration, disable and interrupted earlier runs.
+                - name: "Step 9: Read the live manager configuration"
+                  tags: [C11]
+                  no_log: true
+                  diff: false
+                  ansible.builtin.command: docker exec single-node-wazuh.manager-1 cat /var/ossec/etc/ossec.conf
+                  register: wazuh_live_config
+                  changed_when: false
+                  retries: 12
+                  delay: 5
+                  until: wazuh_live_config.rc == 0
+
+                - name: "Step 9a: Recreate the manager when managed configuration drifted"
+                  tags: [C11]
+                  community.docker.docker_compose_v2:
+                    project_src: "{{ wazuh_single_node_dir }}"
+                    project_name: "{{ wazuh_compose_project }}"
+                    state: present
+                    recreate: always
+                    services: [wazuh.manager]
+                  when: >-
+                    'ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward)' in wazuh_live_config.stdout
+                    or 'PILOT WAZUH DELIVERY PROBE' in wazuh_live_config.stdout
+
+                - name: "Step 9b: Verify legacy UDP forwarding is absent in the live configuration"
+                  tags: [C11]
+                  no_log: true
+                  diff: false
+                  ansible.builtin.command: docker exec single-node-wazuh.manager-1 cat /var/ossec/etc/ossec.conf
+                  register: wazuh_live_converged
+                  changed_when: false
+                  retries: 24
+                  delay: 5
+                  until: >-
+                    wazuh_live_converged.rc == 0
+                    and 'ANSIBLE MANAGED BLOCK (wazuh-manager-apply.yml siem forward)' not in wazuh_live_converged.stdout
+                    and 'PILOT WAZUH DELIVERY PROBE' not in wazuh_live_converged.stdout
+
+                - name: "Step 9c: Configure isolated host imfile forwarding"
+                  tags: [C10, C11]
+                  ansible.builtin.include_tasks:
+                    file: tasks/wazuh-alert-forward.yml
+                    apply:
+                      tags: [C10, C11]
+
+                - name: "Step 10: Wait for agent port 1514/tcp (wazuh-remoted; spec C5)"
+                  tags: [C5, C6]
+                  ansible.builtin.wait_for:
+                    port: 1514
+                    host: 127.0.0.1
+                    timeout: 300
+
+                # 401-without-credentials proves OpenSearch + the security plugin
+                # finished bootstrapping, not merely that the container exists
+                # (spec C4). First boot takes ~1 minute.
+                - name: "Step 11: Wait for the indexer HTTPS API to answer 401 (spec C4)"
+                  tags: [C4]
+                  ansible.builtin.uri:
+                    url: "https://127.0.0.1:9200"
+                    validate_certs: false
+                    status_code: 401
+                  register: wazuh_indexer_ready
+                  until: wazuh_indexer_ready.status == 401
+                  retries: 60
+                  delay: 5
+
+                - name: "Verify selected local reader and replay before ordinary commit"
+                  ansible.builtin.command:
+                    argv:
+                      - /usr/local/sbin/pilot-wazuh-transaction
+                      - reader-enable-verify
+                      - --owner
+                      - "{{ wazuh_writer_owner }}"
+                      - --operation
+                      - "{{ wazuh_reader_operation.stdout }}"
+                  changed_when: false
+                  when:
+                    - wazuh_reader_enable_admitted | bool
+                    - siem_forwarding_enabled | bool
+                  no_log: true
+                  tags: [C10, C11]
+
+                - name: "Record that the ACL transaction completed successfully"
+                  tags: [always]
+                  ansible.builtin.set_fact:
+                    wazuh_acl_journal_committed: true
+
+              rescue:
+                - name: "ROLLBACK — restore the previous files with their original metadata"
+                  tags: [always]
+                  no_log: true
+                  diff: false
+                  ansible.builtin.copy:
+                    dest: "{{ item.item.item }}"
+                    content: "{{ item.content | b64decode }}"
+                    owner: "{{ item.item.stat.uid }}"
+                    group: "{{ item.item.stat.gid }}"
+                    mode: "{{ item.item.stat.mode }}"
+                  loop: "{{ wazuh_forward_snapshot.results | default([]) }}"
+                  when: item.content is defined
+
+                - name: "ROLLBACK — remove only newly created configuration files"
+                  tags: [always]
+                  ansible.builtin.file:
+                    path: "{{ item.item }}"
+                    state: absent
+                  loop: "{{ wazuh_forward_snapshot_stat.results | default([]) | rejectattr('stat.exists') | list }}"
+
+                - name: "ROLLBACK — restore original ACLs only on the captured objects"
+                  tags: [always]
+                  ansible.builtin.command:
+                    argv:
+                      - /usr/local/libexec/pilot-wazuh-acl
+                      - restore
+                      - "{{ wazuh_acl_journal.path }}"
+                  register: wazuh_acl_restore_result
+                  when:
+                    - wazuh_acl_journal is defined
+                    - wazuh_acl_journal.path is defined
+
+                - name: "ROLLBACK — restore the Wazuh transport material"
+                  tags: [always]
+                  ansible.builtin.include_tasks:
+                    file: tasks/rsyslog-relp-restore.yml
+                    apply:
+                      tags: [always]
+                      no_log: true
+                      diff: false
+                  when:
+                    - siem_tls_snapshot_role is defined
+                    - siem_tls_snapshot_role == 'wazuh-sender'
+
+                - name: "ROLLBACK — reload restored AppArmor permissions"
+                  tags: [always]
+                  ansible.builtin.command: apparmor_parser -r /etc/apparmor.d/usr.sbin.rsyslogd
+                  when:
+                    - wazuh_apparmor_result is defined
+                    - wazuh_apparmor_result is changed
+
+                - name: "ROLLBACK — validate the restored rsyslog configuration"
+                  tags: [always]
+                  no_log: true
+                  diff: false
+                  ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
+                  register: wazuh_rescue_syntax
+                  changed_when: false
+                  failed_when: false
+                  when: >-
+                    (wazuh_reload_pending is defined and not (wazuh_reload_pending is skipped))
+                    or (siem_tls_snapshot_role is defined and siem_tls_snapshot_role == 'wazuh-sender' and
+                        ((siem_tls_restore_result is defined and siem_tls_restore_result is changed)
+                         or (siem_tls_remove_result is defined and siem_tls_remove_result is changed)
+                         or (siem_module_restore_result is defined and siem_module_restore_result is changed)
+                         or (siem_module_remove_result is defined and siem_module_remove_result is changed)))
+
+                - name: "ROLLBACK — load restored rsyslog configuration"
+                  tags: [always]
+                  ansible.builtin.systemd:
+                    name: rsyslog
+                    state: restarted
+                  when:
+                    - wazuh_rescue_syntax is defined
+                    - not (wazuh_rescue_syntax is skipped)
+                    - wazuh_rescue_syntax.rc == 0
+
+                - name: "ROLLBACK — recreate manager with its restored source configuration"
+                  tags: [always]
+                  community.docker.docker_compose_v2:
+                    project_src: "{{ wazuh_single_node_dir }}"
+                    project_name: "{{ wazuh_compose_project }}"
+                    state: present
+                    recreate: always
+                    services: [wazuh.manager]
+                  when: wazuh_live_config is defined and not (wazuh_live_config is skipped)
+
+                - name: "ROLLBACK — verify the restored rsyslog service remains active"
+                  tags: [always]
+                  ansible.builtin.command: systemctl is-active --quiet rsyslog
+                  changed_when: false
+                  when: wazuh_rescue_syntax is defined and not (wazuh_rescue_syntax is skipped)
+
+                - name: "ROLLBACK — wait for the restored manager agent listener"
+                  tags: [always]
+                  ansible.builtin.wait_for:
+                    host: 127.0.0.1
+                    port: 1514
+                    timeout: 300
+                  when: wazuh_live_config is defined and not (wazuh_live_config is skipped)
+
+                - name: "ROLLBACK — surface the original failure"
+                  tags: [always]
+                  ansible.builtin.fail:
+                    msg: "wazuh-manager apply failed; previous configuration and captured ACLs were restored. Inspect the original failed task and service health before retrying."
+
+              always:
+                - name: "Retire the transient ACL journal only after commit or successful recovery"
+                  tags: [always]
+                  ansible.builtin.file:
+                    path: "{{ wazuh_acl_journal.path }}"
+                    state: absent
+                  changed_when: false
+                  when:
+                    - wazuh_acl_journal is defined
+                    - wazuh_acl_journal.path is defined
+                    - wazuh_acl_journal_committed | default(false) | bool or (wazuh_acl_restore_result.rc | default(-1)) == 0
+
+            - name: "Commit local replay acknowledgement only after selected forwarding convergence"
+              ansible.builtin.command:
+                argv:
+                  - /usr/local/sbin/pilot-wazuh-transaction
+                  - reader-enable-complete
+                  - --owner
+                  - "{{ wazuh_writer_owner }}"
+                  - --operation
+                  - "{{ wazuh_reader_operation.stdout }}"
+              changed_when: false
+              when:
+                - not ansible_check_mode
+                - wazuh_reader_enable_admitted | bool
+              no_log: true
+              tags: [always]
+
+            - name: "Record local replay convergence independently of later verification"
+              ansible.builtin.set_fact:
+                wazuh_reader_enable_committed: true
+              when:
+                - not ansible_check_mode
+                - wazuh_reader_enable_admitted | bool
+              tags: [always]
+
+            - name: "Verify native releases, retained-agent compatibility and readiness (spec C12)"
+              ansible.builtin.command:
+                argv: [/usr/local/sbin/pilot-wazuh-transaction, central-verify, --owner, "{{ wazuh_writer_owner }}"]
+              changed_when: false
+              when: not ansible_check_mode
+              tags: [C12]
+      rescue:
+        - name: "Retain the original Wazuh failure while settling transient preview ownership"
+          ansible.builtin.set_fact:
+            wazuh_preview_failed: true
           tags: [always]
+        # The coordinator tasks run under no_log because their arguments carry
+        # operator inputs, which also censors why they failed. Their stdout holds a
+        # bounded typed refusal (error_kind refused|native plus a fixed message,
+        # never tool output); extract only that pair with a strict pattern.
+        - name: "Extract only the bounded typed refusal from each coordinator result hidden by no_log"
+          ansible.builtin.set_fact:
+            wazuh_coordinator_refusals: >-
+              {%- set ns = namespace(found=[]) -%}
+              {%- for label, result in {'central': wazuh_central_transaction | default({}), 'preview reader admission': wazuh_reader_preview_admit | default({}), 'reader admission': wazuh_reader_admit | default({})}.items() -%}
+              {%- set text = ((result.stdout | default('')) if result is mapping else '') | string -%}
+              {%- set kind = text | regex_search('(?<="error_kind": ")(refused|native)(?=")') -%}
+              {%- set error = text | regex_search('(?<="error": ")[^"{}]{1,300}(?=", "error_kind")') -%}
+              {%- if kind and error -%}{%- set ns.found = ns.found + [label ~ ' ' ~ kind ~ ': ' ~ error] -%}{%- endif -%}
+              {%- endfor -%}
+              {{ ns.found | join(' ; ') }}
           no_log: true
-          diff: false
-          ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
-          register: wazuh_rescue_syntax
-          changed_when: false
-          failed_when: false
-          when: >-
-            (wazuh_reload_pending is defined and not (wazuh_reload_pending is skipped))
-            or (siem_tls_snapshot_role is defined and siem_tls_snapshot_role == 'wazuh-sender' and
-                ((siem_tls_restore_result is defined and siem_tls_restore_result is changed)
-                 or (siem_tls_remove_result is defined and siem_tls_remove_result is changed)
-                 or (siem_module_restore_result is defined and siem_module_restore_result is changed)
-                 or (siem_module_remove_result is defined and siem_module_remove_result is changed)))
-
-        - name: "ROLLBACK — load restored rsyslog configuration"
           tags: [always]
-          ansible.builtin.systemd:
-            name: rsyslog
-            state: restarted
-          when:
-            - wazuh_rescue_syntax is defined
-            - not (wazuh_rescue_syntax is skipped)
-            - wazuh_rescue_syntax.rc == 0
-
-        - name: "ROLLBACK — recreate manager with its restored source configuration"
+        - name: "Disclose the typed coordinator refusal that no_log hid from its failed task"
+          ansible.builtin.debug:
+            msg: "Wazuh coordinator refusal: {{ wazuh_coordinator_refusals }}"
+          when: wazuh_coordinator_refusals | default('') | length > 0
           tags: [always]
-          community.docker.docker_compose_v2:
-            project_src: "{{ wazuh_single_node_dir }}"
-            project_name: "{{ wazuh_compose_project }}"
-            state: present
-            recreate: always
-            services: [wazuh.manager]
-          when: wazuh_live_config is defined and not (wazuh_live_config is skipped)
-
-        - name: "ROLLBACK — verify the restored rsyslog service remains active"
-          tags: [always]
-          ansible.builtin.command: systemctl is-active --quiet rsyslog
-          changed_when: false
-          when: wazuh_rescue_syntax is defined and not (wazuh_rescue_syntax is skipped)
-
-        - name: "ROLLBACK — wait for the restored manager agent listener"
-          tags: [always]
-          ansible.builtin.wait_for:
-            host: 127.0.0.1
-            port: 1514
-            timeout: 300
-          when: wazuh_live_config is defined and not (wazuh_live_config is skipped)
-
-        - name: "ROLLBACK — surface the original failure"
-          tags: [always]
+        - name: "Surface the original Wazuh failure after its recorded task diagnostics"
           ansible.builtin.fail:
-            msg: "wazuh-manager apply failed; previous configuration and captured ACLs were restored. Inspect the original failed task and service health before retrying."
-
-      always:
-        - name: "Retire the transient ACL journal only after commit or successful recovery"
+            msg: "Wazuh operation failed; the original task failure remains authoritative. Transient cleanup and exact writer settlement follow."
           tags: [always]
-          ansible.builtin.file:
-            path: "{{ wazuh_acl_journal.path }}"
-            state: absent
+      always:
+        - name: "Settle only a positively pinned transient scope"
+          when:
+            - ansible_check_mode
+            - wazuh_writer_claimed | default(false) | bool
+            - wazuh_preview_allocation == 'scope-pinned'
+          tags: [always]
+          block:
+            - name: "Record cleanup intent before its foreground invocation"
+              ansible.builtin.set_fact:
+                wazuh_preview_cleanup_attempted: true
+            - name: "Remove only this invocation's validated transient preview tools"
+              ansible.builtin.script:
+                cmd: >-
+                  ../files/pilot-wazuh-delivery preview-cleanup {{ wazuh_preview_assets | to_json | quote }}
+                  {{ {'coordinator_sha256': wazuh_preview_coordinator_hash, 'calls': [{'dispatched': wazuh_preview_central_dispatched, 'response': wazuh_central_transaction.stdout | default('')}, {'dispatched': wazuh_preview_admit_dispatched, 'response': wazuh_reader_preview_admit.stdout | default('')}]} | to_json | quote }}
+                executable: python3
+              register: wazuh_preview_cleanup
+              changed_when: false
+              check_mode: false
+              no_log: true
+              tags: [always]
+            - name: "Require the complete bound absence certificate before settlement"
+              ansible.builtin.assert:
+                that:
+                  - wazuh_preview_cleanup is mapping
+                  - not (wazuh_preview_cleanup.failed | default(false))
+                  - not (wazuh_preview_cleanup.skipped | default(false))
+                  - not (wazuh_preview_cleanup.unreachable | default(false))
+                  - wazuh_preview_cleanup.rc is integer and wazuh_preview_cleanup.rc is not boolean and wazuh_preview_cleanup.rc == 0
+                  - (wazuh_preview_cleanup.stdout | from_json).schema is integer and (wazuh_preview_cleanup.stdout | from_json).schema is not boolean
+                  - ((wazuh_preview_cleanup.stdout | from_json).identity | select('integer') | list | length) == 5
+                  - (wazuh_preview_cleanup.stdout | from_json).observers_settled is sameas true
+                  - (wazuh_preview_cleanup.stdout | from_json).scope_absent is sameas true
+                  - (wazuh_preview_cleanup.stdout | from_json) == {'schema':1,'kind':'WAZUH_PREVIEW_CLEANUP','owner':wazuh_writer_owner,'operation':wazuh_reader_operation.stdout,'path':wazuh_preview_assets.path,'identity':wazuh_preview_assets.identity,'source_sha256':wazuh_reader_tools['pilot-wazuh-delivery'],'observers_settled':true,'scope_absent':true}
+                quiet: true
+              no_log: true
+            - name: "Publish positive transient settlement for every final consumer"
+              ansible.builtin.set_fact:
+                wazuh_preview_settled: true
+          rescue:
+            - name: "Retain unknown cleanup without masking the original operation failure"
+              ansible.builtin.set_fact:
+                wazuh_preview_settled: false
+
+        - name: "Retain pending replay after this invocation's uncommitted local enable"
+          ansible.builtin.command:
+            argv:
+              - /usr/local/sbin/pilot-wazuh-transaction
+              - reader-enable-failed
+              - --owner
+              - "{{ wazuh_writer_owner }}"
+              - --operation
+              - "{{ wazuh_reader_operation.stdout }}"
           changed_when: false
           when:
-            - wazuh_acl_journal is defined
-            - wazuh_acl_journal.path is defined
-            - wazuh_acl_journal_committed | default(false) | bool or (wazuh_acl_restore_result.rc | default(-1)) == 0
+            - not ansible_check_mode
+            - wazuh_writer_claimed | default(false) | bool
+            - wazuh_reader_enable_admitted | default(false) | bool
+            - not (wazuh_reader_enable_committed | default(false) | bool)
+          no_log: true
+          tags: [always]
+
+        - name: "Release only this exact writer after all mutators and recovery tasks have ended"
+          ansible.builtin.script:
+            cmd: >-
+              files/wazuh-transaction.py writer-release --owner {{ wazuh_writer_owner | quote }}
+            executable: python3
+          changed_when: false
+          check_mode: false
+          when:
+            - wazuh_writer_claimed is defined and wazuh_writer_claimed | bool
+            - wazuh_preview_settled | bool
+          tags: [always]
+
+        - name: "Disclose retained preview scope and owner after an uncertain cleanup"
+          ansible.builtin.debug:
+            msg: "Preview cleanup retained owner={{ wazuh_writer_owner }} operation={{ wazuh_reader_operation.stdout | default('unknown') }} allocation={{ wazuh_preview_allocation }} prefix={{ wazuh_preview_prefix | default('not-dispatched') }} scope={{ wazuh_preview_assets.path | default(wazuh_preview_directory.path | default('unknown')) }} status=foreground-or-scope-unsettled reason={{ wazuh_cleanup_reason }}. Original task failure remains authoritative."
+          vars:
+            wazuh_cleanup_text: "{{ ((wazuh_preview_cleanup.stdout | default('')) if wazuh_preview_cleanup is mapping else '') | string }}"
+            wazuh_cleanup_reason: >-
+              {{ (wazuh_cleanup_text | regex_search('(?<="error": ")[^"{}]{1,300}(?=", "error_kind")')) | default('not reported by the cleanup helper', true) }}
+          when: not (wazuh_preview_settled | bool)
+          tags: [always]
+
+        - name: "Report unsettled transient scope without masking an earlier operation failure"
+          ansible.builtin.assert:
+            that: wazuh_preview_settled | bool
+            fail_msg: "Transient preview cleanup refused an unknown scope/member/process; scope and writer are retained for explicit inspection."
+          when: not (wazuh_preview_failed | bool)
+          tags: [always]
+
+    - name: "End the completed version or recovery operation after durable writer release"
+      ansible.builtin.meta: end_host
+      when: wazuh_finish_host and (wazuh_preview_settled | bool)
+      tags: [always]

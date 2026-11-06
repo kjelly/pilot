@@ -39,9 +39,29 @@
 #   stale: bool, a package download 404'd
 #   timed_out: bool (FATAL below when true)
 
+- name: "APT download probe ({{ pilot_apt_probe_stage }}) — validate exact-version output paths before downloading"
+  ansible.builtin.script:
+    cmd: "../files/apt-exact-stage.py --cache-preflight"
+    executable: python3
+  changed_when: false
+  check_mode: false
+  when: _pilot_apt_versions | default({}) | length > 0
+
+- name: "APT download probe ({{ pilot_apt_probe_stage }}) — authorize a Wazuh-only held-change plan"
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-apt-plan, --family, Debian, --owner, "{{ pilot_apt_wazuh_owner }}", --version, "{{ _pilot_apt_versions['wazuh-agent'] }}", --stage]
+  changed_when: false
+  no_log: true
+  when: pilot_apt_wazuh_owner is defined
+
 - name: "APT download probe ({{ pilot_apt_probe_stage }}) — apt-get install --download-only, never installs"
   ansible.builtin.command:
-    argv: "{{ _pilot_apt_probe_argv + _pilot_apt_missing }}"
+    argv: >-
+      {{ _pilot_apt_probe_argv
+         + (['--reinstall'] if (_pilot_apt_stage_only | default(false) | bool) else [])
+         + (['--allow-downgrades'] if (pilot_apt_allow_downgrade | default(false) | bool) else [])
+         + (['--allow-change-held-packages', '--no-install-recommends', '--no-remove'] if pilot_apt_wazuh_owner is defined else [])
+         + _pilot_apt_missing }}
   vars:
     _pilot_apt_probe_argv:
       - timeout
@@ -51,6 +71,8 @@
       - -y
       - -o
       - DPkg::Lock::Timeout=60
+      - -o
+      - APT::Get::AllowUnauthenticated=false
       - install
       - --download-only
   register: _pilot_apt_download_probe
