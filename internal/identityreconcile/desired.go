@@ -223,10 +223,15 @@ func desiredUser(u map[string]any, name, state string) (DesiredUser, error) {
 		}
 		du.HasInitialPassword = true
 	}
-	if du.PreserveExisting, err = boolOr(pw, "preserve_existing", true); err != nil {
+	// A null inside these mappings is refused where Go would otherwise take
+	// its own default for it (declaredBool, nameList, ssh_keys.values below):
+	// the playbook reads a null there as false, as a failure or as unmanaged,
+	// not as the default. password.initial is the exception: a null initial
+	// is no password in both engines.
+	if du.PreserveExisting, err = declaredBool(pw, "preserve_existing", true); err != nil {
 		return du, fmt.Errorf("password: %w", err)
 	}
-	if _, err = boolOr(pw, "force_change", false); err != nil {
+	if _, err = declaredBool(pw, "force_change", false); err != nil {
 		return du, fmt.Errorf("password: %w", err)
 	}
 	keys, err := declaredMapping(u, "ssh_keys")
@@ -236,14 +241,20 @@ func desiredUser(u map[string]any, name, state string) (DesiredUser, error) {
 	// inventory.ValidateRoster refuses a literal false, but its
 	// boolFieldDefault answers the default for any value that is not a bool,
 	// so a string passes it; the playbook runs `| bool` on the value.
-	authoritative, err := boolOr(keys, "authoritative", true)
+	authoritative, err := declaredBool(keys, "authoritative", true)
 	if err != nil {
 		return du, fmt.Errorf("ssh_keys: %w", err)
 	}
 	if !authoritative {
 		return du, fmt.Errorf("ssh_keys: authoritative must be true: the declared keys replace the live set")
 	}
-	if values, present := keys["values"]; present && values != nil {
+	if values, present := keys["values"]; present {
+		if values == nil {
+			// Both engines leave the keys alone for a null (unmanaged, as if
+			// absent), while `values: []` clears them: a stanza left empty
+			// must not stand for either.
+			return du, fmt.Errorf("ssh_keys: values must be a list, not null (leave it out, or write [] to clear every key)")
+		}
 		list, ok := values.([]any)
 		if !ok {
 			return du, fmt.Errorf("ssh_keys.values must be a list")
@@ -281,7 +292,7 @@ func desiredGroup(g map[string]any, name string) (DesiredGroup, error) {
 	if err != nil {
 		return dg, err
 	}
-	if dg.Authoritative, err = boolOr(m, "authoritative", true); err != nil {
+	if dg.Authoritative, err = declaredBool(m, "authoritative", true); err != nil {
 		return dg, fmt.Errorf("membership: %w", err)
 	}
 	if dg.Users, dg.UsersDeclared, err = nameList(m, "users"); err != nil {
@@ -293,11 +304,15 @@ func desiredGroup(g map[string]any, name string) (DesiredGroup, error) {
 	return dg, nil
 }
 
-// nameList reads a list of names, lower-cased as FreeIPA stores them.
+// nameList reads a list of names, lower-cased as FreeIPA stores them. Absent
+// is not declared; null is an error, not "not declared".
 func nameList(m map[string]any, key string) ([]string, bool, error) {
 	raw, present := m[key]
-	if !present || raw == nil {
+	if !present {
 		return nil, false, nil
+	}
+	if raw == nil {
+		return nil, true, nullKeyError(key, "a list")
 	}
 	list, ok := raw.([]any)
 	if !ok {
@@ -337,6 +352,20 @@ func optionalString(m map[string]any, key string) (*string, error) {
 		return nil, fmt.Errorf("%s must be a string", key)
 	}
 	return &s, nil
+}
+
+// declaredBool is boolOr for a key whose null is refused rather than read as
+// the default.
+func declaredBool(m map[string]any, key string, def bool) (bool, error) {
+	if v, present := m[key]; present && v == nil {
+		return false, nullKeyError(key, "true or false")
+	}
+	return boolOr(m, key, def)
+}
+
+// nullKeyError is the refusal of a key written without a value.
+func nullKeyError(key, want string) error {
+	return fmt.Errorf("%s must be %s, not null (leave it out, or give a value)", key, want)
 }
 
 func boolOr(m map[string]any, key string, def bool) (bool, error) {

@@ -391,11 +391,13 @@ func TestReconcileGolangWorkspaceFailures(t *testing.T) {
 // a mapping, null included (and the other wrong types the roster validator
 // lets through), used to be read as "not declared", which for a group is an
 // authoritative group with no members and, once the engine writes, the removal
-// of every direct member. The playbook's gate fails on null as well. Each row
-// is a roster that passes inventory.ValidateRoster, so the refusal is the
-// adapter's (gate roster-adapter): exit 1 with the field and the roster object
-// named, nothing dialed, nothing sent to FreeIPA, no plan, and no value in the
-// error.
+// of every direct member. The playbook's gate fails on null as well. A null
+// inside those mappings (membership.authoritative, ssh_keys.values, ...) is
+// refused too: the playbook reads it as false, as a failure or as unmanaged.
+// Each row is a roster that passes inventory.ValidateRoster, so the refusal is
+// the adapter's (gate roster-adapter): exit 1 with the field and the roster
+// object named, nothing dialed, nothing sent to FreeIPA, no plan, and no value
+// in the error.
 func TestReconcileGolangRefusesWrongTypedRosterValues(t *testing.T) {
 	const sentinel = "pw-sentinel-not-a-real-secret"
 	base := strings.Replace(captureRoster, "%s", "/bin/sh", 1)
@@ -424,6 +426,10 @@ func TestReconcileGolangRefusesWrongTypedRosterValues(t *testing.T) {
 			want: "groups[0] (team-a): membership must be a mapping, not null"},
 		{name: "membership is ~ (null)", roster: withGroup("~"), gate: "roster-adapter",
 			want: "groups[0] (team-a): membership must be a mapping, not null"},
+		{name: "membership.authoritative is null", roster: withGroup("{authoritative: ~, users: [p1-self]}"), gate: "roster-adapter",
+			want: "groups[0] (team-a): membership: authoritative must be true or false, not null"},
+		{name: "ssh_keys.values is null", roster: withUserField("p1-keys", "ssh_keys: {values: ~}"), gate: "roster-adapter",
+			want: "users[0] (p1-keys): ssh_keys: values must be a list, not null"},
 		{name: "password is null", roster: withUserField("p1-nopw", "password: ~"), gate: "roster-adapter",
 			want: "users[2] (p1-nopw): password must be a mapping, not null"},
 		{name: "ssh_keys is null", roster: withUserField("p1-keys", "ssh_keys: ~"), gate: "roster-adapter",

@@ -177,6 +177,61 @@ func TestFromRosterRefusesANullPasswordSshKeysOrMembership(t *testing.T) {
 	})
 }
 
+// A null inside these mappings is refused too, where Go would otherwise take
+// its own default. How the playbook's expressions read it (ansible-core 2.19.2,
+// the same expressions replayed; freeipa-identity-apply.yml line numbers):
+//
+//	key                       playbook with null                          Go before
+//	membership.authoritative  :1600 `| default(true) | bool` = false:     true: prunes
+//	                          no pruning
+//	membership.users          :1662 subelements fails ("got None"), after prunes as undeclared
+//	                          the removals (:1580, :1635) ran
+//	membership.groups         :427 gate fails ("NoneType is not iterable") undeclared
+//	ssh_keys.values           normalize `.get('values', none)` = absent   unmanaged
+//	ssh_keys.authoritative    :391 gate fails (= false)                   true
+//	password.preserve_existing :387 gate fails (`is boolean`)             default true
+//	password.force_change     :386 gate fails (`is boolean`)              default false
+//	password.initial          :1214 selection drops it = no password      no password
+//
+// Only password.initial stays accepted. The two password flags are refused by
+// inventory.ValidateRoster first (rule "user password flag"), so they are
+// exercised on desiredUser.
+func TestFromRosterRefusesANullInsideThePasswordSshKeysAndMembershipMappings(t *testing.T) {
+	for _, tc := range []struct{ name, doc, want string }{
+		{"membership.users", groupDoc("{users: ~}"), "groups[0] (team-a): membership: users must be a list, not null"},
+		{"membership.groups", groupDoc("{groups: ~}"), "groups[0] (team-a): membership: groups must be a list, not null"},
+		{"membership.authoritative", groupDoc("{authoritative: ~}"), "groups[0] (team-a): membership: authoritative must be true or false, not null"},
+		{"ssh_keys.values", userDoc("ssh_keys", "{values: ~}"), "users[1] (bob): ssh_keys: values must be a list, not null"},
+		{"ssh_keys.authoritative", userDoc("ssh_keys", "{authoritative: ~}"), "users[1] (bob): ssh_keys: authoritative must be true or false, not null"},
+		// The way it is written by hand: the key with nothing after it.
+		{"membership.users as an empty line", "schema_version: 3\nusers:\n  - name: alice\ngroups:\n  - name: team-a\n    category: team\n    membership:\n      users:\n",
+			"groups[0] (team-a): membership: users must be a list, not null"},
+		{"membership.authoritative as an empty line", "schema_version: 3\nusers:\n  - name: alice\ngroups:\n  - name: team-a\n    category: team\n    membership:\n      authoritative:\n      users: [alice]\n",
+			"groups[0] (team-a): membership: authoritative must be true or false, not null"},
+		{"ssh_keys.values as an empty line", "schema_version: 3\nusers:\n  - name: alice\n  - name: bob\n    ssh_keys:\n      values:\n",
+			"users[1] (bob): ssh_keys: values must be a list, not null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refusedByAdapter(t, tc.doc, tc.want)
+		})
+	}
+	for _, key := range []string{"preserve_existing", "force_change"} {
+		t.Run("password."+key+" on the adapter", func(t *testing.T) {
+			_, err := desiredUser(map[string]any{"password": map[string]any{key: nil}}, "bob", "present")
+			if err == nil || !strings.Contains(err.Error(), "password: "+key+" must be true or false, not null") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+		t.Run("password."+key+" through FromRoster", func(t *testing.T) {
+			// Refused by the validator, whose rule is not the adapter's.
+			_, err := FromRoster(roster(t, userDoc("password", "{"+key+": ~}")))
+			if err == nil || !strings.Contains(err.Error(), "user password flag") {
+				t.Fatalf("err = %v, want the validator's password flag rule", err)
+			}
+		})
+	}
+}
+
 // The values that are accepted, and what they mean: an absent or empty
 // section is "not declared" (the playbook's own default), a mapping is read.
 func TestFromRosterAcceptsAbsentEmptyAndMappingSections(t *testing.T) {
