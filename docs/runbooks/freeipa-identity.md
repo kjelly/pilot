@@ -339,8 +339,10 @@ ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（�
 9. **`pilot host decommission apply`／`resume` 在第一個步驟之前取鎖**（有 FreeIPA client 的 converge 步驟的 plan；
    TUI 的下架流程是同一個函式）。順序是：stage 確認、provider 的建立與取鎖前檢查、記錄 approval、**取鎖**（最多等
    30 分鐘）、client 的 uninstall、roster 的 tombstone、identity 收斂、驗證與 finalize，最後才放鎖。鎖忙碌、等待逾時、
-   等待中 Ctrl-C／SIGTERM 或被拒絕時，**沒有任何步驟執行**：client 仍 enrolled、roster 與 `hosts.yml` 不變、server 不變，
-   approval 保留，錯誤訊息寫明 `was not started`。鎖空出來之後，用同一份 plan 跑 `pilot host decommission resume
+   或被拒絕時，**沒有任何步驟執行**：client 仍 enrolled、roster 與 `hosts.yml` 不變、server 不變，approval 保留，錯誤訊息寫明
+   `was not started`。**等待中按 Ctrl-C 或收到 SIGTERM 時沒有訊息**：`apply`／`resume` 沒有安裝訊號處理，行程直接結束，
+   不會印 `was not started`，也沒有任何其他輸出；狀態同樣沒有改變（client 仍 enrolled、roster 與 `hosts.yml` 不變、approval
+   保留、plan 可 resume），看狀態、不要等訊息。鎖空出來之後，用同一份 plan 跑 `pilot host decommission resume
    --id <plan>` 或再跑一次 `apply --confirm-host <host>` 都能繼續，不必重新 plan。（修正之前鎖取在最後的 identity 收斂
    步驟：被中斷的 apply 已經先把 client 解除 enrollment。這個修正改的是鎖何時取；一個 workspace 若沒有設選用的
    `ipa_client_fqdn`，uninstall 之後的 SSH 快取退役檢查會失敗，那是另一個既有缺口〔issue #303〕，與鎖無關，這個修正
