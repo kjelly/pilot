@@ -1,7 +1,9 @@
 """Offline unit + real git worktree quality gate tests (no GitHub operations)."""
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -13,6 +15,8 @@ from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "_shared" / "tests"))
+import secret_fixtures as fx  # noqa: E402
 import create_pr   # noqa: E402
 import issue_gate  # noqa: E402
 import mark_ready  # noqa: E402
@@ -633,6 +637,275 @@ class DisputedIssueClaimTests(LocalGitFixture):
         self.evidence["issue_resolution"] = "partial"
         self.save()
         self.assertEqual("partial", self.eval_with_thread()[1]["issue_resolution"])
+
+
+class SecretScanGateTests(LocalGitFixture):
+    """The gate scans EVERY commit of base..HEAD; what a later commit scrubs is still published."""
+
+    def rebind(self):
+        """Re-take the receipts and the review on the current HEAD, so only the scan can still refuse."""
+        sha = git(self.worktree, "rev-parse", "HEAD")
+        run_check.run_check(self.worktree, "regression", self.receipt, [sys.executable, "-c", "pass"], 30)
+        run_check.run_check(self.worktree, "lint", self.lint, [sys.executable, "-c", "pass"], 30)
+        self.evidence["head_sha"] = self.evidence["review"]["head_sha"] = sha
+        self.save()
+        return sha
+
+    def commit(self, name, text, message=None):
+        path = self.worktree / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        git(self.worktree, "add", name)
+        git(self.worktree, "commit", "-q", "-m", message or f"edit {name}")
+        return git(self.worktree, "rev-parse", "HEAD")
+
+    def b1(self):
+        """Commit 1 adds a real-shaped NT-hash fixture, commit 2 replaces it with the placeholder."""
+        value = fx.random_b64()
+        leak = self.commit("testdata/user.json", fx.attribute_document(fx.NT_HASH, value), "test: add a captured user")
+        self.commit("testdata/user.json", fx.attribute_document(fx.NT_HASH, fx.PLACEHOLDER), "test: use the placeholder")
+        self.rebind()
+        return value, leak
+
+    def b2(self):
+        """The same final tree as b1() from one commit that adds only the placeholder."""
+        self.commit("testdata/user.json", fx.attribute_document(fx.NT_HASH, fx.PLACEHOLDER), "test: add a captured user")
+        self.rebind()
+
+    def run_cli(self, *extra):
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = issue_gate.main(["--repo", "OWNER/REPO", "--issue", "123", "--worktree", str(self.worktree),
+                                    "--evidence", str(self.path), *extra])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_value_replaced_in_a_later_commit_blocks_and_the_one_commit_control_passes(self):
+        value, leak = self.b1()
+        errors, info = self.eval_local()
+        self.assertEqual("FOUND", info["secret_scan"]["status"], errors)
+        text = " ".join(errors)
+        self.assertIn("freeipa-secret-attribute", text)
+        self.assertIn("testdata/user.json", text)
+        self.assertIn(leak[:12], text)
+        self.assertIn("scrubs the value does not clear this finding", text)
+        self.assertIn(".agents/skills/_shared/committed-secrets.md", text)
+        self.assertEqual(2, len([e for e in errors if e.startswith(("Secret scan", "STOP"))]),
+                         "the finding line and the STOP line are the only scan blockers")
+        self.assertEqual(errors, [e for e in errors if e.startswith(("Secret scan", "STOP"))],
+                         "premise: the receipts and the review are current, so only the scan refuses")
+        code, out, err = self.run_cli()
+        self.assertEqual(2, code)
+        self.assertEqual("BLOCKED", json.loads(out)["status"])
+        tree_b1 = git(self.worktree, "rev-parse", "HEAD^{tree}")
+        # Control: the same final tree from ONE commit that adds only the placeholder passes the same gate.
+        git(self.worktree, "reset", "-q", "--hard", self.sha)
+        self.b2()
+        self.assertEqual(tree_b1, git(self.worktree, "rev-parse", "HEAD^{tree}"))
+        errors, info = self.eval_local()
+        self.assertEqual([], errors)
+        self.assertEqual("CLEAN", info["secret_scan"]["status"])
+        self.assertEqual(0, self.run_cli()[0])
+
+    def test_no_output_channel_ever_holds_the_value_or_a_part_of_it(self):
+        value, _ = self.b1()
+        errors, info = self.eval_local()
+        code, out, err = self.run_cli()
+        channels = json.dumps([errors, info]) + out + err
+        for part in (value, value[:10], value[-10:], value.rstrip("=")):
+            self.assertNotIn(part, channels)
+        self.assertEqual(2, code)
+
+    def test_an_evidence_only_path_is_scanned_like_any_other(self):
+        # Receipts carry over an evidence-only commit (RepoEvidenceGateTests); the scan must not.
+        git(self.repo, "checkout", "-q", "main")
+        (self.repo / ".github").mkdir(exist_ok=True)
+        (self.repo / ".github" / "pr-evidence.json").write_text(json.dumps(DELTA_ONLY), encoding="utf-8")
+        git(self.repo, "add", ".github/pr-evidence.json")
+        git(self.repo, "commit", "-q", "-m", "declare evidence rules")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", git(self.repo, "rev-parse", "main"))
+        git(self.worktree, "rebase", "-q", "main")
+        self.rebind()
+        token = fx.mixed(40)
+        clean = self.commit("qa/evidence/run.md", "ran on staging; the token is <redacted>\n")
+        self.evidence["head_sha"] = self.evidence["review"]["head_sha"] = clean
+        self.save()
+        errors, info = self.eval_local()
+        self.assertEqual([], [e for e in errors if "stale" in e or "another HEAD" in e], "premise: receipts carry over")
+        self.assertEqual([], errors, "control: the evidence-only commit without a secret passes")
+        self.commit("qa/evidence/run.md", f"curl -H 'Authorization: Bearer {token}' https://example.invalid/\n")
+        leaked = git(self.worktree, "rev-parse", "HEAD")
+        self.evidence["head_sha"] = self.evidence["review"]["head_sha"] = leaked
+        self.save()
+        errors, info = self.eval_local()
+        self.assertEqual([], [e for e in errors if "stale" in e or "another HEAD" in e], "premise: receipts carry over")
+        self.assertIn("authorization-header", " ".join(errors))
+        self.assertIn("qa/evidence/run.md", " ".join(errors))
+        self.assertNotIn(token, json.dumps([errors, info]))
+
+    def test_a_known_value_from_a_secret_file_blocks_in_added_lines_messages_and_paths(self):
+        value = fx.mixed(18)
+        secrets_file = self.root / "known.txt"
+        secrets_file.write_text(f"\n{value}\n", encoding="utf-8")
+        self.commit("notes.txt", f"scratch {value}\n")
+        self.commit("notes.txt", "scrubbed\n", f"fix: drop {value}")
+        self.rebind()
+        with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]):
+            errors, info = issue_gate.evaluate(repo="OWNER/REPO", issue=123, worktree=self.worktree,
+                                               evidence_path=self.path, secret_files=[secrets_file])
+        self.assertEqual(1, info["secret_scan"]["known_values"])
+        self.assertIn("known-value", " ".join(errors))
+        self.assertIn("(commit message)", " ".join(errors))
+        self.assertNotIn(value, json.dumps([errors, info]))
+        self.assertEqual([], self.eval_local()[0], "control: without the secret file the branch is clean")
+        code, out, err = self.run_cli("--secret-file", str(secrets_file))
+        self.assertEqual(2, code)
+        self.assertNotIn(value, out + err)
+
+    def test_an_unusable_secret_file_refuses_the_gate_without_echoing_a_value(self):
+        short = fx.mixed(6)
+        bad = self.root / "short.txt"
+        bad.write_text(f"{fx.mixed(14)}\n{short}\n", encoding="utf-8")
+        inside = self.worktree / "secrets.txt"
+        inside.write_text(f"{fx.mixed(14)}\n", encoding="utf-8")
+        for path, needle in ((bad, "line 2"), (inside, "inside the repository"), (self.root / "missing.txt", "cannot be read")):
+            with self.subTest(needle=needle):
+                with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]):
+                    errors, _ = issue_gate.evaluate(repo="OWNER/REPO", issue=123, worktree=self.worktree,
+                                                    evidence_path=self.path, secret_files=[path])
+                self.assertTrue(any("--secret-file" in e and needle in e for e in errors), errors)
+                self.assertNotIn(short, " ".join(errors))
+        inside.unlink()
+
+    def test_a_scanner_that_cannot_be_loaded_refuses_instead_of_skipping(self):
+        broken = self.root / "secret_scan.py"
+        broken.write_text("def (:\n", encoding="utf-8")
+        for path in (broken, self.root / "does-not-exist.py"):
+            with self.subTest(path=path.name), patch.dict(sys.modules), patch.object(issue_gate, "SECRET_SCAN_PATH", path):
+                sys.modules.pop("pilot_secret_scan", None)
+                errors, info = self.eval_local()
+                self.assertTrue(any(e.startswith("Secret scan unavailable") for e in errors), errors)
+                self.assertEqual("ERROR", info["secret_scan"]["status"])
+        errors, info = self.eval_local()
+        self.assertEqual([], errors, "control: the real scanner loads and the branch is clean")
+
+    def test_a_base_commit_that_is_not_in_the_clone_cannot_be_scanned(self):
+        base = git(self.repo, "rev-parse", "origin/main")
+        loose = self.repo / ".git" / "objects" / base[:2] / base[2:]
+        self.assertTrue(loose.is_file(), "premise: a loose object")
+        loose.chmod(0o644)
+        loose.unlink()
+        errors, info = self.eval_local()
+        self.assertIn("fetch", " ".join(e for e in errors if "Secret scan" in e))
+        self.assertNotEqual("CLEAN", info["secret_scan"]["status"])
+
+    def test_create_pr_stops_before_any_push_and_mark_ready_before_gh_ready(self):
+        self.b1()
+        body = self.state / "body.md"
+        body.write_text("Fixes #123\n\n## Tests\n- regression passed\n", encoding="utf-8")
+        with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), \
+                patch.object(issue_gate, "remote_head", return_value=self.sha), \
+                patch.object(create_pr, "check_pr", return_value={"number": 9, "url": "u"}), \
+                patch.object(create_pr, "execute", return_value="") as execute:
+            result = create_pr.create(repo="OWNER/REPO", issue=123, worktree=self.worktree, evidence=self.path,
+                                      title="fix: issue 123 proper fix", body_file=body)
+        self.assertEqual("BLOCKED", result["status"])
+        self.assertIn("freeipa-secret-attribute", " ".join(result["blockers"]))
+        execute.assert_not_called()
+        head = git(self.worktree, "rev-parse", "HEAD")
+        pr = {"number": 9, "state": "OPEN", "isDraft": True, "headRefName": "issue/123-fix", "headRefOid": head,
+              "mergeable": "MERGEABLE", "url": "u", "body": "Fixes #123\n\nTests pass"}
+        calls = []
+        with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), \
+                patch.object(issue_gate, "remote_head", return_value=head), \
+                patch.object(mark_ready, "command", side_effect=[pr]), \
+                patch.object(mark_ready.pr_ci, "inspect", return_value={"status": "CI_PASSED"}), \
+                patch.object(mark_ready, "execute", side_effect=lambda a, cwd: calls.append(a) or ""):
+            result = mark_ready.mark_ready(repo="OWNER/REPO", issue=123, pr=9, worktree=self.worktree,
+                                           evidence=self.path, confirm_complete=True)
+        self.assertEqual("BLOCKED", result["status"])
+        self.assertEqual([], calls)
+
+    def history_only_value(self):
+        """A value that one commit adds and the next scrubs: only the history holds it. Returns the path of
+        the --secret-file that lists it and the value."""
+        value = fx.mixed(18)
+        secrets_file = self.root / "known.txt"
+        secrets_file.write_text(f"\n{value}\n", encoding="utf-8")
+        self.commit("notes.txt", f"scratch {value}\n", "chore: scratch")
+        self.commit("notes.txt", "scrubbed\n", "chore: scrub")
+        self.rebind()
+        return secrets_file, value
+
+    def test_a_known_value_only_the_history_holds_refuses_through_create_pr(self):
+        secrets_file, value = self.history_only_value()
+        body = self.state / "body.md"
+        body.write_text("Fixes #123\n\n## Tests\n- regression passed\n", encoding="utf-8")
+
+        def create(**kwargs):
+            with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), \
+                    patch.object(issue_gate, "remote_head", return_value=self.evidence["head_sha"]), \
+                    patch.object(create_pr, "check_pr", return_value={"number": 9, "url": "u"}), \
+                    patch.object(create_pr, "execute", return_value="") as execute:
+                result = create_pr.create(repo="OWNER/REPO", issue=123, worktree=self.worktree, evidence=self.path,
+                                          title="fix: issue 123 proper fix", body_file=body, **kwargs)
+            return result, execute
+
+        result, execute = create(secret_files=[secrets_file])
+        self.assertEqual("BLOCKED", result["status"], result)
+        self.assertIn("known-value", " ".join(result["blockers"]))
+        self.assertNotIn(value, json.dumps(result))
+        execute.assert_not_called()
+        # Control: the same branch without the file goes through (the scanner finds nothing else).
+        result, execute = create()
+        self.assertEqual("DRAFT_PR_CREATED", result["status"], result)
+        self.assertTrue(execute.called)
+
+    def test_a_known_value_only_the_history_holds_refuses_through_mark_ready(self):
+        secrets_file, value = self.history_only_value()
+        head = self.evidence["head_sha"]
+        pr = {"number": 9, "state": "OPEN", "isDraft": True, "headRefName": "issue/123-fix", "headRefOid": head,
+              "mergeable": "MERGEABLE", "url": "u", "body": "Fixes #123\n\nTests pass"}
+
+        def mark(**kwargs):
+            calls = []
+            with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), \
+                    patch.object(issue_gate, "remote_head", return_value=head), \
+                    patch.object(mark_ready, "command", side_effect=[pr, NO_REVIEW_THREADS,
+                                                                     {"isDraft": False, "headRefOid": head, "url": "u"}]), \
+                    patch.object(mark_ready.pr_ci, "inspect", return_value={"status": "CI_PASSED"}), \
+                    patch.object(mark_ready, "execute", side_effect=lambda a, cwd: calls.append(a) or ""):
+                result = mark_ready.mark_ready(repo="OWNER/REPO", issue=123, pr=9, worktree=self.worktree,
+                                               evidence=self.path, confirm_complete=True, **kwargs)
+            return result, calls
+
+        result, calls = mark(secret_files=[secrets_file])
+        self.assertEqual("BLOCKED", result["status"], result)
+        self.assertIn("known-value", " ".join(result["blockers"]))
+        self.assertNotIn(value, json.dumps(result))
+        self.assertEqual([], calls)
+        result, calls = mark()
+        self.assertEqual("READY_FOR_REVIEW", result["status"], result)
+        self.assertEqual([["gh", "pr", "ready", "9", "-R", "OWNER/REPO"]], calls, "control: without the file Ready goes through")
+
+    def test_create_pr_and_mark_ready_hand_the_secret_files_to_the_gate(self):
+        secret = self.root / "known.txt"
+        secret.write_text(f"{fx.mixed(16)}\n", encoding="utf-8")
+        with patch.object(create_pr, "create", return_value={"status": "DRAFT_PR_CREATED"}) as create, \
+                contextlib.redirect_stdout(io.StringIO()):
+            create_pr.main(["--repo", "OWNER/REPO", "--issue", "123", "--worktree", str(self.worktree),
+                            "--evidence", str(self.path), "--title", "a title long enough", "--body-file", str(self.root / "b.md"),
+                            "--secret-file", str(secret)])
+        self.assertEqual([secret], create.call_args.kwargs["secret_files"])
+        with patch.object(mark_ready, "mark_ready", return_value={"status": "BLOCKED"}) as mark, \
+                contextlib.redirect_stdout(io.StringIO()):
+            mark_ready.main(["--repo", "OWNER/REPO", "--issue", "123", "--pr", "9", "--worktree", str(self.worktree),
+                             "--evidence", str(self.path), "--confirm-complete", "--secret-file", str(secret)])
+        self.assertEqual([secret], mark.call_args.kwargs["secret_files"])
+        with patch.object(issue_gate, "evaluate", return_value=([], {})) as gate, contextlib.redirect_stdout(io.StringIO()):
+            issue_gate.main(["--repo", "OWNER/REPO", "--issue", "123", "--worktree", str(self.worktree),
+                             "--evidence", str(self.path), "--secret-file", str(secret)])
+        self.assertEqual([secret], gate.call_args.kwargs["secret_files"])
 
 
 if __name__ == "__main__":

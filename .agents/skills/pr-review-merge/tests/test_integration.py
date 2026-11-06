@@ -147,8 +147,10 @@ class Integration(unittest.TestCase):
         self.fixture_file.write_text(json.dumps(d))
 
     def script(self, name, *args):
-        return subprocess.run([sys.executable, str(ROOT / 'scripts' / name), '--repo', 'acme/demo',
-                               *args], env=self.env, capture_output=True, text=True)
+        """Run a script with the secret scan replaced by a clean one: these PRs have fake SHAs that no
+        repository holds. The scan itself is tested below with a real repository (SecretScanIntegration)."""
+        return subprocess.run([sys.executable, str(ROOT / 'tests' / 'scan_stub_runner.py'), str(ROOT / 'scripts' / name),
+                               '--repo', 'acme/demo', *args], env=self.env, capture_output=True, text=True)
 
     def actor(self, execute=False):
         a = ['--pr','42','--evidence',str(self.evidence_file)]

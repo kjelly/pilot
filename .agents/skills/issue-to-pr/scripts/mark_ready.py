@@ -21,6 +21,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Sequence
 
 # Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
 # counts any added file and would STOP every later step. Set before the first sibling import.
@@ -70,14 +71,15 @@ def unresolved_threads(repo: str, pr: int) -> list[str]:
 
 
 def mark_ready(*, repo: str, issue: int, pr: int, worktree: Path, evidence: Path,
-               remote: str = "origin", confirm_complete: bool = False) -> dict:
+               remote: str = "origin", confirm_complete: bool = False,
+               secret_files: Sequence[Path] = ()) -> dict:
     if not confirm_complete:
         return {"status": "BLOCKED", "issue": issue, "pr": pr,
                 "blockers": ["Pass --confirm-complete only after every follow-up is done "
                              "(final independent review of the whole head diff, accurate PR body, evidence/doc follow-ups)"]}
     worktree = worktree.expanduser().resolve(strict=True)
     errors, info = evaluate(repo=repo, issue=issue, worktree=worktree, evidence_path=evidence,
-                            stage="pushed", remote=remote, own_pr=pr)
+                            stage="pushed", remote=remote, own_pr=pr, secret_files=secret_files)
     if errors:
         return {"status": "BLOCKED", "issue": issue, "pr": pr, "blockers": errors}
     branch, sha = info["branch"], info["head_sha"]
@@ -126,12 +128,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--worktree", required=True, type=Path)
     ap.add_argument("--evidence", required=True, type=Path)
     ap.add_argument("--remote", default="origin")
+    ap.add_argument("--secret-file", action="append", default=[], type=Path, metavar="FILE",
+                    help="File OUTSIDE the repository with one secret value per line (8+ bytes each) that must "
+                         "appear in no commit of the branch (see issue_gate.py). Repeatable.")
     ap.add_argument("--confirm-complete", action="store_true",
                     help="Attest that all other follow-up work is finished, every review comment answered (required)")
     o = ap.parse_args(argv)
     try:
         result = mark_ready(repo=o.repo, issue=o.issue, pr=o.pr, worktree=o.worktree, evidence=o.evidence,
-                            remote=o.remote, confirm_complete=o.confirm_complete)
+                            remote=o.remote, confirm_complete=o.confirm_complete, secret_files=o.secret_file)
     except (GateError, OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
         result = {"status": "BLOCKED", "issue": o.issue, "pr": o.pr, "blockers": [str(exc)]}
     print(json.dumps(result, ensure_ascii=False, indent=2))
