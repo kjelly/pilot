@@ -1,6 +1,6 @@
 # Pilot 改善計畫：SSH Key 登入時強制更新已過期的 FreeIPA 密碼
 
-> **狀態：階段 1（spec + contract）與階段 2（apply + regression）已完成並在拋棄式 topology 實跑；階段 3（Ubuntu 24.04 一般 client）的 `topology test` evidence 與 A01–A09、A11、A13、A14、A17 實機矩陣已完成（見 `docs/evidence/freeipa-client-password-renewal/LATEST.md`）；`renew` 另寫 `[pam] pam_initgroups_scheme = always`（spec v1.16 C19／C20，#262／#263 的根因修正），一般 client 的 `topology test` 與活體矩陣（A01–A09、A11、A13、A14、A17、A18，負向對照組與代價量測）已在新 candidate 重做；A10（六節點，gateway／directory／target-policy）與 A12（HA／offline）也已實跑，見 `docs/evidence/freeipa-client-password-renewal/LATEST.md`、`docs/evidence/freeipa-client-password-expiry-gateways/LATEST.md`、`docs/evidence/freeipa-client-password-expiry-ha/LATEST.md`；preflight 對 gateway／directory／target-policy 主機的 `renew` 拒絕**尚未解除**；A16 也已實跑。** `freeipa-client-apply.yml` 實作 C13／C14（含修正 SSSD restart task 只標 `C8` 的既有 bug），`playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml` 建 fixture 帳號；四種政策狀態 C13–C18 全 PASS、重跑 `changed=0`、負向控制與 rescue 都實際觸發（`docs/verification/freeipa-client.md` §0、§9 v1.15）。這是開發期 `ansible-playbook` 實跑，不是 candidate commit 上的 evidence chain。
+> **狀態：階段 1（spec + contract）、階段 2（apply + regression）與階段 3（Ubuntu 24.04 一般 client 的 `topology test` evidence 與活體矩陣）已完成；`renew` 另寫 `[pam] pam_initgroups_scheme = always`（spec v1.16 C19／C20，#262／#263 的根因修正）。A10（六節點：gateway／directory／target-policy）、A12（HA／offline）與 A16 也已實跑。結果、tested candidate 與限制都在 evidence record，本檔不重複：[一般 client](../../evidence/freeipa-client-password-renewal/LATEST.md)、[gateway／directory／target-policy](../../evidence/freeipa-client-password-expiry-gateways/LATEST.md)、[HA／offline](../../evidence/freeipa-client-password-expiry-ha/LATEST.md)。preflight 對 gateway／directory／target-policy 主機的 `renew` 拒絕**尚未解除**。** `freeipa-client-apply.yml` 實作 C13／C14／C19／C20（含修正 SSSD restart task 只標 `C8` 的既有 bug），`playbooks/test/fixtures/freeipa-client-pwexpiry-fixtures.yml` 建 fixture 帳號（`docs/verification/freeipa-client.md` §0、§5、§9）。階段 2 期間的 `ansible-playbook` 開發期實跑不是 evidence chain；正式 evidence 只有上面三份 record。
 > 日期：2026-11-05（Asia/Taipei）
 > 修訂：2026-11-05 依程式碼 review 修正：支援 OS 只有 Ubuntu 24.04；補上 roster 預設密碼的影響、OpenSSH 實際行為、canary 作法、既有 SSSD restart tag 問題；政策改為未設定／`warn`／`renew`／`off`；縮小主 PR 範圍。同日再依 SSSD 2.9.4 原始碼修正：沒有密碼的帳號（含目前的 canary）在 `warn`／`renew` 下會被拒絕，見 §1.3。
 > Repository：[`kjelly/pilot`](https://github.com/kjelly/pilot)
@@ -45,7 +45,7 @@ sshd → PAM account → pam_sss → SSSD IPA access provider
 
 **OpenSSH 行為：** 上圖依 OpenSSH portable 原始碼：`auth-pam.c` 的 `do_pam_account()`／`sshpam_password_change_required()`，以及 `session.c` 的 `do_child()`／`do_pwchange()`。publickey 驗證後 PAM account 回 `PAM_NEW_AUTHTOK_REQD` 時，sshd 在執行任何命令之前，有 TTY 就改跑 `passwd`，沒有 TTY 就直接 exit 1。所以「改完後在同一個 session 繼續」不會發生，修改後一定要重新登入；ForceCommand、sftp subsystem、遠端命令都不會被執行。這些是 spec 的預期 Expected，仍由 A04／A08／A09／A10 實機確認。password／keyboard-interactive 驗證是在驗證階段就由 PAM 對話完成修改，不走這條路。
 
-**2026-11-05 Ubuntu 24.04（OpenSSH 9.6p1）實測**：沒有 TTY 印 `WARNING: Your password has expired.` + `Password change required but no TTY available.`、rc=1、命令沒執行；`ssh -tt` 時 sshd 改跑 `passwd`（`Current Password:` → `New password:` → `Retype new password:` → `passwd: password updated successfully`），結束後斷線，FreeIPA 的 `krbPasswordExpiration` 延到 90 天後；sftp rc=255。**新發現**：改完後 2 秒內重新登入仍被要求修改，約 10 秒後才正常（SSSD PAM responder 短時間沿用舊快取）。使用者說明要寫「改完等幾秒再登入」；不要用清快取當修法。
+**2026-11-05 Ubuntu 24.04（OpenSSH 9.6p1）實測**：沒有 TTY 印 `WARNING: Your password has expired.` + `Password change required but no TTY available.`、rc=1、命令沒執行；`ssh -tt` 時 sshd 改跑 `passwd`（`Current Password:` → `New password:` → `Retype new password:` → `passwd: password updated successfully`），結束後斷線，FreeIPA 的 `krbPasswordExpiration` 延到 90 天後；sftp rc=255。**新發現**：改完後短時間內重新登入仍被要求修改，之後才正常（SSSD PAM responder 短時間沿用舊快取）。不要用清快取當修法；根因修正是 spec v1.16 的 `pam_initgroups_scheme = always`（C19／C20、A18），見 `docs/verification/freeipa-client.md` §0。
 
 **文件依據：** `sssd-ipa(5)` 將 `pwd_expire_policy_warn`、`pwd_expire_policy_reject`、`pwd_expire_policy_renew` 明確定位於 SSH Key 等非密碼驗證場景；`renew` 表示已過期時提示立即更改，且必須使用 `access_provider = ipa`。該文件不等於 Pilot 的目標 OS（Ubuntu 24.04）與其 OpenSSH 已實機通過。參見 [SSSD IPA provider manual](https://man.archlinux.org/man/sssd-ipa.5.en)、[PAM `pam_chauthtok(3)`](https://man7.org/linux/man-pages/man3/pam_chauthtok.3.html)。
 
@@ -120,8 +120,8 @@ pwd_expiration_warning = 14
 - **Preflight**：確認 host 確實 enroll、`/etc/sssd/sssd.conf` 存在且 `0600`、偵測到唯一的 IPA domain section、`access_provider = ipa`、主機是 Ubuntu 24.04（本功能唯一支援的 OS；非 24.04 主機設定本功能任何非預設值時，在修改前拒絕）、沒有重複或未知衝突的 `ipa_access_order`。缺少確證即 fail-closed（修改前就失敗）。
 - **寫入方式**：preflight assert sssd.conf 恰好一個 `[domain/` section、`ipa_access_order`／`pwd_expiration_warning` 各最多一行、現有值是已知形式（見 P0）；通過後沿用現有 hardening task 的 `lineinfile` + `insertafter: '^ipa_domain\s*='` 整行寫入。只有一個 domain section 時，整檔 regex 不會改錯 section，不需要 INI parser 或 ownership 契約；檔案註解與不相關鍵不動。
 - **最小變更**：未設定時不產生 mutation；already converged 時無改變、無重啟；更新 `pwd_expiration_warning` 只針對目標 domain，不要改全域 `[pam]` 以波及其他 realm。
-- **正確順序**：讀取目前內容與雜湊 → 建立本次私有、受限前像 → render candidate → 驗證 `sssctl config-check` → 安全寫入 → 按既有 SSSD restart gate 只重啟一次 → 確認 active 與 PAM account 健康 → 確認政策有效。前像不可使用歷史 `.prev` 模糊回退；變更腳本中斷後下次 apply 可安全 reconciliation。
-- **失敗時**：在同次 block/rescue 邊界回復*本次*前像（包含 mode、owner）、驗證 `config-check`、重啟 SSSD、確認既有管理連線；若恢復也失敗則回報 `PARTIAL`／人工介入，不得偽稱成功。敏感檔的內容、密碼、PAM 輸入、Kerberos ticket 不得出現在 CI、log、diff、evidence。
+- **實際順序**（apply 已實作）：`slurp` 目前的 sssd.conf（快照在 Ansible 變數裡，不寫前像檔）→ preflight 檔案形狀 → `lineinfile` 整行寫入 → `sssctl config-check`（檢查的是已寫入的檔案，失敗由 rescue 把快照寫回）→ 依既有 SSSD restart gate 只重啟一次（另加 confdb 與檔案不一致時也重啟）→ 確認 SSSD active、`sssctl config-check`、confdb 與檔案一致。前像不可使用歷史 `.prev` 模糊回退；變更腳本中斷後，下次 apply 以 confdb 與檔案的比對補上重啟。PAM account 結果（C15–C17）由 verify 檢查，不在 apply 的 block 內。
+- **失敗時**：兩個 block 各有 `always` 的 rescue。(a) 寫入階段（preflight、寫入、`sssctl config-check`）失敗：rescue 把本次快照寫回（內容、mode `0600`、owner root），SSSD 此時還沒重啟，run 失敗。(b) 重啟**成功之後**的驗證（SSSD active、`sssctl config-check`、confdb 與檔案一致）失敗：rescue 寫回快照、在還原的檔案上重啟 SSSD，run 失敗。**不在 rescue 內**：兩個 SSSD 重啟 task（「restart SSSD after wiring responders」與「enable + start SSSD」）。`systemctl restart sssd` 自己失敗時不會回滾，sssd.conf 保留新政策、SSSD 可能停著，由操作者處理（`journalctl -u sssd`、修檔後重跑 apply），這是 spec §5 的已知限制。只帶 `--tags C14`／`C20` 而略過快照的 run 沒有可還原的前像，失敗訊息會明說沒有還原。還原後 playbook 不另外跑 `sssctl config-check`，也不確認管理連線，沒有 `PARTIAL` 狀態：還原的 copy 或重啟自己失敗時，該 task 失敗，由操作者處理。敏感檔的內容、密碼、PAM 輸入、Kerberos ticket 不得出現在 CI、log、diff、evidence。
 - **標籤與 idempotency**：沿用 `freeipa-client`、`sssd_hardening` 及新 spec row tag，注意 [PR #243](https://github.com/kjelly/pilot/pull/243) 對 `always` task 的收斂限制。第二次 apply 必須 `changed=0`，不能因為備份／健康檢查而永遠報 changed。新 row tag 與 `sssd_hardening` 都要加到 SSSD restart task（`freeipa-client-apply.yml:848`）；restart 的 `when:` 讀其他 register 一律改成 `(x | default({})) is changed`，否則 `--tags <新 row>` 會因 `ipa_sssd_services` undefined 而失敗（§2 的既有 bug，同一個 PR 修掉）。rescue 每個 task 標 `always`（AGENTS.md §4.4）。
 - **保留既有支援**：不能更動 `services = nss, pam, ssh...`、Ubuntu `sssd-sudo.socket` 與 AlmaLinux responder 差異；不能倒退 [PR #222](https://github.com/kjelly/pilot/pull/222) 的 sudo full-refresh 邏輯。
 
@@ -176,6 +176,8 @@ sssctl user-checks -a acct -s sudo <interactive-ipa-user>
 | A17 | 沒有密碼的帳號（純金鑰） | 未設定／`off`：照常登入。`warn`／`renew`：依 §1.3 被拒絕（PAM system error，SSSD log 有「No Kerberos password expiration attributes found」）。記錄實際結果，作為「啟用前所有帳號都要有密碼」的依據。 |
 | A18 | 改密碼後重新登入、管理員 reset 偵測（`renew`，spec C19／C20） | 同一帳號在 `renew` 下完成 `passwd` 後：只用 TTY 的重試（每次停在 `Current Password` 再中斷）與非互動式重試都在 30 秒內重新登入成功；使用者有一個開著的 session 時，管理員 reset 在 10 秒內被發現。比較預設 `no_session`（#262／#263 的失敗行為）與 `always`。同時量代價（每個 PAM 請求多一次後端查詢：sudo／登入延遲、LDAP 請求數）。 |
 
+**A11 的實際涵蓋**：沒有單一名為 A11 的活體 arm。設定無效與輸入不合法由負向對照組（非法值、非 24.04、gateway 群組、天數、重複或未知的 `ipa_access_order`、`sssctl config-check` 失敗、`pam_initgroups_scheme` 的非法形式）在 VM 上觸發；sssd.conf 有不只一個 `[domain/` 區段或 `access_provider` 不是 `ipa` 由 preflight 在修改前拒絕，由 `internal/spec` 的單元層 runtime 測試（真 ansible 跑真的 preflight，sssd.conf 位元組不變）覆蓋，不是 VM arm。
+
 **重要：** A04 必須是正規的 **活體端到端測試**（真實 FreeIPA KDC/LDAP + 真實 SSSD/PAM + 真實 sshd + user SSH Key + 密碼更新），單純 `grep ipa_access_order`、`sssctl config-check` 或 mock PAM 均不足以宣告已實現需求。使用可拋棄測試帳號，**不得修改正式人員密碼到期狀態**。
 
 ## 5. 實施階段與 PR 切分
@@ -184,14 +186,14 @@ sssctl user-checks -a acct -s sudo <interactive-ipa-user>
 |---|---|---|
 | **0. Baseline** | 固定 `main` revision；讀現有 `sssd.conf`、`sshd -T`、PAM、FreeIPA 版本、canary 政策、實際 inventory；列出 `krbPasswordExpiration <= now` 的使用者（還在用預設密碼的人）與 `preserve_existing: false` 的使用者；記錄風險清單。 | 確認目標主機都是 Ubuntu 24.04；清楚列出原有 SSH 密碼驗證設定、受影響自動化帳號；影響名單已通知；主機上能登入的 FreeIPA 帳號都有密碼（含 canary，到期日在遠未來）；已確認 client 的 SSSD 快取有 `krbLastPwdChange`／`krbPasswordExpiration`（§1.3）。 |
 | **1. Spec + contract（已完成 2026-11-05）** | 完成 spec acceptance rows、變數契約與回滾語意；先獨立 review。 | Spec 沒有把預期 config 視為端到端證據；未設定／`warn`／`renew`／`off` 精確定義；§1.1 的 OpenSSH 行為寫成 Expected。 |
-| **2. Apply + regression（已完成 2026-11-05，evidence 待階段 3）** | 新增 SSSD 收斂 task（單一 domain assert + 整行寫入）、preflight、SSSD/SSHD/PAM 有效設定檢查、失敗恢復、tags（含 restart task 的 tag 修正）、測試。 | lint、unit/regression、negative controls、check-mode、idempotency 全 PASS。 |
-| **3. Native topology（主 PR）** | FreeIPA server + Ubuntu 24.04 一般 client（不是 gateway／directory／target-policy 主機）+ login-probe；A01–A09、A11、A13–A15、A17 實機矩陣，產生 evidence record。 | 上述全部 PASS。 |
-| **3b. 擴大適用範圍（後續 PR）** | gateway／directory／target-policy 主機（A10）、HA／offline（A12）、sudo cache 交叉（A16）。 | 各自 PASS 前，spec 寫明不支援，preflight 在屬於這些 component 的主機設定 `renew` 時拒絕。 |
+| **2. Apply + regression（已完成 2026-11-05）** | 新增 SSSD 收斂 task（單一 domain assert + 整行寫入）、preflight、SSSD/SSHD/PAM 有效設定檢查、失敗恢復、tags（含 restart task 的 tag 修正）、測試。 | lint、unit/regression、negative controls、check-mode、idempotency 全 PASS。 |
+| **3. Native topology（主 PR）** | FreeIPA server + Ubuntu 24.04 一般 client（不是 gateway／directory／target-policy 主機）+ login-probe；A01–A09、A13–A15、A17 實機矩陣與負向對照組（非法值、非 24.04、gateway 群組、天數、重複或未知的 `ipa_access_order`、`sssctl config-check` 失敗、`pam_initgroups_scheme` 的非法形式），產生 evidence record。sssd.conf 有不只一個 `[domain/` 區段或 `access_provider` 不是 `ipa` 由 preflight 拒絕，由單元層 runtime 測試覆蓋，不是 VM 對照組。 | 上述全部 PASS。 |
+| **3b. 擴大適用範圍（後續 PR）** | 解除 preflight 對 gateway／directory／target-policy 主機 `renew` 的拒絕（A10、A12、A16 的實機結果已在階段 3 的 evidence，但 A10 是用不含這三個群組的 inventory 套用取得的，解除拒絕要改 playbook 並重做證據）。| 解除前，spec 寫明不支援，preflight 在屬於這些 component 的主機設定 `renew` 時拒絕。 |
 | **4. Rollout** | 先 sandbox → 單一 staging canary host（**非** login-probe 監測帳號）→ 分批正式 host；每批 live SSH、sudo、login-probe 驗證。 | 每批成功率、故障回滾與 break-glass 演練有紀錄；失敗即暫停下一批。 |
 
 **建議 Issue／PR 規劃**：
 
-- **主 Issue / 主 PR（必要）**：「FreeIPA SSH-key expired password renewal」— 在 Ubuntu 24.04 一般主機上，spec、contract、apply、regression、native evidence（階段 3）同一個完整交付閉環；gateway／directory／target-policy、HA／offline 留給階段 3b 的後續 PR；遵守 `issue-to-pr` 一次一項、先 spec 後 implement、最終 Ready 前獨立 review。切勿把僅修改 SSSD 一行的 PR 提前當作功能完成。
+- **主 Issue / 主 PR（必要）**：「FreeIPA SSH-key expired password renewal」— 在 Ubuntu 24.04 一般主機上，spec、contract、apply、regression、native evidence（階段 3）同一個完整交付閉環；解除 preflight 對 gateway／directory／target-policy 的 `renew` 拒絕留給階段 3b 的後續 PR；遵守 `issue-to-pr` 一次一項、先 spec 後 implement、最終 Ready 前獨立 review。切勿把僅修改 SSSD 一行的 PR 提前當作功能完成。
 - **後續獨立 PR（選配）**：「FreeIPA password expiry EPN notifications／login-probe 密碼政策監控」— 可以使用 `ipa-epn` 主動 Email，但不取代 SSH 登入強制修改，也不阻塞核心功能的第一個 PR（除非環境無法保證人員操作時有恢復管道）。
 - **若實測發現 Key-only requirement**：另開明確 scope 的 SSH password-login hardening PR；不得順手改動現行 `05-freeipa-client-password-auth.conf`，因為可能影響仍未部署 SSH Key 的新使用者。
 
@@ -211,7 +213,7 @@ sssctl user-checks -a acct -s sudo <interactive-ipa-user>
 ### 正式回滾策略
 
 1. 部署前記錄 host identity、targeted SSSD domain、`sssd.conf` checksum／權限、SSHD effective config、SSSD health、仍可用的本機 root/console/break-glass 通路。
-2. **當次 apply 失敗**：由 Ansible rescue 還原本次前像，驗證 `sssctl config-check`、SSSD active、原 SSH/PAM allow/deny 行為；驗證失敗標記 `PARTIAL` 並停批，不得繼續 rollout。
+2. **當次 apply 失敗**：寫入階段（preflight、寫入、config-check）失敗，與重啟成功之後的驗證（SSSD active、config-check、confdb 與檔案一致）失敗，都由 Ansible rescue 還原本次快照（後者並在還原的檔案上重啟 SSSD），run 失敗；操作者確認 SSSD active 與原 SSH／PAM allow/deny 行為後，才可繼續 rollout，失敗即停批。**SSSD 重啟本身失敗不回滾**（兩個重啟 task 在 rescue 之外，spec §5）：sssd.conf 保留新政策、SSSD 可能停著，要由操作者處理（`journalctl -u sssd`、修檔後重跑 apply），所以 rollout 先在單一 staging canary 上做，並備好 break-glass（§1、§5 階段 4）。
 3. **部署已成功但後續相容性失敗**：由 `pilot edit` 將該 host 政策改為 `warn`（保持可登入）或 `off`（寫回 `ipa_access_order = expire`），經 `pilot generate/deploy` 重新套用；再以 live SSH+sudo+login-probe 驗證。取消設定（回到未設定）**不能當作 rollback**。
 4. 變更責任邊界是 **client-host** 的 SSSD/SSHD；不修改 FreeIPA global password policy、HBAC roster、sudo rule 作為回滾捷徑。若測試帳號密碼真的過期，優先透過 FreeIPA password-change／admin reset 恢復。
 
@@ -228,17 +230,17 @@ sssctl user-checks -a acct -s sudo <interactive-ipa-user>
 - [x] 階段 2：apply（`always` 輸入 gate、快照→preflight→整行寫入→`sssctl config-check`、confdb drift 檢查、post-restart 驗證與 rescue）、fixture playbook、`TestRegression_FreeipaClientApplyPlaybook_PasswordExpiryPolicy`／`_PwexpiryFixtures`；`TestSpecPlaybookTagAlignment` 通過；restart task 的 tag 修正有反向測試證明會失敗。
 - [x] 階段 1：`docs/verification/freeipa-client.md` v1.14 新增 C13–C18（隨主機政策判斷的列）；contract 宣告 `freeipa_client_sssd_password_expiry_policy`（`^(warn|renew|off)$`）與 `freeipa_client_sssd_password_expiry_warning_days`；regression test 鎖住列與契約；spec lint 0 errors。`TestSpecPlaybookTagAlignment` 在 C13/C14 失敗是預期的，直到階段 2 的 apply playbook 加上 tag。
 - [x] `freeipa-client` contract 支援 `warn/renew/off`，未設定時不動；預設與既有 host 行為完全相容。
-- [x] 單一 domain assert + 整行寫入的 SSSD edit、有效設定檢查、fail-closed、當次前像回滾、冪等性全部通過。
+- [x] 單一 domain assert + 整行寫入的 SSSD edit、有效設定檢查、fail-closed、冪等性全部通過；當次前像回滾涵蓋寫入階段與重啟成功之後的驗證失敗，**不含** SSSD 重啟本身失敗（兩個重啟 task 在 rescue 之外，spec §5 已知限制）。
 - [x] SSSD restart task 帶新 row tag 與 `sssd_hardening`，`--tags` 只選其中一個時設定也會生效。
 - [x] 真實 SSH Key + 已過期密碼出現互動修改，修改前不能進正常 Shell，`passwd` 結束後斷線，重新 SSH 與 sudo 正常。
 - [x] HBAC deny、停用帳號、SCP/SFTP／遠端命令、login-probe 沒有未授權的存取回歸；gateway／directory／target-policy 主機在 A10 通過前，由 preflight 拒絕 `renew`。
-- [x] A10（gateway／directory／target-policy 主機）已實跑（新 candidate，`always` 之後）：密碼有效時既有 portal／Directory／transport／recording 流程通過（e2e `strict` 階段有偶發失敗，非本功能造成，#272），過期時由 `passwd` 取代 ForceCommand、沒有 TTY 的 transport 失敗且沒有繞過 recording 的 session（`docs/evidence/freeipa-client-password-expiry-gateways/LATEST.md`）。**preflight 的拒絕仍保留**：解除需要改 playbook、新 candidate 與完整證據。
+- [x] A10（gateway／directory／target-policy 主機）已實跑（`always` 之後）：密碼有效時既有 portal／Directory／transport／recording 流程通過（e2e `strict` 階段有偶發失敗，非本功能造成，#272），過期時由 `passwd` 取代 ForceCommand、沒有 TTY 的 transport 失敗且沒有繞過 recording 的 session（`docs/evidence/freeipa-client-password-expiry-gateways/LATEST.md`）。**preflight 的拒絕仍保留**：解除需要改 playbook、新 candidate 與完整證據。
 - [x] A12（HA／offline）已實跑：primary 停止、replica 停止、全部停止、恢復（`docs/evidence/freeipa-client-password-expiry-ha/LATEST.md`）。
 - [x] A18（改密碼後重新登入、管理員 reset 偵測）與 `always` 的代價量測：`docs/evidence/freeipa-client-password-renewal/LATEST.md`。
 - [x] A16（sudo cache 交叉，#267）已實跑：PAM 過期狀態與 sudo 規則分開診斷，規則變更等 `SUDO Smart Refresh`（預設 900 秒），與 `renew`、`pam_initgroups_scheme` 無關，沒有用清快取指令（`docs/evidence/freeipa-client-password-renewal/LATEST.md`）。
 - [ ] 啟用前已列出並通知還在用預設密碼的使用者；主機上能登入的 FreeIPA 帳號都有密碼，canary 的密碼到期日在遠未來。
 - [x] Ubuntu 24.04 產出真實實跑 evidence；spec 明寫只支援 Ubuntu 24.04（不支援 22.04），非 24.04 主機設定本功能時在修改前拒絕。
-- [x] `--check --diff`、選定 row tag／component、第二次 apply `changed=0`、失敗恢復與 CI/negative controls 完成。
+- [x] `--check --diff`（已 enroll 的主機不預覽政策變更，spec §5）、選定 row tag／component、第二次 apply `changed=0`、失敗恢復（寫入階段與重啟成功之後的驗證失敗由 rescue 還原；SSSD 重啟本身失敗不回滾，spec §5）與 CI／negative controls 完成。
 - [ ] 可由 `pilot edit/generate/deploy` 執行 staging rollout 與 `warn/off` rollback；沒有任何必要的人工作業去直接編修 inventory/vault。
 - [ ] 獨立 reviewer PASS，PR HEAD 含最新 `main` 祖先且 CI 與 native evidence 對齊最新 candidate；才標記 Ready for Review。
 
@@ -256,4 +258,4 @@ sssctl user-checks -a acct -s sudo <interactive-ipa-user>
 
 ---
 
-**交付判定：** 本文件是 `kjelly/pilot` 的**實作計畫**。階段 1 已完成（spec 列、contract、regression test，並在 Ubuntu 24.04 真實 topology 實機探測，結果記在 `docs/verification/freeipa-client.md` §3）；**尚未**修改 apply playbook、啟用 `renew` 或產生 evidence。最關鍵的不確定性「Ubuntu 24.04 的 sshd 是否如 §1.1 所述，在 publickey 登入後執行 `passwd` 完成修改」已用實機確認（含 rc、輸出、FreeIPA 到期日 +90 天），但正式 evidence 仍須由階段 3 的 A04/A05 產生。
+**交付判定：** 本文件是 `kjelly/pilot` 的**實作計畫**，也記錄這個 PR 的交付狀態。階段 1–3 已完成：spec 列（C13–C20）、contract、regression test、`freeipa-client-apply.yml` 的 SSSD 政策 block（含 `renew` 的 `pam_initgroups_scheme = always`）與 fixture playbook，並在 Ubuntu 24.04 真實 topology 上實跑；結果、tested candidate 與限制都在 evidence record（見上方三份 LATEST），本檔不重複。最關鍵的不確定性「Ubuntu 24.04 的 sshd 是否如 §1.1 所述，在 publickey 登入後執行 `passwd` 完成修改」已由實機確認（A04）。**尚未完成**：preflight 對 gateway／directory／target-policy 主機的 `renew` 拒絕仍在（解除要改 playbook 並重做證據，階段 3b）；啟用前通知還在用預設密碼的使用者，與 staging rollout／`warn`、`off` rollback（階段 0／4）是操作者的前置，不在這個 PR 內完成。已知限制（SSSD 重啟本身失敗不回滾、不讀 `conf.d`、`--check --diff` 不預覽政策變更、純金鑰帳號被拒絕、`always` 是主機全域）見 `docs/verification/freeipa-client.md` §5。

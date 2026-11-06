@@ -900,11 +900,17 @@
       tags: [freeipa-client, sssd_hardening]
 
     # SSSD password-expiry policy (spec C13/C14, plan P1). snapshot ->
-    # preflight the file shape -> write whole lines -> sssctl config-check;
-    # any failure puts the snapshot back (rescue is `always` so a --tags run
-    # still rolls back) and nothing has been restarted yet. The line is
-    # replaced whole (lineinfile regexp), never appended, so a second apply
-    # is changed=0. Not run in --check: a fresh host has no sssd.conf yet.
+    # preflight the file shape -> write whole lines -> sssctl config-check.
+    # A failure inside THIS block (the preflight, a write, config-check) puts
+    # the snapshot back (rescue is `always` so a --tags run still rolls back)
+    # and nothing has been restarted yet. What follows is NOT covered by this
+    # rescue: the "restart SSSD" task and the "enable + start SSSD" task after
+    # it sit outside every rescue, so a `systemctl restart sssd` that itself
+    # fails leaves sssd.conf on the new policy with SSSD possibly down until
+    # the operator fixes it (known limit, docs/verification/freeipa-client.md
+    # section 5). The line is replaced whole (lineinfile regexp), never
+    # appended, so a second apply is changed=0. Not run in --check: a fresh
+    # host has no sssd.conf yet.
     - name: "FreeIPA client — SSSD password-expiry policy: snapshot, preflight, write, config-check"
       when:
         - not ansible_check_mode
@@ -1057,9 +1063,14 @@
       when: not ansible_check_mode
       tags: [freeipa-client, C2]
 
-    # After the restart: SSSD must be up, hold the file's value (spec C14) and
-    # accept the config. If not, put the pre-policy file back and restart so
-    # the host keeps its previous login behaviour, then fail the run.
+    # After a restart that SUCCEEDED: SSSD must be active, accept the config
+    # and hold the file's value (spec C14/C20). If one of those three checks
+    # fails, this rescue puts the pre-policy file back, restarts SSSD on it so
+    # the host keeps its previous login behaviour, then fails the run. It does
+    # not cover the restart and the enable/start tasks above: a restart that
+    # fails never reaches this block, so nothing is rolled back (known limit,
+    # docs/verification/freeipa-client.md section 5). A `--tags` run that
+    # skipped the snapshot above has nothing to put back and says so.
     - name: "FreeIPA client — SSSD runs the password-expiry policy it was given"
       when:
         - not ansible_check_mode

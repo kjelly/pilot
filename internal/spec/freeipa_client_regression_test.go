@@ -1130,7 +1130,10 @@ func TestRegression_FreeipaClientApplyPlaybook_PasswordExpiryPolicy(t *testing.T
 // always` right after [pam], `warn`/`off` remove only a line whose value is
 // `always`, a second run changes nothing, and a conf the playbook cannot edit
 // safely is refused before any change (spec C19, AGENTS.md section 5.12: both
-// the passing and the refusing cases).
+// the passing and the refusing cases). A refusing case leaves sssd.conf
+// byte-identical; the cases for the preflight lines that share one fail_msg
+// (more than one [domain/] section, access_provider other than ipa, more than
+// one pwd_expiration_warning line) also check which assertion fired.
 func TestRegression_FreeipaClientPamInitgroupsSchemeRuns(t *testing.T) {
 	ansible, err := exec.LookPath("ansible-playbook")
 	if err != nil {
@@ -1155,6 +1158,7 @@ func TestRegression_FreeipaClientPamInitgroupsSchemeRuns(t *testing.T) {
 	cases := []struct {
 		name, policy, conf string
 		wantFail           bool
+		wantAssertion      string   // fragment of the failing assert condition (refusal cases that name the line that must fire)
 		wantScheme         []string // pam_initgroups_scheme lines expected afterwards
 	}{
 		{name: "renew-adds-always", policy: "renew", conf: base + pamEmpty, wantScheme: []string{"pam_initgroups_scheme = always"}},
@@ -1168,6 +1172,15 @@ func TestRegression_FreeipaClientPamInitgroupsSchemeRuns(t *testing.T) {
 		{name: "refuse-two-lines", policy: "renew", conf: base + "[pam]\npam_initgroups_scheme = always\npam_initgroups_scheme = no_session\n\n[sudo]\n", wantFail: true, wantScheme: []string{"pam_initgroups_scheme = always", "pam_initgroups_scheme = no_session"}},
 		{name: "refuse-renew-without-pam-section", policy: "renew", conf: base + "[sudo]\n", wantFail: true},
 		{name: "refuse-two-pam-sections", policy: "renew", conf: base + pamEmpty + "[pam]\n", wantFail: true},
+		// The three preflight lines the cases above do not reach. Each conf is
+		// otherwise valid for `renew` (one [pam], no other violation), so the
+		// named assertion is the only line that can refuse it.
+		{name: "refuse-two-domains", policy: "renew", conf: base + "[domain/second.example.test]\nid_provider = ipa\nipa_domain = second.example.test\naccess_provider = ipa\n\n" + pamEmpty, wantFail: true,
+			wantAssertion: `regex_findall('(?m)^\\[domain/')`},
+		{name: "refuse-access-provider-not-ipa", policy: "renew", conf: strings.Replace(base, "access_provider = ipa", "access_provider = permit", 1) + pamEmpty, wantFail: true,
+			wantAssertion: `search('(?m)^access_provider`},
+		{name: "refuse-two-warning-lines", policy: "renew", conf: strings.Replace(base, "access_provider = ipa\n", "access_provider = ipa\npwd_expiration_warning = 7\npwd_expiration_warning = 14\n", 1) + pamEmpty, wantFail: true,
+			wantAssertion: `regex_findall('(?m)^pwd_expiration_warning`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1245,6 +1258,21 @@ func TestRegression_FreeipaClientPamInitgroupsSchemeRuns(t *testing.T) {
 				}
 				if string(after) != tc.conf {
 					t.Errorf("a refused run changed sssd.conf:\n%s", after)
+				}
+				if tc.wantAssertion != "" {
+					// ansible prints the condition that evaluated false on one
+					// `"assertion": "..."` line; the shared fail_msg cannot tell
+					// the preflight lines apart, so check which one fired.
+					var line string
+					for _, l := range strings.Split(out, "\n") {
+						if strings.Contains(l, `"assertion":`) {
+							line = l
+							break
+						}
+					}
+					if !strings.Contains(line, tc.wantAssertion) {
+						t.Errorf("the refusal must come from the preflight line containing %s, got %q\n%s", tc.wantAssertion, line, out)
+					}
 				}
 				return
 			}
