@@ -21,8 +21,9 @@ OLD = "89abcdef0123456789abcdef0123456789abcdef"
 class FakeContext:
     """The parts of issue-to-pr's repo_evidence.Context that pr_gate.evaluate uses."""
 
-    def __init__(self, accept):
+    def __init__(self, accept, review_accept=()):
         self.accept, self.accepted, self.errors = set(accept), [], []
+        self.review_accept = set(review_accept)
 
     def accepts(self, sha, label):
         if sha in self.accept:
@@ -30,8 +31,20 @@ class FakeContext:
             return True
         return False
 
+    def accepts_review(self, sha, label):
+        if self.accepts(sha, label):
+            return True
+        if sha in self.review_accept:
+            self.accepted.append({"label": label, "from": sha, "head": SHA, "method": "non-execution-base-import",
+                                  "changed": [".agents/skills/x/SKILL.md"]})
+            return True
+        return False
+
     def stale_reason(self, sha):
         return "files outside evidence_only_paths changed: internal/x.go"
+
+    def review_stale_reason(self, sha):
+        return self.stale_reason(sha) + "; non-execution reuse: base import is not a declared non-execution path: internal/x.go"
 
 
 def good():
@@ -171,6 +184,64 @@ class GateTests(unittest.TestCase):
         errs = module.evaluate(s, e, repo="acme/repo", number=7, local=(SHA, "fix-one", []), ctx=FakeContext(accept=set()))
         self.assertTrue(any("tests[0] stale/missing SHA (files outside evidence_only_paths changed" in x for x in errs), errs)
         self.assertTrue(any(x.startswith("Independent reviewer result stale") and "evidence_only_paths" in x for x in errs), errs)
+
+    def test_review_but_not_receipts_survive_a_non_execution_base_import(self):
+        s, e = good()
+        e["local_validation"]["tests"][0]["head_sha"] = OLD
+        e["independent_review"]["head_sha"] = OLD
+        ctx = FakeContext(accept=set(), review_accept={OLD})
+        errs = module.evaluate(s, e, repo="acme/repo", number=7, local=(SHA, "fix-one", []), ctx=ctx)
+        self.assertFalse(any(x.startswith("Independent reviewer result stale") for x in errs), errs)
+        self.assertTrue(any("tests[0] stale/missing SHA (files outside evidence_only_paths changed" in x for x in errs), errs)
+        self.assertEqual(["independent_review"], [a["label"] for a in ctx.accepted])
+        # A refused review says why both reuse rules failed.
+        errs = module.evaluate(s, e, repo="acme/repo", number=7, local=(SHA, "fix-one", []), ctx=FakeContext(accept=set()))
+        self.assertTrue(any(x.startswith("Independent reviewer result stale") and "non-execution reuse" in x for x in errs), errs)
+
+    def test_review_reuse_through_the_real_context(self):
+        """evidence_context -> repo_evidence.Context.accepts_review on a real Git graph (kjelly/pilot#304)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            wt = Path(tmp)
+
+            def git(*args):
+                return subprocess.run(["git", "-C", tmp, *args], check=True, capture_output=True, text=True).stdout.strip()
+
+            def put(path, text):
+                (wt / path).parent.mkdir(parents=True, exist_ok=True)
+                (wt / path).write_text(text)
+                git("add", path)
+                git("commit", "-q", "-m", path)
+                return git("rev-parse", "HEAD")
+
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "t@example.org")
+            git("config", "user.name", "t")
+            put(".github/pr-evidence.json", json.dumps({
+                "schema_version": 1, "evidence_only_paths": ["docs/evidence/**"],
+                "non_execution_paths": [".agents/**", "**/*_test.go"]}))
+            git("checkout", "-q", "-b", "fix-one")
+            reviewed = put("src/app.go", "package app\n")
+            git("checkout", "-q", "main")
+            put(".agents/skills/x/SKILL.md", "rule\n")
+            put("src/lint_test.go", "package src\n")
+            git("update-ref", "refs/remotes/origin/main", "main")
+            git("checkout", "-q", "fix-one")
+            git("merge", "-q", "--no-edit", "main")
+            head = git("rev-parse", "HEAD")
+            ctx = module.evidence_context(wt, head, "main", "origin")
+            self.assertTrue(module.review_covers_head(ctx, reviewed, head, "independent_review"))
+            self.assertFalse(module.covers_head(ctx, reviewed, head, "local_validation.tests[0]"))
+            # A runtime file from main is not covered.
+            git("checkout", "-q", "main")
+            put("src/other.go", "package src\n")
+            git("update-ref", "refs/remotes/origin/main", "main")
+            git("checkout", "-q", "fix-one")
+            git("merge", "-q", "--no-edit", "main")
+            head = git("rev-parse", "HEAD")
+            ctx = module.evidence_context(wt, head, "main", "origin")
+            self.assertFalse(module.review_covers_head(ctx, reviewed, head, "independent_review"))
+            self.assertIn("base import is not a declared non-execution path: src/other.go",
+                          module.stale_detail(ctx, reviewed, review=True))
 
     def test_without_a_context_only_head_receipts_count(self):
         s, e = good()

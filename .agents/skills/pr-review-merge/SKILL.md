@@ -107,8 +107,9 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   `repo_evidence.py` rules. Missing or malformed, `blocked`, `not-needed` on a PR that
   changes the manifest's `required_paths` (`playbooks/**`, `contracts/**`; a spec edit
   is the reviewer's call, since only some need a run), or `required` without a committed `docs/evidence/**` record that names
-  a tested revision covering HEAD (same SHA, or an ancestor whose delta to HEAD is
-  evidence-only) is `WAITING`, never `MERGE` (`references/evidence-contract.md`). The
+  a tested revision covering HEAD (same SHA, an ancestor whose delta to HEAD is
+  evidence-only, or a merged base that brought in only the manifest's
+  `non_execution_paths`, or a reviewed `target_reuse`) is `WAITING`, never `MERGE` (`references/evidence-contract.md`). The
   reviewer still files a blocking `P1` at the changed path when a change needs a record
   and has none: that is a confirmed violation of a hard repository rule and the only way
   this becomes `DRAFT`. Docs-, skill- or pure-Go changes proven by native-tool tests need
@@ -193,7 +194,7 @@ Review CI with `gh pr checks --json name,state,bucket,link,workflow` plus live P
 ## 5. Iteration / PR dependencies
 
 - Review and act on **only the selected PR**. Re-fetch its HEAD, Base, mergeability, CI and dependencies before action. Old evidence is invalid after any HEAD or Base change; obtain a new independent review. Do not continue to another PR after completion.
-- If a PR has verified blockers: do not silently edit it here. Comment with path/line, severity, issue rationale, test failure details and resolution steps; convert to Draft. For a confirmed base ancestry or metadata failure, the actor records HEAD/Base/live-base SHAs and directs `pr-ready` to reconcile metadata, merge the verified latest base into HEAD, rerun affected checks/CI and obtain fresh independent review before Ready. The separate `pr-ready` skill can remediate it later.
+- If a PR has verified blockers: do not silently edit it here. Comment with path/line, severity, issue rationale, test failure details and resolution steps; convert to Draft. For a confirmed base ancestry or metadata failure, the actor records HEAD/Base/live-base SHAs and directs `pr-ready` to reconcile metadata, merge the verified latest base into HEAD, rerun affected checks/CI and obtain fresh independent review before Ready (when main brought in only `non_execution_paths`, `pr-ready`'s align-only path keeps the target record and its review; `.agents/skills/_shared/target-evidence-reuse.md`). The separate `pr-ready` skill can remediate it later.
 - If CI/permissions are pending, report `WAITING`, leave Ready and re-check if current session permits. Do not issue a blind loop or mark the PR as merged.
 - Save the durable checkpoint for the selected PR outside the checkout. Do not create new PRs, modify PR branches, or delete branches. Do not close unrelated issues.
 - Review steps are subject to runtime capabilities. If code execution, GitHub API, or subagents are unavailable, **do not claim completion**.

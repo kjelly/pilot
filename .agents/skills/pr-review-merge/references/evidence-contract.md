@@ -70,8 +70,12 @@ Evidence trust boundary: `independent: true` cannot cryptographically prove agen
 
 For a base requirement with `kind: target-run`, `target_validation.target_reuse`
 may provide the separately reviewed proof described in the
-shared target evidence rule at `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` (the verified snapshot). This is the
-only additional alternative to the evidence-only candidate delta above. The
-original `tested_revision` is retained. It does not relax reviewed HEAD/base,
+shared target evidence rule at `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` (the verified snapshot). Without
+`target_reuse`, the gate also keeps the record when main brought in only the base
+manifest's `non_execution_paths` that the record's closure cannot reach; a machine
+record whose closure has unresolved or external inputs takes the reviewed path only
+when the manifest item declares `rerun_paths`, with `unrelated_runtime_changes`
+for each imported runtime file. These are the only alternatives to the evidence-only
+candidate delta above. The original `tested_revision` is retained. It does not relax reviewed HEAD/base,
 current-HEAD tests or CI; the gate verifies complete trees, scoped modes/blobs
 and pure upstream imports using the shared implementation.
