@@ -273,6 +273,8 @@ Go 比 playbook 嚴格的輸入檢查（在建立 tunnel 前失敗）：
 | `marker_collision` | marker 存在但描述不是 `pilot.group-history/v1 name=<name>`（與 playbook 的 marker 檢查相同，playbook 在此失敗） |
 | `case_collision` | 兩個 roster 群組或使用者名稱只差大小寫（validator 以原字串判斷唯一，FreeIPA 以小寫儲存） |
 | `reference_to_absent` | 群組成員引用了 `state: absent` 的使用者或群組。validator 允許，但 playbook 在使用者已刪除後的重跑會因 `group-add-member` 找不到成員而失敗 |
+| `password_value_unsupported` | （Phase 2 新增，P2-5）有計畫的密碼操作，而 `password.initial` 不是寫在 roster 裡的字串：範本、inline `!vault`、YAML 1.1 可能讀成數字或布林的值、空字串，或沒有讀過密碼形態。沒有密碼操作的使用者不受影響。Phase 2 spec §7.8 |
+| `protected_object` | （Phase 2 新增，P2-5）執行這份計畫會讓 engine 失去自己用的登入：登入 principal 被刪除、停用、重設自己的密碼，或在計畫的任何 stage 邊界之後對 `admins` 不再遞移可達；或刪除 `admins`、`ipausers`、`editors`、`trust admins`。Phase 2 spec §7.10 |
 
 ### 7.4 報告（不是操作，不影響結果）
 
