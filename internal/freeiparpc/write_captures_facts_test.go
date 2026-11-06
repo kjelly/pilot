@@ -471,6 +471,7 @@ func factsGroupWrites() []captureFact {
 				set("the group not a member before", "group-show-before-member-group-del", []any{"p24cap-other"}, entryPath("member_group")...),
 				set("the user still in the deleted group", "user-show-after-member-group-del", []any{"ipausers", "p24cap-mdel"}, entryPath("memberof_group")...),
 				set("the user not in the group before", "user-show-before-member-group-del", []any{"ipausers"}, entryPath("memberof_group")...),
+				asError("the delete refused", "group-del-with-members"),
 			},
 		},
 		{
@@ -1062,11 +1063,24 @@ func factsBatches() []captureFact {
 				g := itemValue(c, got[2].Result, "item 2")
 				gr, _ := g["result"].(map[string]any)
 				c.that(len(attr(gr, "ipauniqueid")) == 1 && len(attr(gr, "gidnumber")) == 1, "the group item lacks ipauniqueid or gidnumber: %v", gr)
+				// The same group read once more, after the batch, on its own (the only
+				// other read of it): the batch item names the same object, not another
+				// one with the same name.
+				found := findEntryByName(s, "group-find-after-batch", "cn", "p24cap-bg")
+				c.that(found != nil, "group-find-after-batch has no p24cap-bg")
+				if found != nil {
+					c.that(slices.Equal(attr(gr, "ipauniqueid"), attr(found, "ipauniqueid")), "ipauniqueid of the group in the batch %v, in the single read %v", attr(gr, "ipauniqueid"), attr(found, "ipauniqueid"))
+					c.that(slices.Equal(attr(gr, "gidnumber"), attr(found, "gidnumber")), "gidnumber of the group in the batch %v, in the single read %v", attr(gr, "gidnumber"), attr(found, "gidnumber"))
+				}
 			},
 			set("another error name for the missing user", "batch-show-one-missing", "EmptyResult", "result", "results", 1, "error_name"),
 			set("another ipauniqueid in the batch", "batch-show-one-missing", []any{"00000000-0000-0000-0000-000000000000"}, "result", "results", 0, "result", "ipauniqueid"),
 			del("no gidnumber for the group", "batch-show-one-missing", "result", "results", 2, "result", "gidnumber"),
 			set("a success for the missing group", "batch-show-one-missing", nil, "result", "results", 3, "error"),
+			set("another ipauniqueid for the group in the batch", "batch-show-one-missing", []any{"00000000-0000-0000-0000-000000000000"}, "result", "results", 2, "result", "ipauniqueid"),
+			set("another ipauniqueid for the group in the single read", "group-find-after-batch", []any{"00000000-0000-0000-0000-000000000000"}, "result", "result", 2, "ipauniqueid"),
+			set("another gidnumber for the group in the batch", "batch-show-one-missing", []any{"1"}, "result", "results", 2, "result", "gidnumber"),
+			set("the group of the single read renamed", "group-find-after-batch", []any{"p24cap-other"}, "result", "result", 2, "cn"),
 		),
 	}
 }
@@ -1074,6 +1088,38 @@ func factsBatches() []captureFact {
 // K19
 func factsReReads() []captureFact {
 	return []captureFact{
+		{
+			id: "K19 a user_show lists the groups the user is directly in under memberof_group and the groups reached through another group under memberofindirect_group: the re-read's memberof_group is direct only",
+			run: func(_ testingT, s *captureSet) error {
+				var c factCheck
+				u, err := s.entry("user-show-before-member-group-del")
+				if !c.noError(err) {
+					return c.err()
+				}
+				c.that(sameSet(attr(u, "memberof_group"), []string{"ipausers", "p24cap-mdel"}), "memberof_group = %v, want the direct groups only", attr(u, "memberof_group"))
+				c.that(slices.Equal(attr(u, "memberofindirect_group"), []string{"p24cap-mg1"}), "memberofindirect_group = %v", attr(u, "memberofindirect_group"))
+				// The group view of the same state: p24cap-mg1 holds p24cap-mdel as
+				// its member group and the user only as an indirect member, so it is
+				// not a group the user is directly in.
+				g, err := s.entry("group-show-before-member-group-del")
+				if c.noError(err) {
+					c.that(slices.Equal(attr(g, "cn"), []string{"p24cap-mg1"}) && slices.Equal(attr(g, "member_group"), []string{"p24cap-mdel"}), "the parent group is %v with member_group %v", attr(g, "cn"), attr(g, "member_group"))
+					_, direct := g["member_user"]
+					c.that(!direct && slices.Contains(attr(g, "memberindirect_user"), "p24cap-m1"), "the user is a direct member of the parent group: member_user %v, memberindirect_user %v", g["member_user"], attr(g, "memberindirect_user"))
+					c.that(slices.Equal(attr(u, "uid"), []string{"p24cap-m1"}), "the user read is %v", attr(u, "uid"))
+					c.that(!slices.Contains(attr(u, "memberof_group"), "p24cap-mg1"), "memberof_group lists the parent group p24cap-mg1, which is reached only through p24cap-mdel")
+				}
+				return c.err()
+			},
+			probes: []probe{
+				set("the indirect group listed as direct (the shape of a transitive memberof_group)", "user-show-before-member-group-del", []any{"ipausers", "p24cap-mdel", "p24cap-mg1"}, entryPath("memberof_group")...),
+				del("no indirect group listed", "user-show-before-member-group-del", entryPath("memberofindirect_group")...),
+				set("another indirect group", "user-show-before-member-group-del", []any{"p24cap-x"}, entryPath("memberofindirect_group")...),
+				set("the direct group missing", "user-show-before-member-group-del", []any{"ipausers"}, entryPath("memberof_group")...),
+				add("the user a direct member of the parent group", "group-show-before-member-group-del", []any{"p24cap-m1"}, entryPath("member_user")...),
+				set("the parent group renamed", "group-show-before-member-group-del", []any{"p24cap-other"}, entryPath("cn")...),
+			},
+		},
 		{
 			id: "K19 a user_show with all=true carries ipauniqueid (a uuid), uidnumber and gidnumber, nsaccountlock and preserved as booleans, and the password timestamps",
 			run: func(_ testingT, s *captureSet) error {
@@ -1245,6 +1291,7 @@ func factsEmptyValues() []captureFact {
 				set("another given name after the empty mods", "user-show-after-empty-mods", []any{"x"}, entryPath("givenname")...),
 				set("another home after the empty mods", "user-show-after-empty-mods", []any{"/home/x"}, entryPath("homedirectory")...),
 				del("the shell cleared by the empty mail list", "user-show-after-empty-mail-list", entryPath("loginshell")...),
+				asError("the empty mail list refused", "user-mod-empty-mail-list"),
 			},
 		},
 		captureFact{

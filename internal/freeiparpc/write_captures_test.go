@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -97,6 +99,19 @@ func (s *captureSet) entry(name string) (map[string]any, error) {
 		return nil, fmt.Errorf("%s: no entry in the result", name)
 	}
 	return r.Result, nil
+}
+
+// findEntryByName is the entry of a find answer (result.result is a list)
+// whose attribute attrName holds name, nil when there is none.
+func findEntryByName(s *captureSet, name, attrName, want string) map[string]any {
+	res, _ := s.doc(name)["result"].(map[string]any)
+	list, _ := res["result"].([]any)
+	for _, item := range list {
+		if e, ok := item.(map[string]any); ok && slices.Contains(attr(e, attrName), want) {
+			return e
+		}
+	}
+	return nil
 }
 
 // errorOf is the *RPCError of an answer that is one.
@@ -446,5 +461,68 @@ func TestWriteCaptureFilesAreTheHarnessList(t *testing.T) {
 	}
 	if !slices.IsSorted(p24Fixtures) || len(slices.Compact(slices.Clone(p24Fixtures))) != len(p24Fixtures) {
 		t.Error("p24Fixtures is not sorted and free of repeats")
+	}
+}
+
+// headersConstant is the whole of every P2-4 .headers fixture: FreeIPA's
+// JSON-RPC answer has one header the tests read, and the harness writes
+// exactly this (capture_p24_live_test.go). A fixture with anything more in it
+// (a Set-Cookie, a Location, a debugging header) was not written by the
+// harness, and the secret scan would not necessarily see it.
+const headersConstant = "Content-Type: application/json; charset=utf-8\n"
+
+// headerProblems lists the .headers fixtures of names in dir that are not
+// headersConstant.
+func headerProblems(dir string, names []string) []string {
+	var problems []string
+	for _, n := range names {
+		data, err := os.ReadFile(filepath.Join(dir, n+".headers"))
+		switch {
+		case err != nil:
+			problems = append(problems, n+".headers: "+err.Error())
+		case string(data) != headersConstant:
+			problems = append(problems, fmt.Sprintf("%s.headers is %q, want %q", n, data, headersConstant))
+		}
+	}
+	return problems
+}
+
+func TestEveryWriteCaptureHasTheConstantHeaders(t *testing.T) {
+	if problems := headerProblems("testdata", p24Fixtures); len(problems) != 0 {
+		t.Fatalf("%d fixtures differ:\n%s", len(problems), strings.Join(problems, "\n"))
+	}
+}
+
+// The check fires: a copy of one fixture's headers with something added, with
+// the line changed, with no final newline or missing is found, and a copy as
+// committed is not.
+func TestHeaderProblemsFire(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name+".headers"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("ok", headersConstant)
+	if got := headerProblems(dir, []string{"ok"}); len(got) != 0 {
+		t.Fatalf("the constant line is refused: %v", got)
+	}
+	for name, content := range map[string]string{
+		"extra-header":    headersConstant + "Set-Cookie: ipa_session=0123456789abcdef\n",
+		"other-type":      "Content-Type: text/plain\n",
+		"no-newline":      strings.TrimSuffix(headersConstant, "\n"),
+		"two-lines":       headersConstant + headersConstant,
+		"other-charset":   "Content-Type: application/json\n",
+		"empty":           "",
+		"carriage-return": strings.TrimSuffix(headersConstant, "\n") + "\r\n",
+	} {
+		write(name, content)
+		if got := headerProblems(dir, []string{name}); len(got) != 1 {
+			t.Errorf("%s: problems = %v, want one", name, got)
+		}
+	}
+	if got := headerProblems(dir, []string{"missing"}); len(got) != 1 {
+		t.Errorf("a missing file: problems = %v, want one", got)
 	}
 }
