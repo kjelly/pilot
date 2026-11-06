@@ -604,3 +604,52 @@ func sameRosterExceptAdminPassword(before, after []byte, password string) error 
 	}
 	return nil
 }
+
+// ErrIPAAdminPasswordUnusable: the identity playbook would use an admin
+// password pilot cannot read outside Ansible — a template, an inline
+// !vault value, a value a YAML loader may read as a non-string — or none
+// at least 8 characters long.
+var ErrIPAAdminPasswordUnusable = errors.New("FreeIPA admin password unusable outside Ansible")
+
+// ResolveIPAAdminPassword returns the FreeIPA admin password the identity
+// playbook's "Normalize canonical FreeIPA settings" picks: the vault vars
+// file's ipa_admin_password, else (missing or empty) the roster's
+// freeipa.admin.password; the playbook's admin gate then requires at least
+// 8 characters. vaultData (nil: no vars file) and rosterData must be
+// plaintext. Every failure wraps ErrIPAAdminPasswordUnusable and never
+// holds the value.
+func ResolveIPAAdminPassword(vaultData, rosterData []byte) (string, error) {
+	password, err := literalAdminPassword("the vault's ipa_admin_password", vaultAdminValue(vaultData))
+	if err != nil {
+		return "", err
+	}
+	if password == "" {
+		var value *yaml.Node
+		if doc, perr := parseYAMLDocument(rosterData); perr == nil {
+			_, value, _ = rosterAdminPassword(doc)
+		}
+		if password, err = literalAdminPassword("the roster's freeipa.admin.password", value); err != nil {
+			return "", err
+		}
+	}
+	if len(password) < 8 {
+		return "", fmt.Errorf("%w: neither the vault's ipa_admin_password nor the roster's freeipa.admin.password holds one of at least 8 characters", ErrIPAAdminPasswordUnusable)
+	}
+	return password, nil
+}
+
+// literalAdminPassword is value as Ansible uses it when that is a literal
+// string, "" when there is none.
+func literalAdminPassword(what string, value *yaml.Node) (string, error) {
+	switch ansibleScalarKind(value) {
+	case scalarAbsent:
+		return "", nil
+	case scalarLiteral:
+		return value.Value, nil
+	case scalarTemplate:
+		return "", fmt.Errorf("%w: %s is a Jinja template; pilot does not render templates", ErrIPAAdminPasswordUnusable, what)
+	case scalarEncrypted:
+		return "", fmt.Errorf("%w: %s is an inline !vault value; encrypt the whole file instead", ErrIPAAdminPasswordUnusable, what)
+	}
+	return "", fmt.Errorf("%w: %s may be read as something other than a string; quote it", ErrIPAAdminPasswordUnusable, what)
+}

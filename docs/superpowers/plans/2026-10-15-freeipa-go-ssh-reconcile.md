@@ -1,6 +1,6 @@
 # 本機 Go 經 SSH tunnel 執行 FreeIPA reconcile 改善計畫
 
-日期：2026-10-15。狀態：設計提案，尚未實作或完成效能驗證。2026-10-15 修訂：架構由「遠端 Go helper」改為「本機 Go 經 SSH tunnel 連 JSON-RPC」。同日再修訂：新增 Phase −1、Phase 2 混合執行模型、test driver 與 spec row 對應檢查、Phase 3 規模與 go/no-go。2026-10-27 修訂：Phase 0 已合併（PR #120）；新增 Phase 1 的 users/groups find 讀取契約（依真實擷取）、與 PR #138 的關係與 SSH key 範圍決定、Phase 1 test driver 可用的非互動入口，以及 vault 讀取方式；同日依 PR #145 review 修正：`user_find` 的 `memberof_group` 含間接群組、#138 授權快取刷新列為 Phase 2 進入條件、SSH key 差異只報告不判定成敗、補擷取 `maxlife=0` admin 重設、key 清除前後與三層巢狀群組。第二輪 review 修正：#138 已於 2026-10-27 合併，相關敘述改為以目前 main 為準；find 契約每一列標出鎖住的測試；授權快取選項 (i) 寫明需在遠端執行 helper 原始碼或自寫 journal，屬遠端規則例外，建議改為 (ii)（待使用者確認）。第三輪 review 修正：(ii) 的測試要求不再互相矛盾，並寫明為何需要專用的 `auth_prepare` 入口；find 契約補上時間戳格式與 SSH key 指紋的斷言。2026-10-28 修訂：授權快取刷新決定採用 (ii)，寫明實作要求，Phase 2 進入條件改為該決定的實作項目。2026-10-28 第二次修訂（review 後）：(ii) 補上四項要求。一，混合模式啟用前，所有執行 identity playbook 的 pilot 入口都要取同一把 `/etc/ipa` 遠端鎖，否則另一輪完整執行會清掉或覆蓋 Go 寫入前設定的 `auth_pending`（目前沒有任何 pilot 入口取鎖，這是 Phase 2 的條件，不是 Phase 3 的工作；此處「進入／退出條件」的說法已被第三次修訂的「取鎖閘門」取代，以後者為準）。二，入口必須對 identity playbook 的同一台主機執行，Go 要觀察到該主機的 `auth_prepare` 結果才寫入，且入口與 playbook 共用三個輸入（journal 路徑、`ipa_domain`、helper 原始碼）。三，executor 不變量：本輪鎖內入口尚未成功，就不送任何寫入 RPC；入口位置在寫入前重讀與重新規劃之後。四，Go 寫入後沒有以會刷新的 playbook run 結尾的情形（users/groups-only scope、tag 選擇漏掉刷新），結果必須回報授權快取義務未結清並標為非成功的未結清結果。2026-10-28 第三次修訂（獨立 review 後）：取鎖要求改在漏斗處定義（`accessgrants.applyPlan`、host decommission 的 identity converge、`freeipa-identity` 的 deploy runner），由全 repo lint 鎖住所有呼叫者，補上漏列的 `pilot identity drift --repair-managed` 與 `pilot edit` TUI 的 breakglass 路徑，並寫明 dev 路徑不在範圍；users/groups-only scope 在沒有寫入時也要以唯讀探測揭露既有的未結清義務；「是否已刷新」改以 playbook 印出的機器可讀標記判定，不在 Go 重推 tag 邏輯；取鎖包裝的 target 推導、等待策略與 `Lock.Lost()` 處理列為 Phase 2 spec 必須決定的項目；統一取鎖閘門的措辭，並以描述取代未定義的 S 編號。2026-10-28 第四次修訂：未結清結果必須非成功（不沿用 `partial_success`，它的結束碼為 0 且對外發布成 success）；探測由 Ansible 執行；lint 分成引用 allowlist 與具名漏斗函式的 AST 檢查；取鎖時機在確認之後；入口 playbook 的名稱與資料夾列為 Phase 2 spec 決定；定義 users/groups-only scope 兩輪 live 測試的通過標準。
+日期：2026-10-15。狀態：Phase −1 與 Phase 0 已完成；Phase 1 規格草稿為 `docs/superpowers/specs/2026-10-30-freeipa-go-reconcile-phase1-spec.md`；Phase 1 已實作並對拋棄式 VM 實跑（目前驗收紀錄見 [LATEST](../../evidence/freeipa-go-reconcile/LATEST.md)，PR #255），Phase 2 起尚未實作。2026-10-15 修訂：架構由「遠端 Go helper」改為「本機 Go 經 SSH tunnel 連 JSON-RPC」。同日再修訂：新增 Phase −1、Phase 2 混合執行模型、test driver 與 spec row 對應檢查、Phase 3 規模與 go/no-go。2026-10-27 修訂：Phase 0 已合併（PR #120）；新增 Phase 1 的 users/groups find 讀取契約（依真實擷取）、與 PR #138 的關係與 SSH key 範圍決定、Phase 1 test driver 可用的非互動入口，以及 vault 讀取方式；同日依 PR #145 review 修正：`user_find` 的 `memberof_group` 含間接群組、#138 授權快取刷新列為 Phase 2 進入條件、SSH key 差異只報告不判定成敗、補擷取 `maxlife=0` admin 重設、key 清除前後與三層巢狀群組。第二輪 review 修正：#138 已於 2026-10-27 合併，相關敘述改為以目前 main 為準；find 契約每一列標出鎖住的測試；授權快取選項 (i) 寫明需在遠端執行 helper 原始碼或自寫 journal，屬遠端規則例外，建議改為 (ii)（待使用者確認）。第三輪 review 修正：(ii) 的測試要求不再互相矛盾，並寫明為何需要專用的 `auth_prepare` 入口；find 契約補上時間戳格式與 SSH key 指紋的斷言。2026-10-28 修訂：授權快取刷新決定採用 (ii)，寫明實作要求，Phase 2 進入條件改為該決定的實作項目。2026-10-28 第二次修訂（review 後）：(ii) 補上四項要求。一，混合模式啟用前，所有執行 identity playbook 的 pilot 入口都要取同一把 `/etc/ipa` 遠端鎖，否則另一輪完整執行會清掉或覆蓋 Go 寫入前設定的 `auth_pending`（目前沒有任何 pilot 入口取鎖，這是 Phase 2 的條件，不是 Phase 3 的工作；此處「進入／退出條件」的說法已被第三次修訂的「取鎖閘門」取代，以後者為準）。二，入口必須對 identity playbook 的同一台主機執行，Go 要觀察到該主機的 `auth_prepare` 結果才寫入，且入口與 playbook 共用三個輸入（journal 路徑、`ipa_domain`、helper 原始碼）。三，executor 不變量：本輪鎖內入口尚未成功，就不送任何寫入 RPC；入口位置在寫入前重讀與重新規劃之後。四，Go 寫入後沒有以會刷新的 playbook run 結尾的情形（users/groups-only scope、tag 選擇漏掉刷新），結果必須回報授權快取義務未結清並標為非成功的未結清結果。2026-10-28 第三次修訂（獨立 review 後）：取鎖要求改在漏斗處定義（`accessgrants.applyPlan`、host decommission 的 identity converge、`freeipa-identity` 的 deploy runner），由全 repo lint 鎖住所有呼叫者，補上漏列的 `pilot identity drift --repair-managed` 與 `pilot edit` TUI 的 breakglass 路徑，並寫明 dev 路徑不在範圍；users/groups-only scope 在沒有寫入時也要以唯讀探測揭露既有的未結清義務；「是否已刷新」改以 playbook 印出的機器可讀標記判定，不在 Go 重推 tag 邏輯；取鎖包裝的 target 推導、等待策略與 `Lock.Lost()` 處理列為 Phase 2 spec 必須決定的項目；統一取鎖閘門的措辭，並以描述取代未定義的 S 編號。2026-10-28 第四次修訂：未結清結果必須非成功（不沿用 `partial_success`，它的結束碼為 0 且對外發布成 success）；探測由 Ansible 執行；lint 分成引用 allowlist 與具名漏斗函式的 AST 檢查；取鎖時機在確認之後；入口 playbook 的名稱與資料夾列為 Phase 2 spec 決定；定義 users/groups-only scope 兩輪 live 測試的通過標準。2026-10-30 修訂：更新狀態；新增 Phase 1 規格連結。
 
 目標是將日常 identity reconcile 改為本機 pilot 內的 Go engine：pilot 用系統 OpenSSH 建立到 FreeIPA 寫入 server 的 TCP 轉送，經轉送以 HTTPS 呼叫 FreeIPA JSON-RPC API，用密碼登入取得 session，共用連線、批次讀取現況，只套用實際差異。遠端不安裝或發布任何程式。FreeIPA 安裝與主機設定繼續由現有部署流程負責。
 
@@ -58,7 +58,7 @@ FreeIPA 官方描述了 batch 呼叫；batch 可合併 RPC 往返，本計畫不
 
 ### SSH tunnel
 
-- Go 呼叫系統 OpenSSH，保留已驗證的 known_hosts、ssh-agent 與 ProxyJump 行為，不自行重做 SSH 設定語意。ssh 參數以 argv 傳遞，不經 shell。
+- Go 呼叫系統 OpenSSH，保留已驗證的 known_hosts、ssh-agent 與 ProxyJump 行為，不自行重做 SSH 設定語意。ssh 參數以 argv 傳遞，不經 shell。ssh 與 ProxyJump 跳板在沒有 terminal 的 session 執行，不提示輸入。
 - 目標必須由本次 effective inventory 解析成唯一 host、address、port、user、環境及寫入 FreeIPA server。列出支援的 SSH 選項；不支援的設定在 mutation 前明確拒絕，不默默忽略。SSH 目標預設為寫入 server 本身。
 - `http.Transport` 的 DialContext 不使用本機 DNS 或本機 port：每條連線啟動 `ssh -W <目的地>`，把子程序 stdin/stdout 包成 `net.Conn`。不用 `-L` 開本機 listening port，避免同機其他使用者共用轉送。Transport 不讀 `HTTP(S)_PROXY` 環境變數。
 - request URL、TLS ServerName、Host 與 Referer 一律使用寫入 server 的 FQDN；轉送目的地預設為 `127.0.0.1:443`，可設定為 `<fqdn>:443` 由 SSH 端解析。Phase 0 實測確認 FreeIPA httpd 在 loopback 接受此組合。
@@ -267,6 +267,8 @@ FreeIPA 多物件更新不是交易。run journal 記錄 operation ID、前置�
 
 ### Phase 1 唯讀 observer 與 planner
 
+規格（草稿，2026-10-30）：`docs/superpowers/specs/2026-10-30-freeipa-go-reconcile-phase1-spec.md`。它定下 Go engine 的預覽入口、vault 讀取方式（`--ask-vault-pass` 在 Phase 1 不可達，延到 Phase 4）、SSH 目標推導與 plan 格式，並把下面「尚未擷取」清單分成實作前必須擷取與延後的項目。
+
 #### find 讀取契約（2026-10-27 真實擷取）
 
 環境：拋棄式 vm-target `pwfix-ipa`（FreeIPA 4.13.4／API 2.257），經 Phase 0 的 `ssh -W` tunnel 與 pinned CA，以 admin 的 `login_password` session 擷取。分兩次，擷取後所有 `p1-*` 物件都已刪除，global password policy 回到 `maxlife=90` 並以 `ipa pwpolicy-show` 確認：
@@ -291,7 +293,7 @@ FreeIPA 多物件更新不是交易。run journal 記錄 operation ID、前置�
 
 `pwpolicy_show` 不在 `internal/freeiparpc` 的 allowlist；兩次擷取時的 policy 只用來記錄擷取條件，由測試直接讀檔確認（`maxlife` 90 與 0）。
 
-尚未擷取（Phase 1 spec 前要補，或明確列為不支援）：external 群組、`preserved`（stage／preserved）使用者、`uid`／`gid` 變更、非 admin 讀取者看到的欄位（權限造成的缺欄位）、大量資料下的完整性（§5 Phase 0 初步量測只記錄一次 `user_find --all` 回傳 138 筆、197 KiB，沒有記錄請求的 `sizelimit` 與回應的 `truncated`，所以任何資料量下的完整讀取都還沒有可追溯的證據；389-ds 後端的 size／lookthrough 上限是否生效也未測試，見 §6 的 1,000 users 情境）。
+尚未擷取（Phase 1 spec 前要補，或明確列為不支援；2026-11-05 已擷取 external 群組、preserved 使用者與大量資料下的完整性，結果見 Phase 1 spec §9 K1–K3，uid／gid 變更在 Phase 1 一律 blocked，非 admin 讀取者不支援）：external 群組、`preserved`（stage／preserved）使用者、`uid`／`gid` 變更、非 admin 讀取者看到的欄位（權限造成的缺欄位）、大量資料下的完整性（§5 Phase 0 初步量測只記錄一次 `user_find --all` 回傳 138 筆、197 KiB，沒有記錄請求的 `sizelimit` 與回應的 `truncated`，所以任何資料量下的完整讀取都還沒有可追溯的證據；389-ds 後端的 size／lookthrough 上限是否生效也未測試，見 §6 的 1,000 users 情境）。
 
 #### 與 PR #138 的關係：SSH key 範圍（2026-10-27 已決定）與授權快取刷新（2026-10-28 已決定）
 
@@ -380,11 +382,13 @@ SSH key 範圍的決定：
 client 不被刷新，只發生在 Go 沒有寫入、journal 沒有未完成的義務、且 playbook 其餘 section 也沒有變更時（`auth_settle` 以「前一次的 `auth_pending` 或本輪有變更」判定）；上述序列化前提成立時才適用。
 
 #### Phase 1 工作項
-- [ ] 實作完整性判斷、正規化、差異與依賴排序，先僅提供 preview/shadow comparison。
-- [ ] 測試 no-op、單人變更、外部 drift、nested membership、空集合、保留外部資料、逾期 grants 及大量資料截斷。
-- [ ] plan 綁定 desired revision、target 與能力範圍；live state 變更時必須重新評估。
-- [ ] 建立 Go reconcile test driver：在 vm-target 上 snapshot → preview → apply → verify → 第二輪零 mutation，失敗時 rollback，輸出可放進 evidence 的摘要（tested revision/tree、PASS/FAIL、API 計數）。driver 經 pilot 正式入口執行，不直接呼叫內部函式。本階段先完成 snapshot、preview、verify 與 rollback，apply 與第二輪檢查在 Phase 2 接上。`pilot reconcile --component <key> --preview-only --stage <stage>` 與 `--force` 已可非互動執行（PR #139、#140，promptAutomation 預設值驅動），driver 沿用它，不再另寫 wizard 驅動；但現有的預覽走 Ansible `--check --diff`，Go engine 需要自己的明確入口（名稱與旗標由 Phase 1 spec 決定，擬議為唯讀的 engine 選擇），且不得讓 `--preview-only` 在不經 Go engine 的情況下被當成 Go 預覽通過。
-- [ ] 建立 spec row 對應檢查：每個 users/groups 相關 row 對應到 planner 的 operation 種類與 verifier 檢查，雙向鎖住（row 沒有對應，或程式宣告的對應不在 spec，都要 fail），比照 `TestSpecPlaybookTagAlignment`。相容期內舊 playbook 仍受 `TestSpecPlaybookTagAlignment` 約束，兩個檢查都要通過。新檢查要先把一個 regression 放回去，確認它會 fail（AGENTS.md §5.7）。
+- [x] 實作完整性判斷、正規化、差異與依賴排序，先僅提供 preview/shadow comparison。（2026-11-05：`internal/identityreconcile`、`pilot reconcile --engine golang --preview-only`；observer 的判讀已由 K1–K4 擷取鎖住，見 Phase 1 spec §9）
+- [x] 測試 no-op、單人變更、外部 drift、nested membership、空集合、保留外部資料、逾期 grants 及大量資料截斷。（2026-11-05：截斷由 K3 擷取鎖住：server 端限制只會變成 `truncated: true` 或錯誤，`Find` 兩者都視為失敗）
+- [x] plan 綁定 desired revision、target 與能力範圍；live state 變更時必須重新評估。（2026-11-05：plan JSON 帶 `desired_revision`、`target`、`scope` 與 observation fingerprint；apply 時重新讀取與規劃屬 Phase 2）
+- [x] （`TestLiveGoPreviewDriver` 已對拋棄式 vm-target 實跑，目前驗收紀錄見 [LATEST](../../evidence/freeipa-go-reconcile/LATEST.md)）建立 Go reconcile test driver：在 vm-target 上 snapshot → preview → apply → verify → 第二輪零 mutation，失敗時 rollback，輸出可放進 evidence 的摘要（tested revision/tree、PASS/FAIL、API 計數）。driver 經 pilot 正式入口執行，不直接呼叫內部函式。本階段先完成 snapshot、preview、verify 與 rollback，apply 與第二輪檢查在 Phase 2 接上。`pilot reconcile --component <key> --preview-only --stage <stage>` 與 `--force` 已可非互動執行（PR #139、#140，promptAutomation 預設值驅動），driver 沿用它，不再另寫 wizard 驅動；但現有的預覽走 Ansible `--check --diff`，Go engine 需要自己的明確入口（名稱與旗標由 Phase 1 spec 決定，擬議為唯讀的 engine 選擇），且不得讓 `--preview-only` 在不經 Go engine 的情況下被當成 Go 預覽通過。
+- [x] （2026-11-05：`TestSpecRowsMapToPlannerOperations`，以 `TestSpecRowMappingCheckFires` 證明會 fail）建立 spec row 對應檢查：每個 users/groups 相關 row 對應到 planner 的 operation 種類與 verifier 檢查，雙向鎖住（row 沒有對應，或程式宣告的對應不在 spec，都要 fail），比照 `TestSpecPlaybookTagAlignment`。相容期內舊 playbook 仍受 `TestSpecPlaybookTagAlignment` 約束，兩個檢查都要通過。新檢查要先把一個 regression 放回去，確認它會 fail（AGENTS.md §5.7）。
+
+- [x] （2026-11-05，第二輪 review）預覽入口的每個 fail-closed gate 都有會觸發它的 test row，由程式碼中的 `// gate:` 標註與 `TestReconcileGolangEveryGateHasARow`、`TestObserveEveryGateHasARow`（掃描器 `internal/gateledger`）雙向鎖住；失敗一律以結束碼 1 結束，子行程的結束碼不傳遞，只有產生出的 blocked plan 是 3；Ctrl-C／SIGTERM／SIGHUP 與 `--timeout` 一樣取消預覽並殺掉預覽啟動的每個子行程與它們啟動的行程（ansible-inventory、ansible --list-hosts、ansible-vault、ssh；Phase 1 spec §2.5），登入後的 session 仍會登出（Phase 1 spec §2.3、§3、§10.1；AGENTS.md §5.10、§5.12）。
 
 退出條件：讀取無 mutation，計畫能解釋每個操作；不支援的 roster section 明確阻擋對應範圍。
 

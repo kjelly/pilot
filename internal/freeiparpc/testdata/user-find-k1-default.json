@@ -1,0 +1,87 @@
+{
+  "result": {
+    "result": [
+      {
+        "cn": [
+          "P1 Live"
+        ],
+        "displayname": [
+          "P1 Live"
+        ],
+        "initials": [
+          "PL"
+        ],
+        "gecos": [
+          "P1 Live"
+        ],
+        "objectclass": [
+          "top",
+          "person",
+          "organizationalperson",
+          "inetorgperson",
+          "inetuser",
+          "posixaccount",
+          "krbprincipalaux",
+          "krbticketpolicyaux",
+          "ipaobject",
+          "ipasshuser",
+          "ipaSshGroupOfPubKeys",
+          "mepOriginEntry",
+          "ipantuserattrs"
+        ],
+        "ipauniqueid": [
+          "f8fb8642-d8c1-11f1-909e-5254001b059e"
+        ],
+        "mepmanagedentry": [
+          "cn=p1-live,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        ],
+        "ipantsecurityidentifier": [
+          "S-1-5-21-3998632271-3893472475-798555519-1273"
+        ],
+        "gidnumber": [
+          "1927600273"
+        ],
+        "krbcanonicalname": [
+          "p1-live@IPA.PILOT.INTERNAL"
+        ],
+        "homedirectory": [
+          "/home/p1-live"
+        ],
+        "sn": [
+          "Live"
+        ],
+        "uid": [
+          "p1-live"
+        ],
+        "loginshell": [
+          "/bin/sh"
+        ],
+        "mail": [
+          "p1-live@ipa.pilot.internal"
+        ],
+        "krbprincipalname": [
+          "p1-live@IPA.PILOT.INTERNAL"
+        ],
+        "uidnumber": [
+          "1927600273"
+        ],
+        "givenname": [
+          "P1"
+        ],
+        "nsaccountlock": false,
+        "preserved": false,
+        "memberof_group": [
+          "ipausers"
+        ],
+        "dn": "uid=p1-live,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 1,
+    "truncated": false,
+    "summary": "1 user matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}
