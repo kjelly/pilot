@@ -14,6 +14,10 @@ import (
 // from the spec's §7.4 rules rather than from classify's own switch: a rule that is
 // widened to a kind it does not name, or loses a kind it does, changes a cell.
 func TestClassifyEveryCapturedErrorForEveryKind(t *testing.T) {
+	mustReturn(returnDeadline, "classify", func() { classifyEveryCapturedErrorForEveryKind(t) })
+}
+
+func classifyEveryCapturedErrorForEveryKind(t *testing.T) {
 	type cells struct {
 		fixture string
 		// outcomes of the kinds that are not the default
@@ -154,6 +158,10 @@ func TestClassifyAMemberReasonByTheCommandItAnswers(t *testing.T) {
 // What an error that is not an answer of the server says of itself: its text, except
 // for a password command, where it is reduced to the type of the innermost error.
 func TestClassifyKeepsTheTextOfAnUnsentErrorExceptNearAPassword(t *testing.T) {
+	mustReturn(returnDeadline, "classify", func() { classifyKeepsTheTextOfAnUnsentError(t) })
+}
+
+func classifyKeepsTheTextOfAnUnsentError(t *testing.T) {
 	unsent := &freeiparpc.TransportError{Err: errors.New("dial tcp: no route"), Sent: false}
 	if got := classify(op(KindUserCreate, "x"), nil, unsent); !strings.Contains(got.Detail, "no route") {
 		t.Errorf("a user_add: %+v, want the text of the error", got)

@@ -151,7 +151,7 @@ func TestExecuteRecordsAndReadsAfterTheRunWasCancelled(t *testing.T) {
 		}
 		return nil, nil, false
 	}
-	res, err := Execute(ctx, e.f, e.opts)
+	res, err := executeWithin(ctx, e.f, e.opts)
 	if !errors.Is(err, ErrWrites) {
 		t.Fatalf("err = %v", err)
 	}
@@ -448,7 +448,7 @@ func TestExecuteResolvesAWriteTheSignalCutOff(t *testing.T) {
 		}
 		return nil, nil, false
 	}
-	res, err := Execute(ctx, e.f, e.opts)
+	res, err := executeWithin(ctx, e.f, e.opts)
 	if !errors.Is(err, ErrWrites) {
 		t.Fatalf("err = %v", err)
 	}

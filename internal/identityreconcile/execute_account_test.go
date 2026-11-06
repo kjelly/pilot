@@ -415,7 +415,7 @@ func TestJournalSaysWhyARunStoppedBeforeItsFirstCommand(t *testing.T) {
 	t.Run("the read after the entry fails", func(t *testing.T) {
 		e := newRunEnv(t, fullRoster)
 		seedFullRoster(e.f)
-		res, err := Execute(e.ctx, &findFailsFrom{fakeIPA: e.f, from: 2}, e.opts)
+		res, err := executeWithin(e.ctx, &findFailsFrom{fakeIPA: e.f, from: 2}, e.opts)
 		if err == nil || !strings.Contains(err.Error(), "read after the entry") {
 			t.Fatalf("err = %v", err)
 		}
@@ -507,7 +507,7 @@ func TestVerifyEventOKIsTheRunsVerdictNeverTheReadAlone(t *testing.T) {
 	})
 	t.Run("the read after the writes failed", func(t *testing.T) {
 		e := newRunEnv(t, rosterWith("  - {name: ua}\n", ""))
-		res, err := Execute(e.ctx, &findFailsFrom{fakeIPA: e.f, from: 3}, e.opts)
+		res, err := executeWithin(e.ctx, &findFailsFrom{fakeIPA: e.f, from: 3}, e.opts)
 		if !errors.Is(err, ErrVerify) {
 			t.Fatalf("err = %v", err)
 		}

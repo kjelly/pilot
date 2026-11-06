@@ -176,7 +176,7 @@ func TestExecuteClassifiesAnUnknownOutcomeFromTheReadAfterTheWrites(t *testing.T
 		}
 		// A third read that fails: the model's Find has no failure mode, so wrap it.
 		failing := &findFailsFrom{fakeIPA: e.f, from: 3}
-		res, err := Execute(e.ctx, failing, e.opts)
+		res, err := executeWithin(e.ctx, failing, e.opts)
 		o := res.op("user.create:ub")
 		if o.Resolution != resolutionStillUnknown || o.Final() != OutcomeUnknown {
 			t.Fatalf("ub: %+v", o)

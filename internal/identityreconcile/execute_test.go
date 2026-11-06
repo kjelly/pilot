@@ -200,12 +200,12 @@ func TestExecuteRefusesWhatItCannotRunWithout(t *testing.T) {
 	} {
 		opts := e.opts
 		mod(&opts)
-		if _, err := Execute(e.ctx, e.f, opts); err == nil {
+		if _, err := executeWithin(e.ctx, e.f, opts); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
 	// A context without the lock: no read, no write.
-	if _, err := Execute(t.Context(), e.f, e.opts); !errors.Is(err, identitylock.ErrNoLock) {
+	if _, err := executeWithin(t.Context(), e.f, e.opts); !errors.Is(err, identitylock.ErrNoLock) {
 		t.Fatalf("without the lock: %v", err)
 	}
 	if len(e.f.calls) != 0 {
@@ -213,7 +213,7 @@ func TestExecuteRefusesWhatItCannotRunWithout(t *testing.T) {
 	}
 	// A lock that was released.
 	_ = e.held.Release()
-	if _, err := Execute(e.ctx, e.f, e.opts); err == nil || len(e.f.calls) != 0 {
+	if _, err := executeWithin(e.ctx, e.f, e.opts); err == nil || len(e.f.calls) != 0 {
 		t.Fatalf("a released lock: %v, calls %v", err, e.f.methodsCalled())
 	}
 }

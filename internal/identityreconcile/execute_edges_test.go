@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kjelly/pilot/internal/freeiparpc"
 )
@@ -29,7 +30,7 @@ func TestExecuteRefusesAnIncompleteOrOutOfRangeCall(t *testing.T) {
 		var rpc RPC = e.f
 		opts := e.opts
 		mod(&rpc, &opts)
-		if res, err := Execute(e.ctx, rpc, opts); err == nil || res != nil {
+		if res, err := executeWithin(e.ctx, rpc, opts); err == nil || res != nil {
 			t.Errorf("%s: accepted (%v, %v)", name, res, err)
 		}
 	}
@@ -66,7 +67,7 @@ func TestExecuteShutsAGateLeftOpen(t *testing.T) {
 func TestExecuteStopsWhenItCannotReadBeforePlanning(t *testing.T) {
 	e := newRunEnv(t, fullRoster)
 	seedFullRoster(e.f)
-	res, err := Execute(e.ctx, &findFailsFrom{fakeIPA: e.f, from: 1}, e.opts)
+	res, err := executeWithin(e.ctx, &findFailsFrom{fakeIPA: e.f, from: 1}, e.opts)
 	if err == nil || !strings.Contains(err.Error(), "read before planning") || errors.Is(err, ErrWrites) {
 		t.Fatalf("err = %v", err)
 	}
@@ -263,7 +264,7 @@ func TestTheReadAfterTheWritesResolvesOnlyWhatItCan(t *testing.T) {
 			}
 			return nil, nil, false
 		}
-		res, err := Execute(e.ctx, &findFailsFrom{fakeIPA: e.f, from: 3}, e.opts)
+		res, err := executeWithin(e.ctx, &findFailsFrom{fakeIPA: e.f, from: 3}, e.opts)
 		if !errors.Is(err, ErrVerify) || !strings.Contains(err.Error(), "the read failed:") || !strings.Contains(err.Error(), "the server stopped answering") {
 			t.Fatalf("err = %v", err)
 		}
@@ -357,3 +358,21 @@ func TestShowEntryRefusesAnAnswerWithoutAnEntry(t *testing.T) {
 }
 
 var _ = context.Background
+
+// mustReturn lets a call that returns go by and stops one that does not, naming it.
+func TestMustReturnStopsACallThatDoesNotReturn(t *testing.T) {
+	if !mustReturn(time.Second, "a quick call", func() {}) {
+		t.Fatal("a call that returned was not reported as returned")
+	}
+	release := make(chan struct{})
+	defer close(release)
+	var message any
+	func() {
+		defer func() { message = recover() }()
+		mustReturn(50*time.Millisecond, "a stuck call", func() { <-release })
+	}()
+	text, _ := message.(string)
+	if !strings.Contains(text, "a stuck call did not return within 50ms") {
+		t.Fatalf("a call that does not return: recovered %v", message)
+	}
+}

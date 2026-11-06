@@ -160,7 +160,37 @@ func newRunEnv(t *testing.T, roster string) *runEnv {
 
 func (e *runEnv) execute() (*Result, error) {
 	e.t.Helper()
-	return Execute(e.ctx, e.f, e.opts)
+	return executeWithin(e.ctx, e.f, e.opts)
+}
+
+// returnDeadline is how long a call under test may take before it is taken for a loop
+// that does not end. Every call takes milliseconds; the deadline is a ceiling for a
+// loaded machine, not a measure.
+const returnDeadline = 30 * time.Second
+
+// mustReturn runs fn and panics, naming what, if it has not returned within d. A loop
+// that does not end (a batch that is never taken off its list, a batch limit of zero, a
+// walk that visits a group twice) would otherwise hang the whole package until go test's
+// own timeout and say nothing of where; the panic fails the run at once and names it.
+// It reports whether fn returned, for the test of this helper.
+func mustReturn(d time.Duration, what string, fn func()) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		panic(fmt.Sprintf("%s did not return within %s: a loop that does not end", what, d))
+	}
+}
+
+// executeWithin is Execute under mustReturn.
+func executeWithin(ctx context.Context, rpc RPC, opts Options) (res *Result, err error) {
+	mustReturn(returnDeadline, "Execute", func() { res, err = Execute(ctx, rpc, opts) })
+	return res, err
 }
 
 // mustApply runs and fails the test unless the run ended as planned.

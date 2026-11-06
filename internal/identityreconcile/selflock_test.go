@@ -66,7 +66,9 @@ func planRaw(live liveState, d Desired) Plan {
 	for _, n := range d.AbsentGroups {
 		groups = withMarkers(groups, n)
 	}
-	return Build(d, live.users, groups)
+	var p Plan
+	mustReturn(returnDeadline, "Build", func() { p = Build(d, live.users, groups) })
+	return p
 }
 
 // plan plans against the live state with the reads consistent, as a real server's are:
