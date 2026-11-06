@@ -157,15 +157,19 @@ func pushBreakglassActivateTicket(r *editRouterModel, dir, path, name, duration,
 			return pushBreakglassDetail(r, dir, path, name, "")
 		}
 		ticket := strings.TrimSpace(m.Value())
+		doing := fmt.Sprintf("break-glass %s was not activated", name)
+		if r.planSource != "" {
+			return pushBreakglassDetail(r, dir, path, name, r.planSkipped("activate_breakglass", name))
+		}
 		parsed, err := inventory.ParseAccessDuration(duration)
 		if err != nil {
-			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
+			return pushBreakglassDetail(r, dir, path, name, r.failedAction(doing, err))
 		}
 		// Refused here, before anything is read or run, when the inventory
 		// cannot give the lock (see checkIdentityLockTarget).
 		lock, err := tuiIdentityLockFor(context.Background(), accessGovernanceInventoryPath(dir))
 		if err != nil {
-			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
+			return pushBreakglassDetail(r, dir, path, name, r.failedAction(doing, err))
 		}
 		activation, err := accessgrants.Activate(context.Background(), accessgrants.ActivateOptions{
 			RosterFile:  path,
@@ -180,7 +184,7 @@ func pushBreakglassActivateTicket(r *editRouterModel, dir, path, name, duration,
 			Lock:        lock,
 		})
 		if err != nil {
-			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
+			return pushBreakglassDetail(r, dir, path, name, r.failedAction(doing, err))
 		}
 		return pushBreakglassDetail(r, dir, path, name, fmt.Sprintf("✅ 已啟用，到期時間 %s", activation.ExpiresAt.Format(time.RFC3339)))
 	})
@@ -197,9 +201,13 @@ func pushBreakglassDeactivateConfirm(r *editRouterModel, dir, path, name string)
 		if m.Canceled() || m.Selected() == 1 {
 			return pushBreakglassDetail(r, dir, path, name, "")
 		}
+		doing := fmt.Sprintf("break-glass %s was not deactivated", name)
+		if r.planSource != "" {
+			return pushBreakglassDetail(r, dir, path, name, r.planSkipped("deactivate_breakglass", name))
+		}
 		lock, err := tuiIdentityLockFor(context.Background(), accessGovernanceInventoryPath(dir))
 		if err != nil {
-			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
+			return pushBreakglassDetail(r, dir, path, name, r.failedAction(doing, err))
 		}
 		if err := accessgrants.Deactivate(context.Background(), accessgrants.DeactivateOptions{
 			RosterFile: path,
@@ -209,7 +217,7 @@ func pushBreakglassDeactivateConfirm(r *editRouterModel, dir, path, name string)
 			Now:        time.Now(),
 			Lock:       lock,
 		}); err != nil {
-			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
+			return pushBreakglassDetail(r, dir, path, name, r.failedAction(doing, err))
 		}
 		return pushBreakglassDetail(r, dir, path, name, "✅ 已停用")
 	})

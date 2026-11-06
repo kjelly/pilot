@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -203,22 +205,26 @@ func TestEditAutomationDriverRosterGrantsFlow_ActivateDeactivateBreakglass(t *te
 		t.Fatalf("driver.run() error = %v", err)
 	}
 
-	// activate_breakglass goes through accessgrants.Activate, which tries
-	// to run a real ansible-playbook against accessGovernanceInventoryPath
-	// (an inventory.yml that was never created in this fixture) — no
-	// fake-runner injection point exists at the editAction level, so this
-	// can only reach a real ansible-playbook invocation and fail there.
-	// pushBreakglassActivateTicket (edit_tui_roster_breakglass.go) turns
-	// that failure into a "❌ "-prefixed r.banner rather than a Go error
-	// bubbling up through the driver's send/choose/typeText/enter
-	// primitives (those only ever report navigation-level errors), so the
-	// banner is what this test asserts on — internal/accessgrants' own
-	// tests already cover Activate/Deactivate's logic with a fake runner.
-	if err := d.activateBreakglass(&r, "infra-emergency", "30m", "outage", "INC-1"); err != nil {
-		t.Fatalf("activateBreakglass() navigation error = %v", err)
+	// activate_breakglass goes through accessgrants.Activate, which runs
+	// ansible-playbook against accessGovernanceInventoryPath; there is no
+	// fake-runner injection point at the editAction level, so the test puts an
+	// ansible-playbook that fails on PATH (internal/accessgrants' own tests
+	// cover Activate/Deactivate's logic with a fake runner). The screen shows
+	// the failure as a "❌" banner and records it for the driver
+	// (editRouterModel.failedAction): the driver's call fails with the cause,
+	// as the step of a scenario does, instead of returning nil for an
+	// activation that did not happen (AGENTS.md §5.8).
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "ansible-playbook"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.HasPrefix(r.banner, "❌") {
-		t.Fatalf("banner = %q, want a ❌-prefixed failure (no real ansible-playbook/FreeIPA target in this sandbox)", r.banner)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	err := d.activateBreakglass(&r, "infra-emergency", "30m", "outage", "INC-1")
+	if err == nil || !strings.Contains(err.Error(), "break-glass infra-emergency was not activated") || !strings.Contains(err.Error(), "exited 1") {
+		t.Fatalf("activateBreakglass() error = %v, want the failure of the playbook", err)
+	}
+	if !strings.HasPrefix(r.banner, "❌") || !strings.Contains(r.banner, "exited 1") {
+		t.Fatalf("banner = %q, want the ❌-prefixed failure the operator sees", r.banner)
 	}
 	// The failure above is the playbook's, not the lock's: the screen took the
 	// lock first, without waiting (the TUI call is synchronous, with nowhere to
@@ -231,8 +237,8 @@ func TestEditAutomationDriverRosterGrantsFlow_ActivateDeactivateBreakglass(t *te
 		t.Fatalf("the lock was taken %d times and released %d", lock.Acquired(), lock.Released())
 	}
 	// And deactivating goes through the same funnel.
-	if err := d.deactivateBreakglass(&r, "infra-emergency"); err != nil {
-		t.Fatalf("deactivateBreakglass() navigation error = %v", err)
+	if err := d.deactivateBreakglass(&r, "infra-emergency"); err == nil || !strings.Contains(err.Error(), "break-glass infra-emergency was not deactivated") {
+		t.Fatalf("deactivateBreakglass() error = %v, want the failure of the playbook", err)
 	}
 	if reqs := lock.Requests(); len(reqs) != 2 || reqs[1].Wait != 0 || lock.Acquired() != 2 {
 		t.Fatalf("after deactivating: lock requests = %+v, taken %d times", reqs, lock.Acquired())

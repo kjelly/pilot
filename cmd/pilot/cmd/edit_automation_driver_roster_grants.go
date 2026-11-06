@@ -308,6 +308,11 @@ func (d *automationDriver) ensureBreakglassDetail(r *editRouterModel, name strin
 	return fmt.Errorf("could not resolve navigation to breakglass detail for %s", name)
 }
 
+// activateBreakglass drives the Activate screens. A refused or failed activation
+// is a failure banner on the detail screen that the screen also records on r
+// (editRouterModel.failedAction), and send hands it back from the final Enter, so
+// the step fails with the cause instead of returning once the keys are sent. A
+// plan does not run it (editRouterModel.planSkipped).
 func (d *automationDriver) activateBreakglass(r *editRouterModel, name, duration, reason, ticket string) error {
 	if err := d.ensureBreakglassDetail(r, name); err != nil {
 		return err
@@ -333,6 +338,8 @@ func (d *automationDriver) activateBreakglass(r *editRouterModel, name, duration
 	return d.enter(r)
 }
 
+// deactivateBreakglass is activateBreakglass for the Deactivate confirmation: a
+// deactivation that failed did not end the access, and the step says so.
 func (d *automationDriver) deactivateBreakglass(r *editRouterModel, name string) error {
 	if err := d.ensureBreakglassDetail(r, name); err != nil {
 		return err

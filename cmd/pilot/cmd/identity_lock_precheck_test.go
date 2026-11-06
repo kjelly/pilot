@@ -196,7 +196,8 @@ func TestEveryCLIFunnelWithALockableInventoryGoesOn(t *testing.T) {
 }
 
 // The pilot edit TUI's break-glass screens: the same refusal, shown in the
-// screen's banner, and no lock built and no playbook run.
+// screen's banner and failing the automation step, and no lock built and no
+// playbook run.
 func TestTUIBreakglassIsRefusedBeforeAnythingRuns(t *testing.T) {
 	dir := t.TempDir()
 	writeMinimalRosterFixture(t, dir)
@@ -226,8 +227,10 @@ func TestTUIBreakglassIsRefusedBeforeAnythingRuns(t *testing.T) {
 		"activate":   func() error { return d.activateBreakglass(&r, "infra-emergency", "30m", "outage", "INC-1") },
 		"deactivate": func() error { return d.deactivateBreakglass(&r, "infra-emergency") },
 	} {
-		if err := run(); err != nil {
-			t.Fatalf("%s: navigation error %v", name, err)
+		// The refusal is the banner the operator sees and the error the step
+		// fails with (editRouterModel.failedAction).
+		if err := run(); err == nil || !strings.Contains(err.Error(), "取鎖前檢查沒有通過") || !strings.Contains(err.Error(), "ProxyCommand") {
+			t.Fatalf("%s: error = %v, want the precheck's refusal", name, err)
 		}
 		if !strings.HasPrefix(r.banner, "❌") || !strings.Contains(r.banner, "取鎖前檢查沒有通過") || !strings.Contains(r.banner, "ProxyCommand") {
 			t.Fatalf("%s: banner = %q, want the precheck's refusal", name, r.banner)
