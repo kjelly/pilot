@@ -72,6 +72,15 @@ root-cause class, an observable invariant, a discriminating regression/counterex
 `target_validation = required | not-needed | blocked` plan. A repeated class needs
 a class-wide caller/include/backend assessment, not another syntax special case.
 
+Nothing committed or posted carries a secret. That covers fixtures from real
+captures, evidence records (including their hand-written sections), runbooks and
+PR/Issue text. Give every Coder and Reviewer the snapshot path of
+`.agents/skills/_shared/committed-secrets.md`. Root reads the staged diff before
+each commit and runs `_shared/scripts/secret_scan.py` over the commit range before
+each push. The pre-PR gate runs the same scanner over every commit of the branch and
+refuses on a finding, even when a later commit removed the value; nothing in the
+gate overrides that. A leaked secret stops the work until the user decides.
+
 When correctness depends on fresh-host/task-selection, native service state,
 upgrade/rollback or multi-host behavior, gather candidate-bound vm-target evidence
 as described in the shared reference. Normal apply/verify/`changed=0` is separate
@@ -130,7 +139,9 @@ python3 "$SNAP/.agents/skills/issue-to-pr/scripts/issue_gate.py" \
   --evidence /path/to/state/evidence.json
 ```
 
-**Only** `GATE-PASS` for **the currently checked-out HEAD** authorizes the next stage. Gate verifies current local SHA/clean worktree, matching SHA-bound check receipts, test/lint applicability, independent review artifact, dependency readiness, and GitHub Issue state/known PR duplicates. It cannot prove correctness or detect all PR cross-references; Root must still independently verify substantive review, Issue requirements, and duplicate-PR risk. If validation cannot be obtained, **fail closed**.
+Add `--secret-file /path/outside/the/repo/known.txt` (one value per line, each 8+ bytes; the file must be outside the repository) for the lab passwords and other values you know of; `create_pr.py` and `mark_ready.py` take the same option. A finding of any class makes the gate `BLOCKED`: **stop, report the class, file and commit to the user, and let them decide.** Do not add a commit that scrubs the value, because the secret stays in the earlier commit.
+
+**Only** `GATE-PASS` for **the currently checked-out HEAD** authorizes the next stage. Gate verifies current local SHA/clean worktree, that no commit of the branch (`base..HEAD`, evidence-only paths included) carries a secret, matching SHA-bound check receipts, test/lint applicability, independent review artifact, dependency readiness, and GitHub Issue state/known PR duplicates. It cannot prove correctness or detect all PR cross-references; Root must still independently verify substantive review, Issue requirements, and duplicate-PR risk. If validation cannot be obtained, **fail closed**.
 
 ## 4. Push, create one Draft PR, finish it, then mark Ready
 
@@ -162,7 +173,8 @@ For an already resolved Issue, also report the closure comment URL and verified 
 - `scripts/claim.py` — cross-session Issue claim (acquire / renew / release / check / list)
 - `scripts/repo_evidence.py` — print/validate the repository evidence manifest as the gate sees it
 - `scripts/run_check.py` — record command results against clean committed HEAD
-- `scripts/issue_gate.py` — fail-closed deterministic pre-PR gate
+- `scripts/issue_gate.py` — fail-closed deterministic pre-PR gate (including the secret scan of every commit)
+- `../_shared/scripts/secret_scan.py` — value-free secret scanner the three gates share (rules: `../_shared/committed-secrets.md`)
 - `scripts/create_pr.py` — guarded PR creation; Draft by default (`--ready` only on explicit user request)
 - `scripts/pr_ci.py` — SHA-bound GitHub CI status verifier (works on Draft and Ready PRs)
 - `scripts/mark_ready.py` — guarded Draft → Ready transition (gate + CI_PASSED on exact HEAD + mergeable + no unresolved review thread or `CHANGES_REQUESTED` + `--confirm-complete`)

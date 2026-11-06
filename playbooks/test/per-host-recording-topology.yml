@@ -2,8 +2,8 @@
 # Test entry point for docs/topologies/per-host-recording-topology.yaml,
 # run by scripts/per-host-recording-topology-test.sh: the per-host SSH
 # session recording components in site.yml order on fresh hosts, with
-# gateway-scope before the gateway and the canonical client fixture that
-# docs/verification/freeipa-client.md needs.
+# gateway-scope before the gateway and the two client fixtures that
+# docs/verification/freeipa-client.md needs (C5/C8 and C15-C17).
 #
 # There is no apt refresh here on purpose: fresh cloud images ship stale
 # indexes, and tasks/apt-package-install.yml must recover from that itself.
@@ -24,6 +24,13 @@
 # SSSD sees the central sudo rule on its first lookup.
 - name: Client verification fixtures
   ansible.builtin.import_playbook: fixtures/freeipa-client-fixtures.yml
+# freeipa-client.md §7: the same spec's C15-C17 probe the password-state
+# fixture accounts (pilot-pwexpired/-pwvalid/-nopw), created only by this
+# playbook on the FreeIPA server. Without it the full-spec verify below gets
+# three extra FAIL rows and the chain rolls back. Before the client apply so
+# each client's SSSD sees the accounts on its first lookup.
+- name: Client password-expiry verification fixtures
+  ansible.builtin.import_playbook: fixtures/freeipa-client-pwexpiry-fixtures.yml
 - name: FreeIPA clients (host access policy)
   ansible.builtin.import_playbook: ../apply/freeipa-client-apply.yml
 - name: Gateway scope hostgroup

@@ -19,6 +19,8 @@ Some facts about "valid evidence" belong to the repository, not to these skills:
 - **Read from the base branch** (`origin/<base>`), never from the PR head. A change cannot grant itself an exemption. If the manifest is itself part of the change, it takes effect only after it is merged.
 - `evidence_only_paths`: globs (`*`, `**`, `?`) for files that hold evidence only. Default is none, meaning strict SHA binding. A glob that would cover all code of a language or all build files (`**`, `**/*.go`, `*`) is rejected. Only list paths no test, build step or runtime reads. If a test reads `AGENTS.md` or a docs file, that file is behaviour, not evidence.
 - `required_evidence[].artifact_glob`: where the committed artifact for that item must live. These paths are also treated as evidence-only.
+- `non_execution_paths` / `non_execution_exclude` (optional): globs of files a target run never reads, and globs that never count as such. `non_execution_paths` takes the same whole-tree check as `evidence_only_paths`; a path matching an exclude or any `required_paths` glob is never non-execution. Used only for `kind: target-run` records and, in `pr-ready`, for the independent review; never for check receipts.
+- `required_evidence[].rerun_paths` (optional, `kind: target-run` only): base imports matching these always need a new run; declaring it lets a machine record whose closure has unresolved or external inputs use the reviewed `target_reuse` path.
 - `required_evidence[].required_paths` (optional): repository-relative globs whose change always needs that evidence. When the change (from the merge base with the base branch to HEAD, both names of a rename) touches one, `not-applicable` is refused and only a `pass` entry satisfies the gate. A broad glob only makes the rule stricter, so the whole-tree check above does not apply. pr-review-merge refuses `not-needed` for the same paths, so an Issue PR does not reach Ready only to wait at the merge gate.
 - Check the manifest the way the gate sees it: `python3 "$SNAP/.agents/skills/issue-to-pr/scripts/repo_evidence.py" --worktree "$REPO_ROOT" --base-ref origin/main`.
 
@@ -58,7 +60,7 @@ Long checks are expensive, and any commit invalidates SHA-bound receipts unless 
 1. Freeze code/tests as a clean candidate commit. Obtain an independent preliminary code review that identifies unresolved findings and required target runs. This is not final PASS while mandatory evidence is missing.
 2. Gather repository-required evidence (live runs and relevant failure paths) against that exact candidate.
 3. Have the independent Reviewer inspect the candidate-bound artifacts and full diff, then issue final PASS only when all required verification is complete and blockers are resolved.
-4. Commit sanitized evidence separately. A record being evidence-only for repo publication does not automatically make its delta accepted by the Python gate: without base-manifest allowances, checks/review remain strictly SHA-bound and must cover the new HEAD. Never let the PR declare its own exemption.
+4. Commit sanitized evidence separately. Sanitized means `.agents/skills/_shared/committed-secrets.md`: pilot's redaction does not cover the hand-written sections, encrypted vault values or derived values. A record being evidence-only for repo publication does not automatically make its delta accepted by the Python gate: without base-manifest allowances, checks/review remain strictly SHA-bound and must cover the new HEAD. Never let the PR declare its own exemption.
 5. Run long receipts (`run_check.py`) on the final HEAD, or reuse candidate receipts only when the gate accepts the evidence-only delta. Refresh the final review on the actual HEAD when required; do not claim the earlier PASS covers an unaccepted delta.
 6. Run the gate.
 
@@ -89,5 +91,10 @@ A base requirement may opt in with `kind: target-run`. Only that kind may use
 `target_reuse` on a `repo_required_evidence[]` entry after integrating an advanced
 base. Follow the shared target evidence rule at `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` (the verified snapshot)
 for the exact schema, dependency review, provenance proof and failure conditions.
-General check receipts, review judgments and disputed claims continue to use the
-strict `Context.accepts()` rule.
+Without `target_reuse`, a target record is also kept when the base brought in only
+the manifest's top-level `non_execution_paths` (minus `non_execution_exclude` and
+every `required_paths`) that a machine record's closure cannot reach. An item's
+`rerun_paths` opts machine records with unresolved or external inputs into the
+reviewed path (`unrelated_runtime_changes`). General check receipts, review
+judgments and disputed claims in this gate continue to use the strict
+`Context.accepts()` rule.

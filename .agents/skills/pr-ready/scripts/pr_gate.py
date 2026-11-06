@@ -19,7 +19,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 sys.dont_write_bytecode = True
 
@@ -47,6 +47,66 @@ def cmd(argv: list[str], *, allow_nonzero_json: bool = False, empty_if: re.Patte
     except json.JSONDecodeError as exc:
         raise GateError(f"Invalid/missing JSON from {argv[0]} (exit {p.returncode}): {(p.stderr or p.stdout).strip()[:700]}") from exc
     return val
+
+
+SECRET_SCAN_PATH = Path(__file__).resolve().parents[2] / "_shared" / "scripts" / "secret_scan.py"
+
+
+def load_secret_scan() -> Any:
+    """The shared secret scanner, loaded by path from the `_shared` bundle directory.
+
+    The module name is shared with issue_gate.py and review_gate.py, so one process loads it once.
+    A scanner that is missing or does not load is a refusal (GateError), never a skipped check.
+    """
+    name = "pilot_secret_scan"
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(name, SECRET_SCAN_PATH)
+    if spec is None or spec.loader is None or not SECRET_SCAN_PATH.is_file():
+        raise GateError(f"the shared secret scanner is missing: {SECRET_SCAN_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # a scanner that does not load must refuse, whatever the reason
+        sys.modules.pop(name, None)
+        raise GateError(f"the shared secret scanner cannot be loaded ({type(exc).__name__})") from None
+    return module
+
+
+def secret_scan_errors(worktree: Path, pr: dict[str, Any], secret_files: Sequence[Path] = (),
+                       cache: dict[tuple[str, str], tuple[list[str], dict[str, Any]]] | None = None
+                       ) -> tuple[list[str], dict[str, Any]]:
+    """Refusal messages and a value-free summary from scanning EVERY commit of baseRefOid..headRefOid.
+
+    The range is named by the PR's own SHAs, never by the checked-out HEAD: Ready may be invoked
+    after the checkout moved back to the starting branch, and the PR head is what gets published.
+    History counts, not just the final diff. `cache` holds one scan per (base, head) so a --wait
+    loop does not re-walk the same commits at every poll; a new head or base is scanned again.
+    """
+    base, head = pr.get("baseRefOid"), pr.get("headRefOid")
+    if not (isinstance(base, str) and SHA.fullmatch(base) and isinstance(head, str) and SHA.fullmatch(head)):
+        return (["Secret scan unavailable: the PR base/head SHA is missing or invalid"], {"status": "ERROR"})
+    key = (base.lower(), head.lower())
+    if cache is not None and key in cache:
+        messages, summary = cache[key]
+        return list(messages), dict(summary)
+    try:
+        scanner = load_secret_scan()
+    except GateError as exc:
+        outcome: tuple[list[str], dict[str, Any]] = ([f"Secret scan unavailable: {exc}"], {"status": "ERROR"})
+    else:
+        try:
+            known = scanner.load_secret_files([str(p) for p in secret_files], worktree)
+        except ValueError as exc:  # SecretScanError
+            outcome = ([f"Secret scan refused its --secret-file input: {exc}"], {"status": "ERROR"})
+        else:
+            result = scanner.scan_range(worktree, key[0], key[1], known=known)
+            outcome = (scanner.refusal_messages(result), result.summary())
+    if cache is not None:
+        cache[key] = outcome
+    return list(outcome[0]), dict(outcome[1])
 
 
 def gh_pr(repo: str, pr: int) -> dict[str, Any]:
@@ -107,11 +167,25 @@ def covers_head(ctx: Any, value: Any, sha: Any, label: str) -> bool:
     return value == sha or (ctx is not None and ctx.accepts(value, label))
 
 
-def stale_detail(ctx: Any, value: Any) -> str:
+def review_covers_head(ctx: Any, value: Any, sha: Any, label: str) -> bool:
+    """A review (never a check receipt) taken at `value` covers HEAD: `covers_head`, or every
+    change since is evidence-only or a pure import of the base manifest's non_execution_paths.
+    Check receipts stay on `covers_head`: imported test files must run against the PR's code."""
+    if value == sha:
+        return True
+    if ctx is None:
+        return False
+    try:
+        return ctx.accepts_review(value, label)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def stale_detail(ctx: Any, value: Any, *, review: bool = False) -> str:
     if ctx is None or not isinstance(value, str):
         return ""
     try:
-        return " (" + ctx.stale_reason(value) + ")"
+        return " (" + (ctx.review_stale_reason(value) if review else ctx.stale_reason(value)) + ")"
     except (OSError, RuntimeError, ValueError):
         return ""
 
@@ -743,8 +817,9 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
     else:
         if r.get("agent") != "pr-reviewer":
             errs.append("Independent pr-reviewer agent is not identified")
-        if not covers_head(ctx, r.get("head_sha"), sha, "independent_review"):
-            errs.append("Independent reviewer result stale for current HEAD" + stale_detail(ctx, r.get("head_sha")))
+        if not review_covers_head(ctx, r.get("head_sha"), sha, "independent_review"):
+            errs.append("Independent reviewer result stale for current HEAD"
+                        + stale_detail(ctx, r.get("head_sha"), review=True))
         if r.get("status") != "PASS" or r.get("blocking_findings") != []:
             errs.append("Independent review has not passed / still has blocking findings")
         if not isinstance(r.get("report"), str) or len(r["report"].strip()) < 12:
@@ -946,7 +1021,12 @@ def main() -> int:
     parser.add_argument("--repo", required=True, help="OWNER/REPO")
     parser.add_argument("--pr", type=int, required=True, help="Existing PR number")
     parser.add_argument("--evidence", type=Path, required=True, help="HEAD-specific evidence JSON")
-    parser.add_argument("--worktree", type=Path, help="Original PR-branch worktree; verify clean and HEAD")
+    parser.add_argument("--worktree", type=Path, required=True,
+                        help="Original PR-branch worktree: verified clean and on the PR head, and the repository whose "
+                             "commits are scanned for secrets (baseRefOid..headRefOid, every commit)")
+    parser.add_argument("--secret-file", action="append", default=[], type=Path, metavar="FILE",
+                        help="File OUTSIDE the repository with one secret value per line (8+ bytes each) that must "
+                             "appear in no commit, message or path of the PR. Repeatable. Values are never printed.")
     parser.add_argument("--ready", action="store_true", help="Execute 'gh pr ready' only after all gates pass")
     parser.add_argument("--restore-sha", help="Restore this verified starting commit before Ready; abort on restore failure")
     parser.add_argument("--restore-branch", help="Starting branch to restore (omit for a detached start)")
@@ -959,8 +1039,6 @@ def main() -> int:
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo) or args.pr <= 0:
         parser.error("--repo must be OWNER/REPO and --pr must be positive")
-    if (args.ready or args.wait) and not args.worktree:
-        parser.error("--ready/--wait requires --worktree to verify branch/clean tree")
     if args.restore_branch is not None and not args.restore_sha:
         parser.error("--restore-branch requires --restore-sha")
     if args.restore_sha is not None and (not args.ready or not SHA.fullmatch(args.restore_sha)):
@@ -978,6 +1056,8 @@ def main() -> int:
     restored_local = None
     handlers = {}
     workflows = WorkflowHistory() if args.wait else None
+    scans: dict[tuple[str, str], tuple[list[str], dict[str, Any]]] = {}
+    scan_summary: dict[str, Any] = {}
 
     def emit(result: dict[str, Any]) -> None:
         if status_path is not None:
@@ -1017,7 +1097,7 @@ def main() -> int:
         conversation = args.wait or bool(args.restore_sha) or bool(evidence.get("disputed_review_comments"))
 
         def inspect(snapshot: Snapshot) -> tuple[list[str], list[str], list[Any]]:
-            local = check_local(args.worktree) if args.worktree else None
+            local = check_local(args.worktree)
             ctx = evidence_context(args.worktree, snapshot.pr.get("headRefOid"), snapshot.pr.get("baseRefName"),
                                    args.base_remote)
             errors = evaluate(snapshot, evidence, repo=args.repo, number=args.pr,
@@ -1026,6 +1106,10 @@ def main() -> int:
             if restored_local is not None and local != restored_local:
                 errors.append("Restored checkout changed before Ready transition")
             errors.extend(target_evidence_errors(snapshot.pr, evidence, args.repo))
+            scan_errors, summary = secret_scan_errors(args.worktree, snapshot.pr, args.secret_file, scans)
+            scan_summary.clear()
+            scan_summary.update(summary)
+            errors.extend(scan_errors)
             pending = classify_ci(snapshot, evidence).pending
             if workflows is not None:
                 lifecycle = workflows.inspect(snapshot, args.repo)
@@ -1053,6 +1137,7 @@ def main() -> int:
             if not pending and not args.ready:
                 emit({"status": "GATE-PASS", "pr": before.pr.get("url"),
                       "head_sha": before.pr.get("headRefOid"), "receipt_reuse": reuse,
+                      "secret_scan": dict(scan_summary),
                       "message": "Use --ready after final review to transition Draft -> Ready for Review"})
                 return 0
             if not pending:
@@ -1112,7 +1197,7 @@ def main() -> int:
                         if errors:
                             raise GateError("Ready invoked but post-action verification failed: " + "; ".join(errors))
                     emit({"status": "READY", "pr": after_pr.get("url"), "head_sha": after_pr["headRefOid"],
-                          "receipt_reuse": reuse, "message": "Ready for Review; no merge performed"})
+                          "receipt_reuse": reuse, "secret_scan": dict(scan_summary), "message": "Ready for Review; no merge performed"})
                     return 0
             if not args.wait:
                 # inspect() normally rejects pending outside wait mode.

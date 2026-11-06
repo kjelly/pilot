@@ -29,6 +29,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/childproc"
 	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/delivery"
 	"github.com/kjelly/pilot/internal/inventory"
@@ -167,10 +168,32 @@ func deployAnsibleRuntimeFromContext(ctx context.Context) deployAnsibleRuntime {
 	return runtime
 }
 
+type isolatedChildrenKey struct{}
+
+// withIsolatedChildren marks ctx as the context of a command that cancels it
+// on SIGINT, SIGTERM and SIGHUP itself, which is what lets the Ansible
+// commands built from it run in their own session (childproc.Isolate): the
+// terminal's signals no longer reach them, so pilot has to, and ctx ending
+// kills them together with everything they started. Only the Go preview of
+// pilot reconcile (spec §2.5) sets it; every other caller of
+// deployAnsibleCommand keeps the process group and the exec.CommandContext
+// behaviour it has always had.
+func withIsolatedChildren(ctx context.Context) context.Context {
+	return context.WithValue(ctx, isolatedChildrenKey{}, true)
+}
+
+func isolatedChildrenFromContext(ctx context.Context) bool {
+	isolated, _ := ctx.Value(isolatedChildrenKey{}).(bool)
+	return isolated
+}
+
 func deployAnsibleCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	command := exec.CommandContext(ctx, name, args...)
 	if runtime := deployAnsibleRuntimeFromContext(ctx); len(runtime.Env) > 0 {
 		command.Env = append(os.Environ(), runtime.Env...)
+	}
+	if isolatedChildrenFromContext(ctx) {
+		childproc.Isolate(command)
 	}
 	return command
 }
@@ -2527,7 +2550,7 @@ func loadDeployInventorySnapshot(ctx context.Context, inventory string) (deployI
 		release()
 	}
 	if err != nil {
-		return deployInventorySnapshot{}, fmt.Errorf("ansible-inventory --list: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return deployInventorySnapshot{}, fmt.Errorf("ansible-inventory --list: %w: %s", childproc.Cause(ctx, err), strings.TrimSpace(stderr.String()))
 	}
 	return parseDeployInventorySnapshot(stdout.String())
 }
@@ -2628,6 +2651,11 @@ func resolvePatternHosts(ctx context.Context, inventory, pattern, limit string) 
 		err = command.Run()
 		release()
 	}
+	if err != nil && ctx.Err() != nil {
+		// A run that ctx ended is not "zero hosts", whatever the killed
+		// ansible had printed so far.
+		return nil, fmt.Errorf("ansible %s --list-hosts: %w: %s", pattern, childproc.Cause(ctx, err), strings.TrimSpace(stderr.String()))
+	}
 	if err != nil {
 		// Ansible reports "pattern matches zero hosts" inconsistently: without
 		// --limit it is a [WARNING] (exit 0, "hosts (0):"); with --limit it is a
@@ -2637,7 +2665,7 @@ func resolvePatternHosts(ctx context.Context, inventory, pattern, limit string) 
 		if limit != "" && strings.Contains(stderr.String(), "leaves us with no hosts to target") {
 			return []string{}, nil
 		}
-		return nil, fmt.Errorf("ansible %s --list-hosts: %w: %s", pattern, err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("ansible %s --list-hosts: %w: %s", pattern, childproc.Cause(ctx, err), strings.TrimSpace(stderr.String()))
 	}
 	hosts := make([]string, 0)
 	for _, line := range strings.Split(stdout.String(), "\n") {

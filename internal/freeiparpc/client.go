@@ -52,6 +52,9 @@ type Config struct {
 	RequestTimeout time.Duration
 	// SupportedAPIVersions; default DefaultSupportedAPIVersions.
 	SupportedAPIVersions []string
+	// ReadOnly refuses every write command, alone or in a batch, before
+	// anything is sent.
+	ReadOnly bool
 }
 
 var fqdnRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
@@ -174,6 +177,14 @@ func (t *originTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	return resp, err
 }
+
+// CloseIdleConnections closes the connections the client keeps open between
+// requests: with the SSH dialer, the ssh process of each. Call it when the
+// client is done; a request in flight is not touched, nor is a dial in
+// progress: net/http cancels the dial's context and returns, and ends that
+// connection later in a goroutine of its own. A caller that must have no ssh
+// left when it returns closes the dialer too (sshdial.Dialer.Close waits).
+func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
 
 // Stats returns the counters so far.
 func (c *Client) Stats() Stats {
@@ -300,6 +311,9 @@ func (c *Client) Call(ctx context.Context, cmd Command) (json.RawMessage, error)
 	kind, ok := allowlist[cmd.Method]
 	if !ok {
 		return nil, &ErrMethodNotAllowed{Method: cmd.Method}
+	}
+	if kind == write && c.cfg.ReadOnly {
+		return nil, &ErrMethodNotAllowed{Method: cmd.Method, ReadOnly: true}
 	}
 	body, err := json.Marshal(request{Method: cmd.Method, Params: cmd.params()})
 	if err != nil {

@@ -3,6 +3,16 @@
   "evidence_only_paths": [
     "docs/evidence/**"
   ],
+  "non_execution_paths": [
+    ".agents/**",
+    "*.md",
+    "docs/**/*.md",
+    "**/*_test.go",
+    ".github/**"
+  ],
+  "non_execution_exclude": [
+    "docs/verification/**"
+  ],
   "required_evidence": [
     {
       "id": "actual-run",
@@ -13,7 +23,25 @@
         "playbooks/**",
         "contracts/**"
       ],
-      "description": "Candidate-bound target run (syntax, check/diff, apply, spec verify, second apply changed=0, plus the failure paths the change touches) on a disposable vm-target/docker-target, with the sanitized summary committed as docs/evidence/<feature>/<date>-<tested-revision>.md. Required for any change to playbooks, specs, contracts, inventory handling or deploy orchestration; not-applicable, with the reason, for docs/skill-only changes or pure Go changes proven by native-tool tests. required_paths lists the paths whose change always needs it (pr-review-merge's gate refuses not-needed and issue-to-pr's gate refuses not-applicable for them); spec changes (docs/verification/**), Go inventory handling and deploy orchestration are left to the reviewer: a spec edit that changes no command, Expected, target or variable contract needs no new run (docs/actual-run-evidence.md section 4), which no path glob can tell apart, and a pure Go change proven by native-tool tests is exempt."
+      "rerun_paths": [
+        "cmd/**",
+        "internal/**",
+        "**/*.go",
+        "go.mod",
+        "go.sum",
+        "go.work",
+        "go.work.sum",
+        "images/**",
+        "contracts/**",
+        "group_vars/**",
+        "host_vars/**",
+        "ansible.cfg",
+        "requirements.yml",
+        "playbooks/apply/tasks/**",
+        "playbooks/**/templates/**",
+        "playbooks/**/files/**"
+      ],
+      "description": "Candidate-bound target run (syntax, check/diff, apply, spec verify, second apply changed=0, plus the failure paths the change touches) on a disposable vm-target/docker-target, with the sanitized summary committed as docs/evidence/<feature>/<date>-<tested-revision>.md. Required for any change to playbooks, specs, contracts, inventory handling or deploy orchestration; not-applicable, with the reason, for docs/skill-only changes or pure Go changes proven by native-tool tests. required_paths lists the paths whose change always needs it (pr-review-merge's gate refuses not-needed and issue-to-pr's gate refuses not-applicable for them); spec changes (docs/verification/**), Go inventory handling and deploy orchestration are left to the reviewer: a spec edit that changes no command, Expected, target or variable contract needs no new run (docs/actual-run-evidence.md section 4), which no path glob can tell apart, and a pure Go change proven by native-tool tests is exempt. After main is merged, a pure import of non_execution_paths keeps the record without a new run; for a machine record whose closure has unresolved or external inputs, rerun_paths always need a new run and every other imported runtime file outside the closure needs the reviewer's unrelated_runtime_changes entry (.agents/skills/_shared/target-evidence-reuse.md)."
     }
   ]
 }

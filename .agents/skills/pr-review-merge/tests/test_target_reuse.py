@@ -5,9 +5,12 @@ import unittest
 from unittest import mock
 
 from test_gate import Fake, sample, B, H
+from scan_stub import CleanScan
 from test_target_validation import API, R, ART, RECORD, MANIFEST, REPO, repo_manifest, replay
 import gh_runtime
 from review_gate import evaluate
+
+setUpModule, tearDownModule = CleanScan.up, CleanScan.down
 
 A = "d" * 40
 APP = "playbooks/apply/x.yml"
@@ -334,6 +337,83 @@ class GitTreeAdapterTests(unittest.TestCase):
             with self.subTest(data=data), mock.patch.object(gh_runtime, "gh_json", return_value=data):
                 with self.assertRaises(gh_runtime.GitHubError):
                     gh_runtime.tree_entries(REPO, H)
+
+
+SKILL = ".agents/skills/x/SKILL.md"
+OTHER_PLAYBOOK = "playbooks/apply/other.yml"
+UNRELATED_REASON = "Another component's playbook: no include, lookup, template or spec of this run names it."
+
+
+class NonExecutionReuseRemoteTests(unittest.TestCase):
+    """kjelly/pilot#304 on the remote gate, under this repository's own manifest."""
+
+    def fixture(self, imported):
+        gh = Fake()
+        gh.files[(MANIFEST, B)] = repo_manifest()
+        gh.files[(ART, H)] = RECORD
+        gh.compares[(R, H)] = {"ancestor": True, "merge_base": R, "files": [ART, imported]}
+        gh.compares[(B, H)] = {"ancestor": True, "merge_base": B, "files": [ART, APP]}
+        gh.compares[(R, B)] = {"ancestor": False, "merge_base": A, "files": [imported]}
+        trees = {A: {DEP: blob(1)}, R: {APP: blob(2), DEP: blob(1)},
+                 B: {DEP: blob(1), imported: blob(3)},
+                 H: {APP: blob(2), DEP: blob(1), imported: blob(3), ART: blob(4)}}
+        gh.tree_entries = lambda repo, revision: trees[revision]
+        gh.branch_head = lambda repo, name: B
+        gh.commit_tree = lambda repo, revision: "e" * 40
+        e = sample()
+        e["target_validation"] = {"decision": "required", "artifact": ART, "tested_revision": R,
+                                  "reason": "Native target chain passed on the candidate; main only brought declared inputs."}
+        return gh, e
+
+    def machine(self, gh):
+        record = {"schema": "pilot-evidence-record/v1", "outcome": "success",
+                  "candidate": {"commit": R, "tree": "e" * 40, "source": "git"},
+                  "closure": {"resolution_version": 10, "frozen": True,
+                              "files": [{"path": APP, "mode": "100644", "blob": blob(2)[1]}], "patterns": [APP],
+                              "unresolved": [{"from": "environment", "ref": "ambient Ansible plugin discovery",
+                                              "reason": "external plugin, collection and Python discovery paths are not fingerprinted"}],
+                              "external": ["/home/operator/.vault/sandbox.yaml"]}}
+        gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(record) + "\n```\n").encode()
+
+    def reuse(self, **kw):
+        return dict({"head_sha": H, "base_sha": B, "reviewer_confirmed": True, "non_execution_changes": [],
+                     "dependency_review": "Reviewed the machine closure and every runtime file main brought in; none is reachable from this run."}, **kw)
+
+    def test_non_execution_import_merges_without_attestation(self):
+        for record in ("legacy", "machine"):
+            with self.subTest(record=record):
+                gh, e = self.fixture(SKILL)
+                if record == "machine":
+                    self.machine(gh)
+                r = evaluate(REPO, 42, e, client=gh)
+                self.assertEqual("MERGE", r["decision"], r["reasons"])
+
+    def test_runtime_import_without_attestation_waits(self):
+        gh, e = self.fixture(OTHER_PLAYBOOK)
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("WAITING", r["decision"], r)
+        self.assertIn("base import is not a declared non-execution path: " + OTHER_PLAYBOOK, " ".join(r["reasons"]))
+
+    def test_reviewed_runtime_import_outside_an_incomplete_closure(self):
+        gh, e = self.fixture(OTHER_PLAYBOOK)
+        self.machine(gh)
+        e["target_validation"]["target_reuse"] = self.reuse(
+            unrelated_runtime_changes=[{"path": OTHER_PLAYBOOK, "reason": UNRELATED_REASON}])
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("MERGE", r["decision"], r["reasons"])
+        e["target_validation"]["target_reuse"] = self.reuse()
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("WAITING", r["decision"], r)
+        self.assertIn("needs a reviewed unrelated_runtime_changes entry: " + OTHER_PLAYBOOK, " ".join(r["reasons"]))
+
+    def test_rerun_path_import_waits_even_when_explained(self):
+        gh, e = self.fixture(OTHER)
+        self.machine(gh)
+        e["target_validation"]["target_reuse"] = self.reuse(
+            unrelated_runtime_changes=[{"path": OTHER, "reason": UNRELATED_REASON}])
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("WAITING", r["decision"], r)
+        self.assertIn("always needs a new run (rerun_paths): " + OTHER, " ".join(r["reasons"]))
 
 
 if __name__ == "__main__":

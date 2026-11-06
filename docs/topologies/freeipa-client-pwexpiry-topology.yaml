@@ -1,0 +1,35 @@
+# Disposable FreeIPA server + one ordinary Ubuntu 24.04 client for the
+# freeipa-client password-expiry evidence run (docs/verification/freeipa-client.md
+# C13-C18). The client is not a gateway/directory/target-policy host.
+#
+#   pilot vm-target topology up --fresh --topology docs/topologies/freeipa-client-pwexpiry-topology.yaml
+#   pilot vm-target topology test --topology docs/topologies/freeipa-client-pwexpiry-topology.yaml \
+#       --playbook playbooks/test/freeipa-client-pwexpiry-chain.yml \
+#       --verify docs/verification/freeipa-server.md=freeipa-server \
+#       --verify docs/verification/freeipa-client.md=freeipa-client \
+#       --verify docs/verification/login-probe.md=login-probe \
+#       -- -e stage=sandbox -e freeipa_client_sssd_password_expiry_policy=renew \
+#       -e login_probe_artifact_path=<dist/pilot-login-probe-linux-amd64> \
+#       -e @<vault with ipa_admin_password> -e @<vault with node_exporter_basic_auth_password>
+nodes:
+  - name: pwexp-ipa
+    base_image: almalinux-9
+    memory: 4608
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    groups: [freeipa-server]
+    wire: ["pwexp-cli=pwexp-cli.ipa.pilot.internal"]
+  - name: pwexp-cli
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    ssh_timeout: 8m
+    boot_timeout: 8m
+    # login-probe probes every freeipa-client host, itself included (A07)
+    groups: [freeipa-client, host-monitoring, login-probe]
+    wire: ["pwexp-ipa=ipa1.ipa.pilot.internal"]

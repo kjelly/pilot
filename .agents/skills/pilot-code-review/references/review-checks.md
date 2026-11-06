@@ -63,6 +63,9 @@
   link 可能指向同檔。查 normalization、device/inode 與 symlink 最後一節的契約。
 - diagnostics / inspect / checksum 也可能洩漏 secrets。查 callback 與 verbosity
   下的輸出；password 的 unsalted hash 不能當安全的公開摘要。
+- commit 的檔案本身也會洩漏：真實擷取的 fixture（admin `all` 會帶出 `ipanthash`、
+  `krbprincipalkey`）、evidence 手寫段落、runbook。搜尋 `BASE..HEAD` 每個 commit，
+  規則見 `.agents/skills/_shared/committed-secrets.md`。
 
 參考：`internal/spec/container_file_mount_regression_test.go`、
 `internal/spec/sshd_config_write_behavior_test.go`、

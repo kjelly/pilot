@@ -7,7 +7,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 # Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
 # counts any added file and would STOP every later step. Set before the first sibling import.
@@ -48,6 +48,51 @@ def _load_repo_evidence() -> Any:
 
 
 repo_evidence = _load_repo_evidence()
+
+SECRET_SCAN_PATH = Path(__file__).resolve().parents[2] / "_shared" / "scripts" / "secret_scan.py"
+
+
+def _load_secret_scan() -> Any:
+    """The shared secret scanner, loaded by path from the `_shared` bundle directory (the module name
+    is shared with the other two gates). Raises ImportError when it is missing or does not load."""
+    name = "pilot_secret_scan"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, SECRET_SCAN_PATH)
+    if spec is None or spec.loader is None or not SECRET_SCAN_PATH.is_file():
+        raise ImportError(f"the shared secret scanner is missing: {SECRET_SCAN_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # a scanner that does not load must hold the PR, whatever the reason
+        sys.modules.pop(name, None)
+        raise ImportError(f"the shared secret scanner cannot be loaded ({type(exc).__name__})") from None
+    return module
+
+
+def check_secrets(worktree: Any, base: str, head: str,
+                  secret_files: Sequence[Any] = ()) -> tuple[list[str], list[str], dict[str, Any]]:
+    """(defects, missing, summary) from scanning EVERY commit of base..head in a local checkout.
+
+    A finding is a defect (DRAFT): a secret in any commit of the PR is a leaked secret, even when HEAD
+    no longer has it. A scan that could not cover the whole range (no checkout, an object that is not
+    there, a scanner that does not load, an unusable --secret-file) is `missing` (WAITING): the gate
+    never calls an unscanned PR clean. Nothing returned holds a value.
+    """
+    if worktree is None:
+        return [], ["Secret scan unavailable: pass --worktree <a checkout of this repository that holds the PR's "
+                    "commits (git fetch them first)> so every commit of the PR can be scanned"], {"status": "NOT_RUN"}
+    try:
+        scanner = _load_secret_scan()
+    except ImportError as exc:
+        return [], [f"Secret scan unavailable: {exc}"], {"status": "ERROR"}
+    try:
+        known = scanner.load_secret_files([str(p) for p in secret_files], worktree)
+    except ValueError as exc:  # SecretScanError
+        return [], [f"Secret scan refused its --secret-file input: {exc}"], {"status": "ERROR"}
+    result = scanner.scan_range(worktree, base.lower(), head.lower(), known=known)
+    return scanner.finding_messages(result), scanner.error_messages(result), result.summary()
 
 
 class RemoteContext(repo_evidence.Context):
@@ -186,7 +231,7 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
     else:
         rev = rev.lower()
         try:
-            if not ctx.accepts_target(rev, "target_validation", tv.get("target_reuse"), art):
+            if not ctx.accepts_target(rev, "target_validation", tv.get("target_reuse"), art, item["id"]):
                 gaps.append(f"{need}; the run at {rev[:12]} does not cover HEAD {head[:12]} ({ctx.target_stale_reason(rev)})")
         except (GitHubError, ValueError, KeyError) as exc:
             gaps.append(f"{need}; cannot verify that the run at {rev[:12]} covers HEAD: {exc}")
@@ -270,14 +315,16 @@ def check_base_alignment(client: Any, repo: Repo, number: int, view: dict[str, A
             "base_mismatch": mismatch, "base_behind": behind}
 
 
-def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any = None) -> dict[str, Any]:
+def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any = None,
+             worktree: Any = None, secret_files: Sequence[Any] = ()) -> dict[str, Any]:
     # Importing from the module allows replacing a client during tests.
     if client is None:
         import gh_runtime as client
     result: dict[str, Any] = {"repository": repo.raw, "pr": number, "decision": "WAITING",
                                "reasons": [], "head_sha": None, "base_sha": None, "url": None,
                                "checks": {"passed": 0, "failed": 0, "pending": 0, "skipped": 0},
-                               "unresolved_threads": None, "merge_queue": None, "target_validation": None}
+                               "unresolved_threads": None, "merge_queue": None, "target_validation": None,
+                               "secret_scan": None}
     reasons: list[str] = result["reasons"]
     try:
         view = client.pr_view(repo, number)
@@ -412,6 +459,13 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
         client, repo, result["head_sha"], result["base_sha"], evidence, base_name=view.get("baseRefName"))
     missing.extend(target_gaps)
 
+    # Every commit of the PR, scanned locally by the PR's own SHAs. A leaked secret is a DRAFT even when
+    # HEAD no longer has it; a scan that could not run is WAITING, never a pass.
+    secret_defects, secret_gaps, result["secret_scan"] = check_secrets(
+        worktree, result["base_sha"], result["head_sha"], secret_files)
+    defects.extend(secret_defects)
+    missing.extend(secret_gaps)
+
     # Live remote evidence: failures are recorded as WAITING instead of inferred success.
     try:
         checks = client.pr_checks(repo, number)
@@ -544,11 +598,18 @@ def main() -> int:
     parser.add_argument("--repo", help="OWNER/REPO; defaults to current repository")
     parser.add_argument("--pr", type=int, required=True)
     parser.add_argument("--evidence", required=True)
+    parser.add_argument("--worktree", type=Path,
+                        help="Checkout of this repository that holds the PR's commits: every commit of "
+                             "baseRefOid..headRefOid is scanned for secrets (without it the gate WAITs)")
+    parser.add_argument("--secret-file", action="append", default=[], type=Path, metavar="FILE",
+                        help="File OUTSIDE the repository with one secret value per line (8+ bytes each) that must "
+                             "appear in no commit, message or path of the PR. Repeatable. Values are never printed.")
     args = parser.parse_args()
     try:
         if args.pr <= 0:
             raise ValueError("PR number must be positive")
-        result = evaluate(resolve_repo(args.repo), args.pr, load_evidence(args.evidence))
+        result = evaluate(resolve_repo(args.repo), args.pr, load_evidence(args.evidence),
+                          worktree=args.worktree, secret_files=args.secret_file)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["decision"] == "MERGE" else 1
     except (ValueError, GitHubError) as exc:

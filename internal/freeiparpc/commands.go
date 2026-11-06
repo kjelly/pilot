@@ -151,6 +151,9 @@ func (c *Client) Batch(ctx context.Context, cmds []Command) ([]BatchItem, error)
 		if !ok {
 			return nil, &ErrMethodNotAllowed{Method: cmd.Method}
 		}
+		if k == write && c.cfg.ReadOnly {
+			return nil, &ErrMethodNotAllowed{Method: cmd.Method, ReadOnly: true}
+		}
 		if k == write {
 			writes++
 		} else {

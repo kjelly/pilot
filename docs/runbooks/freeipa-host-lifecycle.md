@@ -118,6 +118,10 @@ ansible <freeipa-server> -i inventory.yml -m shell -a \
 pilot verify --dir . docs/verification/freeipa-client.md
 ```
 
+這份 spec 的 C5／C8（`pilotuser`）與 C15–C17（`pilot-pwexpired`／`pilot-pwvalid`／`pilot-nopw`）是固定樣態的
+fixture 列：真實站台的 FreeIPA 上沒有這些測試帳號時會 FAIL，不代表這台主機有問題。這幾列只在跑過兩支 fixture
+playbook 的測試環境有意義（`docs/verification/freeipa-client.md` §2、§7.2），真實站台依該 spec §5 標為 `skip`。
+
 ## 3. 刪除 FreeIPA 主機（decommission）
 
 ### 3.1 命名規則（先讀，否則會卡在假的 blocker）

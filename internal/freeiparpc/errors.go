@@ -78,9 +78,15 @@ func (e *OutcomeUnknownError) Error() string {
 func (e *OutcomeUnknownError) Unwrap() error { return e.Err }
 
 // ErrMethodNotAllowed is a command outside the allowlist; nothing is sent.
-type ErrMethodNotAllowed struct{ Method string }
+type ErrMethodNotAllowed struct {
+	Method   string
+	ReadOnly bool // a write refused by a read-only client
+}
 
 func (e *ErrMethodNotAllowed) Error() string {
+	if e.ReadOnly {
+		return fmt.Sprintf("freeiparpc: write command %q refused: the client is read-only", e.Method)
+	}
 	return fmt.Sprintf("freeiparpc: command %q is not in the allowlist", e.Method)
 }
 

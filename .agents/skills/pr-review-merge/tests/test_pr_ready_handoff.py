@@ -19,6 +19,9 @@ from gh_runtime import Repo  # noqa: E402
 from review_gate import evaluate as prm_evaluate  # noqa: E402
 import review_gate  # noqa: E402
 from test_gate import Fake, sample  # noqa: E402
+from scan_stub import CleanScan  # noqa: E402
+
+setUpModule, tearDownModule = CleanScan.up, CleanScan.down
 
 MANIFEST = '.github/pr-evidence.json'
 REQUIRES_RECORD = (HERE.parents[3] / MANIFEST).read_bytes()

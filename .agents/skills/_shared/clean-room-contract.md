@@ -229,4 +229,7 @@ mode, retain the failed topology only while isolating the defect.
 Raw casts and transcripts are one-time development diagnostics. Commit only a
 sanitized candidate/tree, topology, recap, and verdict summary. Do not commit
 or link raw recording paths, cast names, inventories, or other gitignored
-artifacts.
+artifacts. Sanitized means `.agents/skills/_shared/committed-secrets.md`: no
+password, hash, key, token or cookie. That includes the passwords of accounts the
+run created and anything a cast's secret scan did not see. Check the staged diff
+before committing.

@@ -70,7 +70,7 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --p
 python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr 123 --evidence .pr-ready/123/evidence.json --worktree . --wait --ready --restore-sha "$START_SHA" --restore-branch="$START_BRANCH"
 ```
 
-`run_check.py` prints a JSON receipt on stdout and stores it under `--receipt-dir` (default `.pr-ready/receipts`, so pass the per-PR directory) even on failure, returning the command's exit status. Copy the receipt fields into the matching evidence category. `pr_gate.py --worktree` verifies that all referenced logs exist under that checkout directory.
+`run_check.py` prints a JSON receipt on stdout and stores it under `--receipt-dir` (default `.pr-ready/receipts`, so pass the per-PR directory) even on failure, returning the command's exit status. Copy the receipt fields into the matching evidence category. `pr_gate.py --worktree` (required) verifies that all referenced logs exist under that checkout directory and scans every commit of the PR (`baseRefOid..headRefOid`) for secrets; `GATE-PASS` and `READY` carry a value-free `secret_scan` summary, and `--secret-file FILE` (outside the repository, one value per line) adds values to look for.
 
 ## Repository-required target evidence
 
@@ -80,11 +80,16 @@ Ready and again immediately before mutation. Use the
 [merge workflow target schema](../../pr-review-merge/references/evidence-contract.md).
 A missing manifest preserves the generic workflow; an unreadable base/manifest
 or missing mandated target record blocks Ready. This does not weaken
-`local_validation` or `independent_review`, which remain current-HEAD-specific.
+`local_validation`, which remains current-HEAD-specific (or an evidence-only ancestor).
+`independent_review` may also be taken at an ancestor when every change since is
+evidence-only or a pure import of the base manifest's `non_execution_paths`
+(`receipt_reuse` reports it with `method: non-execution-base-import`).
 
 After integrating an advanced base, a base requirement with `kind: target-run`
-may accept `target_validation.target_reuse` under the
-shared target evidence rule at `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` (the verified snapshot). A changed
+may accept `target_validation.target_reuse` (with `unrelated_runtime_changes` for a
+machine record whose closure has unresolved or external inputs) under the
+shared target evidence rule at `$SNAP/.agents/skills/_shared/target-evidence-reuse.md` (the verified snapshot). A base that
+brought in only `non_execution_paths` needs no `target_reuse`. A changed
 execution/dependency input still needs a new target run.
 
 In wait mode the helper pins the evidence JSON bytes, referenced local reports/logs/artifacts, PR HEAD/base/branch, fetched base policy ref, title/body and complete review/comment content. Existing evidence-only ancestor receipts/review remain accepted at wait start; no top-level HEAD movement or artifact edit is accepted during the wait. A referenced file the PR head commits (such as the `target_validation.artifact` record or a committed log) is pinned by its Git blob at that head, as `git:<path>` with the blob's mode and object id; it must be a regular file, and while the checkout is at the PR head the worktree copy must equal the blob (this also catches edits hidden with `skip-worktree`). Because the pin and the check read Git objects, they give the same answer after `--restore-sha` has switched to a starting branch that lacks the file or holds other bytes of it. The evidence JSON and files the head does not track, such as the ignored `.pr-ready` reports, logs and receipts, are pinned by path and SHA-256 and are compared byte for byte before and after the restore; a changed pin names the paths. A legacy inline review summary remains supported; path-shaped local report references must exist. `wait-status.json` stores progress and hashes under `.pr-ready/N/`, leaving Root's `checkpoint.json` alone. Do not edit evidence while the helper is waiting; stop, revalidate and start a fresh session.
