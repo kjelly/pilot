@@ -108,7 +108,9 @@ snapshot 內同名）。要點如下：
   `testdata/`，連同 lab 使用者的 `ipanthash` 一起 commit 並 push 出去。
 - `--evidence-record` 的 redaction 不涵蓋手寫段落、加密 vault 的值與衍生值。
 - reviewer 要搜尋 `BASE..HEAD` 的每個 commit，不能只看最終 diff。任何 commit 含秘密
-  即為 P0 leaked secret，HEAD 已移除也一樣。
+  即為 P0 leaked secret，HEAD 已移除也一樣。三個 gate（`issue_gate.py`、`pr_gate.py`、
+  `review_gate.py`）已用共用的 `.agents/skills/_shared/scripts/secret_scan.py` 逐 commit 掃描並拒絕，
+  沒有 override；reviewer 手動搜尋是補充，不是取代。
 
 ## 可直接放進 task envelope 的提示詞
 

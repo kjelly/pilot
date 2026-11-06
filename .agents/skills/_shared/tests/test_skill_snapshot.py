@@ -243,8 +243,9 @@ else:
 
     def test_pr_gate_target_check_from_the_snapshot_writes_no_bytecode(self):
         """pr_gate.py imports pr-review-merge's review_gate (which loads gh_runtime and repo_evidence)
-        only when it checks the target evidence. --help never gets there, so the test below it
-        would not notice a pr_gate that lets CPython cache those modules inside the snapshot."""
+        only when it checks the target evidence, and loads the shared secret scanner by path when it
+        scans the PR's commits. --help never gets there, so the test below it would not notice a
+        pr_gate that lets CPython cache those modules inside the snapshot."""
         r, snapshot = self.real_snapshot()
         bin_dir = r.base / "fake-bin"
         bin_dir.mkdir()
@@ -254,10 +255,13 @@ else:
         evidence.write_text(json.dumps({"schema_version": 1, "repo": "acme/repo", "pr": 7, "head_sha": "1" * 40}))
         path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
         p = self.run_script(r, snapshot, ".agents/skills/pr-ready/scripts/pr_gate.py",
-                            "--repo", "acme/repo", "--pr", "7", "--evidence", str(evidence), env={"PATH": path})
-        # Premise: the gate got as far as the base manifest, so review_gate really was loaded.
+                            "--repo", "acme/repo", "--pr", "7", "--evidence", str(evidence),
+                            "--worktree", str(r.path), env={"PATH": path})
+        # Premise: the gate got as far as the base manifest, so review_gate really was loaded, and as far
+        # as the secret scan (the fake PR's commits are not in this clone, so the scan reports it).
         self.assertEqual(2, p.returncode, p.stdout + p.stderr)
         self.assertIn("target_validation is missing", p.stdout)
+        self.assertIn("Secret scan could not be completed", p.stdout)
         self.assertEqual([], self.bytecode_dirs(snapshot), "pr_gate.py wrote bytecode into the snapshot")
         self.assertEqual([], sorted(p.relative_to(snapshot).as_posix() for p in snapshot.rglob("*.pyc")))
         rc, out = snap(r, "verify", "--snapshot", str(snapshot))

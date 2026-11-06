@@ -62,6 +62,8 @@ When there are no check runs, use `no_ci_rationale` only if no CI truly applies 
 
 The manifest schema, globs and the evidence-only delta rule are issue-to-pr's `scripts/repo_evidence.py`, loaded by path. The gate result carries `target_validation` (manifest state, required ids, accepted deltas). A missing or stale record is `WAITING` in the gate; it becomes `DRAFT` only through the reviewer's blocking `P1` finding at the changed path (AGENTS.md §1), like every other Draft.
 
+Secret scan (not reviewer evidence): the gate reads no field for it. With `--worktree` it scans every commit of the PR's `baseRefOid..headRefOid` itself and the result carries a value-free `secret_scan` summary (`status`, `commits_scanned`, `findings`). A finding is `DRAFT`; a scan that could not run (no `--worktree`, a commit not in the clone, a scanner that does not load) is `WAITING`. A reviewer's own secret finding is still a blocking P0 (`.agents/skills/_shared/committed-secrets.md`).
+
 Evidence trust boundary: `independent: true` cannot cryptographically prove agent isolation, and SHA equality alone does not prove code correctness. The Orchestrator must really delegate and verify review evidence, and **must not fabricate fields to satisfy the gate**.
 
 ### Target evidence after merging an advanced base

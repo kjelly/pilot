@@ -70,6 +70,19 @@ class CreatePRTest(unittest.TestCase):
                             "--title", "t" * 10, "--body-file", "/b"])
         self.assertIs(create.call_args.kwargs["draft"], True)
 
+    def test_the_local_and_the_pushed_gate_both_get_the_secret_files(self):
+        # The pushed-stage gate runs after the push; it must scan with the same --secret-file values, so
+        # a value that only shows up there is not waved through by a gate that was never told about it.
+        secret_files = [self.root / "known.txt"]
+        with patch.object(create_pr, "evaluate", return_value=([], self.info)) as evaluate, \
+             patch.object(create_pr, "execute", return_value=""), \
+             patch.object(create_pr, "check_pr", return_value={"number": 9, "url": "https://github.com/OWNER/REPO/pull/9"}):
+            result = create_pr.create(repo="OWNER/REPO", issue=123, worktree=self.worktree, evidence=self.evidence,
+                                      title="fix: issue 123 proper fix", body_file=self.body, secret_files=secret_files)
+        self.assertEqual("DRAFT_PR_CREATED", result["status"])
+        self.assertEqual(["local", "pushed"], [c.kwargs["stage"] for c in evaluate.call_args_list])
+        self.assertEqual([secret_files, secret_files], [c.kwargs.get("secret_files") for c in evaluate.call_args_list])
+
     def test_gate_failure_never_pushes(self):
         with patch.object(create_pr, "evaluate", return_value=(["P2 blocker"], self.info)), \
              patch.object(create_pr, "execute") as execute:

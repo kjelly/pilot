@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Sequence
 
 # Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
 # counts any added file and would STOP every later step. Set before the first sibling import.
@@ -69,7 +70,8 @@ def check_pr(repo: str, branch: str, base: str, sha: str, *, draft: bool, issue:
 
 
 def create(*, repo: str, issue: int, worktree: Path, evidence: Path,
-           title: str, body_file: Path, remote: str = "origin", draft: bool = True) -> dict:
+           title: str, body_file: Path, remote: str = "origin", draft: bool = True,
+           secret_files: Sequence[Path] = ()) -> dict:
     worktree = worktree.expanduser().resolve(strict=True)
     body_file = body_file.expanduser().resolve(strict=True)
     if body_file.is_relative_to(worktree):
@@ -85,7 +87,7 @@ def create(*, repo: str, issue: int, worktree: Path, evidence: Path,
     if not ("tests" in body.lower() or "測試" in body):
         raise GateError("PR body must summarize validation/test evidence")
     errors, info = evaluate(repo=repo, issue=issue, worktree=worktree, evidence_path=evidence,
-                            stage="local", remote=remote)
+                            stage="local", remote=remote, secret_files=secret_files)
     if errors:
         return {"status": "BLOCKED", "issue": issue, "blockers": errors}
     branch, sha = info["branch"], info["head_sha"]
@@ -94,7 +96,7 @@ def create(*, repo: str, issue: int, worktree: Path, evidence: Path,
     # Push is intentionally a side effect only after local gate passes. No force-push.
     execute(["git", "push", "--set-upstream", remote, branch], cwd=worktree)
     errors, _ = evaluate(repo=repo, issue=issue, worktree=worktree, evidence_path=evidence,
-                         stage="pushed", remote=remote)
+                         stage="pushed", remote=remote, secret_files=secret_files)
     if errors:
         return {"status": "BLOCKED_AFTER_PUSH", "issue": issue, "head_sha": sha, "blockers": errors}
     cmd = ["gh", "pr", "create", "-R", repo, "--base", base_name, "--head", branch,
@@ -128,12 +130,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--title", required=True)
     ap.add_argument("--body-file", required=True, type=Path)
     ap.add_argument("--remote", default="origin")
+    ap.add_argument("--secret-file", action="append", default=[], type=Path, metavar="FILE",
+                    help="File OUTSIDE the repository with one secret value per line (8+ bytes each) that must "
+                         "appear in no commit of the branch (see issue_gate.py). Repeatable.")
     ap.add_argument("--ready", action="store_true",
                     help="Create a Ready PR directly. Only on an explicit user request; default is DRAFT until mark_ready.py")
     opts = ap.parse_args(argv)
     try:
         result = create(repo=opts.repo, issue=opts.issue, worktree=opts.worktree, evidence=opts.evidence,
-                        title=opts.title, body_file=opts.body_file, remote=opts.remote, draft=not opts.ready)
+                        title=opts.title, body_file=opts.body_file, remote=opts.remote, draft=not opts.ready,
+                        secret_files=opts.secret_file)
     except (GateError, OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
         result = {"status": "BLOCKED", "issue": opts.issue, "blockers": [str(exc)]}
     print(json.dumps(result, ensure_ascii=False, indent=2))

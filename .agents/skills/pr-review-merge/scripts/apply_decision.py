@@ -10,7 +10,7 @@ import hashlib
 import fcntl
 from pathlib import Path
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Sequence
 
 # Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
 # counts any added file and would STOP every later step. Set before the first sibling import.
@@ -31,13 +31,23 @@ def comment_text(result: dict[str, Any]) -> str:
                  "so the live base tip is an ancestor of HEAD."
                  if base_blocked else "")
     live_base = f"Live base tip: `{result['live_base_sha']}`\n\n" if base_blocked else ""
+    leaked = (result.get("secret_scan") or {}).get("status") == "FOUND"
+    # A leaked secret is not something another commit can fix: the earlier commit stays published.
+    next_steps = (
+        "**Next steps:** **Stop.** Do not push more commits on top of this and do not mark the PR Ready. "
+        "The secret is in the commit history of this PR, so a commit that removes it does not clear this "
+        "finding. The user decides on revoking or rotating the credential and on how the history is handled; "
+        "the finding stays blocking until they have recorded that decision on this PR. "
+        "See `.agents/skills/_shared/committed-secrets.md`."
+        if leaked else
+        "**Next steps:** Address blocking findings, rerun affected tests and CI, "
+        "and request independent review on the updated HEAD/Base before marking Ready.")
     return ("## Automated PR review: Draft required\n\n"
             f"{identity_label} HEAD: `{result['head_sha']}`  \n"
             f"{identity_label} Base: `{result['base_sha']}`\n\n"
             + live_base +
             "### Blocking issues / verification notes\n\n" + excerpt + "\n\n"
-            "**Next steps:** Address blocking findings, rerun affected tests and CI, "
-            "and request independent review on the updated HEAD/Base before marking Ready."
+            + next_steps
             + base_next + "\n\n"
             "This comment is an automated technical review, not a human approval.\n")
 
@@ -77,16 +87,20 @@ def repo_mutation_lock(repo: Repo):
         raise GitHubError(f"Cannot acquire GitHub mutation lock: {exc}") from exc
 
 
-def perform(repo: Repo, number: int, evidence: dict[str, Any], method: str, execute: bool) -> dict[str, Any]:
+def perform(repo: Repo, number: int, evidence: dict[str, Any], method: str, execute: bool, *,
+            worktree: Any = None, secret_files: Sequence[Any] = ()) -> dict[str, Any]:
     if execute:
         with repo_mutation_lock(repo):
-            return _perform_locked(repo, number, evidence, method, execute)
-    return _perform_locked(repo, number, evidence, method, execute)
+            return _perform_locked(repo, number, evidence, method, execute,
+                                   worktree=worktree, secret_files=secret_files)
+    return _perform_locked(repo, number, evidence, method, execute, worktree=worktree, secret_files=secret_files)
 
 
-def _perform_locked(repo: Repo, number: int, evidence: dict[str, Any], method: str, execute: bool) -> dict[str, Any]:
-    # This runs only in Root Agent; one invocation per PR at a time, with serial merges.
-    gate = evaluate(repo, number, evidence)
+def _perform_locked(repo: Repo, number: int, evidence: dict[str, Any], method: str, execute: bool, *,
+                    worktree: Any = None, secret_files: Sequence[Any] = ()) -> dict[str, Any]:
+    # This runs only in Root Agent; one invocation per PR at a time, with serial merges. The gate is
+    # re-run here with the same worktree: a MERGE needs the secret scan of every commit to be clean.
+    gate = evaluate(repo, number, evidence, worktree=worktree, secret_files=secret_files)
     out = {"repo": repo.raw, "pr": number, "gate": gate, "executed": False,
            "outcome": gate["decision"], "verified_remote_state": None}
     if gate["decision"] not in ("DRAFT", "MERGE") or not execute:
@@ -149,6 +163,12 @@ def main() -> int:
     parser.add_argument("--repo", help="OWNER/REPO; defaults to current repository")
     parser.add_argument("--pr", type=int, required=True)
     parser.add_argument("--evidence", required=True)
+    parser.add_argument("--worktree", type=Path,
+                        help="Checkout of this repository that holds the PR's commits: every commit of "
+                             "baseRefOid..headRefOid is scanned for secrets (without it the gate WAITs and nothing merges)")
+    parser.add_argument("--secret-file", action="append", default=[], type=Path, metavar="FILE",
+                        help="File OUTSIDE the repository with one secret value per line (8+ bytes each) that must "
+                             "appear in no commit, message or path of the PR. Repeatable. Values are never printed.")
     # Project default: this repository merges with merge commits (upstream default is squash).
     parser.add_argument("--method", choices=["squash", "merge", "rebase"], default="merge")
     parser.add_argument("--execute", action="store_true", help="Actually post comments, convert Draft, or merge")
@@ -156,7 +176,8 @@ def main() -> int:
     try:
         if args.pr <= 0:
             raise ValueError("PR number must be positive")
-        result = perform(resolve_repo(args.repo), args.pr, load_evidence(args.evidence), args.method, args.execute)
+        result = perform(resolve_repo(args.repo), args.pr, load_evidence(args.evidence), args.method, args.execute,
+                         worktree=args.worktree, secret_files=args.secret_file)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["outcome"] in ("MERGED", "DRAFT-BLOCKED", "SKIP", "DRY_RUN_MERGE", "DRY_RUN_DRAFT") else 1
     except (GitHubError, ValueError) as exc:
