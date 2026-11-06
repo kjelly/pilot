@@ -75,6 +75,7 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
 
 - `WAITING-CI`：其他 gate 通過，保持 session 等待 CI；每 30 秒重新驗證 pins 與全部 gate。`--poll-interval` 上限 60 秒。
 - `WAIT-INTERRUPTED`：明確 `--wait-timeout` 或 SIGINT/SIGTERM 中斷；預設無 timeout。狀態保存在 `.pr-ready/N/wait-status.json`，不覆寫 Root checkpoint；`ready_invoked` 表示是否已嘗試 Ready，若為 true 必須重查遠端狀態。
+- `--worktree` 為必填：`pr_gate.py` 用 PR 的 `baseRefOid..headRefOid`（以 SHA 指定，不看目前 checkout 的 HEAD）掃描**每一個 commit** 的新增行、commit message 與路徑，是否含秘密（共用 `_shared/scripts/secret_scan.py`，規則見 `.agents/skills/_shared/committed-secrets.md`）。任何一個 commit 有發現就是 `DRAFT-BLOCKED`，沒有 override：後續 commit 把值換成 placeholder 也不能清除，必須停下來回報使用者。`--wait` 期間同一組 base/head 只掃一次。`--secret-file FILE`（須在 repo 之外，一行一個值，每個至少 8 bytes）可加入已知的秘密值；輸出只有類別、檔案與 commit，絕不含值。
 - `GATE-PASS`：門檻檢查通過，**尚未變更 PR 狀態**。
 - `READY`：GitHub 已確認從 Draft 改為 Ready、HEAD 未變。
 - `DRAFT-BLOCKED`：資料不足或至少一項品質門檻不合格（exit code 2）。
