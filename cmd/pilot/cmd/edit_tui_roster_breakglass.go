@@ -171,6 +171,7 @@ func pushBreakglassActivateTicket(r *editRouterModel, dir, path, name, duration,
 			Ticket:      ticket,
 			ActivatedBy: activatedByCurrentUser(),
 			Now:         time.Now(),
+			Lock:        tuiIdentityLock(accessGovernanceInventoryPath(dir)),
 		})
 		if err != nil {
 			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
@@ -196,6 +197,7 @@ func pushBreakglassDeactivateConfirm(r *editRouterModel, dir, path, name string)
 			StateDir:   resolveStateDir(accessStateFiles...),
 			Name:       name,
 			Now:        time.Now(),
+			Lock:       tuiIdentityLock(accessGovernanceInventoryPath(dir)),
 		}); err != nil {
 			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
 		}

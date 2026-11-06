@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/identitylock/identitylocktest"
 )
 
 var (
@@ -60,6 +61,7 @@ func TestFreeIPAProvider_StageArgsPerTarget(t *testing.T) {
 		IdentityApplyPlaybook: "playbooks/apply/freeipa-identity-apply.yml",
 		ClientStageArgs:       stageFunc(hostStageArgs),
 		ServerStageArgs:       stageFunc(serverStageArgs),
+		IdentityLock:          (&identitylocktest.Fake{}).Acquirer(),
 	})
 	ctx := context.Background()
 	if _, err := p.Inspect(ctx, InspectInput{HostName: "c1"}); err != nil {

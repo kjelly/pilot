@@ -51,6 +51,7 @@ func TestActivate_AppliesRuleAndRecordsState(t *testing.T) {
 	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 
 	activation, err := Activate(context.Background(), ActivateOptions{
+		Lock:        testLock(t),
 		RosterFile:  rosterPath,
 		Inventory:   "inv.yml",
 		StateDir:    stateDir,
@@ -90,6 +91,7 @@ func TestActivate_AppliesRuleAndRecordsState(t *testing.T) {
 func TestActivate_RejectsDurationExceedingMaxDuration(t *testing.T) {
 	rosterPath := writeBreakglassTestRoster(t)
 	_, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath,
 		Inventory:  "inv.yml",
 		StateDir:   t.TempDir(),
@@ -107,6 +109,7 @@ func TestActivate_RejectsDurationExceedingMaxDuration(t *testing.T) {
 func TestActivate_RequiresReasonAndTicketByDefault(t *testing.T) {
 	rosterPath := writeBreakglassTestRoster(t)
 	if _, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: t.TempDir(),
 		Name: "infra-emergency", Duration: 30 * time.Minute, Ticket: "y",
 		Runner: &fakeRunner{exitCode: 0},
@@ -114,6 +117,7 @@ func TestActivate_RequiresReasonAndTicketByDefault(t *testing.T) {
 		t.Fatal("expected an error when --reason is omitted")
 	}
 	if _, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: t.TempDir(),
 		Name: "infra-emergency", Duration: 30 * time.Minute, Reason: "x",
 		Runner: &fakeRunner{exitCode: 0},
@@ -137,6 +141,7 @@ account_policies:
 	}
 
 	_, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: path, Inventory: "inv.yml", StateDir: t.TempDir(),
 		Name: "infra-emergency", Duration: 30 * time.Minute, Reason: "x", Ticket: "y",
 		Now: time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC), Runner: &fakeRunner{exitCode: 0},
@@ -149,6 +154,7 @@ account_policies:
 func TestActivate_RejectsNonBreakglassGrant(t *testing.T) {
 	rosterPath := writeReconcileTestRoster(t) // has a temporary_grant named vendor-project-x
 	_, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: t.TempDir(),
 		Name: "vendor-project-x", Duration: 30 * time.Minute, Reason: "x", Ticket: "y",
 		Runner: &fakeRunner{exitCode: 0},
@@ -164,6 +170,7 @@ func TestDeactivate_MarksActiveActivationInactiveAndAppliesPrune(t *testing.T) {
 	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 
 	if _, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: stateDir,
 		Name: "infra-emergency", Duration: 45 * time.Minute, Reason: "x", Ticket: "y",
 		Now: now, Runner: &fakeRunner{exitCode: 0},
@@ -173,6 +180,7 @@ func TestDeactivate_MarksActiveActivationInactiveAndAppliesPrune(t *testing.T) {
 
 	deactivateRunner := &fakeRunner{exitCode: 0}
 	if err := Deactivate(context.Background(), DeactivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: stateDir,
 		Name: "infra-emergency", Now: now.Add(5 * time.Minute), Runner: deactivateRunner,
 	}); err != nil {
@@ -198,6 +206,7 @@ func TestDeactivate_NoOpWhenNothingActive(t *testing.T) {
 	rosterPath := writeBreakglassTestRoster(t)
 	stateDir := t.TempDir()
 	if err := Deactivate(context.Background(), DeactivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: stateDir,
 		Name: "infra-emergency", Runner: &fakeRunner{exitCode: 0},
 	}); err != nil {
@@ -212,6 +221,7 @@ func TestStatus_MostRecentFirst(t *testing.T) {
 
 	for i, d := range []time.Duration{0, time.Hour, 2 * time.Hour} {
 		if _, err := Activate(context.Background(), ActivateOptions{
+			Lock:       testLock(t),
 			RosterFile: rosterPath, Inventory: "inv.yml", StateDir: stateDir,
 			Name: "infra-emergency", Duration: 10 * time.Minute, Reason: "x", Ticket: "y",
 			Now: base.Add(d), Runner: &fakeRunner{exitCode: 0},

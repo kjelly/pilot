@@ -597,6 +597,9 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 		ExtraArgs:             extraArgs,
 		ClientStageArgs:       hostStage,
 		ServerStageArgs:       scope.ArgsFunc(scope.RoleHosts(stageRoleFreeIPAServer)),
+		// The central converge runs freeipa-identity-apply.yml, so it runs under
+		// the FreeIPA server's /etc/ipa lock; the read-only queries do not.
+		IdentityLock: newIdentityLock(identityLockRequest{Inventory: invPath, Wait: identityLockWaitDefault, Progress: os.Stderr, Runtime: &runtime}),
 	})
 
 	// Wazuh agent (spec.md §37 Phase 4, HD14) — registered unconditionally,

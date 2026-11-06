@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/identitylock/identitylocktest"
 )
 
 // fakeAnsibleExecutor is the in-package fake ansibleExecutor every test in
@@ -156,6 +157,7 @@ func testProvider(t *testing.T, fn func(args []string) (*ansible.Result, error))
 		ServerInventory:       "inventory.yml",
 		DecommissionPlaybook:  "playbooks/decommission/freeipa-client-decommission.yml",
 		IdentityApplyPlaybook: "playbooks/apply/freeipa-identity-apply.yml",
+		IdentityLock:          (&identitylocktest.Fake{}).Acquirer(),
 	})
 	return p, exec
 }

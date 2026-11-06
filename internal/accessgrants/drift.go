@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/identitylock"
 	"github.com/kjelly/pilot/internal/inventory"
 )
 
@@ -577,6 +578,11 @@ func DriftOnce(ctx context.Context, opts DriftProbeOptions) (DriftReport, error)
 // found BEFORE repair (empty Plan/nil Result when there was none to
 // repair) alongside ReconcileOnce's own result.
 func RepairManaged(ctx context.Context, driftOpts DriftProbeOptions, reconcileOpts ReconcileOptions) (DriftReport, Plan, *ansible.Result, error) {
+	// Before the probe, not when drift is found: a repair that could never take
+	// the lock must not look like it was about to work.
+	if reconcileOpts.Lock == nil {
+		return DriftReport{}, Plan{}, nil, fmt.Errorf("accessgrants: %w", identitylock.ErrNoLock)
+	}
 	before, err := DriftOnce(ctx, driftOpts)
 	if err != nil {
 		return DriftReport{}, Plan{}, nil, err

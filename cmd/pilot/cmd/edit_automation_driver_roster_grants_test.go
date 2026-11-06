@@ -180,6 +180,10 @@ func TestEditAutomationDriverRosterGrantsFlow_ActivateDeactivateBreakglass(t *te
 	t.Setenv("PILOT_DATA_DIR", t.TempDir())
 	dataDir = t.TempDir()
 	t.Cleanup(func() { dataDir = "" })
+	// The TUI is a funnel of the identity lock gate: there is no FreeIPA server
+	// here to take /etc/ipa on, so the lock is an in-memory one, and what the
+	// screen asked of it is asserted below.
+	lock := useFakeIdentityLock(t)
 
 	scenario := editScenario{
 		Version: 1,
@@ -215,5 +219,22 @@ func TestEditAutomationDriverRosterGrantsFlow_ActivateDeactivateBreakglass(t *te
 	}
 	if !strings.HasPrefix(r.banner, "❌") {
 		t.Fatalf("banner = %q, want a ❌-prefixed failure (no real ansible-playbook/FreeIPA target in this sandbox)", r.banner)
+	}
+	// The failure above is the playbook's, not the lock's: the screen took the
+	// lock first, without waiting (the TUI call is synchronous, with nowhere to
+	// show progress), on the inventory of the workspace it was editing.
+	reqs := lock.Requests()
+	if len(reqs) != 1 || reqs[0].Wait != 0 || reqs[0].Progress != nil || reqs[0].Inventory != accessGovernanceInventoryPath(dir) {
+		t.Fatalf("lock requests = %+v, want one for %s that does not wait", reqs, accessGovernanceInventoryPath(dir))
+	}
+	if lock.Acquired() != 1 || lock.Released() != 1 {
+		t.Fatalf("the lock was taken %d times and released %d", lock.Acquired(), lock.Released())
+	}
+	// And deactivating goes through the same funnel.
+	if err := d.deactivateBreakglass(&r, "infra-emergency"); err != nil {
+		t.Fatalf("deactivateBreakglass() navigation error = %v", err)
+	}
+	if reqs := lock.Requests(); len(reqs) != 2 || reqs[1].Wait != 0 || lock.Acquired() != 2 {
+		t.Fatalf("after deactivating: lock requests = %+v, taken %d times", reqs, lock.Acquired())
 	}
 }

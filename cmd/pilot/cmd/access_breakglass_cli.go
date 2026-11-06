@@ -60,7 +60,12 @@ group.
 
 --duration MUST NOT exceed the grant's own activation.max_duration;
 --reason/--ticket are required unless the grant's activation explicitly
-sets require_reason/require_ticket to false.`,
+sets require_reason/require_ticket to false.
+
+Like every run of the identity apply playbook, it takes the FreeIPA server's
+/etc/ipa lock first and waits up to 30 minutes for another pilot run to give it
+back (a full identity run takes about that long): during an incident, expect to
+wait for one that is in progress.`,
 	Args: cobra.ExactArgs(2),
 	RunE: runAccessBreakglassActivateCmd,
 }
@@ -156,6 +161,7 @@ func runAccessBreakglassActivateCmd(cmd *cobra.Command, args []string) error {
 		Playbook:          accessBreakglassActivatePlaybook,
 		VaultPasswordFile: accessBreakglassActivateVaultPasswordFile,
 		Now:               startedAt,
+		Lock:              newIdentityLock(identityLockRequest{Inventory: accessBreakglassActivateInventory, Wait: identityLockWaitDefault, Progress: cmd.ErrOrStderr()}),
 	})
 	out := cmd.OutOrStdout()
 	if activateErr == nil {
@@ -216,6 +222,7 @@ func runAccessBreakglassDeactivateCmd(cmd *cobra.Command, args []string) error {
 		Playbook:          accessBreakglassDeactivatePlaybook,
 		VaultPasswordFile: accessBreakglassDeactivateVaultPasswordFile,
 		Now:               startedAt,
+		Lock:              newIdentityLock(identityLockRequest{Inventory: accessBreakglassDeactivateInventory, Wait: identityLockWaitDefault, Progress: cmd.ErrOrStderr()}),
 	})
 	out := cmd.OutOrStdout()
 	if deactivateErr == nil {

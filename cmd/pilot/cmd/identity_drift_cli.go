@@ -162,6 +162,7 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 		Inventory:  identityDriftInventory,
 		StateDir:   resolveStateDir(accessStateFiles...),
 		Now:        time.Now(),
+		Lock:       newIdentityLock(identityLockRequest{Inventory: identityDriftInventory, Wait: identityLockWaitDefault, Progress: cmd.ErrOrStderr()}),
 	})
 	if perr := printIdentityDriftReport(out, before); perr != nil {
 		return perr

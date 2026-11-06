@@ -48,6 +48,7 @@ import (
 	"strings"
 
 	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/identitylock"
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/secretpath"
 )
@@ -117,6 +118,15 @@ type FreeIPAClientProviderConfig struct {
 	// none.
 	ClientStageArgs func() ([]string, error)
 	ServerStageArgs func() ([]string, error)
+
+	// IdentityLock takes the FreeIPA server's /etc/ipa lock for the central
+	// identity-apply convergence (the only step that runs the identity apply
+	// playbook with a mutating tag; the read-only host_absent_inspect queries
+	// do not lock). Required by that step: nil fails it before the playbook
+	// runs, so a provider built without it cannot converge. The caller builds
+	// it (it resolves the server from ServerInventory, which this package
+	// cannot) — cmd/pilot/cmd/host_decommission.go.
+	IdentityLock identitylock.Acquirer
 }
 
 // FreeIPAClientProvider implements providers.Provider for the FreeIPA
@@ -453,7 +463,14 @@ func (e *freeipaIdentityConvergeStep) Inspect(ctx context.Context) (bool, error)
 // is itself idempotent (host-del/dnsrecord-del both tolerate "not found"),
 // so a resume that re-runs this after a partial prior success converges
 // cleanly rather than erroring.
+//
+// It runs under the server's /etc/ipa lock (IdentityLock), taken right before
+// the playbook and given back when it has ended: this is one of the funnels
+// the lint of cmd/pilot/cmd/identity_lock_funnel_test.go names.
 func (e *freeipaIdentityConvergeStep) Execute(ctx context.Context) error {
+	if e.provider.cfg.IdentityLock == nil {
+		return fmt.Errorf("freeipa-client identity-apply-converge %s: %w", e.fqdn, identitylock.ErrNoLock)
+	}
 	args := []string{e.provider.cfg.IdentityApplyPlaybook}
 	if e.provider.cfg.ServerInventory != "" {
 		args = append(args, "-i", e.provider.cfg.ServerInventory)
@@ -474,7 +491,20 @@ func (e *freeipaIdentityConvergeStep) Execute(ctx context.Context) error {
 	if stageErr != nil {
 		return fmt.Errorf("freeipa-client identity-apply-converge %s: %w", e.fqdn, stageErr)
 	}
-	res, err := e.provider.exec(ctx, args)
+	held, err := e.provider.cfg.IdentityLock(ctx)
+	if err != nil {
+		return fmt.Errorf("freeipa-client identity-apply-converge %s: take the FreeIPA identity lock: %w", e.fqdn, err)
+	}
+	defer func() { _ = held.Release() }()
+	runCtx, cancel := held.Bind(ctx)
+	defer cancel()
+	res, err := e.provider.exec(runCtx, args)
+	// Before the run's own outcome (see accessgrants.applyPlan): a playbook the
+	// loss killed says nothing useful, and one that exited 0 did not run under
+	// the lock.
+	if lostErr := held.Check(); lostErr != nil {
+		return fmt.Errorf("freeipa-client identity-apply-converge %s: %w", e.fqdn, lostErr)
+	}
 	if err != nil {
 		return fmt.Errorf("freeipa-client identity-apply-converge %s: %w", e.fqdn, err)
 	}

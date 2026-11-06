@@ -231,6 +231,7 @@ grants:
 	runner := &fakeDriftRunner{live: LiveState{}}
 
 	if _, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", Name: "infra-emergency",
 		Reason: "test", Ticket: "T-1", Duration: time.Hour, StateDir: stateDir,
 		Now: now, Runner: &fakeRunner{exitCode: 0},

@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/spf13/cobra"
@@ -20,6 +22,7 @@ var (
 	reconcileComponentFlags  []string
 	reconcileForceFlag       bool
 	reconcilePreviewOnlyFlag bool
+	reconcileLockWaitFlag    string
 )
 
 // reconcileStdinIsTerminal is a variable so tests can simulate a missing TTY.
@@ -54,6 +57,7 @@ func init() {
 	reconcileCmd.Flags().StringVar(&stageFlag, "stage", "", "直接指定 stage(sandbox、staging、prod)，不再詢問；在指令列指定 staging/prod 即視為確認；--force/--preview-only 沒帶 --stage 時一律是 sandbox")
 	reconcileCmd.Flags().StringVar(&reconcileEngineFlag, "engine", reconcileEngineAnsible, "調和引擎：ansible(預設)或 golang。golang 目前只能與 --preview-only --component freeipa-identity 一起使用，唯讀預覽使用者與群組，不寫入 FreeIPA")
 	reconcileCmd.Flags().StringVar(&reconcilePlanOutFlag, "plan-out", "", "--engine golang：把 plan JSON 寫到這個新檔案(0600，已存在時拒絕)")
+	reconcileCmd.Flags().StringVar(&reconcileLockWaitFlag, "lock-wait", "", "套用 freeipa-identity 前，FreeIPA server 的 /etc/ipa 鎖被另一輪執行持有時最多等多久(Go duration，例如 30m；0 表示忙碌就立即失敗；預設 30m，約一輪完整 identity 執行的時間)；預覽不持鎖，與 --preview-only 同用會被拒絕。鎖只約束 pilot 自己的程式碼路徑，手動執行的 ansible-playbook 不受它約束")
 	reconcileCmd.Flags().StringVar(&stagingAttestedHoursFlag, "staging-attested-within-hours", "", "--stage prod 必填：上次 staging 驗證距今幾小時(0-168)")
 	rootCmd.AddCommand(reconcileCmd)
 }
@@ -64,6 +68,12 @@ func runReconcile(cmd *cobra.Command, _ []string) error {
 	}
 	if reconcileForceFlag && reconcilePreviewOnlyFlag {
 		return fmt.Errorf("--force 不能與 --preview-only 同時使用") // gate: ansible-force-and-preview-only
+	}
+	if _, err := parseReconcileLockWait(reconcileLockWaitFlag); err != nil {
+		return err // gate: entry-lock-wait-value
+	}
+	if reconcileLockWaitFlag != "" && reconcilePreviewOnlyFlag {
+		return fmt.Errorf("--lock-wait 只對會取鎖的執行有意義；--preview-only 不持鎖，請拿掉其中一個") // gate: entry-lock-wait-preview-only
 	}
 	if err := validateStageFlags(stageFlag, stagingAttestedHoursFlag); err != nil {
 		return err // gate: entry-stage-flags
@@ -110,7 +120,10 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	ctx := withDeployAnsibleRuntime(cmd.Context(), runtime)
+	ctx, err := reconcileLockContext(withDeployAnsibleRuntime(cmd.Context(), runtime), cmd)
+	if err != nil {
+		return err
+	}
 	runner := ansible.NewRunner()
 	runner.Timeout = timeout
 	runner.Env = runtime.Env
@@ -168,6 +181,34 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 		fmt.Fprintln(out)
 	}
 	return reconcileExit(runCatalogPlaybookDeploy(ctx, runner, out, inv, "apply", true, snapshot), reconcilePreviewOnlyFlag)
+}
+
+// reconcileLockContext carries --lock-wait and the stderr of cmd (where the
+// "still waiting" lines go) to every funnel the run reaches: ctx is what
+// executeRecordedDeploymentCore builds its identity lock request from.
+func reconcileLockContext(ctx context.Context, cmd *cobra.Command) (context.Context, error) {
+	wait, err := parseReconcileLockWait(reconcileLockWaitFlag)
+	if err != nil {
+		return nil, err
+	}
+	return withIdentityLockProgress(withIdentityLockWait(ctx, wait), cmd.ErrOrStderr()), nil
+}
+
+// parseReconcileLockWait reads --lock-wait: how long the freeipa-identity apply
+// waits for the server's /etc/ipa lock. Empty is the default, one full
+// identity run's worth. 0 fails at once when another run holds the lock.
+// Anything between 0 and a second is refused: the wait is a whole number of
+// seconds on the remote flock, so it would round to something nobody asked
+// for.
+func parseReconcileLockWait(v string) (time.Duration, error) {
+	if v == "" {
+		return identityLockWaitDefault, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 || (d > 0 && d < time.Second) {
+		return 0, fmt.Errorf("--lock-wait %q 不是有效的等待時間：請給 0(忙碌就立即失敗)或至少 1s 的 Go duration，例如 30s、30m", v)
+	}
+	return d, nil
 }
 
 // reconcileExit maps the wizard's result to the command's. A preview-only plan

@@ -261,6 +261,11 @@ type outboundWorkflowEnv struct {
 	inv       string
 	capture   *webhookCapture
 	server    *httptest.Server
+	// lock is the identity lock every funnel that runs the identity playbook
+	// takes here (the synthetic freeipa-identity component of these tests runs
+	// freeipa-identity-apply.yml, and pilot access reconcile is a funnel too):
+	// an in-memory one, since there is no FreeIPA server to take /etc/ipa on.
+	lock *fakeIdentityLock
 }
 
 // newOutboundWorkflowEnv wires PILOT_ROOT, PATH (fake ansible-inventory
@@ -302,7 +307,7 @@ func newOutboundWorkflowEnv(t *testing.T, groups map[string][]string, eventsYAML
 
 	stubDeploymentAvailabilityAllReachable(t)
 
-	return &outboundWorkflowEnv{t: t, workspace: workspace, inv: inv, capture: capture, server: server}
+	return &outboundWorkflowEnv{t: t, workspace: workspace, inv: inv, capture: capture, server: server, lock: useFakeIdentityLock(t)}
 }
 
 // eventsYAMLFor is the standard single-rule events[] block most W-tests

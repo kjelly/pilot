@@ -301,3 +301,70 @@ func TestLockRejectsUnsafePath(t *testing.T) {
 		t.Fatalf("ssh ran for a rejected path: %q", got)
 	}
 }
+
+// The lock is held by its ssh session, so that session runs with a keepalive
+// (about 45 s of a dead network ends it and Lost fires), unless the Target set
+// its own. The tunnel's ssh does not get it: only the lock's session has the
+// "I still hold it" meaning (docs/superpowers/specs/2026-11-06-freeipa-go-reconcile-phase2-spec.md
+// R8, R10).
+func TestLockSessionRunsWithAKeepaliveUnlessTheTargetSetsItsOwn(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed")
+	}
+	option := func(argv []string, key string) (string, bool) {
+		for i := 0; i+1 < len(argv); i++ {
+			if argv[i] == "-o" {
+				if v, ok := strings.CutPrefix(argv[i+1], key+"="); ok {
+					return v, true
+				}
+			}
+		}
+		return "", false
+	}
+	for name, tc := range map[string]struct {
+		options        map[string]string
+		wantInterval   string
+		wantCountMax   string
+		wantFromTarget bool
+	}{
+		"the defaults":                  {nil, "15", "3", false},
+		"the target's own settings win": {map[string]string{"ServerAliveInterval": "5", "ServerAliveCountMax": "9"}, "5", "9", true},
+		"one of the two set":            {map[string]string{"ServerAliveInterval": "7"}, "7", "3", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ssh, calls := fakeSSH(t, "local")
+			target := Target{Host: "ipa1.example.test", Options: tc.options}
+			d := &Dialer{Target: target, SSH: ssh}
+			lock, err := d.AcquireLock(context.Background(), LockOptions{Path: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = lock.Release()
+			argv := calls()[0]
+			if got, ok := option(argv, "ServerAliveInterval"); !ok || got != tc.wantInterval {
+				t.Fatalf("ServerAliveInterval = %q (set: %v) in %q, want %q", got, ok, argv, tc.wantInterval)
+			}
+			if got, ok := option(argv, "ServerAliveCountMax"); !ok || got != tc.wantCountMax {
+				t.Fatalf("ServerAliveCountMax = %q (set: %v) in %q, want %q", got, ok, argv, tc.wantCountMax)
+			}
+			// The Dialer's Target is not edited: what AcquireLock added is its own.
+			if len(d.Target.Options) != len(tc.options) {
+				t.Fatalf("AcquireLock wrote into the Dialer's Target: %v", d.Target.Options)
+			}
+		})
+	}
+	t.Run("the tunnel's ssh has none", func(t *testing.T) {
+		ssh, calls := fakeSSH(t, "echo")
+		d := &Dialer{Target: Target{Host: "ipa1.example.test"}, SSH: ssh}
+		c, err := d.DialContext(context.Background(), "tcp", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = c.Write([]byte("x"))
+		_, _ = io.ReadFull(c, make([]byte, 1))
+		_ = c.Close()
+		if _, ok := option(calls()[0], "ServerAliveInterval"); ok {
+			t.Fatalf("the tunnel's ssh has the lock's keepalive: %q", calls()[0])
+		}
+	})
+}

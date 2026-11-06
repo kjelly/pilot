@@ -32,10 +32,12 @@ import (
 	"github.com/kjelly/pilot/internal/childproc"
 	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/identitylock"
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/outbound"
 	"github.com/kjelly/pilot/internal/spec"
 	"github.com/kjelly/pilot/internal/sshcontrol"
+	"github.com/kjelly/pilot/internal/sshdial"
 	"github.com/kjelly/pilot/internal/store"
 	"github.com/kjelly/pilot/internal/tools"
 )
@@ -1357,6 +1359,17 @@ type deploymentTransactionOptions struct {
 	// PLAY RECAP. Set for dependency runs: Pilot chose their hosts and
 	// target_group, and the consumer relies on each provider host.
 	RequireEveryAppliedHost bool
+	// IdentityLock takes the FreeIPA server's /etc/ipa lock. Required when the
+	// playbook is the identity apply playbook, and refused as nil before
+	// anything runs, previews included (it is only an acquirer: a preview never
+	// calls it): this function is the funnel of every deploy and reconcile run
+	// of that playbook, and a new caller that builds its own options must not
+	// be able to leave the lock out (identity_lock_funnel_test.go). The apply
+	// step calls it after every confirmation and before PrepareApply, and the
+	// lock is held until the transaction has ended, covering verify, the
+	// idempotency re-apply and rollback. Ignored for every other playbook: a
+	// component that is not the identity playbook never locks.
+	IdentityLock identitylock.Acquirer
 }
 
 // deploymentRuntimeRaceOptions carries what executeDeploymentTransaction's
@@ -1379,6 +1392,39 @@ type deploymentRuntimeRaceOptions struct {
 // outcome preserves the historical exit-0 cancellation contract while still
 // finalizing an evidence run when one was started.
 func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, options deploymentTransactionOptions) error {
+	identity := identitylock.IsApplyPlaybook(playbook)
+	if identity && options.IdentityLock == nil {
+		return fmt.Errorf("deploy %s: %w", playbook, identitylock.ErrNoLock)
+	}
+	// held is the lock the apply step takes once everything has been confirmed.
+	// Every later step runs under it and it is given back when the transaction
+	// has ended (the deferred Release is after RunResult has returned).
+	var held *identitylock.Held
+	defer func() {
+		if held != nil {
+			_ = held.Release()
+		}
+	}()
+	// commandCtx is the context a playbook run gets: bound to the lock when the
+	// transaction holds one, so that losing it kills the playbook. The context
+	// RunResult and the step evidence use is never bound: a step whose
+	// evidence could not be written would turn `failed` into `evidence_failed`
+	// and hide that the lock was lost.
+	commandCtx := func(ctx context.Context) (context.Context, context.CancelFunc) {
+		if held == nil {
+			return ctx, func() {}
+		}
+		return held.Bind(ctx)
+	}
+	// lockLost is non-nil once a step that ran a command under the lock finds
+	// it gone. Checked after the command, whatever its exit status was: killed
+	// by the loss, it says nothing; exited 0, it did not run under the lock.
+	lockLost := func() error {
+		if held == nil {
+			return nil
+		}
+		return held.Check()
+	}
 	baseArgs := []string{playbook, "-i", inv}
 	if limit != "" {
 		baseArgs = append(baseArgs, "--limit", limit)
@@ -1400,7 +1446,11 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		dryRunFirst = confirmDeployment(promptExecutionPreview, "要先預覽(--check --diff)再決定要不要真的套用嗎？", true)
 	}
 
-	runOnce := func(check, confirm bool) (*ansible.Result, error) {
+	// announce prints the command about to run and asks its confirmation, and
+	// returns the argv. It is split from execute so that the apply step can take
+	// the identity lock after this last prompt and before the command: nobody
+	// holds the lock while a question waits for an answer.
+	announce := func(check, confirm bool) ([]string, error) {
 		mode := "套用"
 		args := baseArgs
 		if check {
@@ -1417,17 +1467,27 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		if confirm && options.Authorization == nil && !confirmDeployment(questionID, question, true) {
 			return nil, delivery.ErrCancelled
 		}
+		return args, nil
+	}
+	execute := func(ctx context.Context, check bool, args []string) (*ansible.Result, error) {
 		if !check && options.RuntimeRace.ResultPath != "" {
 			env := resultCallbackEnv(options.RuntimeRace.CallbackPluginsDir, options.RuntimeRace.ResultPath)
 			return runner.RunWithExtraEnv(ctx, env, args...)
 		}
 		return runner.Run(ctx, args...)
 	}
+	runOnce := func(ctx context.Context, check, confirm bool) (*ansible.Result, error) {
+		args, err := announce(check, confirm)
+		if err != nil {
+			return nil, err
+		}
+		return execute(ctx, check, args)
+	}
 
 	preview := delivery.StepFunc(nil)
 	if dryRunFirst {
 		preview = func(ctx context.Context) error {
-			res, err := runOnce(true, true)
+			res, err := runOnce(ctx, true, true)
 			if err != nil {
 				return err
 			}
@@ -1458,12 +1518,32 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		} else if !confirmDeployment(promptExecutionConfirmApply, "確定要執行正式套用指令嗎？", true) {
 			return delivery.ErrCancelled
 		}
+		args, err := announce(false, dryRunFirst)
+		if err != nil {
+			return err
+		}
+		if identity {
+			// After every prompt and before the first thing that changes FreeIPA
+			// (PrepareApply, then the playbook): see IdentityLock.
+			acquired, err := options.IdentityLock(ctx)
+			if err != nil {
+				return fmt.Errorf("❌ 無法取得 FreeIPA identity 鎖，沒有執行 %s：%w", playbook, err)
+			}
+			held = acquired
+			ctx = held.Attach(ctx)
+			fmt.Fprintf(out, "🔒 已取得 FreeIPA server %s 的 %s 鎖，執行期間持有\n", held.Host, sshdial.DefaultLockPath)
+		}
 		if options.PrepareApply != nil {
 			if err := options.PrepareApply(ctx); err != nil {
 				return err
 			}
 		}
-		res, err := runOnce(false, dryRunFirst)
+		runCtx, cancel := commandCtx(ctx)
+		defer cancel()
+		res, err := execute(runCtx, false, args)
+		if lost := lockLost(); lost != nil {
+			return fmt.Errorf("❌ 套用被中止：%w", lost)
+		}
 		if err != nil {
 			return err
 		}
@@ -1494,7 +1574,12 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 	if options.Idempotency == delivery.IdempotencyAlways || options.Idempotency == delivery.IdempotencyStageGTEStaging {
 		idempotency = func(ctx context.Context) error {
 			fmt.Fprintln(out, "▶ 冪等性檢查：重新套用相同 playbook")
-			res, err := runner.Run(ctx, baseArgs...)
+			runCtx, cancel := commandCtx(ctx)
+			defer cancel()
+			res, err := runner.Run(runCtx, baseArgs...)
+			if lost := lockLost(); lost != nil {
+				return fmt.Errorf("冪等性檢查被中止：%w", lost)
+			}
 			if err != nil {
 				return fmt.Errorf("執行冪等性檢查失敗: %w", err)
 			}
@@ -1512,9 +1597,40 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 			return nil
 		}
 	}
+	verify, rollback := options.Verify, options.Rollback
+	if identity && verify != nil {
+		inner := verify
+		verify = func(ctx context.Context) error {
+			err := inner(ctx)
+			// Read-only, so not cancelled by the loss; but what it read was not
+			// read under the lock, so its result is void.
+			if lost := lockLost(); lost != nil {
+				return fmt.Errorf("驗證結果作廢：%w", lost)
+			}
+			return err
+		}
+	}
+	if identity && rollback != nil {
+		inner := rollback
+		rollback = func(ctx context.Context) error {
+			if held == nil {
+				// The apply step failed before it had the lock (it was busy, or
+				// refused): nothing ran, so there is nothing to roll back, and a
+				// rollback playbook must not run without the lock.
+				return fmt.Errorf("rollback not run: %w", identitylock.ErrNoLock)
+			}
+			runCtx, cancel := commandCtx(ctx)
+			defer cancel()
+			err := inner(runCtx)
+			if lost := lockLost(); lost != nil {
+				return fmt.Errorf("rollback 被中止：%w", lost)
+			}
+			return err
+		}
+	}
 	txn := delivery.Transaction{
-		Preflight: options.Preflight, Preview: preview, Apply: apply, Verify: options.Verify,
-		Idempotency: idempotency, Rollback: options.Rollback,
+		Preflight: options.Preflight, Preview: preview, Apply: apply, Verify: verify,
+		Idempotency: idempotency, Rollback: rollback,
 		Stage: options.Stage, IdempotencyPolicy: options.Idempotency, RollbackPolicy: options.RollbackPolicy,
 	}
 	if options.Writer != nil {
@@ -2046,13 +2162,30 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 		}
 	}
 
+	// The FreeIPA identity playbook runs under the server's /etc/ipa lock, taken
+	// by the apply step after every confirmation (executeDeploymentTransaction).
+	// This is where the host it locks is known: the included hosts of the
+	// freeipa-server role this run was resolved to, which already honor
+	// --limit, target_group and availability.
+	appliedHosts := deploymentAppliedHosts(applied, scope, execScope.Included)
+	var identityLock identitylock.Acquirer
+	if identitylock.IsApplyPlaybook(playbook) {
+		identityLock = newIdentityLock(identityLockRequest{
+			// Non-nil even when empty: none resolved is "0 hosts", refused, not
+			// "resolve the group again".
+			Inventory: inv, Hosts: append([]string{}, appliedHosts...),
+			Wait: identityLockWaitFrom(ctx), Progress: identityLockProgressFrom(ctx),
+		})
+	}
+
 	var txnResult delivery.Result
 	err = executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, deploymentTransactionOptions{
 		Writer: writer, Preflight: preflight, Verify: verify, Rollback: rollback,
 		Stage: stage, Idempotency: delivery.IdempotencyStageGTEStaging, RollbackPolicy: rollbackPolicy,
 		RuntimeRace: runtimeRace, Authorization: authorization, ResultOut: &txnResult,
-		AppliedHosts:            deploymentAppliedHosts(applied, scope, execScope.Included),
+		AppliedHosts:            appliedHosts,
 		RequireEveryAppliedHost: requireEveryHost,
+		IdentityLock:            identityLock,
 	})
 	if resultOut != nil {
 		*resultOut = ComponentDeliveryResult{ComponentIDs: components, RunID: writer.RunID(), Outcome: txnResult.Outcome, FailedStep: txnResult.FailedStep}

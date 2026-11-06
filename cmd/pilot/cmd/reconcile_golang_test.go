@@ -109,81 +109,6 @@ func TestGolangPreviewStageMatchesThePlaybookGate(t *testing.T) {
 	}
 }
 
-func TestSSHTargetFromHostVars(t *testing.T) {
-	// The shape pilot vm-target show-inventory prints.
-	vmTarget := map[string]any{
-		"ansible_connection":           "ssh",
-		"ansible_host":                 "192.168.122.3",
-		"ansible_user":                 "root",
-		"ansible_port":                 22,
-		"ansible_ssh_private_key_file": "/var/lib/libvirt/images/pilot/x/id_ed25519",
-		"ansible_ssh_args":             `-o ControlMaster=auto -o ControlPath="/tmp/pilot-vmt-1000-171a9ac4/%C" -o ControlPersist=60s`,
-		"ansible_ssh_common_args":      "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
-		"ansible_ssh_pipelining":       true,
-	}
-	got, err := sshTargetFromHostVars("ipa-1", vmTarget)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := sshdial.Target{Host: "192.168.122.3", User: "root", Port: 22, IdentityFile: "/var/lib/libvirt/images/pilot/x/id_ed25519",
-		Options: map[string]string{"StrictHostKeyChecking": "no", "UserKnownHostsFile": "/dev/null"}}
-	if got.Host != want.Host || got.User != want.User || got.Port != want.Port || got.IdentityFile != want.IdentityFile || !mapsEqual(got.Options, want.Options) {
-		t.Fatalf("target = %+v\nwant   %+v", got, want)
-	}
-	if got, err := sshTargetFromHostVars("ipa-1.example.test", map[string]any{}); err != nil || got.Host != "ipa-1.example.test" {
-		t.Fatalf("no ansible_host: %+v, %v", got, err)
-	}
-	// Each refusal, with the message of its own gate: a refusal that came
-	// from another check would prove nothing about this one.
-	for _, tc := range []struct {
-		name string
-		vars map[string]any
-		gate string // the gates the case makes fire, comma separated
-		want string // in the error
-	}{
-		{name: "docker connection", vars: map[string]any{"ansible_connection": "docker"}, gate: "ssh-connection", want: "ansible_connection 是 docker"},
-		{name: "password", vars: map[string]any{"ansible_ssh_pass": "x"}, gate: "ssh-unsupported-var", want: "設定了 ansible_ssh_pass"},
-		{name: "legacy host alias", vars: map[string]any{"ansible_ssh_host": "10.0.0.1"}, gate: "ssh-unsupported-var", want: "設定了 ansible_ssh_host"},
-		{name: "an option sshdial does not allow", vars: map[string]any{"ansible_ssh_common_args": "-o ProxyCommand=nc"}, gate: "ssh-validate", want: "ProxyCommand"},
-		{name: "option value with a space", vars: map[string]any{"ansible_ssh_common_args": `-o "ProxyJump=a b"`}, gate: "ssh-validate", want: "ipa-1："},
-		{name: "short jump flag", vars: map[string]any{"ansible_ssh_common_args": "-J bastion"}, gate: "ssh-extra-args,opts-not-dash-o", want: "只接受 -o Key=Value"},
-		{name: "an option without a value", vars: map[string]any{"ansible_ssh_extra_args": "-o StrictHostKeyChecking"}, gate: "ssh-extra-args,opts-not-key-value", want: "不是 Key=Value"},
-		{name: "unbalanced quote", vars: map[string]any{"ansible_ssh_common_args": `-o "UserKnownHostsFile=/x`}, gate: "ssh-extra-args,opts-split,split-quote", want: "引號沒有成對"},
-		{name: "a backslash", vars: map[string]any{"ansible_ssh_extra_args": `-o UserKnownHostsFile=C:\x`}, gate: "ssh-extra-args,opts-split,split-backslash", want: "不支援反斜線跳脫"},
-		{name: "extra args that are not a string", vars: map[string]any{"ansible_ssh_common_args": 5}, gate: "ssh-extra-args,opts-not-string", want: "不是字串"},
-		{name: "ssh_args that do not split", vars: map[string]any{"ansible_ssh_args": `-o "ControlPath=/x`}, gate: "ssh-args-parse,opts-split,split-quote", want: "ansible_ssh_args："},
-		{name: "ssh_args beyond mux", vars: map[string]any{"ansible_ssh_args": "-o ControlMaster=auto -o ForwardAgent=yes"}, gate: "ssh-args-mux", want: "ansible_ssh_args 含 ForwardAgent"},
-		{name: "non-integer port", vars: map[string]any{"ansible_port": "ssh"}, gate: "ssh-port", want: "ansible_port ssh 不是整數"},
-		// A value of another type is refused, not ignored: ignoring
-		// ansible_user 1000 connects as the local user (spec §4).
-		{name: "a numeric ansible_user", vars: map[string]any{"ansible_user": 1000}, gate: "ssh-var-type", want: "ansible_user 是 int，不是字串"},
-		{name: "a list ansible_user", vars: map[string]any{"ansible_user": []any{"root"}}, gate: "ssh-var-type", want: "ansible_user 是 []interface {}，不是字串"},
-		{name: "a boolean ansible_host", vars: map[string]any{"ansible_host": true}, gate: "ssh-var-type", want: "ansible_host 是 bool，不是字串"},
-		{name: "a numeric key file", vars: map[string]any{"ansible_ssh_private_key_file": 7}, gate: "ssh-var-type", want: "ansible_ssh_private_key_file 是 int，不是字串"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Logf("gate: %s", tc.gate)
-			_, err := sshTargetFromHostVars("ipa-1", tc.vars)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v, want %q", err, tc.want)
-			}
-		})
-	}
-	// What is not a refusal: an unset or null value keeps the default.
-	for name, vars := range map[string]map[string]any{
-		"null ansible_user":      {"ansible_user": nil},
-		"null ansible_host":      {"ansible_host": nil},
-		"empty ansible_host":     {"ansible_host": ""},
-		"null key file":          {"ansible_ssh_private_key_file": nil},
-		"numeric string port":    {"ansible_port": "2222"},
-		"float port from a JSON": {"ansible_port": float64(2222)},
-	} {
-		if got, err := sshTargetFromHostVars("ipa-1", vars); err != nil || got.Host != "ipa-1" {
-			t.Errorf("%s: %+v, %v", name, got, err)
-		}
-	}
-}
-
 // The three checks of the playbook's stage gate and the attestation each
 // refuse with their own message; the acceptance matrix above compares the
 // sets, this names the gate that fired (AGENTS.md §5.12).
@@ -220,18 +145,6 @@ func TestGolangPreviewStageRefusals(t *testing.T) {
 			}
 		})
 	}
-}
-
-func mapsEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 const golangTestFQDN = "ipa.example.test"
