@@ -379,10 +379,11 @@ var p24Fixtures = []string{
 	"group-show-after-recreate", "group-show-after-user-del", "group-show-before-member-group-del",
 	"group-show-before-recreate", "group-show-before-user-del", "group-show-cycle", "group-show-marker",
 	"group-show-marker-changed", "group-show-members", "group-show-private-group-after-user-del",
-	"passwd-empty-password", "passwd-few-classes", "passwd-not-found", "passwd-reuse-rejected",
-	"passwd-short-password", "passwd-success", "passwd-success-again", "passwd-success-maxlife0",
-	"pwpolicy-show-classes4", "pwpolicy-show-global-at-capture", "pwpolicy-show-history3",
-	"pwpolicy-show-maxlife0", "user-add-all-options", "user-add-default-mail", "user-add-duplicate-preserved",
+	"group-show-private-group-before-user-del", "passwd-empty-password", "passwd-few-classes",
+	"passwd-not-found", "passwd-reuse-rejected", "passwd-short-password", "passwd-success",
+	"passwd-success-again", "passwd-success-maxlife0", "pwpolicy-show-classes4",
+	"pwpolicy-show-global-at-capture", "pwpolicy-show-history3", "pwpolicy-show-maxlife0",
+	"user-add-all-options", "user-add-default-mail", "user-add-duplicate-preserved",
 	"user-add-empty-displayname", "user-add-empty-givenname", "user-add-empty-homedirectory",
 	"user-add-empty-loginshell", "user-add-empty-mail", "user-add-empty-sn", "user-add-mail-two",
 	"user-add-unknown-option-display-name", "user-add-unknown-option-first", "user-del", "user-del-not-found",
@@ -567,6 +568,7 @@ func (p *p24Capture) captureUserLifecycle() {
 	p.need(p.showAll("user-show-disabled", "user_show", ud), "user-show-disabled")
 
 	p.need(p.showAll("group-show-before-user-del", "group_show", gu), "group-show-before-user-del")
+	p.need(p.showAll("group-show-private-group-before-user-del", "group_show", ux), "group-show-private-group-before-user-del")
 	p.need(p.rpc("user-del", "user_del", []any{ux}, nil), "user-del")
 	p.wantErr(p.rpc("user-del-not-found", "user_del", []any{ux}, nil), "NotFound", "user-del-not-found")
 	p.need(p.showAll("group-show-after-user-del", "group_show", gu), "group-show-after-user-del")
