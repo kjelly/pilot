@@ -2,15 +2,20 @@ package identityreconcile
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kjelly/pilot/internal/gateledger"
 )
@@ -408,30 +413,30 @@ func TestAuthCacheOutput(t *testing.T) {
 	}
 	defer func() { _ = out.Close() }()
 
-	info, err := os.Stat(out.Path)
+	info, err := os.Stat(out.path)
 	if err != nil || info.Mode().Perm() != 0o600 || info.Size() != 0 {
 		t.Fatalf("the result file: %v, %v: want an empty 0600 file", info, err)
 	}
-	if dir, err := os.Stat(filepath.Dir(out.Path)); err != nil || dir.Mode().Perm() != 0o700 {
+	if dir, err := os.Stat(filepath.Dir(out.path)); err != nil || dir.Mode().Perm() != 0o700 {
 		t.Fatalf("the directory: %v, %v: want 0700", dir, err)
 	}
-	if !filepath.IsAbs(out.Path) {
-		t.Fatalf("path %q is not absolute: the playbook refuses a relative one", out.Path)
+	if !filepath.IsAbs(out.path) {
+		t.Fatalf("path %q is not absolute: the playbook refuses a relative one", out.path)
 	}
 
 	// A run writes; the next one starts from an empty file, a new file.
-	if err := os.WriteFile(out.Path, []byte(`{"stale": true}`), 0o600); err != nil {
+	if err := os.WriteFile(out.path, []byte(`{"stale": true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.Stat(out.Path)
-	if err := out.Reset(); err != nil {
+	before, _ := os.Stat(out.path)
+	if err := out.reset(); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := out.Read(); err != nil || len(got) != 0 {
-		t.Fatalf("after Reset: %q, %v", got, err)
+	if got, err := out.read(); err != nil || len(got) != 0 {
+		t.Fatalf("after reset: %q, %v", got, err)
 	}
-	if after, _ := os.Stat(out.Path); os.SameFile(before, after) {
-		t.Fatal("Reset reused the file: a process that kept it open could still write into the next run's result")
+	if after, _ := os.Stat(out.path); os.SameFile(before, after) {
+		t.Fatal("reset reused the file: a process that kept it open could still write into the next run's result")
 	}
 
 	// A symlink put in its place is replaced, not followed; a directory too is replaced.
@@ -439,37 +444,37 @@ func TestAuthCacheOutput(t *testing.T) {
 	if err := os.WriteFile(secret, []byte(`{"from": "elsewhere"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(out.Path); err != nil {
+	if err := os.Remove(out.path); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(secret, out.Path); err != nil {
+	if err := os.Symlink(secret, out.path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := out.Read(); !errors.Is(err, ErrAuthCacheResult) {
-		t.Fatalf("Read of a symlink: %v, want a rejection", err)
+	if _, err := out.read(); !errors.Is(err, ErrAuthCacheResult) {
+		t.Fatalf("read of a symlink: %v, want a rejection", err)
 	}
-	if err := out.Reset(); err != nil {
+	if err := out.reset(); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := out.Read(); err != nil || len(got) != 0 {
-		t.Fatalf("after Reset over a symlink: %q, %v", got, err)
+	if got, err := out.read(); err != nil || len(got) != 0 {
+		t.Fatalf("after reset over a symlink: %q, %v", got, err)
 	}
 	if kept, _ := os.ReadFile(secret); string(kept) != `{"from": "elsewhere"}` {
-		t.Fatalf("Reset wrote through the symlink: %q", kept)
+		t.Fatalf("reset wrote through the symlink: %q", kept)
 	}
 
 	// Oversize is refused before it is read.
-	if err := os.WriteFile(out.Path, bytes.Repeat([]byte("x"), 17<<10), 0o600); err != nil {
+	if err := os.WriteFile(out.path, bytes.Repeat([]byte("x"), 17<<10), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := out.Read(); !errors.Is(err, ErrAuthCacheResult) {
-		t.Fatalf("Read of a 17 KiB file: %v, want a rejection", err)
+	if _, err := out.read(); !errors.Is(err, ErrAuthCacheResult) {
+		t.Fatalf("read of a 17 KiB file: %v, want a rejection", err)
 	}
 
 	// The extra variables: the JSON object form, so a space in the path is kept (key=value
 	// would be split at the blank by Ansible, found when the same was done for -e elsewhere).
-	spaced := &AuthCacheOutput{Path: "/tmp/with space/result.json"}
-	encoded, err := spaced.ExtraVars(AuthCacheProbe)
+	spaced := &AuthCacheOutput{path: "/tmp/with space/result.json"}
+	encoded, err := spaced.extraVars(AuthCacheProbe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,10 +482,10 @@ func TestAuthCacheOutput(t *testing.T) {
 	if err := json.Unmarshal([]byte(encoded), &vars); err != nil {
 		t.Fatalf("%s: %v", encoded, err)
 	}
-	if vars[AuthCacheOutputVar] != spaced.Path || vars[AuthCacheActionVar] != "probe" || len(vars) != 2 {
+	if vars[AuthCacheOutputVar] != spaced.path || vars[AuthCacheActionVar] != "probe" || len(vars) != 2 {
 		t.Fatalf("extra vars %v", vars)
 	}
-	encoded, err = spaced.ExtraVars("")
+	encoded, err = spaced.extraVars("")
 	if err != nil || strings.Contains(encoded, AuthCacheActionVar) {
 		t.Fatalf("the observation takes no action variable: %s, %v", encoded, err)
 	}
@@ -488,7 +493,172 @@ func TestAuthCacheOutput(t *testing.T) {
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(out.Path); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(out.path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Close left the result file: %v", err)
+	}
+}
+
+// The reset cannot be skipped (P2-3 review): Run is the one way to run a playbook
+// that writes the file, it resets before it runs, and the type offers nothing else
+// to call. These rows are the discriminating ones: the same stale result that a
+// caller who forgot the reset would read back as its own.
+
+func authCacheWant() AuthCacheWant {
+	return AuthCacheWant{Action: AuthCachePrepare, Host: "ipa-1", FQDN: "ipa-1.example.test"}
+}
+
+var staleAndPlausible = []byte(`{"schema":"pilot.identity-auth-cache/v1","action":"prepare","host":"ipa-1","fqdn":"ipa-1.example.test","previous":false}`)
+
+func newOutput(t *testing.T) *AuthCacheOutput {
+	t.Helper()
+	out, err := NewAuthCacheOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = out.Close() })
+	return out
+}
+
+func TestAuthCacheOutputRunResetsBeforeEveryRun(t *testing.T) {
+	out := newOutput(t)
+	// An earlier run left a result that is valid for this host: `previous: false`
+	// reads as "nothing was owed", the dangerous answer.
+	if err := os.WriteFile(out.path, staleAndPlausible, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := os.Stat(out.path)
+	var sawEmpty, sawNewFile bool
+	_, err := out.Run(context.Background(), authCacheWant(), func(_ context.Context, vars string) (int, error) {
+		info, serr := os.Stat(out.path)
+		data, _ := os.ReadFile(out.path)
+		sawEmpty = serr == nil && len(data) == 0
+		sawNewFile = serr == nil && !os.SameFile(stale, info)
+		return 0, nil // ansible-playbook exits 0 and writes nothing (no host matched)
+	})
+	if !sawEmpty || !sawNewFile {
+		t.Fatalf("the playbook found the file empty: %v, a new file: %v; the earlier run's result was still there", sawEmpty, sawNewFile)
+	}
+	if !errors.Is(err, ErrAuthCacheResult) || !strings.Contains(err.Error(), "the result file is empty") {
+		t.Fatalf("err = %v: a run that wrote nothing must read as an entry failure, not as the earlier run's result", err)
+	}
+}
+
+func TestAuthCacheOutputRunHandsTheVariablesAndReturnsWhatTheRunWrote(t *testing.T) {
+	out := newOutput(t)
+	var seen map[string]string
+	res, err := out.Run(context.Background(), authCacheWant(), func(_ context.Context, vars string) (int, error) {
+		if err := json.Unmarshal([]byte(vars), &seen); err != nil {
+			return 0, err
+		}
+		return 0, os.WriteFile(seen[AuthCacheOutputVar], staleAndPlausible, 0o600)
+	})
+	if err != nil || res.Action != AuthCachePrepare || res.Previous {
+		t.Fatalf("result %+v, %v", res, err)
+	}
+	if seen[AuthCacheActionVar] != "prepare" || seen[AuthCacheOutputVar] != out.path || len(seen) != 2 {
+		t.Fatalf("extra vars %v", seen)
+	}
+	// The observation is the identity playbook's own: no action variable.
+	obs, err := out.Run(context.Background(), AuthCacheWant{Action: AuthCacheObserve, Host: "ipa-1", FQDN: "ipa-1.example.test"}, func(_ context.Context, vars string) (int, error) {
+		seen = nil
+		if err := json.Unmarshal([]byte(vars), &seen); err != nil {
+			return 0, err
+		}
+		return 0, os.WriteFile(seen[AuthCacheOutputVar], []byte(`{"schema":"pilot.identity-auth-cache/v1","action":"observe","host":"ipa-1","fqdn":"ipa-1.example.test","prepared":true,"dirty":null,"refreshed":false,"acked":true}`), 0o600)
+	})
+	if err != nil || !obs.Acked || obs.Dirty != nil {
+		t.Fatalf("observe %+v, %v", obs, err)
+	}
+	if _, has := seen[AuthCacheActionVar]; has || len(seen) != 1 {
+		t.Fatalf("the observation's extra vars %v", seen)
+	}
+	// A run after it starts from nothing, and reads only what it wrote itself.
+	if _, err := out.Run(context.Background(), authCacheWant(), func(context.Context, string) (int, error) { return 0, nil }); !errors.Is(err, ErrAuthCacheResult) {
+		t.Fatalf("a run after a run that wrote: %v, want the empty file rejected", err)
+	}
+}
+
+func TestAuthCacheOutputRunRefusesWhatTheRunDid(t *testing.T) {
+	out := newOutput(t)
+	write := func(vars string) {
+		var m map[string]string
+		_ = json.Unmarshal([]byte(vars), &m)
+		_ = os.WriteFile(m[AuthCacheOutputVar], staleAndPlausible, 0o600)
+	}
+	// ansible-playbook failed: a result it wrote before failing is not accepted.
+	if _, err := out.Run(context.Background(), authCacheWant(), func(_ context.Context, vars string) (int, error) { write(vars); return 2, nil }); !errors.Is(err, ErrAuthCacheResult) || !strings.Contains(err.Error(), "exited 2") {
+		t.Fatalf("a failed run: %v", err)
+	}
+	// It could not be started: the error is its own, not a parse rejection.
+	boom := errors.New("no ansible-playbook")
+	if _, err := out.Run(context.Background(), authCacheWant(), func(context.Context, string) (int, error) { return 0, boom }); !errors.Is(err, boom) || errors.Is(err, ErrAuthCacheResult) {
+		t.Fatalf("a run that did not start: %v", err)
+	}
+	// Something else put a symlink where the file is, during the run.
+	secret := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(secret, staleAndPlausible, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := out.Run(context.Background(), authCacheWant(), func(context.Context, string) (int, error) {
+		_ = os.Remove(out.path)
+		return 0, os.Symlink(secret, out.path)
+	}); !errors.Is(err, ErrAuthCacheResult) || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("a symlink put in its place during the run: %v", err)
+	}
+	// And a run that wrote the wrong host's result is rejected as before.
+	if _, err := out.Run(context.Background(), AuthCacheWant{Action: AuthCachePrepare, Host: "ipa-2", FQDN: "ipa-1.example.test"}, func(_ context.Context, vars string) (int, error) {
+		write(vars)
+		return 0, nil
+	}); !errors.Is(err, ErrAuthCacheResult) || !strings.Contains(err.Error(), "another host's result") {
+		t.Fatalf("another host's result: %v", err)
+	}
+}
+
+// Two runs do not overlap: the second would reset the file under the first.
+func TestAuthCacheOutputRunsOneAtATime(t *testing.T) {
+	out := newOutput(t)
+	var inside, most atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = out.Run(context.Background(), authCacheWant(), func(context.Context, string) (int, error) {
+				n := inside.Add(1)
+				for {
+					m := most.Load()
+					if n <= m || most.CompareAndSwap(m, n) {
+						break
+					}
+				}
+				time.Sleep(2 * time.Millisecond)
+				inside.Add(-1)
+				return 0, nil
+			})
+		}()
+	}
+	wg.Wait()
+	if most.Load() != 1 {
+		t.Fatalf("%d runs overlapped", most.Load())
+	}
+}
+
+// The type offers Run and Close and nothing a caller could use to skip the reset:
+// no exported Reset, Read or ExtraVars, no exported path. A new exported method or
+// field must be added to the list on purpose, with the reason it cannot skip it.
+func TestAuthCacheOutputOffersOnlyRun(t *testing.T) {
+	typ := reflect.TypeOf(&AuthCacheOutput{})
+	var methods []string
+	for i := 0; i < typ.NumMethod(); i++ {
+		methods = append(methods, typ.Method(i).Name)
+	}
+	if want := []string{"Close", "Run"}; !slices.Equal(methods, want) {
+		t.Fatalf("exported methods = %v, want %v", methods, want)
+	}
+	elem := typ.Elem()
+	for i := 0; i < elem.NumField(); i++ {
+		if elem.Field(i).IsExported() {
+			t.Fatalf("exported field %s: a caller could read the path and run without Run", elem.Field(i).Name)
+		}
 	}
 }

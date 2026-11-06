@@ -2,6 +2,7 @@ package identityreconcile
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/kjelly/pilot/internal/secretpath"
 )
@@ -296,15 +298,25 @@ func RenderAuthCacheResult(res AuthCacheResult) ([]byte, error) {
 	return json.Marshal(out)
 }
 
-// AuthCacheOutput is the result file of one run of an entry or an observing
+// AuthCacheOutput is the result file of the runs of an entry or an observing
 // playbook: an empty 0600 file that Go makes before ansible-playbook starts, in a
 // private directory, and reads after it. The playbook fills it on the controller.
 // An empty file after the run is the proof that nothing was written, which no exit
 // code gives.
+//
+// The only way to run a playbook that writes the file is Run, which makes the
+// file empty again as a new file before it starts the playbook, every time. There
+// is no other way to learn the path or the extra variables, and no exported Reset
+// or Read to call, so the reset cannot be skipped by a caller that forgets it:
+// a run that shares the path with an earlier one would otherwise read back the
+// earlier run's result as its own, and a stale "acknowledged" would pass for this
+// run's (spec §5.4; the P2-3 review asked for this enforcement, or a nonce in the
+// result that the playbook echoes, which would change the entry playbook and need
+// a live run of its own; TestAuthCacheOutputOffersOnlyRun holds the shape).
 type AuthCacheOutput struct {
-	// Path is the absolute path to hand the playbook as AuthCacheOutputVar.
-	Path string
+	path string
 	dir  string
+	mu   sync.Mutex // one run at a time: a second Run would reset the file under the first
 }
 
 // NewAuthCacheOutput makes the private directory and the empty result file.
@@ -313,34 +325,69 @@ func NewAuthCacheOutput() (*AuthCacheOutput, error) {
 	if err != nil {
 		return nil, fmt.Errorf("make the directory for the authorization cache result: %w", err)
 	}
-	out := &AuthCacheOutput{Path: filepath.Join(dir, "result.json"), dir: dir}
-	if err := out.Reset(); err != nil {
+	out := &AuthCacheOutput{path: filepath.Join(dir, "result.json"), dir: dir}
+	if err := out.reset(); err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
 	return out, nil
 }
 
-// Reset makes the file empty again, as a new file: whatever an earlier run left in
+// AuthCacheCommand is one run of ansible-playbook that writes the result file:
+// it is handed the extra variables (a JSON object for -e) that carry the file's
+// path, and returns ansible-playbook's exit code, or an error when it could not
+// run it at all. It must not read or write the file itself.
+type AuthCacheCommand func(ctx context.Context, extraVars string) (exitCode int, err error)
+
+// Run runs the playbook once through run and returns what it wrote: it makes the
+// file a new empty one, hands run the extra variables, and then reads the file and
+// accepts it only as ParseAuthCacheResult does, with the exit code run returned.
+// For the entry's modes (prepare and probe) the extra variables also carry the
+// mode; for observe the playbook is the identity playbook, which has its own.
+func (o *AuthCacheOutput) Run(ctx context.Context, want AuthCacheWant, run AuthCacheCommand) (AuthCacheResult, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if err := o.reset(); err != nil {
+		return AuthCacheResult{}, err
+	}
+	var mode AuthCacheAction
+	if want.Action == AuthCachePrepare || want.Action == AuthCacheProbe {
+		mode = want.Action
+	}
+	vars, err := o.extraVars(mode)
+	if err != nil {
+		return AuthCacheResult{}, err
+	}
+	code, err := run(ctx, vars)
+	if err != nil {
+		return AuthCacheResult{}, fmt.Errorf("run the authorization cache playbook: %w", err)
+	}
+	data, err := o.read()
+	if err != nil {
+		return AuthCacheResult{}, err
+	}
+	return ParseAuthCacheResult(code, data, want)
+}
+
+// reset makes the file empty again, as a new file: whatever an earlier run left in
 // it, or a file that something else put in its place, is gone. A run that is
-// handed the path after Reset can only read back what it wrote itself. Call it
-// before every ansible-playbook run that shares the path (spec §5.4).
-func (o *AuthCacheOutput) Reset() error {
-	if err := os.Remove(o.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+// handed the path after reset can only read back what it wrote itself.
+func (o *AuthCacheOutput) reset() error {
+	if err := os.Remove(o.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("clear the authorization cache result file: %w", err)
 	}
-	f, err := os.OpenFile(o.Path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.OpenFile(o.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("create the authorization cache result file: %w", err)
 	}
 	return f.Close()
 }
 
-// Read returns the file's contents. It refuses a file that is not a regular
+// read returns the file's contents. It refuses a file that is not a regular
 // file or that holds more than a result can: a symlink or a device put in its
 // place would be read as if the playbook had written it.
-func (o *AuthCacheOutput) Read() ([]byte, error) {
-	info, err := os.Lstat(o.Path)
+func (o *AuthCacheOutput) read() ([]byte, error) {
+	info, err := os.Lstat(o.path)
 	if err != nil {
 		return nil, fmt.Errorf("read the authorization cache result file: %w", err)
 	}
@@ -350,14 +397,14 @@ func (o *AuthCacheOutput) Read() ([]byte, error) {
 	if info.Size() > authCacheMaxBytes {
 		return nil, authCacheReject("the result file is %d bytes, more than the %d a result can be", info.Size(), authCacheMaxBytes)
 	}
-	return os.ReadFile(o.Path)
+	return os.ReadFile(o.path)
 }
 
-// ExtraVars is the JSON object form of -e that hands the playbook the path (and
+// extraVars is the JSON object form of -e that hands the playbook the path (and
 // the entry's action, when it is not empty): the form that survives a path with a
 // space in it, which key=value does not (Ansible splits the value at the blank).
-func (o *AuthCacheOutput) ExtraVars(action AuthCacheAction) (string, error) {
-	vars := map[string]string{AuthCacheOutputVar: o.Path}
+func (o *AuthCacheOutput) extraVars(action AuthCacheAction) (string, error) {
+	vars := map[string]string{AuthCacheOutputVar: o.path}
 	if action != "" {
 		vars[AuthCacheActionVar] = string(action)
 	}
