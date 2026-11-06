@@ -12,6 +12,7 @@ import json
 import unittest
 
 import test_target_reuse as ttr  # imported as a module so its TestCases are not collected twice
+from controller_fixture import add_controller, fixture_files
 from test_repo_evidence import commit, git, re_
 from test_target_reuse import Link
 
@@ -47,8 +48,9 @@ class NonExecutionBase(ttr.ReuseHelpers):
         self.root = git(self.wt, "rev-parse", "main")
 
     def record(self, *, unresolved=None, external=None, patterns=("src/dependency*.go",),
-               files=("src/app.go", "src/dependency.go"), **top):
-        """A pilot-evidence-record for the candidate, committed as the evidence-only artifact."""
+               files=("src/app.go", "src/dependency.go"), controller=False, **top):
+        """A pilot-evidence-record for the candidate, committed as the evidence-only artifact.
+        `controller` adds the synthetic typed proof (the candidate must hold `controller_inputs()`)."""
         ctx = self.ctx()
         tree = ctx.tree_entries(self.candidate)
         record = {"schema": "pilot-evidence-record/v1", "outcome": "success",
@@ -59,6 +61,8 @@ class NonExecutionBase(ttr.ReuseHelpers):
                               "unresolved": UNRESOLVED if unresolved is None else unresolved,
                               "external": EXTERNAL if external is None else external}}
         record.update(top)
+        if controller:
+            add_controller(record)
         commit(self.wt, ART, "<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(record) + "\n```\n")
         return record
 
@@ -85,6 +89,11 @@ class NonExecutionBase(ttr.ReuseHelpers):
 
     def unrelated(self, path, reason=REASON):
         return [{"path": path, "reason": reason}]
+
+    @staticmethod
+    def controller_inputs():
+        """The candidate files the synthetic controller proof hashes (profile, go.mod, go.sum, main.go)."""
+        return {"src/app.go": "package app\n", **{p: raw.decode() for p, raw in fixture_files().items()}}
 
 
 PROSE_IMPORT = {".agents/skills/x/SKILL.md": "rule\n", ".agents/skills/x/scripts/gate.py": "print()\n",
@@ -214,6 +223,50 @@ class Phase1NonExecutionImportTests(NonExecutionBase):
                  "summary": "VM target chain and failure paths passed on the candidate."}
         self.assertEqual([], self.ctx().check_required([entry]))
 
+    def test_malformed_unresolved_or_external_entries_are_refused_not_raised(self):
+        """The automatic path trusts nothing about an incomplete closure's entries until they are typed.
+
+        `_closure_reach` reads `entry.get("from")` of every unresolved entry: a non-object one would
+        raise out of the gate, and a non-string external entry would be skipped as if it named nothing.
+        """
+        self.build(main=PROSE_IMPORT)
+        reason = "machine record: closure unresolved/external entries are malformed"
+        for label, kw in (("bare-string unresolved entry", {"unresolved": ["files/{{ name }}.md"]}),
+                          ("null unresolved entry", {"unresolved": [None]}),
+                          ("unresolved is not a list", {"unresolved": "ambient plugin discovery"}),
+                          ("non-string external entry", {"external": [3]}),
+                          ("object external entry", {"external": [{"ref": "/home/operator/.vault/x.yaml"}]}),
+                          ("external is not a list", {"external": "/home/operator/.vault/sandbox.yaml"})):
+            with self.subTest(label):
+                self.record(**kw)
+                try:
+                    ok, ctx = self.auto()
+                except Exception as exc:  # the guard must refuse; an escaping exception is the bug
+                    self.fail(f"{label}: raised {type(exc).__name__}: {exc}")
+                self.assertFalse(ok, "accepted, expected: " + reason)
+                self.assertIn(reason, ctx.target_stale_reason(self.candidate))
+        # The same topology and the same closure with well-formed entries is a kept record.
+        self.record()
+        ok, ctx = self.auto()
+        self.assertTrue(ok, ctx.target_stale_reason(self.candidate))
+
+    def test_a_complete_closure_still_needs_the_controller_proof_on_the_automatic_path(self):
+        """`allow_incomplete` relaxes only the unresolved/external refusal, never the controller proof."""
+        reason = "controller proof: missing current OCI proof"
+        self.build(candidate=self.controller_inputs(), main=PROSE_IMPORT)
+        record = self.record(unresolved=[], external=[], files=("src/app.go", "src/dependency.go"))
+        self.assertEqual(([], []), (record["closure"]["unresolved"], record["closure"]["external"]))
+        self.assertNotIn("controller", record, "precondition: a complete closure with no proof")
+        self.assertAutoRejected(reason)
+        # The reviewer path (allow_incomplete too, because the item declares rerun_paths) is the same guard.
+        self.assertReviewedRejected(reason)
+        # Control: the identical graph and closure with the typed proof is a kept record, so the proof
+        # is the only thing the refusals above rest on.
+        self.record(unresolved=[], external=[], controller=True)
+        ok, ctx = self.auto()
+        self.assertTrue(ok, ctx.target_stale_reason(self.candidate))
+        self.assertEqual("non-execution-base-import", ctx.report()["delta_accepted"][-1]["method"])
+
     def test_manifest_validation(self):
         bad = {**MANIFEST, "non_execution_paths": ["**"]}
         self.assertTrue(any("non_execution_paths[0]" in e for e in re_.validate_manifest(bad)))
@@ -238,6 +291,29 @@ class Phase3ReviewedIncompleteClosureTests(NonExecutionBase):
         # Declared non-execution imports need no entry; the runtime one does.
         self.assertReviewedRejected("closure has unresolved or external inputs; base import outside the closure "
                                     "needs a reviewed unrelated_runtime_changes entry: playbooks/apply/other.yml")
+
+    def test_closure_reach_is_evaluated_before_the_declared_non_execution_skip(self):
+        """A declared non-execution file that the closure can reach still refuses a reviewed reuse.
+
+        `.agents/hooks/a.md` is declared non-execution, which on its own would let a reviewed import
+        pass it by. A recorded search pattern names it, so the run may have read it. It is imported
+        beside a runtime file the reviewer did explain, so only the reach guard, ordered before the
+        non-execution skip, rejects.
+        """
+        other, hook = "playbooks/apply/other.yml", ".agents/hooks/a.md"
+        patterns = ("src/dependency*.go", ".agents/hooks/*.md")
+        self.build(fork={hook: "v1\n"}, main={hook: "v2\n", other: "- hosts: other\n"})
+        self.record(patterns=patterns)
+        self.assertTrue(self.ctx().non_execution_path(hook), "precondition: declared non-execution")
+        self.assertReviewedRejected("base import is reachable from the recorded closure "
+                                    "(closure search pattern .agents/hooks/*.md): " + hook,
+                                    unrelated_runtime_changes=self.unrelated(other))
+        # Control: without the reachable file the same reviewed reuse is accepted.
+        self.build(fork={hook: "v1\n"}, main={other: "- hosts: other\n"})
+        self.record(patterns=patterns)
+        ok, ctx = self.reviewed(unrelated_runtime_changes=self.unrelated(other))
+        self.assertTrue(ok, ctx.target_stale_reason(self.candidate))
+        self.assertEqual("reviewed-base-integration", ctx.report()["delta_accepted"][-1]["method"])
 
     def test_rerun_paths_cannot_be_waived(self):
         for path in ("internal/x/y.go", "src/unrelated.go", "go.mod", "images/Dockerfile"):
