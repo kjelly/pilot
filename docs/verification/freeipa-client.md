@@ -126,8 +126,10 @@ SSH key（或 GSSAPI）登入、但 FreeIPA 密碼已過期的人在拿到 shell
   同一個改密碼在 34.8 秒內成功，沒有任何清快取指令。`sssctl domain-status` 的 Online 欄位會落後實際狀態。
 - `always` 的代價（一台 client 的 A-B-A 量測）：每個「距離使用者上一個 PAM 請求超過 5 秒、而使用者已有 session」的 PAM 請求
   多一次後端使用者查詢（約 4 個 LDAP 搜尋），每次多約 10 ms，登入時間沒有變長；高負載主機與 FreeIPA 伺服器端的負載沒有量。
-- 未完成：A16（sudo cache 交叉，#267）。SSH 公鑰在使用者被快取後才加入時要等一段時間才可用（#269）。這些不屬於本功能的行為，
-  但會影響測試與操作。
+- A16（sudo cache 與密碼過期交叉，#267）：PAM 的過期狀態與 sudo 規則是兩個獨立的更新機制。把使用者加進 sudo 規則後，PAM 在改密碼後
+  約 2 秒就是 `Success`，但規則要等後端的 `SUDO Smart Refresh`（預設每 900 秒）才生效（實測 647 秒與 900 秒，`always` 與預設
+  scheme 都一樣），與 `renew` 無關，沒有用任何清快取指令。新帳號加進規則後，最久約 15 分鐘沒有 sudo。
+- SSH 公鑰在使用者被快取後才加入時要等一段時間才可用（#269）。這不屬於本功能的行為，但會影響測試與操作。
 
 **這台 client 從 FreeIPA 拿到什麼（AAA）**：
 - **Authentication（認證）**：帳號與 Kerberos 身分來自 FreeIPA，經 SSSD 提供給 NSS/PAM
