@@ -282,9 +282,9 @@ ansible-playbook -i inventory-freeipa.yaml \
 這一段是程式碼的行為說明，**還沒有對真實 sshd 實跑驗證**，驗證結果會寫進該 PR 的 evidence
 record，不在這裡累積）：`pilot deploy`／`pilot reconcile` 選到 freeipa-identity、`pilot access
 reconcile --once`、`pilot access breakglass activate`／`deactivate`、`pilot access drift`／`pilot
-identity drift` 的 `--repair-managed`、`pilot edit` 的 break-glass 與 `pilot host decommission`
-的 identity 收斂，都在最後一個確認之後、送出 playbook 之前取鎖，playbook（含冪等性再套用）結束
-才放。別的 pilot 執行持有鎖時 CLI 最多等 30 分鐘（`pilot reconcile --lock-wait` 可調，`0` 是忙碌
+identity drift` 的 `--repair-managed`、`pilot edit` 的 break-glass，都在最後一個確認之後、送出
+playbook 之前取鎖，playbook（含冪等性再套用）結束才放；`pilot host decommission` 的鎖屬於整輪，
+在 approval 之後、第一個步驟（client 的 uninstall）之前取，整輪結束才放（見下面第 9 點）。別的 pilot 執行持有鎖時 CLI 最多等 30 分鐘（`pilot reconcile --lock-wait` 可調，`0` 是忙碌
 就立即失敗；`pilot edit` 的 TUI 不等待，訊息會指向 `pilot access breakglass activate`）。
 freeipa-server 主機若用 docker／local connection、ProxyCommand、密碼 SSH、`ansible_ssh_executable`
 或不在 allowlist 的 `-o`，這些入口會拒絕並指出是哪個 hostvar，**不會無鎖執行**；而且是在任何
@@ -333,6 +333,17 @@ ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（�
 8. **apply 的 rollback 收不回已生效的 breakglass 啟用**：scenario 裡 `activate_breakglass` 之後的步驟失敗時，
    workspace 的檔案會還原，但啟用已在 FreeIPA 生效、也已記錄。把 breakglass 步驟放在 scenario 最後，或失敗後
    用 `pilot access breakglass status` 檢查並 `deactivate`。
+9. **`pilot host decommission apply`／`resume` 在第一個步驟之前取鎖**（有 FreeIPA client 的 converge 步驟的 plan；
+   TUI 的下架流程是同一個函式）。順序是：stage 確認、provider 的建立與取鎖前檢查、記錄 approval、**取鎖**（最多等
+   30 分鐘）、client 的 uninstall、roster 的 tombstone、identity 收斂、驗證與 finalize，最後才放鎖。鎖忙碌、等待逾時、
+   等待中 Ctrl-C／SIGTERM 或被拒絕時，**沒有任何步驟執行**：client 仍 enrolled、roster 與 `hosts.yml` 不變、server 不變，
+   approval 保留，錯誤訊息寫明 `was not started`。鎖空出來之後，用同一份 plan 跑 `pilot host decommission resume
+   --id <plan>` 或再跑一次 `apply --confirm-host <host>` 都能繼續，不必重新 plan。（修正之前鎖取在最後的 identity 收斂
+   步驟：被中斷的 apply 已經先把 client 解除 enrollment。這個修正改的是鎖何時取；一個 workspace 若沒有設選用的
+   `ipa_client_fqdn`，uninstall 之後的 SSH 快取退役檢查會失敗，那是另一個既有缺口〔issue #303〕，與鎖無關，這個修正
+   也沒有改變它。）一輪開始之後掉鎖（網路中斷約 45 秒、ssh 結束）：執行中的 playbook 被殺，這一輪以 `lock lost`
+   結束、不啟動下一個步驟；client 可能已部分或全部解除 enrollment，要重跑，之後能不能 `resume` 取決於 workspace 是否
+   有效（`ipa_client_fqdn`）。已完成的 plan 重跑只重播 receipt，不取鎖。
 
 ### 4.4 只跑一部分（tags）
 
