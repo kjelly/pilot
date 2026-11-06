@@ -167,11 +167,25 @@ def covers_head(ctx: Any, value: Any, sha: Any, label: str) -> bool:
     return value == sha or (ctx is not None and ctx.accepts(value, label))
 
 
-def stale_detail(ctx: Any, value: Any) -> str:
+def review_covers_head(ctx: Any, value: Any, sha: Any, label: str) -> bool:
+    """A review (never a check receipt) taken at `value` covers HEAD: `covers_head`, or every
+    change since is evidence-only or a pure import of the base manifest's non_execution_paths.
+    Check receipts stay on `covers_head`: imported test files must run against the PR's code."""
+    if value == sha:
+        return True
+    if ctx is None:
+        return False
+    try:
+        return ctx.accepts_review(value, label)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def stale_detail(ctx: Any, value: Any, *, review: bool = False) -> str:
     if ctx is None or not isinstance(value, str):
         return ""
     try:
-        return " (" + ctx.stale_reason(value) + ")"
+        return " (" + (ctx.review_stale_reason(value) if review else ctx.stale_reason(value)) + ")"
     except (OSError, RuntimeError, ValueError):
         return ""
 
@@ -803,8 +817,9 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
     else:
         if r.get("agent") != "pr-reviewer":
             errs.append("Independent pr-reviewer agent is not identified")
-        if not covers_head(ctx, r.get("head_sha"), sha, "independent_review"):
-            errs.append("Independent reviewer result stale for current HEAD" + stale_detail(ctx, r.get("head_sha")))
+        if not review_covers_head(ctx, r.get("head_sha"), sha, "independent_review"):
+            errs.append("Independent reviewer result stale for current HEAD"
+                        + stale_detail(ctx, r.get("head_sha"), review=True))
         if r.get("status") != "PASS" or r.get("blocking_findings") != []:
             errs.append("Independent review has not passed / still has blocking findings")
         if not isinstance(r.get("report"), str) or len(r["report"].strip()) < 12:

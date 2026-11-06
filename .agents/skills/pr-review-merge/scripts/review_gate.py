@@ -231,7 +231,7 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
     else:
         rev = rev.lower()
         try:
-            if not ctx.accepts_target(rev, "target_validation", tv.get("target_reuse"), art):
+            if not ctx.accepts_target(rev, "target_validation", tv.get("target_reuse"), art, item["id"]):
                 gaps.append(f"{need}; the run at {rev[:12]} does not cover HEAD {head[:12]} ({ctx.target_stale_reason(rev)})")
         except (GitHubError, ValueError, KeyError) as exc:
             gaps.append(f"{need}; cannot verify that the run at {rev[:12]} covers HEAD: {exc}")

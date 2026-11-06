@@ -6,9 +6,15 @@ waiver for merging main. The manifest on the current base must declare
 `required_evidence[].kind: target-run`; untyped required records, including CI or
 coverage URLs, retain the existing strict comparison.
 
-The default remains exact candidate/HEAD equality or an evidence-only delta. For
-an advanced base merged into the candidate branch, a fresh independent reviewer
-may add `target_reuse` to the required target record. `issue-to-pr` puts it on the
+The default remains exact candidate/HEAD equality or an evidence-only delta. Two
+more ways keep the record after an advanced base is merged into the candidate
+branch:
+
+- **Declared non-execution import (no attestation).** When every file main brought
+  in is one the base manifest declares a target run never reads, the gate keeps the
+  record by itself (see "Declared non-execution imports" below).
+- **Reviewed import.** Otherwise a fresh independent reviewer may add `target_reuse`
+  to the required target record. `issue-to-pr` puts it on the
 `repo_required_evidence[]` entry; the other workflows put it inside
 `target_validation`. The original tested revision and artifact are retained.
 
@@ -66,7 +72,9 @@ an independent substantive review of this HEAD/base. A short list containing onl
 PR-changed files is not sufficient dependency analysis.
 
 `Context.accepts()` is unchanged: review judgments, disputed claims, local check
-receipts and CI do not use this target-only exception. The final merge review
+receipts and CI do not use the reviewed exception. The one exception for reviews is
+the declared non-execution import below (`Context.accepts_review`, used by
+`pr-ready`'s gate for `independent_review` only). The final merge review
 must still match current HEAD/base, and current-HEAD CI must pass. An actual-run
 record is not a current-HEAD CI receipt. Do not change its tested SHA to HEAD.
 
@@ -74,6 +82,42 @@ The shared local implementation lives in `issue-to-pr/scripts/repo_evidence.py`.
 The remote verifier in `pr-review-merge/scripts/review_gate.py` supplies complete
 GitHub trees to the same algorithm; `pr-ready` calls that same read-only target
 validator before Ready, and checks it again immediately before mutation.
+
+## Declared non-execution imports
+
+The base manifest may declare, at top level, `non_execution_paths` (globs of files a
+target run never reads) and `non_execution_exclude` (globs that never count, even
+when a `non_execution_paths` glob matches). A path matching a `required_paths` glob of
+any required record is never non-execution either. This repository declares agent
+skills (`.agents/**`), top-level and `docs/` Markdown except specs
+(`docs/verification/**`), Go test files and `.github/**`: the pilot binary is built
+without `*_test.go`, and no playbook, spec, contract or inventory reads the others.
+
+For a `kind: target-run` record, with no `target_reuse` at all, the gate accepts the
+original candidate when:
+
+1. the candidate and the current base are ancestors of HEAD, from a single common fork
+   that predates both (the same topology as check 1 above);
+2. every path changed from the candidate to HEAD is evidence-only, or a pure base
+   import (candidate equals the fork, HEAD equals the current base) of a regular file
+   that is a declared non-execution path. A PR-side edit, a merged blend of both sides,
+   a symlink or a submodule is not;
+3. for a machine record, the record itself still holds (candidate commit/tree, clean,
+   successful, `resolution_version: 10`, frozen, recorded blobs and search membership),
+   and nothing in its closure can reach an imported path: not a closure file, not a
+   search pattern, not the `from` of an unresolved entry, and not an unresolved or
+   external reference read as a suffix glob (a Jinja expression becomes `*`; labels,
+   absolute paths and references that are only a variable name match nothing). The
+   closure may have unresolved or external inputs: the question is only whether an
+   imported file can be an input, and the same record is accepted at its exact
+   candidate. A hand-written record has no closure to consult and relies on the
+   declaration.
+
+`pr-ready`'s gate applies the same proof to `independent_review`: the PR's own content
+is byte-identical to what was reviewed. Local check receipts never use it: an imported
+Go test must run against the PR's code, so receipts are rerun for the packages the
+import touches, and current-HEAD CI is required as before. Accepted imports are
+reported under `delta_accepted` with `method: non-execution-base-import`.
 
 ## Machine-generated records
 
@@ -85,9 +129,11 @@ then compares those files with HEAD. Search patterns also bind membership, so a
 new include glob match, copied directory member or earlier search-path match
 requires a new run even when all old files are unchanged.
 
-Unresolved references, external inputs, malformed records and older machine
-records without `closure.patterns`, `closure.resolution_version: 10`, or
-`closure.frozen: true` fail closed. Run again with resolved inputs
+Malformed records and older machine records without `closure.patterns`,
+`closure.resolution_version: 10`, or `closure.frozen: true` fail closed. Unresolved
+references and external inputs fail the reviewed path closed unless the record's
+manifest item declares `rerun_paths` (see "Reviewed imports outside an incomplete
+closure" below). Run again with resolved inputs
 instead of overriding the machine result with a manual list. Legacy hand-written
 records retain the full manual dependency review above. The independent reviewer
 still confirms the current HEAD/base and audits non-execution changes; runtime
@@ -144,3 +190,52 @@ row diagnostics, successful probe/rc/status, summary counts and every selected
 host at an exact host/group limit. Missing export, malformed frames or partial
 rows cannot be replaced by an aggregate PASS. Decoded V1 command expressions or argument escapes
 that can perform controller-side Jinja lookups retain unresolved markers.
+
+## Reviewed imports outside an incomplete closure
+
+A machine record from the default (ambient) controller never has a complete closure:
+resolver version 10 proves only literal `copy` and `debug.msg`, so templates, facts,
+assertions, includes and every Jinja or `when:` expression stay unresolved, and a vault
+is always external. `--evidence-controller=pinned` clears only the ambient entries. For
+such a record the reviewed path above would never apply, and every base integration
+that brought in runtime files would need a new run.
+
+When the record's `kind: target-run` manifest item declares `rerun_paths`, the reviewed
+path accepts a machine record whose closure has unresolved or external inputs. The
+machine closure still supplies `execution_paths`, the controller proof is not required
+(it answers whether the closure is complete, which this path does not rely on), and
+`target_reuse` adds one list:
+
+```json
+"unrelated_runtime_changes": [
+  {"path": "playbooks/apply/other-component-apply.yml",
+   "reason": "Another component's playbook: no include, lookup, template or spec of this run names it."}
+]
+```
+
+Every changed path from the candidate to HEAD must then be evidence-only, an audited
+non-execution edit (check 4 above), or a pure base import, and each pure base import
+must pass, in this order:
+
+1. nothing in the closure can reach it (the same closure-reach test as the declared
+   non-execution import): a recorded input cannot be explained away;
+2. it is a regular file;
+3. it is a declared non-execution path (no entry needed), or
+4. it matches no `rerun_paths` glob: those always need a new run, whatever the
+   explanation. This repository lists the compiled pilot sources (`cmd/**`,
+   `internal/**`, every non-test `.go`, `go.mod`/`go.sum`/`go.work*`), since a default
+   record has no Go closure, plus `images/**`, `contracts/**`, `group_vars/**`,
+   `host_vars/**`, `ansible.cfg`, `requirements.yml` and the shared playbook
+   `tasks/`, `templates/` and `files/` directories, which dynamic includes and
+   lookups reach;
+5. it has an `unrelated_runtime_changes` entry (exact path, 30+ character reason).
+
+An entry must name a changed path, once, outside `execution_paths` and the audited
+edits. Entries on a hand-written record, or on a machine record with a complete closure,
+are refused: those already accept pure base imports outside their scope. Without
+`rerun_paths` on the item, an incomplete closure fails closed as before. Accepted
+reviews are reported with `closure_complete: false` and the entries.
+
+What remains the reviewer's judgment: that an imported runtime file outside the closure
+is not named by a reference the resolver could not read (a variable path, a computed
+include). A file the closure names, or a path in `rerun_paths`, is never left to it.

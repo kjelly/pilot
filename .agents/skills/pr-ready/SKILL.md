@@ -117,7 +117,9 @@ to answer. These rules remove that cost without weakening a gate:
    since matches the base manifest's `evidence_only_paths` (the rule `issue_gate.py` already
    applies; the gate lists accepted deltas under `receipt_reuse`). Order the work
    accordingly: freeze the code, review it, run the target evidence on that commit, commit
-   the record, let the receipts carry over. `evidence.head_sha` still names HEAD.
+   the record, let the receipts carry over. `evidence.head_sha` still names HEAD. The
+   review (not the receipts) also survives a merge of main that brought in only the base
+   manifest's `non_execution_paths` (rule 5).
 3. **P3/P4 close the round; they do not start another.** When the reviewer returns PASS
    with only P3/P4 remarks, do not dispatch a Coder: reply, resolve the thread, and record
    them under "Not in this PR" in the PR body or in a follow-up issue. Fix one in the same
@@ -125,22 +127,34 @@ to answer. These rules remove that cost without weakening a gate:
 4. **One reviewer per round over the whole diff**; a delta review only for a delta. Two
    reviewers split by layer doubled the cost and still missed the defects the merge review
    found afterwards.
-5. **Align with the latest base before Ready.** Independently read the current
-   base ref (`main` here) and require that exact commit to be an ancestor of PR
+5. **Align with the latest base once, right before Ready.** Independently read the
+   current base ref (`main` here) and require that exact commit to be an ancestor of PR
    HEAD, even when GitHub reports no conflicts and PR Base SHA equals the live tip.
    When behind, integrate the verified base into the original head branch using
    a merge commit under the checkout contract; no force-push. A feature HEAD
    normally differs from main: SHA equality of HEAD and main is not required.
    Reconcile any PR Base/live-base metadata mismatch as well. Before Ready,
-   `pr_gate.py` verifies both metadata and ancestry against the live remote;
-   rerun affected validation/CI and obtain fresh independent review after base
-   integration. Repeat alignment if main advances before the final gate.
+   `pr_gate.py` verifies both metadata and ancestry against the live remote.
+   Do it once, after the code is frozen and reviewed, not in every round: do not
+   restart a round because main moved while the round was running. If main moves after
+   Ready, `pr-review-merge` sends the PR back and the align-only path below applies.
+   What an integration costs depends on what main brought in (the gate computes it;
+   `$SNAP/.agents/skills/_shared/target-evidence-reuse.md`):
+   - **Only `non_execution_paths`** (skills, prose, Go tests, `.github/**`): the
+     **align-only path**. Merge, push, rerun the local receipts for the packages the
+     imported files touch (an imported Go test or lint runs against the PR's code), wait
+     for current-HEAD CI, rerun the gate. The target record and the independent review
+     carry over without attestation; no Coder, SA or full reviewer.
+   - **Runtime files outside the target record's closure** (another component's playbook
+     or spec): a delta review of the merge writes `target_reuse` with
+     `unrelated_runtime_changes`; no new target run. A file the closure reaches, or one in
+     the item's `rerun_paths` (compiled Go, contracts, group_vars, shared task/template
+     directories), needs a new candidate and run.
+   - Any conflict resolution is a PR-side edit: a conflict confined to Markdown
+     (changelog rows, runbook wording) is an audited non-execution edit in `target_reuse`
+     plus a delta review; a conflict in an execution-affecting file is a new candidate.
    If access or metadata still prevents reconciliation, keep Draft with the exact
-   observed SHAs and blocker. A conflict confined to Markdown (changelog rows, runbook wording) is a
-   non-execution edit: keep the target evidence through `target_reuse`
-   (`$SNAP/.agents/skills/_shared/target-evidence-reuse.md`), rerun the touched-package
-   receipts and a delta review. A conflict in an execution-affecting file is a new
-   candidate.
+   observed SHAs and blocker.
 6. **A bounced PR gets the merge reviewer's rubric before Ready.** When the PR carries an
    `Automated PR review: Draft required` comment, the final review round also follows
    [the merge gate's reviewer definition](../pr-review-merge/platforms/claude/agents/prm-reviewer.md):
