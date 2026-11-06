@@ -42,7 +42,7 @@ func TargetFromHostVars(host string, vars map[string]any) (Target, error) {
 			return t, fmt.Errorf("%s 設定了 %s；不支援", host, key) // gate: ssh-unsupported-var
 		}
 	}
-	if c, ok := vars["ansible_connection"]; ok && c != nil && !isSSHConnection(c) {
+	if c, ok := vars["ansible_connection"]; ok && c != nil && !IsSSHConnection(c) {
 		return t, fmt.Errorf("%s 的 ansible_connection 是 %v；只支援 ssh(或同一個外掛的全名 ansible.builtin.ssh)", host, c) // gate: ssh-connection
 	}
 	t.Host = host
@@ -101,14 +101,17 @@ func TargetFromHostVars(host string, vars map[string]any) (Target, error) {
 	return t, nil
 }
 
-// isSSHConnection reports whether an ansible_connection value names the ssh
+// IsSSHConnection reports whether an ansible_connection value names the ssh
 // connection plugin: ansible-core resolves `ssh` and its fully qualified name
 // `ansible.builtin.ssh` to the same plugin, so an inventory that spells it the
 // long way connects exactly as the short one does. Everything else (docker,
 // local, paramiko, smart, community.docker.docker, ansible.builtin.local, ...)
 // is another connection and stays refused; a value that is not a string is
-// not the name of anything.
-func isSSHConnection(v any) bool {
+// not the name of anything. It is the one place that knows the two names:
+// TargetFromHostVars (the identity lock, the Go engine's tunnel) and the
+// availability probe of optional hosts (internal/availability) both ask it, so
+// they cannot disagree about which inventories connect over ssh.
+func IsSSHConnection(v any) bool {
 	s, ok := v.(string)
 	return ok && (s == "ssh" || s == "ansible.builtin.ssh")
 }

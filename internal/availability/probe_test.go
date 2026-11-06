@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/sshdial"
 )
 
 // fakeConn is the minimal net.Conn a test dial needs to hand back; it
@@ -238,3 +239,46 @@ func TestResolveRuntimeHost_DefaultsWhenHostvarsOmitFields(t *testing.T) {
 type probeFunc func(ctx context.Context, endpoint Endpoint) ProbeResult
 
 func (f probeFunc) Probe(ctx context.Context, endpoint Endpoint) ProbeResult { return f(ctx, endpoint) }
+
+// ssh by either of its names: ansible-core resolves `ansible.builtin.ssh` to the
+// same plugin as `ssh`, so an optional host that spells it the long way is
+// probed like one that does not, and is not refused as a connection pilot has no
+// prober for. The availability probe and the identity lock's target derivation
+// ask one function (sshdial.IsSSHConnection); this checks they agree on every
+// value, in both directions (an unsupported plugin stays unsupported to both).
+func TestClassifyConnectionSupport_AgreesWithTheSSHTargetDerivation(t *testing.T) {
+	for _, tc := range []struct {
+		connection string
+		ssh        bool
+	}{
+		{"ssh", true},
+		{"ansible.builtin.ssh", true},
+		{"", true}, // unset: Ansible's default is ssh
+		{"paramiko", false},
+		{"smart", false},
+		{"docker", false},
+		{"community.docker.docker", false},
+		{"ansible.builtin.local", false},
+		{"winrm", false},
+		{"ansible.builtin.ssh ", false},
+		{"SSH", false},
+	} {
+		t.Run(tc.connection, func(t *testing.T) {
+			vars := map[string]any{"ansible_host": "10.0.0.5", "deployment_availability": "optional"}
+			if tc.connection != "" {
+				vars["ansible_connection"] = tc.connection
+			}
+			rh := ResolveRuntimeHost("vm-01", vars)
+			got := ClassifyConnectionSupport(rh)
+			if got.Probable != tc.ssh || got.Fatal == tc.ssh {
+				t.Fatalf("an optional host with ansible_connection %q: %+v, want Probable=%v and Fatal=%v", tc.connection, got, tc.ssh, !tc.ssh)
+			}
+			if _, err := sshdial.TargetFromHostVars("vm-01", vars); (err == nil) != tc.ssh {
+				t.Fatalf("sshdial.TargetFromHostVars for ansible_connection %q: err = %v, want accepted = %v: the probe and the lock disagree", tc.connection, err, tc.ssh)
+			}
+			if ep, ok := ResolveEndpoint(rh); ok != tc.ssh || (ok && ep.Addr != "10.0.0.5:22") {
+				t.Fatalf("ResolveEndpoint = %+v, %v, want ok = %v", ep, ok, tc.ssh)
+			}
+		})
+	}
+}
