@@ -20,6 +20,10 @@ class GitHubError(RuntimeError):
     pass
 
 
+class CompareLimitError(GitHubError):
+    """GitHub cut a comparison's file list: nothing a retry fixes, so a person must integrate the PR."""
+
+
 @dataclass(frozen=True)
 class Repo:
     raw: str
@@ -69,7 +73,7 @@ def host_args(repo: Repo) -> list[str]:
 
 def pr_view(repo: Repo, number: int) -> dict[str, Any]:
     fields = ("number,url,title,body,state,isDraft,headRefOid,headRefName,isCrossRepository,baseRefOid,"
-              "baseRefName,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest")
+              "baseRefName,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,labels")
     data = gh_json(["pr", "view", str(number), "-R", repo.raw, "--json", fields])
     if not isinstance(data, dict) or data.get("number") != number:
         raise GitHubError("gh pr view returned invalid PR/number")
@@ -258,8 +262,8 @@ def compare(repo: Repo, base: str, head: str) -> dict[str, Any] | None:
     except (KeyError, TypeError) as exc:
         raise GitHubError("Invalid compare response") from exc
     if len(entries) >= COMPARE_FILE_LIMIT:
-        raise GitHubError(f"GitHub lists at most {COMPARE_FILE_LIMIT} changed files for {base[:12]}...{head[:12]}; "
-                          "the full delta cannot be verified")
+        raise CompareLimitError(f"GitHub lists at most {COMPARE_FILE_LIMIT} changed files for {base[:12]}...{head[:12]}; "
+                                "the full delta cannot be verified")
     return {"status": status, "files": files, "merge_base": merge_base,
             "ancestor": status in ("ahead", "identical") and behind == 0 and merge_base.lower() == base}
 

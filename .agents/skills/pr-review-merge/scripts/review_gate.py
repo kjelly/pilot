@@ -12,7 +12,7 @@ from typing import Any, Sequence
 # Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
 # counts any added file and would STOP every later step. Set before the first sibling import.
 sys.dont_write_bytecode = True
-from gh_runtime import GitHubError, Repo, branch_rules, current_repo, pr_checks, pr_view, unresolved_threads
+from gh_runtime import CompareLimitError, GitHubError, Repo, branch_rules, current_repo, pr_checks, pr_view, unresolved_threads
 
 COVERAGE = ("requirements", "correctness", "architecture", "security", "concurrency",
             "edge_cases", "semantic_regression", "tests")
@@ -184,26 +184,49 @@ def read_manifest(client: Any, repo: Repo, base: str) -> tuple[dict[str, Any] | 
 
 def check_target_validation(client: Any, repo: Repo, head: str, base: str,
                             evidence: dict[str, Any], *, base_name: str | None = None,
-                            integrated_base: bool = False) -> tuple[list[str], dict[str, Any]]:
+                            integrated_base: bool = False,
+                            infra: list[str] | None = None) -> tuple[list[str], dict[str, Any]]:
     """Gaps that keep the PR from MERGE under the base branch's `.github/pr-evidence.json`.
 
     The manifest is read at the PR's base SHA, never the head, so a PR cannot weaken its own
     requirement. No manifest means no requirement. Every gap is a WAITING reason: a missing
     record is a DRAFT only through the reviewer's blocking P1 finding.
+
+    A failure to READ or COMPARE (the manifest or a file at a revision cannot be read or parsed,
+    the changed files cannot be listed, GitHub fails) says nothing about the record. With `infra`
+    given, those messages go into it and `gaps` holds only what the record itself lacks; without
+    it every message is a gap, as before. The merge train must not Draft a PR for the former.
     """
     head, base = head.lower(), base.lower()
     manifest, errors, report = read_manifest(client, repo, base)
     if errors or manifest is None:
+        # `unreadable` (the API failed) and `invalid` (the base manifest does not parse) are both the
+        # base branch's or GitHub's state, never a defect of this PR's record.
+        if infra is not None and errors:
+            infra.extend(errors)
+            return [], report
         return errors, report
     ctx = RemoteContext(client, repo, head, manifest, base, base_name, integrated_base=integrated_base)
     report["manifest"] = "loaded"
     tv = evidence.get("target_validation")
-    gaps = _check_record(client, repo, head, base, ctx, tv)
+    unverified: set[str] = set()
+    gaps = _check_record(client, repo, head, base, ctx, tv, unverified)
     report.update(ctx.report(), decision=tv.get("decision") if isinstance(tv, dict) else None)
+    if infra is not None:
+        infra.extend(g for g in gaps if g in unverified)
+        gaps = [g for g in gaps if g not in unverified]
     return gaps, report
 
 
-def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: Any) -> list[str]:
+def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: Any,
+                  unverified: set[str] | None = None) -> list[str]:
+    """The record's gaps. `unverified` collects the messages that are read/compare/API failures."""
+    unverified = set() if unverified is None else unverified
+
+    def failure(message: str) -> str:
+        unverified.add(message)
+        return message
+
     required = list(ctx.required.values())
     if not required:
         return []
@@ -228,9 +251,9 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
         try:
             cmp = client.compare(repo, base, head)
         except (GitHubError, ValueError, KeyError) as exc:
-            return [f"target_validation is not-needed, but the PR's changed files cannot be listed: {exc}"]
+            return [failure(f"target_validation is not-needed, but the PR's changed files cannot be listed: {exc}")]
         if cmp is None:
-            return ["target_validation is not-needed, but GitHub could not compare the PR's base and HEAD"]
+            return [failure("target_validation is not-needed, but GitHub could not compare the PR's base and HEAD")]
         hits = sorted({p for p in cmp["files"] if any(rx.match(p) for rx in patterns)})
         if hits:
             return [f"{need}: target_validation says not-needed, but the PR changes {', '.join(hits[:5])}, "
@@ -250,7 +273,7 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
             if not ctx.accepts_target(rev, "target_validation", tv.get("target_reuse"), art, item["id"]):
                 gaps.append(f"{need}; the run at {rev[:12]} does not cover HEAD {head[:12]} ({ctx.target_stale_reason(rev)})")
         except (GitHubError, ValueError, KeyError) as exc:
-            gaps.append(f"{need}; cannot verify that the run at {rev[:12]} covers HEAD: {exc}")
+            gaps.append(failure(f"{need}; cannot verify that the run at {rev[:12]} covers HEAD: {exc}"))
     if not _safe_relative(art):
         gaps.append(f"{need}; target_validation.artifact must be a repository-relative path, got {art!r}")
         return gaps
@@ -260,7 +283,7 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
     try:
         content = client.file_at(repo, art, head)
     except (GitHubError, ValueError, KeyError) as exc:
-        return gaps + [f"{need}; cannot read artifact {art} at HEAD: {exc}"]
+        return gaps + [failure(f"{need}; cannot read artifact {art} at HEAD: {exc}")]
     if content is None:
         gaps.append(f"{need}; artifact {art} is not committed at HEAD {head[:12]}")
     elif rev and not _names_revision(content.decode("utf-8", "replace"), rev):
@@ -338,7 +361,9 @@ def train_alignment(client: Any, repo: Repo, number: int, view: dict[str, Any]) 
     to refresh), `train` (behind, but GitHub's test merge is clean and no file changed on both sides
     since the merge base: the train merges the live tip in and the review still covers the PR's
     content), `conflict`/`overlap` (a person or `pr-ready` must integrate and re-review), or
-    `unknown` (GitHub has not computed mergeability, or a side changed too many files to list).
+    `unknown` (GitHub has not computed mergeability, an API read failed, or a side changed too many
+    files to list). `unknown_reason` says which kind: `transient` (retry later: mergeability not
+    computed, an API failure) or `needs-person` (GitHub cut the file list: only a person can integrate).
     """
     out = check_base_alignment(client, repo, number, view)
     head, live = view["headRefOid"], out["live_base_sha"]
@@ -354,18 +379,22 @@ def train_alignment(client: Any, repo: Repo, number: int, view: dict[str, Any]) 
         out["alignment"] = "conflict"
         return out
     if mergeable != "MERGEABLE":
-        out["alignment"] = "unknown"
+        out["alignment"], out["unknown_reason"] = "unknown", "transient"
         out["alignment_detail"] = f"GitHub mergeability against the live base is {mergeable!r}"
         return out
     try:
         pr_side = client.compare(repo, live, head)
         base_side = client.compare(repo, head, live)
+    except CompareLimitError as exc:
+        out["alignment"], out["unknown_reason"] = "unknown", "needs-person"
+        out["alignment_detail"] = f"cannot list the files changed since the merge base: {exc}"
+        return out
     except (GitHubError, ValueError, KeyError) as exc:
-        out["alignment"] = "unknown"
+        out["alignment"], out["unknown_reason"] = "unknown", "transient"
         out["alignment_detail"] = f"cannot list the files changed since the merge base: {exc}"
         return out
     if not pr_side or not base_side:
-        out["alignment"] = "unknown"
+        out["alignment"], out["unknown_reason"] = "unknown", "transient"
         out["alignment_detail"] = "GitHub could not compare the PR head and the live base"
         return out
     out["overlap"] = sorted(set(pr_side["files"]) & set(base_side["files"]))
@@ -377,7 +406,11 @@ def review_covers(client: Any, repo: Repo, reviewed: Any, head: str, live_base: 
                   base_name: str) -> tuple[dict[str, Any] | None, str]:
     """(reuse record, "") when a review taken at `reviewed` covers `head`: the same commit, or every
     change since is evidence-only or a pure import from the base (the merge train's integration
-    commit); otherwise (None, reason). Uses the base manifest's evidence-only paths when present."""
+    commit); otherwise (None, reason). Uses the base manifest's evidence-only paths when present.
+
+    A (None, reason) is a verdict about the review. Failing to find out (GitHub fails, the base
+    manifest cannot be read or parsed) says nothing about it and raises GitHubError instead: a caller
+    must not treat an outage as a stale review."""
     if not isinstance(reviewed, str) or not SHA.fullmatch(reviewed):
         return None, "reviewed HEAD is not a full SHA"
     reviewed = reviewed.lower()
@@ -385,19 +418,60 @@ def review_covers(client: Any, repo: Repo, reviewed: Any, head: str, live_base: 
         return {"method": "same-head"}, ""
     manifest, errors, _ = read_manifest(client, repo, live_base)
     if errors:
-        return None, "; ".join(errors)
+        raise GitHubError("cannot verify the delta since the review: " + "; ".join(errors))
     ctx = RemoteContext(client, repo, head, manifest or {"schema_version": 1}, live_base, base_name,
                         integrated_base=True)
     try:
         if ctx.accepts_pure_import(reviewed, "review"):
             return ctx.accepted[-1], ""
         return None, ctx.review_stale_reason(reviewed)
-    except (GitHubError, ValueError, KeyError) as exc:
-        return None, f"cannot verify the delta since the review: {exc}"
+    except (ValueError, KeyError) as exc:
+        raise GitHubError(f"cannot verify the delta since the review: {exc}") from exc
+
+
+class WaitKinds:
+    """Which WAITING reasons resolve by themselves, for the merge train (kjelly/pilot#307).
+
+    A WAITING gate means either "look again later" or "a person has to act". The train keeps the
+    first kind enqueued and stops the run (nothing it does changes the answer); it takes the second
+    kind out of the queue with the reasons, so one PR waiting for a person cannot hold up every later
+    PR. A reason is `transient` only when it is registered as such at the place that emits it: CI that
+    is pending, a base or PR that moved during the gate, mergeability or merge state GitHub has not
+    computed, an API/infrastructure failure, a secret scan that could not run. `derived` reasons (the
+    merge state of a PR that waits for something else) decide nothing alone. Every other reason, one
+    nobody registered included, needs a person."""
+
+    def __init__(self) -> None:
+        self.transient: set[str] = set()
+        self.derived: set[str] = set()
+
+    def later(self, reason: str) -> str:
+        self.transient.add(reason)
+        return reason
+
+    def secondary(self, reason: str) -> str:
+        self.derived.add(reason)
+        return reason
+
+    def kind(self, reasons: Sequence[str]) -> str:
+        """`transient` when at least one reason is and every other is transient or derived."""
+        if any(r not in self.transient and r not in self.derived for r in reasons):
+            return "person"
+        return "transient" if any(r in self.transient for r in reasons) else "person"
 
 
 def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any = None,
              worktree: Any = None, secret_files: Sequence[Any] = ()) -> dict[str, Any]:
+    """The live gate. A WAITING result also carries `wait_kind`: `transient` or `person` (WaitKinds)."""
+    kinds = WaitKinds()
+    result = _evaluate(repo, number, evidence, client, worktree, secret_files, kinds)
+    if result["decision"] == "WAITING":
+        result["wait_kind"] = kinds.kind(result["reasons"])
+    return result
+
+
+def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, worktree: Any,
+              secret_files: Sequence[Any], kinds: WaitKinds) -> dict[str, Any]:
     # Importing from the module allows replacing a client during tests.
     if client is None:
         import gh_runtime as client
@@ -410,7 +484,7 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
     try:
         view = client.pr_view(repo, number)
     except (GitHubError, ValueError, KeyError) as exc:
-        reasons.append(f"Unable to inspect PR: {exc}")
+        reasons.append(kinds.later(f"Unable to inspect PR: {exc}"))
         return result
     result.update({"url": view.get("url"), "head_sha": view.get("headRefOid"),
                    "base_sha": view.get("baseRefOid")})
@@ -419,7 +493,7 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
         reasons.append("PR is not an open non-draft PR")
         return result
     if view.get("isDraft") is not False or not _sha(result["head_sha"]) or not _sha(result["base_sha"]):
-        reasons.append("Invalid PR state or missing HEAD/Base SHA")
+        reasons.append(kinds.later("Invalid PR state or missing HEAD/Base SHA"))
         return result
 
     # Operational hand-off: metadata equality alone does not prove HEAD includes main. A PR behind the
@@ -439,11 +513,12 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
                 "then rerun affected validation/CI and independent review on the updated HEAD/Base before Ready.")
             return result
         if result["alignment"] == "unknown":
-            reasons.append(f"PR HEAD does not include live {base_name} SHA {live_base} and the merge train "
-                           f"cannot classify it yet: {result.get('alignment_detail', 'unknown')}")
+            reason = (f"PR HEAD does not include live {base_name} SHA {live_base} and the merge train "
+                      f"cannot classify it yet: {result.get('alignment_detail', 'unknown')}")
+            reasons.append(kinds.later(reason) if result.get("unknown_reason") == "transient" else reason)
             return result
     except (GitHubError, ValueError, KeyError) as exc:
-        reasons.append(f"Unable to verify live base branch: {exc}")
+        reasons.append(kinds.later(f"Unable to verify live base branch: {exc}"))
         return result
 
     # Stale review evidence must never drive a destructive operation.
@@ -463,7 +538,9 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
         reuse, why = review_covers(client, repo, reviewed_head, result["head_sha"].lower(), live_base, base_name) \
             if base_known else (None, f"reviewed Base {reviewed_base[:12]} is not on live {base_name}")
     except (GitHubError, ValueError, KeyError) as exc:
-        reuse, why = None, f"cannot verify the reviewed Base: {exc}"
+        # Not a verdict about the review: GitHub (or the base manifest) could not be read.
+        reasons.append(kinds.later(f"Unable to verify that the review covers HEAD: cannot verify the reviewed Base: {exc}"))
+        return result
     if reuse is None:
         reasons.append(f"Stale review evidence: reviewed HEAD/Base does not cover GitHub HEAD ({why})")
         return result
@@ -557,23 +634,26 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
             missing.append("Invalid unrelated_failing_checks entry (needs exact name, reason, reviewer_confirmed)")
 
     # Actual-run record the base branch's .github/pr-evidence.json mandates: gaps are WAITING.
+    target_infra: list[str] = []
     target_gaps, result["target_validation"] = check_target_validation(
         client, repo, result["head_sha"], live_base, evidence, base_name=view.get("baseRefName"),
-        integrated_base=True)
+        integrated_base=True, infra=target_infra)
     missing.extend(target_gaps)
+    missing.extend(kinds.later(message) for message in target_infra)
 
     # Every commit of the PR, scanned locally by the PR's own SHAs. A leaked secret is a DRAFT even when
     # HEAD no longer has it; a scan that could not run is WAITING, never a pass.
     secret_defects, secret_gaps, result["secret_scan"] = check_secrets(
         worktree, result["base_sha"], result["head_sha"], secret_files)
     defects.extend(secret_defects)
-    missing.extend(secret_gaps)
+    # A scan that could not run is the environment's problem (no checkout, an object not fetched yet).
+    missing.extend(kinds.later(message) for message in secret_gaps)
 
     # Live remote evidence: failures are recorded as WAITING instead of inferred success.
     try:
         checks = client.pr_checks(repo, number)
     except (GitHubError, ValueError, KeyError) as exc:
-        missing.append(f"CI state unavailable: {exc}")
+        missing.append(kinds.later(f"CI state unavailable: {exc}"))
         checks = None
     if checks is not None:
         if not checks:
@@ -597,7 +677,7 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
                     defects.append(f"GitHub CI check {name} is {bucket}: {check.get('link', '')}")
             elif bucket == "pending":
                 result["checks"]["pending"] += 1
-                missing.append(f"GitHub CI check pending: {name}")
+                missing.append(kinds.later(f"GitHub CI check pending: {name}"))
             else:
                 missing.append(f"Unknown GitHub CI check bucket {bucket!r}: {name}")
     try:
@@ -606,7 +686,7 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
         if nthreads:
             defects.append(f"Unresolved GitHub review threads: {nthreads} (triage/resolve first)")
     except (GitHubError, ValueError, KeyError) as exc:
-        missing.append(f"Cannot verify review threads: {exc}")
+        missing.append(kinds.later(f"Cannot verify review threads: {exc}"))
 
     try:
         base = view.get("baseRefName")
@@ -625,7 +705,7 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
                 if isinstance(count, int) and count > 0 and view.get("reviewDecision") != "APPROVED":
                     missing.append("Branch rules require reviewer approval")
     except (GitHubError, ValueError, KeyError) as exc:
-        missing.append(f"Unable to verify active branch rules: {exc}")
+        missing.append(kinds.later(f"Unable to verify active branch rules: {exc}"))
 
     decision = view.get("reviewDecision")
     if decision == "CHANGES_REQUESTED":
@@ -643,10 +723,14 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
     if mergeable == "CONFLICTING" or state == "DIRTY":
         defects.append("Merge conflict requires branch repair")
     elif mergeable != "MERGEABLE":
-        missing.append(f"Mergeability unknown/not mergeable: {mergeable!r}")
+        text = f"Mergeability unknown/not mergeable: {mergeable!r}"
+        missing.append(kinds.later(text) if mergeable in (None, "", "UNKNOWN") else text)
     if state != "CLEAN":
         # UNSTABLE may be due to CI failures handled above; all other states require renewed proof.
-        missing.append(f"Merge state is not CLEAN: {state!r}")
+        # UNKNOWN/BEHIND settle by themselves; the rest (BLOCKED, UNSTABLE, ...) only say that something
+        # else is wrong, so they are never the reason alone for a PR to stay enqueued.
+        text = f"Merge state is not CLEAN: {state!r}"
+        missing.append(kinds.later(text) if state in (None, "", "UNKNOWN", "BEHIND") else kinds.secondary(text))
     if view.get("autoMergeRequest") is not None:
         missing.append("PR already has auto-merge configured; do not modify silently")
 
@@ -656,13 +740,13 @@ def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any =
         if second.get("state") != "OPEN" or second.get("isDraft") is not False or \
             second.get("headRefOid") != result["head_sha"] or second.get("baseRefOid") != result["base_sha"] or \
             second.get("baseRefName") != result["base_name"]:
-            reasons.append("PR HEAD/Base/branch/state changed during live gate")
+            reasons.append(kinds.later("PR HEAD/Base/branch/state changed during live gate"))
             return result
         if client.branch_head(repo, base_name) != live_base:
-            reasons.append("Live base branch changed during gate; rerun to classify current base state")
+            reasons.append(kinds.later("Live base branch changed during gate; rerun to classify current base state"))
             return result
     except (GitHubError, ValueError, KeyError) as exc:
-        reasons.append(f"Could not recheck PR version: {exc}")
+        reasons.append(kinds.later(f"Could not recheck PR version: {exc}"))
         return result
 
     # Confirmed blocker is actionable only if evidence is current and API state is known.

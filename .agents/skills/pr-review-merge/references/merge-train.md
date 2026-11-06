@@ -40,6 +40,17 @@ Notes on the table:
   The last case covers the train's integration commit (`review_gate.review_covers()`,
   `repo_evidence.Context.accepts_pure_import()`). The reviewer's test entries stay bound to R; CI on
   HEAD covers the integration. Local check receipts in `pr-ready` do not use this.
+- **HEAD must also carry the base's changes.** The "same bytes as R" rules above look only at paths
+  where R and HEAD differ, so a merge that keeps the PR's side of a file the base changed (the `ours`
+  merge strategy, a conflict resolved with the PR's version, a deletion of the base undone) differs from R
+  nowhere and used to pass, while it silently reverts the base. Every review reuse therefore also
+  checks, for each path the base changed since the fork F of R and the base B that HEAD contains
+  (evidence-only paths excepted): HEAD holds B's bytes there, and R holds F's or B's. Otherwise the
+  review does not cover HEAD: `base change not carried into HEAD: <path>`. It runs in
+  `Context._non_execution_import` (both its modes: the merge gate's pure import and `pr-ready`'s
+  non-execution review reuse) and before the evidence-only shortcut of those two (`_review_shortcut`).
+  Check receipts and target evidence that is exactly the tested bytes keep the shortcut: a revert
+  leaves the tested bytes in place, and the review is what refuses it.
 - The reviewed Base must be on the live base branch: the PR's Base, or an ancestor of the live tip.
 - Target evidence imports from the base HEAD actually contains (the merge base of HEAD and the live
   tip), and the manifest is read at the live tip. See `.agents/skills/_shared/target-evidence-reuse.md`.
@@ -53,11 +64,23 @@ Notes on the table:
   `merge_train.enqueue()`, which does three things in this order:
   1. writes the gate-checked evidence to `$PRM_STATE_DIR/queue/<repo key>/<pr>.json` (mode 0600);
   2. adds the label;
-  3. posts a "enqueued" comment.
+  3. posts a "enqueued" comment (reviewed HEAD, and the HEAD the gate saw when it differs).
 
   The actor never merges. Only `--method merge` (the project default) can be enqueued.
-- **Leaving.** Removing the label takes a PR out of the queue. The train removes it when it drafts or
-  dequeues a PR.
+- **What the entry holds.** The evidence, `reviewed_head` (the HEAD the evidence names),
+  `enqueued_head` (the HEAD the gate decided MERGE for), `train_commits` (every commit the train
+  pushed to the PR branch) and `errors` (consecutive ERROR runs).
+- **Binding.** The train works only on a PR whose HEAD is `enqueued_head` or one of `train_commits`.
+  It checks this before it integrates, and again in the final step with a fresh read of the HEAD.
+  Any other HEAD (a push after the enqueue, a merge of main by the author) was never gated for the
+  merge, so the PR leaves the queue: "HEAD changed since it was enqueued; run `pr-review-merge`
+  again". The train records its own commit in `train_commits` before it pushes it, so a crash
+  between the two still leaves a HEAD it recognises. The saved review must also still cover HEAD,
+  whatever the entry says.
+- **Leaving.** Removing the label withdraws a PR. The train re-reads the label at the start of every
+  attempt, on every CI poll, and under the mutation lock right before a push and right before the
+  merge; when it is gone the train drops the saved entry and writes nothing to the PR (no comment,
+  no label change). The train removes the label itself when it drafts or dequeues a PR.
 
 ## Consumer
 
@@ -83,32 +106,60 @@ The consumer takes the oldest PR in the queue and:
 1. Check the entry:
    - Closed: skip it.
    - Draft: leave the queue silently.
+   - Label removed: drop the entry, silently.
    - No saved evidence, or a fork PR: leave the queue with a comment.
-2. Classify alignment.
+   - HEAD neither the enqueued one nor a train commit: leave the queue with a comment.
+2. Fetch the PR head (`refs/pull/<n>/head`) and the base branch into `refs/merge-train/*`, on every
+   attempt and on every path: the long-lived clone holds neither, and the secret scan of the PR's
+   commits and the merge both need them. The fetched head must equal the PR's `headRefOid`; if GitHub
+   has not caught up, retry at most `--max-align` times, then WAITING.
+3. Classify alignment.
    - `conflict`/`overlap`: Draft with the reason.
-   - `unknown`: poll; after `--max-align` tries, WAITING.
+   - `unknown`: mergeability not computed or an API failure: poll; after `--max-align` tries,
+     WAITING. A comparison GitHub cut at 300 files: leave the queue (a person must integrate).
    - `train`:
-     1. Fetch the PR head and base.
-     2. Build the merge of exactly the live tip.
-     3. Check every file the merge changes against the base (defense in depth if GitHub's file
+     1. Build the merge of exactly the live tip.
+     2. Check every file the merge changes against the base (defense in depth if GitHub's file
         lists are wrong).
-     4. Push.
-     5. Repeat at most `--max-align` times when the base keeps moving, then WAITING.
-3. Wait for CI on HEAD. Checks that have not registered count as pending for 5 minutes.
-   - The base moved: back to step 2.
+     3. Push, under the mutation lock, after re-reading the PR (label, HEAD, Draft, base). The push
+        is never forced: a PR branch that moved since is refused by Git and nothing is overwritten.
+     4. Repeat at most `--max-align` times when the base keeps moving, then WAITING.
+4. Wait for CI on HEAD. Checks that have not registered count as pending for 5 minutes.
+   - The base moved: back to step 3.
    - HEAD changed outside the train: leave the queue, so a new review is needed.
+   - Label removed, PR closed or made Draft: back to step 1.
    - `--ci-timeout`: WAITING.
-4. Finish:
+5. Finish:
    - The saved review no longer covers HEAD: leave the queue (needs a new `pr-review-merge` run).
    - The target record no longer covers HEAD (for example, main brought in a `rerun_paths` file):
      Draft, so `pr-ready` runs the chain again or records `unrelated_runtime_changes`.
+   - A GitHub or infrastructure failure while checking either of those: WAITING. A failure to read
+     says nothing about the review or the record, so it never dequeues or drafts the PR.
    - Otherwise rerun `review_gate.evaluate()` with the saved evidence:
-     - MERGE: `gh pr merge --merge --match-head-commit`, then verify MERGED.
+     - MERGE: under the mutation lock, re-read the PR (label, HEAD, base, Draft) and run
+       `gh pr merge --merge --match-head-commit`, then verify MERGED.
      - DRAFT: Draft with the reasons.
-     - WAITING: stays enqueued.
+     - WAITING: transient or needs a person, see below.
 
-The run stops at the first WAITING or ERROR, so later PRs keep their place. Outcomes are `MERGED`,
-`DRAFTED`, `DEQUEUED`, `WAITING`, `SKIP` and `ERROR`.
+### Transient or needs a person
+
+A WAITING gate result carries `wait_kind`. Every reason is registered where `review_gate.evaluate()`
+emits it (`WaitKinds`); a reason nobody registered needs a person.
+
+| `wait_kind` | Which reasons | The train |
+|---|---|---|
+| `transient` | CI pending; the PR or base moved during the gate; mergeability or merge state (`UNKNOWN`, `BEHIND`) GitHub has not computed; an API or infrastructure failure (PR, base, ancestry, checks, threads, rules, review coverage, target record, base manifest); a secret scan that could not run | stays enqueued; the run stops (nothing the train does changes the answer, so the PRs behind it keep their place) |
+| `person` | requested changes; approval required (by decision or by rule); a failing check the reviewer confirmed unrelated; a finding disputed without new evidence; a merge state that is not clean for another reason (`BLOCKED`, `UNSTABLE`, ...); stale or invalid review evidence; no CI without a rationale; a branch with a GitHub merge queue; auto-merge already set; a comparison GitHub cut | leaves the queue with a comment that lists the reasons; the PR stays Ready; **the PRs behind it keep going** |
+
+A merge state that is not clean is `derived`: it says only that something else is wrong, so it keeps
+a PR enqueued when another transient reason (a pending check) explains it, and needs a person alone.
+A transient reason next to a reason that needs a person needs a person.
+
+The run stops at the first WAITING or ERROR, so later PRs keep their place; a PR that leaves the
+queue (`MERGED`, `DRAFTED`, `DEQUEUED`, `SKIP`) does not stop it. Outcomes are `MERGED`, `DRAFTED`,
+`DEQUEUED`, `WAITING`, `SKIP` and `ERROR`. A PR that ends in `ERROR` on three runs in a row (the
+count is in its entry; a run that ends any other way resets it) leaves the queue with a comment
+naming the last error, so one persistent error cannot stop the others for ever.
 
 ## Running it
 
