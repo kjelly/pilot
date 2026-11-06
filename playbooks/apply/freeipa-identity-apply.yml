@@ -4184,6 +4184,9 @@
               - "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"
             stdin: "{{ {'domain': ipa_domain} | to_json }}"
           become: true
+          # Read by the observation below: whether this run acknowledged the
+          # obligation is the one thing pilot's Go reconciler needs from it.
+          register: ipa_auth_cache_ack
           changed_when: false
           when:
             - not ansible_check_mode
@@ -4216,6 +4219,75 @@
               {{ (ipa_ssh_cache_final.stdout | from_json).work | map(attribute='host') | list | to_json }}
           when: not ansible_check_mode
           tags: [identity, users, sshkeys, client-cache]
+
+        # ── Observation for pilot's Go reconciler (Phase 2, P2-3) ────────────
+        # Only a run that was handed pilot_identity_auth_cache_output (the Go
+        # reconciler's mixed run: docs/superpowers/specs/2026-11-06-freeipa-go-reconcile-phase2-spec.md
+        # §5.5) writes anything; every other run, pilot's legacy engine included,
+        # never defines it, so these two tasks are skipped and the playbook is what
+        # it was. The file is on the controller, 0600, one JSON object:
+        #
+        #   {"schema": "pilot.identity-auth-cache/v1", "action": "observe",
+        #    "host": ..., "fqdn": ..., "prepared": ..., "dirty": ..., "refreshed": ..., "acked": ...}
+        #
+        # acked is the one that matters: this run acknowledged the obligation, so
+        # the clients' authorization caches are no longer owed a refresh. prepared:
+        # the prepare task ran and succeeded. dirty: what the settle task reported,
+        # null when it did not run. refreshed: the refresh ran for at least one
+        # client and every one finished (the same test the gate above makes). The
+        # run is at the end of the block: an earlier failure leaves no observation,
+        # and none is the right answer for a run that failed.
+        #
+        # Both tasks are `always`, so they run under any --tags (a tag selection
+        # that skips the ack then reports acked=false, which is true). Everything
+        # they read comes from tasks that carry other tags or run only sometimes,
+        # so every read is guarded with `is defined`/`.get` (AGENTS.md §4.4): a
+        # task that did not run leaves no register, and a skipped one has no rc.
+        - name: "Read the host's FQDN for the authorization cache observation"
+          ansible.builtin.command: hostname -f
+          register: ipa_auth_cache_observe_fqdn
+          changed_when: false
+          check_mode: false
+          when:
+            - not ansible_check_mode
+            - pilot_identity_auth_cache_output is defined
+          tags: [always]
+
+        - name: "Record what this run did about the authorization cache (observation for pilot)"
+          ansible.builtin.copy:
+            content: "{{ ipa_auth_cache_observation | to_json }}"
+            dest: "{{ pilot_identity_auth_cache_output }}"
+            mode: "0600"
+          vars:
+            # The file belongs to the user who runs pilot, never to root or to the
+            # host's become user: `become: false` below, and, because an
+            # ansible_become set for localhost in the inventory is a variable and
+            # beats the keyword, the same value here.
+            ansible_become: false
+            ipa_auth_cache_observe_refresh_items: >-
+              {{ ((ipa_sudo_refresh_results | default({})).get('results', []) if ipa_sudo_refresh_results is defined else []) }}
+            ipa_auth_cache_observation:
+              schema: pilot.identity-auth-cache/v1
+              action: observe
+              host: "{{ inventory_hostname }}"
+              fqdn: "{{ ipa_auth_cache_observe_fqdn.stdout | trim }}"
+              prepared: "{{ ipa_auth_cache_prepare is defined and ipa_auth_cache_prepare.get('rc', 1) == 0 }}"
+              dirty: >-
+                {{ ((ipa_auth_cache_settle.get('stdout', '{}') | from_json).get('dirty')
+                    if ipa_auth_cache_settle is defined else none) }}
+              refreshed: >-
+                {{ ipa_auth_cache_observe_refresh_items | length > 0 and
+                   (ipa_auth_cache_observe_refresh_items | rejectattr('skipped', 'defined') | rejectattr('unreachable', 'defined')
+                    | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0) | list | length)
+                   == (ipa_auth_cache_observe_refresh_items | length) }}
+              acked: "{{ ipa_auth_cache_ack is defined and ipa_auth_cache_ack.get('rc', 1) == 0 }}"
+          delegate_to: localhost
+          become: false
+          changed_when: false
+          when:
+            - not ansible_check_mode
+            - pilot_identity_auth_cache_output is defined
+          tags: [always]
       always:
         - name: "Destroy the private Kerberos cache"
           ansible.builtin.include_tasks:
