@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // Operation kinds, in the order a plan lists them (spec §7.2, the
@@ -48,6 +50,12 @@ const (
 	BlockedMarkerCollision   = "marker_collision"
 	BlockedCaseCollision     = "case_collision"
 	BlockedReferenceToAbsent = "reference_to_absent"
+	// BlockedPasswordValue: the user's password operation cannot be sent because
+	// the password is not a string written out in the roster (a template, an
+	// inline !vault value, a value YAML may read as a number, an empty string, or
+	// a roster whose password forms were not read). Only an operation that is
+	// planned is blocked on it; a user whose password needs no change is not.
+	BlockedPasswordValue = "password_value_unsupported"
 )
 
 // Change is one attribute's live and desired value; From is nil for an
@@ -313,6 +321,14 @@ func (b *builder) users(d Desired) {
 				continue
 			}
 		}
+		// A password operation that cannot be sent blocks the user before any of
+		// its operations is planned: the others would be a half of a user.
+		if passwordAction(u, live, exists) != "" {
+			if detail := passwordUnsupported(u); detail != "" {
+				b.block(key, BlockedPasswordValue, u.Name, detail)
+				continue
+			}
+		}
 		var createID string
 		if !exists {
 			fields := map[string]Change{}
@@ -408,6 +424,44 @@ func descriptionMatches(live []string, want string) bool {
 	return sameValues(live, mailValues(want))
 }
 
+// passwordAction is the password operation the playbook's "Decide the password
+// action for each user" takes for a user: only a user declaring password.initial
+// has one; initialize without a Kerberos key, reset when not preserving and the
+// user is no longer on the last reset password.
+func passwordAction(u DesiredUser, live LiveUser, exists bool) string {
+	switch {
+	case !u.HasInitialPassword:
+		return ""
+	case !exists || live.LastPwdChange == "":
+		return KindPasswordInitialize
+	case !u.PreserveExisting && !onResetPassword(live):
+		return KindPasswordReset
+	}
+	return ""
+}
+
+// passwordUnsupported is why the password of u cannot be sent, "" when it can.
+// The engine sets only a password written out in the roster: anything Ansible
+// would render or decrypt is not something it can read, and an empty one is
+// refused by FreeIPA (RequirementError, captured K6). The text names the form,
+// never the value.
+func passwordUnsupported(u DesiredUser) string {
+	if !u.PasswordFormRead {
+		return "the roster's password forms were not read, so what password.initial holds is not known (Desired.WithPasswordForms)"
+	}
+	switch u.PasswordForm {
+	case inventory.PasswordLiteral:
+		return ""
+	case inventory.PasswordTemplate:
+		return "password.initial is a Jinja template: pilot does not render templates, and the Go engine sets only a password written out in the roster; use the Ansible engine for it"
+	case inventory.PasswordEncrypted:
+		return "password.initial is an inline !vault value: only Ansible can decrypt it; use the Ansible engine for it, or encrypt the whole roster file instead"
+	case inventory.PasswordNotString:
+		return "password.initial may be read as something other than a string: quote it so it stays one"
+	}
+	return "password.initial is empty: FreeIPA refuses an empty password"
+}
+
 func idChange(u DesiredUser, live LiveUser) string {
 	var parts []string
 	if u.UID != nil && live.UIDNumber != strconv.FormatInt(*u.UID, 10) {
@@ -427,18 +481,15 @@ func idChange(u DesiredUser, live LiveUser) string {
 // Kerberos key, reset when not preserving and the user is no longer on
 // the last reset password (expiration <= last change means still on it).
 func (b *builder) password(u DesiredUser, live LiveUser, exists bool, createID string) {
-	if !u.HasInitialPassword {
-		return
-	}
 	name := strings.ToLower(u.Name)
 	var deps []string
 	if createID != "" {
 		deps = []string{createID}
 	}
-	switch {
-	case !exists || live.LastPwdChange == "":
+	switch passwordAction(u, live, exists) {
+	case KindPasswordInitialize:
 		b.add(Operation{Kind: KindPasswordInitialize, Object: name, DependsOn: deps})
-	case !u.PreserveExisting && !onResetPassword(live):
+	case KindPasswordReset:
 		b.add(Operation{Kind: KindPasswordReset, Object: name, Destructive: true})
 	}
 }

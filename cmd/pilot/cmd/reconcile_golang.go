@@ -206,7 +206,7 @@ func golangPreview(cmd *cobra.Command) error {
 	if err := yaml.Unmarshal(rosterData, &root); err != nil {
 		return fmt.Errorf("解析 roster %s: %w", rosterPath, err) // gate: roster-yaml
 	}
-	desired, err := identityreconcile.FromRoster(root)
+	desired, err := identityreconcile.FromRosterWithForms(root, rosterData)
 	if err != nil {
 		return fmt.Errorf("roster %s: %w", rosterPath, err) // gate: roster-adapter
 	}

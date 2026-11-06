@@ -11,6 +11,7 @@ package identityreconcile
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 
@@ -38,6 +39,15 @@ type DesiredUser struct {
 	// itself is never loaded: a plan does not carry passwords.
 	HasInitialPassword bool
 	PreserveExisting   bool // password.preserve_existing, default true
+	// PasswordForm is how Ansible reads password.initial: a literal the engine
+	// can set, or something it cannot (a template, an inline !vault value, a
+	// value that may not be a string). It is read from the roster's bytes,
+	// because the decoded roster has lost it (WithPasswordForms), and only
+	// matters when a password operation is planned. PasswordFormRead is false
+	// until it was read; a password operation of a user whose form was never
+	// read is blocked, not sent.
+	PasswordForm     inventory.PasswordForm
+	PasswordFormRead bool
 
 	// SSHKeys is the normalized ssh_keys.values; nil when not declared
 	// (unmanaged). An empty, non-nil slice clears every key.
@@ -182,6 +192,43 @@ func FromRoster(root map[string]any) (Desired, error) {
 		}
 	}
 	sort.Strings(d.NotInScope)
+	return d, nil
+}
+
+// FromRosterWithForms is FromRoster for a roster whose plaintext bytes are at
+// hand, which is every roster the engine reads: it also records how Ansible reads
+// each user's password.initial (WithPasswordForms), so that the plan made from it
+// knows which password operations it can send. The preview and the writer both
+// build their Desired through it, so they judge a roster's passwords alike.
+func FromRosterWithForms(root map[string]any, rosterData []byte) (Desired, error) {
+	d, err := FromRoster(root)
+	if err != nil {
+		return d, err
+	}
+	return d.WithPasswordForms(rosterData)
+}
+
+// WithPasswordForms records, for every user, how Ansible reads password.initial
+// in rosterData, the plaintext bytes the roster was decoded from. The decoded
+// map has lost the tags and quoting that decide it (spec §7.8), and one
+// classifier judges it for every consumer (inventory.RosterUserPasswords). It
+// returns a copy; d is not changed. A roster whose users cannot be read again
+// from the bytes is an error: no user is then trusted to have a password the
+// engine can set.
+func (d Desired) WithPasswordForms(rosterData []byte) (Desired, error) {
+	forms, err := inventory.RosterUserPasswords(rosterData)
+	if err != nil {
+		return d, err
+	}
+	users := slices.Clone(d.Users)
+	for i := range users {
+		p, ok := forms[users[i].Name]
+		if !ok {
+			return d, fmt.Errorf("the user %q is not in the roster bytes the passwords were read from", users[i].Name)
+		}
+		users[i].PasswordForm, users[i].PasswordFormRead = p.Form, true
+	}
+	d.Users = users
 	return d, nil
 }
 

@@ -91,6 +91,17 @@ func desired(t *testing.T, doc string) Desired {
 	return d
 }
 
+// desiredForPlan is desired with the password forms read from the roster's
+// bytes, as the preview and the writer do it: what a plan needs.
+func desiredForPlan(t *testing.T, doc string) Desired {
+	t.Helper()
+	d, err := desired(t, doc).WithPasswordForms([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 // capturedDesired declares exactly what the 2026-10-27 capture holds
 // (user-find-states, group-find-states, group-find-nested), so a plan
 // against it plans nothing but the history markers the capture never had.
