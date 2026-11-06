@@ -480,6 +480,70 @@ runpy.run_path(source,run_name='__main__')
         self.prepare([key()])
         self.assertTrue(self.auth("auth_prepare")["previous"])
 
+    def test_auth_inspect_reads_the_obligation_without_touching_anything(self):
+        """The Go reconciler's probe (Phase 2, P2-3): journal absent is owed
+        (the same default as auth_prepare's `previous`), true after a prepare,
+        false after an acknowledgement, and the read creates and changes nothing."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "state", "journal.json")
+            inspect = lambda: cache.journal(path, "auth_inspect", {"domain": "ipa.test"})
+            # Absent: owed, and not even the directory is created.
+            self.assertEqual({"auth_pending": True}, inspect())
+            self.assertFalse(Path(path).parent.exists())
+            # Written by the helper's own writer: true after a prepare, false after the ack.
+            cache.journal(path, "auth_prepare", {"domain": "ipa.test"})
+            self.assertEqual({"auth_pending": True}, inspect())
+            cache.journal(path, "auth_settle", {"domain": "ipa.test", "previous": True, "changed": False})
+            self.assertEqual({"auth_pending": True}, inspect())
+            cache.journal(path, "auth_ack", {"domain": "ipa.test"})
+            self.assertEqual({"auth_pending": False}, inspect())
+            cache.journal(path, "auth_prepare", {"domain": "ipa.test"})
+            self.assertEqual({"auth_pending": True}, inspect())
+            cache.journal(path, "auth_ack", {"domain": "ipa.test"})
+            # Pure: no byte, mtime, sidecar lock, temporary or fsync/flock call.
+            before = (Path(path).read_bytes(), os.stat(path).st_mtime_ns, sorted(os.listdir(os.path.dirname(path))))
+            with mock.patch.object(cache.os, "fsync", side_effect=AssertionError("a read called fsync")), \
+                    mock.patch.object(cache.fcntl, "flock", side_effect=AssertionError("a read took a lock")), \
+                    mock.patch.object(cache.os, "replace", side_effect=AssertionError("a read replaced the journal")):
+                self.assertEqual({"auth_pending": False}, inspect())
+            self.assertEqual(before, (Path(path).read_bytes(), os.stat(path).st_mtime_ns, sorted(os.listdir(os.path.dirname(path)))))
+
+    def test_auth_inspect_without_the_flag_is_owed_and_only_literal_false_is_settled(self):
+        # A journal that only holds SSH-key state never recorded the flag.
+        self.prepare([key()])
+        self.assertEqual({"auth_pending": True}, self.auth("auth_inspect"))
+        for damaged in ("false", 0, None, [], {}, "no"):
+            self.state["auth_pending"] = damaged
+            self.assertEqual({"auth_pending": True}, self.auth("auth_inspect"), "auth_pending=%r" % (damaged,))
+        self.state["auth_pending"] = False
+        self.assertEqual({"auth_pending": False}, self.auth("auth_inspect"))
+        self.state["auth_pending"] = True
+        self.assertEqual({"auth_pending": True}, self.auth("auth_inspect"))
+
+    def test_auth_inspect_fails_closed_on_another_domain_or_a_damaged_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "journal.json")
+            cache.journal(path, "auth_prepare", {"domain": "ipa.test"})
+            cache.journal(path, "auth_ack", {"domain": "ipa.test"})
+            original = Path(path).read_bytes()
+            # Through the real entry point, as ansible runs it: the error is the
+            # JSON line and rc 1, so the playbook task fails and no result is written.
+            command = ["python3", str(SOURCE), "auth_inspect", path]
+            other = subprocess.run(command, input=json.dumps({"domain": "other.test"}), text=True, capture_output=True)
+            self.assertEqual(1, other.returncode)
+            self.assertEqual({"error": "journal domain mismatch"}, json.loads(other.stdout))
+            for damaged in ("not json", json.dumps({"version": 2, "domain": "ipa.test", "users": {}}),
+                            json.dumps({"version": 1, "domain": "ipa.test", "users": []})):
+                Path(path).write_text(damaged)
+                bad = subprocess.run(command, input=json.dumps({"domain": "ipa.test"}), text=True, capture_output=True)
+                self.assertEqual(1, bad.returncode, damaged)
+                self.assertIn("error", json.loads(bad.stdout))
+                self.assertEqual(damaged, Path(path).read_text())
+            Path(path).write_bytes(original)
+            ok = subprocess.run(command, input=json.dumps({"domain": "ipa.test"}), text=True, capture_output=True, check=True)
+            self.assertEqual({"auth_pending": False}, json.loads(ok.stdout))
+            self.assertEqual(original, Path(path).read_bytes())
+
     def test_atomic_private_journal_and_corruption_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "state", "cache.json")

@@ -128,6 +128,15 @@ def update(state, action, data):
         raise ValueError("journal domain mismatch")
     if action == "inspect":
         return {"work": work(state), "retired": state.get("retired", {})}
+    if action == "auth_inspect":
+        # Read-only view of the authorization-cache obligation (pilot's Go
+        # reconciler asks it before it decides whether anything is owed). The
+        # same default as auth_prepare's `previous`: a journal that never
+        # recorded the flag cannot show that earlier runs refreshed every
+        # client, so it is owed. Only a literal false counts as settled; any
+        # other value is read as owed, the safe side of a damaged journal. The
+        # domain check above already makes a journal of another domain an error.
+        return {"auth_pending": state.get("auth_pending", True) is not False}
     if action == "retirement_status":
         matches = [r for r in state.get("retired", {}).values()
                    if r["fqdn"] == data["fqdn"].lower()
@@ -266,7 +275,7 @@ def read_state(stream):
 
 def journal(path, action, data):
     directory = os.path.dirname(path)
-    if action in ("inspect", "plan", "retirement_status"):
+    if action in ("inspect", "plan", "retirement_status", "auth_inspect"):
         # Atomic replacement makes an unlocked read a coherent snapshot. Do
         # not create even a sidecar lock during preview/read-only discovery.
         try:
