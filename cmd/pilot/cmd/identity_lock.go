@@ -24,16 +24,39 @@ import (
 // identityLockHelp is the paragraph the help of every command that runs the
 // identity apply playbook carries (see checkIdentityLockTarget for the rule and
 // docs/runbooks/freeipa-identity.md §4.3 for the operator's side): one text, so
-// the commands cannot say different things about the same refusals.
-const identityLockHelp = `Before it runs or connects to anything, it checks that this server's /etc/ipa lock
-can be taken through the inventory, by the same rule the lock itself follows,
-and refuses an inventory it cannot (a docker or local connection, ProxyCommand,
-a password, an ssh option pilot's own ssh does not take), naming the variable.
-It reads the inventory through ansible-inventory without a vault password, so a
-workspace whose group_vars hold a plaintext contract secret, or are encrypted as
-a whole file, is refused too: keep secrets in .vault/main.yaml. Connection
-variables that only reach the playbook through -e @file, ansible.cfg's ssh_args
-or ANSIBLE_SSH_ARGS are not seen by that check.`
+// the commands cannot say different things about the same refusals. It says
+// what comes before the check as well as what the check comes before: a claim
+// that nothing does is not true (a wizard asks its questions, deploy and
+// reconcile regenerate inventory.yml and upgrade a roster's schema, decommission
+// confirms the stage and regenerates inventory.yml first).
+const identityLockHelp = `Before it runs any ansible-playbook, opens any ssh connection, records an approval
+or starts a step of its own, it checks that this server's /etc/ipa lock can be
+taken through the inventory, by the same rule the lock itself follows, and
+refuses an inventory it cannot (a docker or local connection, ProxyCommand, a
+password, an ssh option pilot's own ssh does not take), naming the variable.
+Work that only prepares the workspace can come first: the questions of a wizard,
+regenerating inventory.yml from hosts.yml, upgrading a roster file's schema (a
+backup is kept) and, for decommission, the stage confirmation. It reads the
+inventory through ansible-inventory without a vault password, so a workspace
+whose group_vars hold a plaintext contract secret, or are encrypted as a whole
+file, is refused too: keep secrets in .vault/main.yaml. Connection variables that
+only reach the playbook through -e @file, ansible.cfg's ssh_args or
+ANSIBLE_SSH_ARGS are not seen by that check.`
+
+// identityLockDeployHelp is identityLockHelp for pilot deploy and pilot
+// reconcile, whose help is in Chinese: the same rule and the same limits, one
+// text for the two commands (TestLockHelpIsASingleSource).
+const identityLockDeployHelp = `選到 freeipa-identity 時(deploy 與 reconcile 的 ansible engine，含 --preview-only)，
+會在任何 ansible-playbook、ssh、依賴 apply 或預覽之前，先檢查 FreeIPA server 的
+/etc/ipa 鎖能不能經 inventory 取得(與取鎖本身同一套規則)；取不到(docker 或
+local connection、ProxyCommand、密碼、pilot 的 ssh 不接受的 -o)就拒絕並指出是
+哪個 hostvar，--preview-only 與 --force 的結果一致。只整理 workspace 的事會在這個
+檢查之前：精靈的問題、從 hosts.yml 重新產生 inventory.yml、roster 的 schema 升級
+(會留備份)。這個檢查透過 ansible-inventory 讀 inventory(不帶 vault 密碼)，所以
+group_vars 有 contract 的明文 secret、或整份 group_vars 被 vault 加密，會在取鎖前
+被拒絕(secret 放在 .vault/main.yaml)；只靠 -e @file、ansible.cfg 的 ssh_args 或
+ANSIBLE_SSH_ARGS 提供的連線設定，檢查看不到。--ask-vault-pass／--ask-become-pass
+的密碼提示發生在取鎖之後(在 ansible-playbook 內)，輸入密碼的時間算在持鎖時間裡。`
 
 // identityLockWaitDefault is how long a funnel waits for another run to give
 // the lock back: one full identity run takes about 26-27 minutes

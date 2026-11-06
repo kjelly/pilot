@@ -210,16 +210,7 @@ var deployCmd = &cobra.Command{
 這是 DELIVERY.md 手動組指令的替代路徑，行為完全一致(同一套 stage/confirm
 gate、同一份 Playbook 對照表)——熟悉 Ansible 的人仍可以照 DELIVERY.md 手動執行。
 
-選到 freeipa-identity 時(deploy 與 reconcile 的 ansible engine，含 --preview-only)，
-會在任何 playbook、ssh、依賴 apply 或預覽之前，先檢查 FreeIPA server 的
-/etc/ipa 鎖能不能經 inventory 取得(與取鎖本身同一套規則)；取不到(docker 或
-local connection、ProxyCommand、密碼、pilot 的 ssh 不接受的 -o)就拒絕並指出是
-哪個 hostvar，--preview-only 與 --force 的結果一致。這個檢查透過 ansible-inventory
-讀 inventory(不帶 vault 密碼)，所以 group_vars 有 contract 的明文 secret、或整份
-group_vars 被 vault 加密，會在取鎖前被拒絕(secret 放在 .vault/main.yaml)；只靠
--e @file、ansible.cfg 的 ssh_args 或 ANSIBLE_SSH_ARGS 提供的連線設定，檢查看不到。
---ask-vault-pass／--ask-become-pass 的密碼提示發生在取鎖之後(在 ansible-playbook
-內)，輸入密碼的時間算在持鎖時間裡。`,
+` + identityLockDeployHelp,
 	RunE: runDeploy,
 }
 
