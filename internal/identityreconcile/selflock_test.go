@@ -140,6 +140,16 @@ func TestSelfLockoutAtEveryStageBoundary(t *testing.T) {
 		lg("editors", nil, nil),
 		lg("trust admins", nil, nil),
 	}
+	// The login's one path is through team-old, itself a member of admins; the login is not
+	// a direct member.
+	viaOldops := func() liveState {
+		s := base()
+		s.groups = []LiveGroup{
+			lg("admins", []string{"bob"}, []string{"team-old"}), lg("team-old", []string{login}, nil),
+			lg("ipausers", []string{login, "bob", "carol"}, nil), lg("editors", nil, nil), lg("trust admins", nil, nil),
+		}
+		return s
+	}
 	resetState := base()
 	for i := range resetState.users { // every user is past the reset password: an expiration after the change
 		resetState.users[i].PwdExpiration = "20990101000000Z"
@@ -180,6 +190,17 @@ func TestSelfLockoutAtEveryStageBoundary(t *testing.T) {
 			"after S5 (group_remove_member)", login},
 		{"a cycle in the live graph and a plan that leaves the login's edge alone", cycle,
 			Desired{Groups: []DesiredGroup{dgroup("admins", true, []string{"bob"}, []string{"ops"}), dgroup("ops", true, []string{login}, []string{"admins"})}}, "", ""},
+		// The path built in the same plan and the old one removed after it: S6 adds the
+		// edges (the login to newops, newops to admins), S8 deletes oldops. Not blocked,
+		// which needs the walk to remember a group the plan created and the edges it adds.
+		{"S6 builds the new path and S8 deletes the old one: the new one is there by then", viaOldops(),
+			Desired{Groups: []DesiredGroup{
+				{Name: "admins", Description: "admins", Type: TypePosix, Authoritative: false, Groups: []string{"team-new"}, GroupsDeclared: true},
+				dgroup("team-new", true, []string{login}, nil),
+			}, AbsentGroups: []string{"team-old"}}, "", ""},
+		{"... and when the new path is never built, deleting the old one cuts the login off at S8", viaOldops(),
+			Desired{Groups: []DesiredGroup{dgroup("team-new", true, []string{login}, nil)}, AbsentGroups: []string{"team-old"}},
+			"after S8 (user_del and group_del) the login adm would not be a member of admins", login},
 		// S7: disabled.
 		{"S7 the login disabled by the roster", base(),
 			Desired{Users: []DesiredUser{duser(login, false)}},
@@ -202,10 +223,16 @@ func TestSelfLockoutAtEveryStageBoundary(t *testing.T) {
 		{"S8 editors deleted", base(), Desired{AbsentGroups: []string{"editors"}}, "would delete the group editors", "editors"},
 		{"S8 trust admins deleted", base(), Desired{AbsentGroups: []string{"trust admins"}}, "would delete the group trust admins", "trust admins"},
 		{"S8 another group deleted", base(), Desired{AbsentGroups: []string{"ops"}}, "", ""},
+		{"S8 a user that has the name of a protected group is deleted: it is a user, not the group", base(), Desired{AbsentUsers: []string{"editors"}}, "", ""},
 		// S4: the login's own password.
 		{"S4 the login's own password reset", resetState,
 			Desired{Users: []DesiredUser{passwordUser(login, false)}},
 			"S4 (passwd) would reset the password of the login adm", login},
+		{"S4 the login has no password change recorded and the roster gives it one: an initialize, which is never blocked (only a reset is)", func() liveState {
+			s := base()
+			s.users[0].LastPwdChange, s.users[0].PwdExpiration = "", ""
+			return s
+		}(), Desired{Users: []DesiredUser{passwordUser(login, true)}}, "", ""},
 		{"S4 another user's password reset", resetState,
 			Desired{Users: []DesiredUser{passwordUser(login, true), passwordUser("bob", false)}}, "", ""},
 		{"S4 the login's password declared and preserved", resetState,

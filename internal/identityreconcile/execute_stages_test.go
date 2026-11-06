@@ -32,14 +32,16 @@ func (f *fakeIPA) beforeShow(n int, fn func()) {
 	}
 }
 
-// sentTo is the members of the command of a method sent for an object, "" when none.
+// sentMembers is the members of the command of a method sent for an object: nil when
+// no such command was sent, and a non-nil list (empty if it names none) when one was,
+// so a test tells a command that was never sent from one sent with no members.
 func (f *fakeIPA) sentMembers(method, object, typ string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, c := range f.calls {
 		if c.method == method && len(c.args) > 0 && c.args[0] == object {
 			raw, _ := c.opts[typ].([]any)
-			var out []string
+			out := []string{}
 			for _, m := range raw {
 				out = append(out, m.(string))
 			}
@@ -293,13 +295,11 @@ func TestExecuteDeletesAreCheckedAgainstTheObjectsAsTheyAreNow(t *testing.T) {
 		reason string
 	}{
 		"deleted and added again (another ipauniqueid and uidnumber)": {func(f *fakeIPA) { delete(f.users, "carol"); f.addUser("carol", "carol", "carol") }, "another ipauniqueid"},
-		"preserved":                {func(f *fakeIPA) { f.users["carol"].preserved = true }, "preserved"},
-		"read fails with an error": {nil, ""},
-		"uidnumber differs":        {func(f *fakeIPA) { f.users["carol"].uid = "1" }, "uidnumber"},
+		"preserved":         {func(f *fakeIPA) { f.users["carol"].preserved = true }, "preserved"},
+		"uidnumber differs": {func(f *fakeIPA) { f.users["carol"].uid = "1" }, "uidnumber"},
 	} {
-		if tc.change == nil {
-			continue
-		}
+		// (A read that fails with an error is not a change to make before the read:
+		// TestAReReadThatFailsRefusesTheStepItGuards has it.)
 		t.Run("a user that is "+name+": neither user is deleted, the group is not", func(t *testing.T) {
 			e := newRunEnv(t, roster)
 			seed(e.f)

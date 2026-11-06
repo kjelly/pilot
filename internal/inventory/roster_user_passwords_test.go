@@ -158,6 +158,7 @@ func TestRosterUserPasswordsRefusals(t *testing.T) {
 		"not YAML":            {"users: [\n  password: \"" + userPasswordSentinel, nil, "does not parse"},
 		"cyclic":              {cyc, errCyclicYAML, ""},
 		"users not a list":    {"users: {name: x, password: {initial: \"" + userPasswordSentinel + "\"}}\n", nil, "users is not a list"},
+		"users a scalar":      {"users: \"" + userPasswordSentinel + "\"\n", nil, "users is not a list"},
 		"entry not a mapping": {"users:\n  - \"" + userPasswordSentinel + "\"\n", nil, "users[0] is not a mapping"},
 		"no name":             {"users:\n  - password: {initial: \"" + userPasswordSentinel + "\"}\n", nil, "users[0] has no string name"},
 		"name is a number":    {"users:\n  - name: 12\n    password: {initial: \"" + userPasswordSentinel + "\"}\n", nil, "no string name"},
@@ -206,5 +207,29 @@ func TestRosterUserPasswordNeverFormatsTheValue(t *testing.T) {
 		if s := fmt.Sprintf(verb, got["alice"]) + fmt.Sprintf(verb, got); strings.Contains(s, userPasswordSentinel) {
 			t.Fatalf("%s shows the password: %s", verb, s)
 		}
+	}
+}
+
+// The name of each form is what the messages that refuse a password say of it.
+func TestPasswordFormsHaveTheirNames(t *testing.T) {
+	for form, want := range map[PasswordForm]string{
+		PasswordAbsent: "absent", PasswordLiteral: "literal", PasswordTemplate: "template",
+		PasswordNotString: "not-a-string", PasswordEncrypted: "inline-vault", PasswordForm(99): "PasswordForm(99)",
+	} {
+		if got := form.String(); got != want {
+			t.Errorf("PasswordForm(%d).String() = %q, want %q", int(form), got, want)
+		}
+	}
+}
+
+// A user that is an alias of a mapping is read as that mapping: its name and its
+// password are the anchored ones.
+func TestRosterUserPasswordsReadsAUserThatIsAnAlias(t *testing.T) {
+	got, err := RosterUserPasswords([]byte("x-user: &u\n  name: aliased\n  password: {initial: \"" + userPasswordSentinel + "\"}\nusers:\n  - *u\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["aliased"].Form != PasswordLiteral || got["aliased"].Value != userPasswordSentinel || len(got) != 1 {
+		t.Fatalf("got %v", got)
 	}
 }
