@@ -797,8 +797,8 @@ class _Scan:
         p = _run_git(self.repo, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
         sha = p.stdout.decode("ascii", "replace").strip()
         if p.returncode or not re.fullmatch(r"[0-9a-f]{40}", sha):
-            self.error(f"the {label} commit {rev if len(rev) < 80 else rev[:80]} is not in this clone; "
-                       f"fetch it (git fetch origin) and run the scan again")
+            self.error(f"the {label} revision {rev if len(rev) < 80 else rev[:80]} does not resolve to a commit in this "
+                       f"clone; fetch it (git fetch origin) or name another one, and run the scan again")
             return None
         return sha
 
