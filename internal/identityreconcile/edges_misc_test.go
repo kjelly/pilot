@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -298,6 +299,34 @@ func TestAuthCacheOutputRunDoesNotRunWhenTheFileCannotBeMadeEmpty(t *testing.T) 
 		return 0, nil
 	})
 	if err == nil || ran || !strings.Contains(err.Error(), "authorization cache result file") {
+		t.Fatalf("err = %v, ran %v", err, ran)
+	}
+}
+
+// A result path that cannot be cleared is refused with the reason, and nothing runs: a
+// directory with something in it stands where the file should be, and the run would
+// otherwise read whatever is there as the playbook's answer.
+func TestAuthCacheOutputRunRefusesAPathItCannotClear(t *testing.T) {
+	out, err := NewAuthCacheOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = out.Close() })
+	if err := os.Remove(out.path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(out.path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out.path, "x"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	_, err = out.Run(context.Background(), AuthCacheWant{Action: AuthCacheProbe, Host: "ipa-1", FQDN: testFQDN}, func(context.Context, string) (int, error) {
+		ran = true
+		return 0, nil
+	})
+	if err == nil || ran || !strings.Contains(err.Error(), "clear the authorization cache result file") {
 		t.Fatalf("err = %v, ran %v", err, ran)
 	}
 }
