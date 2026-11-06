@@ -90,6 +90,14 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   user has recorded on the PR that the credential is revoked, rotated or confirmed
   dead, and how the history is handled. Draft comments name the secret and the
   commits, never the value.
+  The gate also scans for it itself: `review_gate.py` and `apply_decision.py` take
+  `--worktree "$REPO_ROOT"` and scan every commit of `baseRefOid..headRefOid` (named
+  by SHA, so it holds after the checkout is restored) with the shared
+  `_shared/scripts/secret_scan.py`. A finding is `DRAFT`, and the posted comment tells
+  Root to stop and leaves the credential and the history to the user: no scrubbing
+  commit clears it. A scan that cannot run (no `--worktree`, a PR commit that is not in
+  the clone, a scanner that does not load, an unusable `--secret-file`) is `WAITING`,
+  so nothing is merged unscanned. `git fetch` the PR head first when it is missing.
 - **Mandated actual-run evidence.** `.github/pr-evidence.json` on the base branch
   declares `docs/evidence/**` as evidence-only and requires an `actual-run` record
   for any change to playbooks, specs, contracts, inventory handling or deploy
@@ -147,8 +155,8 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 | Decision | Conditions | GitHub action |
 |---|---|---|
 | `MERGE` | Valid independent reviewed HEAD/Base; zero P0–P2 blockers; relevant HEAD-SHA-bound tests succeed; the base manifest's required record covers HEAD (or is reasoned `not-needed`); CI all passed (or narrowly justified no-CI policy); required approvals and rules satisfied; no unresolved threads/dependencies; current mergeable and safe | `gh pr merge --match-head-commit <SHA>`; verify `MERGED` |
-| `DRAFT` | Confirmed live base tip absent from HEAD ancestry or PR Base SHA differing from that tip (independent of semantic review), confirmed blocking defect, failed CI not confirmed unrelated, failing tests, substantive review finding (a repeated disputed one only with new evidence), merge conflict or unresolved review thread | Post actionable reasons and HEAD/Base/live-base SHAs for alignment failures, then `gh pr ready --undo`; hand repair to `pr-ready` |
-| `WAITING` | Pending CI, pending required approval, `CHANGES_REQUESTED` awaiting re-review, a failing check the reviewer confirmed unrelated to the PR, a disputed finding repeated without new evidence, the mandated actual-run record missing or not covering HEAD (no reviewer finding), unknown GitHub status, evidence incomplete, stale review HEAD/Base without a confirmed live-base mismatch, movement during live confirmation, merge queue, missing access or unmet dependency | Leave Ready **unchanged**; report blocker and recommended next action |
+| `DRAFT` | Confirmed live base tip absent from HEAD ancestry or PR Base SHA differing from that tip (independent of semantic review), confirmed blocking defect, failed CI not confirmed unrelated, failing tests, substantive review finding (a repeated disputed one only with new evidence), merge conflict, unresolved review thread or a secret in any commit of the PR (the local scan) | Post actionable reasons and HEAD/Base/live-base SHAs for alignment failures, then `gh pr ready --undo`; hand repair to `pr-ready` |
+| `WAITING` | Pending CI, pending required approval, `CHANGES_REQUESTED` awaiting re-review, a failing check the reviewer confirmed unrelated to the PR, a disputed finding repeated without new evidence, the mandated actual-run record missing or not covering HEAD (no reviewer finding), unknown GitHub status, evidence incomplete, stale review HEAD/Base without a confirmed live-base mismatch, movement during live confirmation, merge queue, missing access, unmet dependency or a secret scan that could not run | Leave Ready **unchanged**; report blocker and recommended next action |
 | `SKIP` | Already Draft, closed or merged | No action |
 
 `WAITING` is intentional: lack of evidence or a transient pending check is not proof the code is defective. **Do not automatically downgrade in these situations**. If the PR has *any confirmed* blocking defect, classify `DRAFT` even if some checks are pending.
@@ -159,8 +167,10 @@ Before taking action on semantic findings or merging, require review evidence fo
 
 ```bash
 python3 "$SNAP/.agents/skills/pr-review-merge/scripts/review_gate.py" --repo OWNER/REPO --pr 123 \
-  --evidence /safe/state/123/review.json
+  --evidence /safe/state/123/review.json --worktree "$REPO_ROOT"
 ```
+
+`--worktree` is the checkout that holds the PR's commits; add `--secret-file FILE` (outside the repository, one value per line, each 8+ bytes) to look for values you know of. Both are passed to the actor below as well.
 
 This command reads GitHub state and outputs structured JSON, no mutation. If the
 result is `MERGE` or `DRAFT`, first complete the shared contract's safe restore
@@ -171,7 +181,7 @@ Only then run the guarded actor from the snapshot:
 
 ```bash
 python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 \
-  --evidence /safe/state/123/review.json --method merge --execute
+  --evidence /safe/state/123/review.json --worktree "$REPO_ROOT" --method merge --execute
 ```
 
 Without `--execute`, the actor performs a dry run. **Run with `--execute` when the user has requested this workflow**, without asking for additional permission for every normal PR; observe session/tool permission prompts.
@@ -201,5 +211,6 @@ Keep Root context small: include structured findings and essential citations/pat
 - [Quality gate and merge-queue safety](references/quality-gate.md)
 - [Platforms and repository layout](references/platforms.md)
 - `scripts/list_ready.py` — lists candidate open Ready PRs (paginated) so the user can choose one; listing is not authorization to process them
-- `scripts/review_gate.py` — live read-only decision gate
-- `scripts/apply_decision.py` — gated GitHub mutation (`--execute` required)
+- `scripts/review_gate.py` — live read-only decision gate (scans every commit of the PR for secrets with `--worktree`)
+- `scripts/apply_decision.py` — gated GitHub mutation (`--execute` required; takes the same `--worktree`/`--secret-file`)
+- `../_shared/scripts/secret_scan.py` — value-free secret scanner the three gates share (rules: `../_shared/committed-secrets.md`)

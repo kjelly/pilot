@@ -6,6 +6,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from gh_runtime import Repo, GitHubError
 from review_gate import evaluate, COVERAGE
+from scan_stub import CleanScan
+
+setUpModule, tearDownModule = CleanScan.up, CleanScan.down
 
 H = 'a' * 40
 B = 'b' * 40
