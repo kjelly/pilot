@@ -15,10 +15,16 @@ import (
 )
 
 // Two captures of the same harness differ in the values the server makes up:
-// identifiers, the numbers it allocates, the time. Everything else (the
-// names, the error names and codes, which attribute is there and which is
-// not, the order of the members) is what the fixtures are for, so it has to
-// be the same. normalizeCapture masks the first kind and keeps the second.
+// identifiers, the numbers it allocates, the time; in the order of a
+// multi-valued attribute (LDAP does not order the values: memberof_group of
+// one user came as [group, ipausers] in one run and [ipausers, group] in the
+// next); and in what the server adds to a new user or group a moment after
+// the answer (the SID and its object classes come from a task that runs
+// later: the answer to the same group_add carried ipantgroupattrs in one run
+// and not in another). Everything else (the names, the error names and codes,
+// which attribute is there and which is not, which values) is what the
+// fixtures are for, so it has to be the same. normalizeCapture masks the
+// first kind and keeps the second.
 
 var (
 	captureUUIDRe   = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -26,15 +32,29 @@ var (
 	captureSIDRe    = regexp.MustCompile(`^S-1-5-21-[0-9-]+$`)
 )
 
+// lateSIDObjectClasses are the object classes the SID task adds to a user or
+// a group after the add has been answered.
+var lateSIDObjectClasses = []string{"ipantgroupattrs", "ipantuserattrs"}
+
 func normalizeCaptureValue(v any) any {
 	switch v := v.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for k, e := range v {
-			if k == "__base64__" {
+			switch {
+			case k == "__base64__":
 				if s, _ := e.(string); s != fixtureSecretPlaceholder {
 					out[k] = "<base64>"
 					continue
+				}
+			case strings.EqualFold(k, "ipantsecurityidentifier"):
+				continue
+			case strings.EqualFold(k, "objectclass"):
+				if list, ok := e.([]any); ok {
+					e = slices.DeleteFunc(slices.Clone(list), func(c any) bool {
+						s, _ := c.(string)
+						return slices.Contains(lateSIDObjectClasses, strings.ToLower(s))
+					})
 				}
 			}
 			out[k] = normalizeCaptureValue(e)
@@ -42,8 +62,15 @@ func normalizeCaptureValue(v any) any {
 		return out
 	case []any:
 		out := make([]any, len(v))
+		allStrings := true
 		for i, e := range v {
 			out[i] = normalizeCaptureValue(e)
+			if _, ok := out[i].(string); !ok {
+				allStrings = false
+			}
+		}
+		if allStrings {
+			sort.Slice(out, func(i, j int) bool { return out[i].(string) < out[j].(string) })
 		}
 		return out
 	case string:
@@ -205,10 +232,11 @@ func TestNormalizeCaptureMasksOnlyWhatChangesFromRunToRun(t *testing.T) {
 	run1 := `{"result":{"result":{"ipauniqueid":["5dc06d5a-d9ed-11f1-8e23-5254001b059e"],"uidnumber":["1927600354"],
 		"krblastpwdchange":[{"__datetime__":"20261106142126Z"}],"krbextradata":[{"__base64__":"AAJm4u1q"}],
 		"ipantsecurityidentifier":["S-1-5-21-3998632271-3893472475-798555519-1367"],"uid":["p24cap-u"],
+		"objectclass":["top","posixgroup","ipantgroupattrs"],"memberof_group":["p24cap-g","ipausers"],
 		"krbprincipalkey":[{"__base64__":"` + fixtureSecretPlaceholder + `"}]}},"error":null,"id":0}`
 	run2 := `{"result":{"result":{"ipauniqueid":["6e2217ab-d9ed-11f1-8e23-5254001b059e"],"uidnumber":["1927600399"],
 		"krblastpwdchange":[{"__datetime__":"20261107010101Z"}],"krbextradata":[{"__base64__":"AAKx9v2z"}],
-		"ipantsecurityidentifier":["S-1-5-21-3998632271-3893472475-798555519-1400"],"uid":["p24cap-u"],
+		"uid":["p24cap-u"],"objectclass":["top","posixgroup"],"memberof_group":["ipausers","p24cap-g"],
 		"krbprincipalkey":[{"__base64__":"` + fixtureSecretPlaceholder + `"}]}},"error":null,"id":0}`
 	a, errA := normalizeCapture([]byte(run1))
 	b, errB := normalizeCapture([]byte(run2))
@@ -230,7 +258,9 @@ func TestNormalizeCaptureMasksOnlyWhatChangesFromRunToRun(t *testing.T) {
 		"another placeholder": func(s string) string {
 			return strings.Replace(s, fixtureSecretPlaceholder, "QUJDREVGR0hJSktMTU5PUA==", 1)
 		},
-		"another time shape": func(s string) string { return strings.Replace(s, `20261107010101Z`, `soon`, 1) },
+		"another time shape":   func(s string) string { return strings.Replace(s, `20261107010101Z`, `soon`, 1) },
+		"a member gone":        func(s string) string { return strings.Replace(s, `["ipausers","p24cap-g"]`, `["ipausers"]`, 1) },
+		"another object class": func(s string) string { return strings.Replace(s, `"top","posixgroup"`, `"top","groupofnames"`, 1) },
 	} {
 		c, err := normalizeCapture([]byte(change(run2)))
 		if err != nil {
