@@ -550,7 +550,8 @@ class Context:
         """Every change since `sha` is evidence-only or a pure base import (the file is unchanged at
         `sha` since the fork and equals the base at HEAD). With `require_non_execution` each imported
         file must also be a declared non-execution regular file the recorded closure cannot reach;
-        without it any pure import passes (review reuse across a merge-train base integration)."""
+        without it any pure import passes (review reuse across a merge-train base integration).
+        Both modes also require HEAD to carry every base change since the fork (see the last loop)."""
         what = "non-execution reuse" if require_non_execution else "base-import reuse"
         if require_non_execution and not self.non_execution:
             return {}, ["no non_execution_paths declared on the base branch"]
@@ -579,17 +580,56 @@ class Context:
                 return {}, ["non-execution import must be a regular file: " + path]
             if machine and (reach := self._closure_reach(path, machine)):
                 return {}, [f"non-execution import is reachable from the recorded closure ({reach}): {path}"]
+        if (path := self._dropped_base_change(tested, head, upstream, ancestor)):
+            return {}, ["base change not carried into HEAD: " + path]
         return {"base": base, "changed": sorted(
             p for p in tested.keys() | head.keys()
             if tested.get(p) != head.get(p) and not any(rx.match(p) for rx in self.patterns))}, []
+
+    def _dropped_base_change(self, tested: dict[str, Any], head: dict[str, Any], upstream: dict[str, Any],
+                             ancestor: dict[str, Any]) -> str | None:
+        """The first path whose change on the base since the fork HEAD does not carry, or None.
+
+        The pure-import loop sees only paths where the reviewed/tested tree and HEAD differ. A path the
+        base changed since the fork is also a change HEAD must carry: a merge that keeps the PR's bytes of
+        it (`-s ours`, a conflict resolved with the PR side, a deletion main made undone) differs from the
+        reviewed tree nowhere, so it passes unseen while it silently reverts the base. HEAD must hold the
+        base's bytes there, and the reviewed tree only the fork's (a pure import) or the base's own (the PR
+        made the same change). Evidence-only paths are never a revert worth refusing."""
+        for path in sorted(p for p in upstream.keys() | ancestor.keys() if upstream.get(p) != ancestor.get(p)):
+            if any(rx.match(path) for rx in self.patterns):
+                continue
+            if head.get(path) != upstream.get(path) or tested.get(path) not in (ancestor.get(path), upstream.get(path)):
+                return path
+        return None
+
+    def _review_shortcut(self, sha: Any, label: str) -> bool:
+        """`accepts` for a review, unless the base moved past the fork and HEAD dropped one of its changes.
+
+        An evidence-only delta (an empty one too) from the reviewed commit holds the reviewed bytes, which
+        is right for a receipt but not for a review across a base integration: when HEAD contains base
+        commits the reviewed commit lacks, the merge must carry what they changed. Only when it can be
+        decided: the reviewed commit and the base are related by one merge base and HEAD contains the base."""
+        if sha != self.head and isinstance(sha, str) and SHA.fullmatch(sha) and (base := self.reuse_base()):
+            fork = self.merge_base_of(sha, base)
+            contained = self.integrated_base or self.merge_base_of(base, self.head) == base
+            if fork and fork not in (sha, base) and contained:
+                trees = [self.tree_entries(r) for r in (sha, self.head, base, fork)]
+                if any(t is None for t in trees):
+                    self._review_errors[str(sha)] = "complete Git trees unavailable for base-import reuse"
+                    return False
+                if (path := self._dropped_base_change(*trees)):
+                    self._review_errors[str(sha)] = "base change not carried into HEAD: " + path
+                    return False
+        return self.accepts(sha, label)
 
     def accepts_review(self, sha: Any, label: str) -> bool:
         """A review (never a check receipt) taken at `sha` covers HEAD: `accepts`, or every change
         since is evidence-only or a pure base import of declared non-execution files. The PR's own
         content is then byte-identical to what was reviewed; the imported tests still run in CI."""
-        if self.accepts(sha, label):
+        if self._review_shortcut(sha, label):
             return True
-        if not self.non_execution:
+        if not self.non_execution or str(sha) in self._review_errors:
             return False
         info, errors = self._non_execution_import(sha, None)
         if errors:
@@ -609,7 +649,7 @@ class Context:
         every change since is evidence-only or a pure import from the base, whatever the files. The
         PR's own content is byte-identical to what was reviewed; CI on HEAD covers the integration.
         Never used for check receipts."""
-        if self.accepts(sha, label):
+        if self._review_shortcut(sha, label):
             return True
         info, errors = self._non_execution_import(sha, None, require_non_execution=False)
         if errors:
