@@ -330,16 +330,23 @@ func TestPasswordFindingsFire(t *testing.T) {
 	}
 }
 
-// The P2-4 fixtures name no lab: no address, no VM, no path of the machine
-// that took them (the home directories FreeIPA gives its users, /home/<uid>,
-// are the server's own and are in the answers). The realm and domain are the
-// lab's, as in every earlier capture.
+// The P2-4 fixtures name no lab: no address, no host of another domain, no
+// path of the machine that took them (the home directories FreeIPA gives its
+// users, /home/<uid>, are the server's own and are in the answers). The realm
+// and domain are the lab's, as in every earlier capture, so a dotted name has
+// to be one of those, the example domain of the mail addresses, or a version.
 var labIdentifierPatterns = map[string]*regexp.Regexp{
 	"an IPv4 address":                     regexp.MustCompile(`\b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b`),
-	"a private-network IP":                regexp.MustCompile(`192\.168\.|10\.[0-9]+\.[0-9]+\.[0-9]+`),
-	"a lab VM name":                       regexp.MustCompile(`(?i)\b(pwfix|pwexp|p22-cli|i179|i244|wx244|wv244)`),
 	"a path of the machine that captured": regexp.MustCompile(`/home/kjelly|/Users/|/tmp/|/var/lib/libvirt|/root/`),
 }
+
+var (
+	dottedNameRe   = regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)+\b`)
+	versionRe      = regexp.MustCompile(`^[0-9]+(\.[0-9]+){1,2}$`)
+	allowedDomains = []string{"ipa.pilot.internal", "pilot.internal", "example.test"}
+	// the marker's description (pilot.group-history/v1) is a name, not a host
+	allowedNames = []string{"pilot.group-history"}
+)
 
 func labIdentifierFindings(t *testing.T, dir string, names []string) []string {
 	t.Helper()
@@ -355,6 +362,20 @@ func labIdentifierFindings(t *testing.T, dir string, names []string) []string {
 					findings = append(findings, n+ext+": holds "+what)
 				}
 			}
+			if ext == ".headers" {
+				continue // Content-Type: application/json; charset=utf-8
+			}
+			for _, tok := range dottedNameRe.FindAllString(string(data), -1) {
+				low := strings.ToLower(tok)
+				ok := versionRe.MatchString(low) || slices.Contains(allowedNames, low)
+				for _, d := range allowedDomains {
+					ok = ok || low == d || strings.HasSuffix(low, "."+d)
+				}
+				if !ok {
+					findings = append(findings, n+ext+": holds a hostname outside the lab's domain")
+					break
+				}
+			}
 		}
 	}
 	sort.Strings(findings)
@@ -368,7 +389,7 @@ func TestWriteCapturesHoldNoLabIdentifiers(t *testing.T) {
 	dir := t.TempDir()
 	for what, content := range map[string]string{
 		"an IPv4 address":                     `{"x":"connected from 203.0.113.9"}`,
-		"a lab VM name":                       `{"x":"vm pwfix-ipa"}`,
+		"a hostname outside the lab's domain": `{"x":"vm-ipa.lab.example.org"}`,
 		"a path of the machine that captured": `{"x":"/home/kjelly/file"}`,
 	} {
 		for _, ext := range []string{".status", ".headers"} {
@@ -383,5 +404,12 @@ func TestWriteCapturesHoldNoLabIdentifiers(t *testing.T) {
 		if len(got) == 0 || !strings.Contains(strings.Join(got, "\n"), what) {
 			t.Fatalf("%s: findings = %q", what, got)
 		}
+	}
+	// the lab's own names pass
+	if err := os.WriteFile(filepath.Join(dir, "probe.json"), []byte(`{"x":"ipa1.ipa.pilot.internal a@example.test 4.13.4 IPA.PILOT.INTERNAL pilot.group-history/v1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := labIdentifierFindings(t, dir, []string{"probe"}); len(got) != 0 {
+		t.Fatalf("the lab's own names are findings: %q", got)
 	}
 }
