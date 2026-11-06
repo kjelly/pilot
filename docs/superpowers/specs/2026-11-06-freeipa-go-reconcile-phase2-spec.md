@@ -11,6 +11,8 @@
 - **待使用者確認 Un**（§12）：附有設計審查的預設值與它的後果，**不是已確認的決定**。未確認前實作不得假設它們已成立；U1 擋住 P2-2 的合併。
 - **未決 Qn**（§13）與**未知 Xn**（§1）：還沒有答案，各自寫明由什麼擷取、量測或誰的回答解決。
 
+修訂：第二輪 review（F1–F4 與 P3）與 #273 的 adapter 範圍已併入，§14 的 E11–E21 列出。
+
 本文件不提供操作 SOP。文中的指令、旗標、檔名與 JSON 欄位是要實作的介面（欄位名稱為擬議），不是已實跑的步驟。AGENTS.md §4.0 的資料夾表**不在這個 PR 修改**（入口 playbook 還不存在），P2-3 新增該列（§5.1）。
 
 ## 0 範圍
@@ -70,6 +72,9 @@ AGENTS.md §0.2 要求明列；沒有列出的項目不是「沒有」，是尚�
 | R6 | 入口的單一 JSON 結果檔靠 controller 端 `copy`（`delegate_to: localhost`）；`become` 與連線形態可能影響 | K17 擷取，P2-3 實跑 |
 | R7 | `partial_failed` 的 webhook 沒有 `confirmed_effects`（`completedComponentIDs` 只算 `success`，`cmd/pilot/cmd/outbound_workflow.go:121-127`），訂閱者看不到已提交的 users／groups 變更；`application_consistency` 是 `partial_or_unknown` | 接受並記錄（Q4） |
 | R8 | server 端先放掉鎖、client 還沒注意到（sshd 的 ClientAlive 設定）：`Lost()` 看不到 | 文件記錄；lock 的 ssh 帶 `ServerAliveInterval=15`、`ServerAliveCountMax=3`（§4.2）縮短反方向的偵測時間 |
+| R9 | 取鎖等待期間（最長 30 分鐘）按 Ctrl-C：本機 ssh 被殺，但遠端 `flock --wait` 行程在 sshd 關閉連線後仍等到它自己的期限；它取得鎖時會因 stdin EOF 立刻結束並放鎖，不會長期占鎖，但這段時間它是一個幽靈等待者，會讓另一個合法等待者的那一次嘗試多等一輪 | P2-2 把遠端指令包在 `timeout` 之下（上限＝`--lock-wait` 加寬限），保證幽靈等待者在 `--lock-wait` 內結束；live arm L8 記錄 Ctrl-C 之後遠端行程多久消失（§10.2） |
+| R10 | 取鎖 ssh 的 `ServerAliveInterval=15`、`ServerAliveCountMax=3` 讓網路中斷約 45 秒就被視為掉鎖，legacy 漏斗因此取消 ansible-playbook；今天同樣的中斷不會殺掉一輪長時間的 run。這是行為變更，也是「偵測反方向掉鎖要多快」與「容忍短暫中斷」的取捨 | 寫進 U1、U2 的後果；數值是常數，P2-2 的 live arm 量測後可調（調大＝R8 的偵測更慢） |
+| R11 | `users-groups` 的寫入 run 在觀察到 `acked` 的完整 run 之前，webhook 一律是 `failure`（義務未結清，§6.2）；`store.LastSuccess`（`pilot runs last-success`）會把零寫入、`pending=false` 的 `users-groups` 成功 run 當成該主機最近一次成功交付，而它沒有執行完整 playbook | 文件寫明給 webhook 訂閱者；`LastSuccess` 是否依 scope 過濾見 Q6 |
 
 ### 1.4 destructive 邊界
 
@@ -91,12 +96,12 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 每個 PR 都要讓下面七條保持成立；測試與 lint 針對它們設計。
 
 - **I1 序列化**：每條會執行 `freeipa-identity-apply.yml` 或新入口的非測試程式碼路徑，從「確認之後」到該次執行（含冪等性再套用、verify、rollback）結束，持有該 FreeIPA server 的 `/etc/ipa` 遠端鎖。一輪只取一次；混合 run 沿用已持有的鎖，不重新取。dev 路徑（`vm-target run`／`vm-target test`／`topology test`）不在範圍，lint 的註解寫明理由（計畫 §4 步驟 2）。
-- **I2 執行器**：沒有任何寫入 RPC 離開 pilot，除非 (a) 這一輪的鎖已持有且沒有掉，(b) 這一輪對**已上鎖主機**的入口結果已被觀察到。由 `freeiparpc` 的 WriteGate 結構性保證，不靠呼叫端的紀律（§7.1）。
+- **I2 執行器**：沒有任何寫入 RPC 離開 pilot，除非 (a) 這一輪的鎖仍然 `Active()`（已持有、沒有 `Release`、沒有掉，§4.1），(b) 這一輪對**已上鎖主機**的入口結果已被觀察到。由 `freeiparpc` 的 WriteGate 結構性保證，不靠呼叫端的紀律（§7.1）。
 - **I3 入口觸發**：入口只會接在「非空且沒有 blocked 的 Plan₁」之後；空的 Plan₁ 不執行入口（改做唯讀探測）。入口之後才寫入，寫入集合取自 Plan₂（它是權威）。入口執行後 Plan₂ 為空是允許的（多刷新一次，無害），在 `users-groups` scope 它算義務未結清。（補充：設計審查原本寫「入口執行若且唯若最終寫入集合非空」，與它自己的流程——入口在 Read₂ 之前——不一致，這裡改為與流程一致的寫法；§7.2。）
 - **I4 永不成功**：Go 有寫入（或入口已執行）、但沒有觀察到該主機的 `acked=true` 的 run，以及探測讀到 `pending=true` 的 run，**不是成功**：結束碼非 0、outcome 是失敗類（義務未結清是 `partial_failed`，§6）、webhook 的 `result` 為 `failure`、不被 `store.LastSuccess` 當成成功。
 - **I5 混合略過**：引擎變數為 `go` 時，任何 `--tags` 下都沒有 users／groups 的 mutation task 執行；SSH key 區塊與授權快取 task 照常執行；變數未設時行為與今天逐位元組相同（§8.4）。
 - **I6 秘密**：密碼、cookie、vault 內容不進 argv、環境、plan、結果檔、delivery 事件、log。
-- **I7 fail closed**：任何 `blocked` 項目或不支援的輸入，都是零寫入、沒有入口；混合 run 在這種情況下也不執行 playbook。
+- **I7 fail closed**：任何 `blocked` 項目或不支援的輸入，都是零寫入，混合 run 在這種情況下也不執行 playbook。Plan₁ 就 `blocked` 時沒有入口；Plan₂ 才出現的 `blocked`（以及 §7.3 的破壞性差異衝突）發生在入口之後，入口已執行、零寫入（§7.2）。
 
 ## 3 決定總表
 
@@ -106,8 +111,8 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 | D2 | 取鎖包裝 | 新套件 `internal/identitylock`；`Acquirer` 由 `cmd` 建好注入，各漏斗的 options 必填，nil 即錯誤 | §4.1 |
 | D3 | target 推導 | host 取 inventory 名稱、剛好一台；推導函式下沉到 `internal/sshdial/hostvars.go`；不支援的 inventory 形態拒絕執行，不退回無鎖（U1） | §4.2 |
 | D4 | 等待策略 | CLI 漏斗最多等 30 分鐘並每 30 秒印一行；`pilot reconcile --lock-wait`；TUI breakglass 等待 0；Phase 2 不提供略過（U2） | §4.3 |
-| D5 | 掉鎖 | 舊漏斗取消 ansible-playbook 並回報；Go writer 每批前檢查；`Held.Lost()` 只在沒有 Release 的結束時關閉 | §4.4 |
-| D6 | 全 repo lint | 引用 allowlist、具名漏斗 AST 檢查、contract 守衛，附變異驗證 | §4.6 |
+| D5 | 掉鎖 | 只取消 ansible-playbook 的指令 ctx（`Bind`），`RunResult`、證據與 Go RPC 的 ctx 不取消；Go writer 用 `Held.Active()` 在每批前檢查，進行中的 batch 回真實答案；`Held.Lost()` 只在沒有 Release 的結束時關閉；掉鎖、取消、逾時之後的證據寫入用脫離取消的 ctx | §4.1、§4.4 |
+| D6 | 全 repo lint | 引用 allowlist、具名漏斗 AST 檢查、contract 守衛，附變異驗證；`executeDeploymentTransaction` 對 identity playbook 沒有 `IdentityLock` 時執行期拒絕 | §4.6 |
 | D7 | 交錯測試 | 用真實 helper 重現清除交錯與覆蓋交錯；先於任何 live Go 寫入通過 | §4.7 |
 | D8 | 入口名稱 | `playbooks/apply/freeipa-identity-auth-cache.yml`，單檔兩模式 `prepare`／`probe`；AGENTS.md §4.0 的列由 P2-3 新增 | §5.1 |
 | D9 | 探測 | helper 新增唯讀動作 `auth_inspect`（計畫選項 (a)） | §5.3 |
@@ -118,20 +123,21 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 | D14 | 結束碼 | 0 成功、1 失敗（含 unknown、partial）、3 blocked（P1）、4 只剩義務未結清 | §6.3 |
 | D15 | outcome 讀取者 | 每個 outcome 明列，未列的不再被發布成 success | §6.4 |
 | D16 | WriteGate | `freeiparpc.Config.WriteGate`，非唯讀客戶端沒有它就拒絕建立 | §7.1 |
-| D17 | 流程 | Read₁→Plan₁→（入口）→Read₂→Plan₂→stages→Read₃→Plan₃ | §7.2 |
-| D18 | stage 與 batch | 八個 stage，每個 batch 只放互相獨立的操作，上限 25 個 | §7.3 |
+| D17 | 流程 | Read₁→Plan₁→（入口）→Read₂→Plan₂→stages→Read₃→Plan₃；Plan₂ 比 Plan₁ 多出破壞性操作就停止 | §7.2、§7.3 |
+| D18 | stage、batch 與前置條件 | 八個 stage，每個 batch 只放互相獨立的操作，上限 25 個；`passwd`、成員撤銷、刪除在送出前各有批次重讀與謂詞 | §7.3 |
 | D19 | 分類與重試 | 五類結果；寫入不重送；unknown 不重送、靠重讀分類 | §7.4、§7.5 |
 | D20 | 驗證 | 重讀整份、Plan₃ 不得再有已嘗試物件的操作 | §7.6 |
 | D21 | journal | 存在 delivery store 的 run 事件，不含秘密；不從 journal 續跑 | §7.7 |
 | D22 | 密碼 | 值只在執行時由記憶體中的 roster 取出；值的形態由 yaml.Node 判斷 | §7.8 |
 | D23 | lifecycle 與保護 | absent 為永久刪除；blocked 原因不變；Go 只碰 roster 物件、marker 與 roster 群組的直接成員；不支援的內容在寫入前拒絕 | §7.9 |
-| D24 | 自鎖保護 | 新 blocked 原因 `protected_object`（U3） | §7.10 |
-| D25 | #273 | 先修：adapter 對型別錯誤的 `membership`／`password`／`ssh_keys` fail closed | §7.9 |
+| D24 | 自鎖保護 | 新 blocked 原因 `protected_object`，依 plan 執行後的遞移成員資格判斷，並擋登入 principal 自己的密碼重設（U3） | §7.10 |
+| D25 | #273 | 先修：adapter 在任何讀取或寫入之前拒絕型別錯誤與明確的 `null`（使用者與群組的純量、頂層清單、`membership`／`password`／`ssh_keys` 及其內部鍵、`absent` 項目的形狀） | §7.9 |
 | D26 | CLI | `--scope users-groups\|full`、`--lock-wait`、`--result-out` | §8.1 |
 | D27 | users-groups scope | 自己的 delivery run，不執行 playbook，結果義務未結清時結束碼 4 | §8.2 |
 | D28 | 混合 | 重用 Ansible reconcile 路徑，hook 只對 identity 元件生效 | §8.3 |
 | D29 | skip 變數 | `pilot_identity_users_groups_engine`（不用計畫擬議的 `identity_users_groups_engine`） | §8.4 |
 | D30 | 輸出與秘密 | stdout 摘要、`--result-out`（`pilot.identity-apply/v1`）、`--plan-out` 與它同一個 #274 修正 | §8.6 |
+| D31 | live 注入點 | driver 用 build tag `identity_live_hooks` 建置的 pilot，在入口之後與 stage／batch 之前暫停，讓 driver 殺程序、送訊號或寫入外部變更；預設與發佈的 binary 不含 | §10.2 |
 
 ## 4 取鎖閘門
 
@@ -140,8 +146,9 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 **決定 D2。** 新增 `internal/identitylock`：
 
 - `type Acquirer func(ctx context.Context) (*Held, error)`。
-- `Held`：`Host`（inventory 名稱）、`Lost() <-chan struct{}`、`Release() error`、`Bind(ctx) (context.Context, context.CancelFunc)`；`HeldFrom(ctx)` 取出 ctx 上的 token。
-- `Bind` 產生的 ctx 在鎖掉了時以 cause `ErrLockLost` 取消，並帶著 token（Go 的 WriteGate 用它，§7.1）。ctx 在取鎖之前就已交給下游的漏斗（deploy 的 `RunResult`，§4.5）改在取鎖後以同樣的語意對它的 `CancelCauseFunc` 通知；實作形狀由 P2-2 決定，行為由 §4.4 的測試鎖住。
+- `Held`：`Host`（inventory 名稱）、`Active() bool`（沒有 `Release`、也沒有掉鎖）、`Lost() <-chan struct{}`、`Release() error`，以及兩個把 token 放進 ctx 的方法：`Attach(ctx) context.Context` 只帶 token，**永不因掉鎖而取消**；`Bind(ctx) (context.Context, context.CancelFunc)` 帶 token，並在掉鎖時以 cause `ErrLockLost` 取消。`HeldFrom(ctx)` 取出 token。實作形狀由 P2-2 決定，行為由 §4.4 與 §4.7 的測試鎖住。
+- **`Bind` 只用在指令的 ctx**：ansible-playbook 的執行（apply、冪等性再套用、rollback playbook、入口）。它的結果**不得**交給 `delivery.Transaction.RunResult`、store 或 journal 的寫入、`freeiparpc` 的呼叫與驗證讀取；那些用 `Attach` 或原本的 ctx。原因見 §4.4：取消那些 ctx 會讓證據寫入失敗而遮住真正的結果，也會讓進行中的 RPC 變成 unknown。
+- WriteGate 與所有「現在還能不能寫」的判斷用 `Active()`，不直接看 `Lost()`：`Held.Lost()` 只在沒有 Release 的結束時關閉，`Release` 之後不會關閉，只看 `Lost()` 的 gate 會在 `Release` 之後放行寫入。
 
 **`Held.Lost()` 只在「沒有 Release 的結束」關閉。** `sshdial.Lock.Lost()` 回傳 `p.done`（`internal/sshdial/lock.go:110`），它在 ssh session 因任何原因結束時關閉，包括 `Release`；而它的 doc comment（`:108-109`）寫「without Release」。**不改 `sshdial`**：`internal/sshdial/sshdial_test.go:276-278` 斷言 `Release` 之後 `Lost` 是關閉的（失敗訊息 `Lost is not closed after Release`），改它會打破 P0 的測試與已實跑的行為。`Held` 在呼叫 `Release` 前先記下「已釋放」，只在未釋放時才把 `Lost` 轉成自己的訊號；P2-2 順手把 `lock.go:108-109` 的 doc comment 改成與實作相符。
 
@@ -161,7 +168,7 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 
 - **host 是 inventory 名稱，剛好一台**（AGENTS.md §5.13：`ansible_host` 是連線位址，不是身分）；不是剛好一台，在任何 ansible-playbook 之前拒絕。
 - 把 `sshTargetFromHostVars`、`sshOptionArgs`、`splitShellWords`（連同 `unsupportedSSHHostVars`、`multiplexOptions`，`cmd/pilot/cmd/reconcile_golang.go:402-550`）搬到 `internal/sshdial/hostvars.go`，公開為 `TargetFromHostVars`。`// gate:` 註解隨函式搬走；ledger 的持有者清單（`cmd/pilot/cmd/reconcile_golang_ledger_test.go:49-56`）與每個 row 一起搬到 `internal/sshdial` 的對應測試，`TestReconcileGolangEveryGateHasARow` 的函式清單同步更新。規則與 P1 spec §4 完全相同：只接受 allowlist 內的 `-o`（`internal/sshdial/sshdial.go:48-55`）；`ansible_connection` 未設或 `ssh`；`ansible_ssh_args` 只准 `ControlMaster`／`ControlPath`／`ControlPersist`（忽略）；密碼 SSH、`ansible_ssh_executable`、舊名稱一律拒絕。
-- 取鎖用的 ssh 另外帶 `ServerAliveInterval=15`、`ServerAliveCountMax=3`，除非 target 自己設了。
+- 取鎖用的 ssh 另外帶 `ServerAliveInterval=15`、`ServerAliveCountMax=3`，除非 target 自己設了（約 45 秒的網路中斷就會被視為掉鎖，行為變更與取捨見 R10、U1、U2）。
 - **不支援的形態（`ansible_connection: docker`／`local`、ProxyCommand、密碼 SSH、不在 allowlist 的 `-o`）：拒絕執行，訊息指出是哪個 hostvar；永不「無鎖執行」。** repo 內的 topology 檔（`docs/topologies/*`）是 `vm-target topology` 的輸入（docker-target 沒有 topology 指令），vm-target 的 inventory 是 `ansible_connection: ssh` 加 `ControlMaster` 與兩個 allowlist 內的 `-o`（`internal/vmtarget/vmtarget.go:1488-1494`）；docker-target 的 inventory 是 `ansible_connection: docker`（`internal/dockertarget/dockertarget.go:618`），repo 內沒有 FreeIPA 角色跑在它上面。**這是行為變更：見 U1。**
 - 已知缺口（與 P1 同類）：透過 `-e @file` 提供的連線變數，推導時看不到。
 
@@ -172,6 +179,7 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 - 每個 CLI 漏斗最多等 **30 分鐘**（受 ctx 約束），每 30 秒在 stderr 印一行進度（哪台 server、已等多久、上限）。一輪完整 identity 約 26–27 分鐘（計畫 §1），所以 30 分鐘夠等一輪完整的 legacy 執行。
 - `pilot reconcile --lock-wait <時間>`（兩個 engine 都有；`0` 立即失敗，driver 的忙碌測試用它）。`pilot deploy`、`pilot access …`、`pilot host decommission` 沒有旗標，用預設值。
 - `pilot edit` 的 TUI breakglass（`cmd/pilot/cmd/edit_tui_roster_breakglass.go:164`、`:193`）是同步呼叫、`context.Background()`、沒有進度畫面，等待 **0**；錯誤訊息指向會等待的 `pilot access breakglass activate`。
+- 取鎖等待的遠端指令包在 `timeout` 之下（上限＝等待時間加寬限，R9）：Ctrl-C 之後留在遠端的 `flock --wait` 行程不會超過 `--lock-wait`。
 - 忙碌：`ErrLockBusy`，訊息指名 server 與路徑。ssh 失敗：整輪失敗，**永不在沒有鎖的情況下繼續**。
 - **不提供略過（bypass）**：略過會重新引入清除交錯與覆蓋交錯。安全的替代方案是計畫的選項 (iv)（`auth_pending` 加世代）。見 U2。
 - **補充（`--timeout` 與等待）**：`pilot reconcile --engine golang --force` 的 `--timeout` 分段計算：取鎖之前的 preflight 在自己的期限內（沿用 P1 的 `--timeout` 語意）、取鎖等待由 `--lock-wait` 界定、取鎖之後的讀取、入口、寫入與驗證整段**重新**以 `--timeout` 計時。否則預設 30 分鐘的等待會吃掉整個 30 分鐘的執行期限。SIGINT／SIGTERM／SIGHUP 在任何階段都取消。
@@ -181,16 +189,22 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 
 **決定 D5。**
 
-- **會包 ansible-playbook 的漏斗**在 `held.Bind(ctx)` 之下執行 ansible-playbook：掉鎖就取消 run（ansible-playbook 被殺；#138 的 journal 設計為 crash-safe），然後回傳 `lock lost; FreeIPA may be partially reconciled; rerun`——即使 ansible-playbook 已經以 0 結束（交錯的另一輪可能已經動過）。
-- **Go writer**：WriteGate 在每次寫入呼叫或每個 batch 之前檢查 `Lost`；已送出的 batch 的答案照實記錄；之後不再送任何寫入；驗證讀取（Read₃）照常執行（讀取不需要鎖）；結果是失敗，若已有 `success` 或 `unknown` 的操作則為 `partial_failed`（§6.1）。
+- **會包 ansible-playbook 的漏斗**：只有 ansible-playbook 的指令 ctx 用 `held.Bind(ctx)`。掉鎖就取消這個指令（ansible-playbook 被殺；#138 的 journal 設計為 crash-safe），該步驟以包著 `ErrLockLost` 的錯誤失敗，訊息 `lock lost; FreeIPA may be partially reconciled; rerun`——即使 ansible-playbook 已經以 0 結束（交錯的另一輪可能已經動過）。`Transaction.RunResult` 的 ctx 與步驟證據用的 ctx **不被取消**，所以 outcome 是 `failed`（`FailedStep` 是掉鎖時正在執行的步驟，原因是 `ErrLockLost`），不是 `evidence_failed`。每個步驟結束後檢查 `Held.Active()`：已掉就把該步驟的結果改為失敗（唯讀的驗證步驟不被取消，但結果作廢）。
+- **Go writer**：WriteGate 用 `Active()` 在每次寫入呼叫或每個 batch 之前檢查，掉鎖後拒絕**新的**寫入。Go 的 RPC ctx **不因掉鎖取消**，所以進行中的 batch 回傳它真正的答案並照實記錄（成功就是 `success`，不是 `unknown`）；之後不再送任何寫入；驗證讀取（Read₃）照常執行（讀取不需要鎖）；結果是失敗，若已有 `success` 或 `unknown` 的操作則為 `partial_failed`（§6.1）。取消 RPC 的只有操作者的訊號與 `--timeout`，那種取消下進行中的寫入是 `unknown`（P0 的語意）。
 - 驗證讀取用 `context.WithoutCancel` 加上有界的期限（**補充**，常數 `golangVerifyTimeout`，初值 60 秒；比照 P1 登出用的 10 秒），所以掉鎖、`--timeout` 與第一次 Ctrl-C 之後仍會嘗試讀一次；第二次 Ctrl-C 立即結束 pilot（P1 spec §2.5 已知限制 3）。讀取失敗就保留 unknown。
 - 殘餘（R8）：server 端先放掉鎖、client 還沒發現的情形看不到；文件記錄。
+
+**證據與終端寫入不隨取消失敗。** 問題已對 main `402ca398` 核對：`Transaction.runStep`（`internal/delivery/transaction.go:208-216`）用步驟的 ctx 寫 `step_finished` 事件，寫入失敗時回傳 `errEvidencePersistence`，**丟掉步驟自己的錯誤**；`RunWriter.appendEvent` 經 `withImmediateTx` 以 `db.Conn(ctx)` 取連線（`internal/store/delivery_evidence.go:353-359`），ctx 已取消就失敗。所以取消 `RunResult` 的 ctx（掉鎖、`--timeout`、Ctrl-C）會把 `failed`／`partial_failed` 變成 `evidence_failed`，並失去 `ErrPartiallyApplied`。`RunWriter.Finish` 已經避開這件事：它用 `context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)`（`delivery_evidence.go:302`）。
+
+- 規則：掉鎖、取消、逾時**之後**的每一次 journal 事件（`identity.op`、`identity.verify`、`identity.auth_cache`）、step 證據寫入與終端寫入，都用 `context.WithoutCancel` 加有界期限（常數 `evidenceAppendTimeout`，初值 5 秒，與 `Finish` 相同）。
+- 誰改：**P2-5** 的 `Execute` 對 journal sink 的每個呼叫與 Read₃ 傳脫離取消的 ctx（executor 保證，不靠 sink 的實作）；**P2-6 改 `Transaction.runStep`**，step 證據在 `WithTimeout(WithoutCancel(ctx), evidenceAppendTimeout)` 下寫入。這會改變**所有** deploy 元件在 ctx 取消後的 outcome：從 `evidence_failed` 變成步驟自己的失敗（`failed` 等），列入 P2-6 的測試與 §14。P2-2 不需要改 `runStep`：掉鎖不取消 `RunResult` 的 ctx。
+- 不改 `runStep` 對真實 store 失敗的處理：脫離取消之後 append 仍失敗，才是 `evidence_failed`。
 
 ### 4.5 時機
 
 **決定 D1。** 鎖取在「確認之後、第一個會改動的執行之前」；預覽、唯讀查詢與互動確認的等待都不持鎖。
 
-- **deploy runner**：在 `executeDeploymentTransaction` 的 `apply` closure 裡，確認分支之後（`cmd/pilot/cmd/deploy.go:1446-1460`）、`PrepareApply`（`:1461-1465`）之前取鎖；`txn.RunResult` 回傳後才釋放（涵蓋 verify、冪等性再套用、rollback）。傳給 `RunResult` 的 ctx 是 `WithCancelCause` 的子 ctx，掉鎖時後續步驟一併取消。`PrepareApply`（`deploy.go:1330`）目前沒有非測試的設定者，混合執行是它的第一個使用者（§8.3）。
+- **deploy runner**：在 `executeDeploymentTransaction` 的 `apply` closure 裡，確認分支之後（`cmd/pilot/cmd/deploy.go:1446-1460`）、`PrepareApply`（`:1461-1465`）之前取鎖；`txn.RunResult` 回傳後才釋放（涵蓋 verify、冪等性再套用、rollback）。`RunResult` 的 ctx **不**被掉鎖取消；每個會執行 ansible-playbook 的步驟閉包（apply、冪等性、rollback）把自己的指令 ctx 以 `held.Bind` 衍生（§4.1、§4.4）。取到的 `Held` 由 `executeDeploymentTransaction` 的區域變數持有，供各步驟閉包與最後的 `defer Release` 使用。`PrepareApply`（`deploy.go:1330`）目前沒有非測試的設定者，混合執行是它的第一個使用者（§8.3）。
 - **`accessgrants.applyPlan`**：extra-vars 檔寫好之後（`internal/accessgrants/reconcile.go:481-487`）、`runner.Run` 之前（`:493`）。
 - **decommission converge**：`Execute` 內、`e.provider.exec` 之前（`internal/decommission/providers/freeipa_client.go:477`）。
 - **從不取鎖**：`--check` 預覽、唯讀 inspect 查詢（`--tags freeipa_host_absent_inspect`，`internal/decommission/providers/freeipa_client.go` 的 `query`，約 `:875-901`）、drift probe、Go `--preview-only`。
@@ -204,6 +218,7 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 2. **具名漏斗 AST 檢查**（以函式與方法名稱比對，不比 receiver，因為漏斗經介面呼叫）：`applyPlan`、`(*freeipaIdentityConvergeStep).Execute`、`executeDeploymentTransaction` 的 apply closure、`executeRecordedDeploymentCore`（在 options 的字面值設 `IdentityLock`），以及 Go 的入口路徑。要求取鎖呼叫先於第一個執行呼叫（`runner.Run`、`e.provider.exec`、`runOnce(false…`）；執行 auth-cache 入口的函式必須接收 `*identitylock.Held`。注意 `--playbook` 可以覆寫（`cmd/pilot/cmd/access_cli.go:86`、`cmd/pilot/cmd/access_breakglass_cli.go:88`、`:92`），所以 `applyPlan` 裡的取鎖是無條件的。
 3. **contract 守衛**：沒有元件的 `dependencies` 指向 `freeipa-identity`（目前確實沒有）；`freeipa-identity` 沒有 `canonical_apply` 的 remediation（目前只有 `contracts/alertmanager.yaml:35`）；`freeipa-identity` 維持 `site.include: false`（`contracts/freeipa-identity.yaml:65`）。之後任何一項被改變，測試失敗，直到那條路徑也取鎖。
 4. 註解寫明 dev 路徑的排除與理由（I1）。
+5. **執行期拒絕**（lint 第 1 點看不到的呼叫者）：`executeDeploymentTransaction`（`cmd/pilot/cmd/deploy.go:1381`）在任何 ansible-playbook 之前檢查，playbook 是 identity apply（以與第 1 點相同的檔名常數判斷）而 `options.IdentityLock == nil` 就回傳錯誤。預覽也要求設定它（它只是 acquirer，預覽不呼叫）。`executeDeployment`（`deploy.go:1323`）傳空的 options，目前沒有非測試的呼叫者，卻是最容易被新程式碼拿去用的入口；這道檢查把它與其他直接建構 options 的呼叫者一併擋下。測試：`executeDeployment` 與空 options 的呼叫對 identity playbook 失敗，對其他 playbook 不受影響。
 
 **負向對照**：lint 自己的表格測試餵合成原始碼（缺取鎖呼叫、取鎖在執行之後、新的未列入引用），比照 `internal/sshdial/start_lint_test.go`（`TestRegression_SSHStartsOnlyThroughStart`）；PR 附變異驗證的紀錄（拿掉任一漏斗的取鎖，lint 與 §4.7 的序列化測試都要 fail）。
 
@@ -214,7 +229,8 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 - `TestAuthCacheClearInterleavingWithoutLockLosesObligation`、`…OverwriteInterleavingWithoutLockLosesObligation`：驅動**真實**的 helper（`python3`、暫存 journal），照計畫「清除交錯」「覆蓋交錯」的精確順序，斷言混合 playbook 的 settle 時 `dirty=false`——這個危害是真的，它就是區別性對照：沒有鎖，義務確實被丟掉。
 - `TestFunnelsSerializeAuthCacheObligation`：同樣兩種順序經兩個漏斗呼叫驅動，ansible-playbook 換成呼叫真實 helper 的假腳本，`sshdial` 的假 ssh 走 `local` 模式，鎖路徑用暫存目錄（`LockOptions.Path`）：第二個漏斗等待或失敗，義務存活到混合 run 自己的 settle 與 ack。拿掉任一漏斗的取鎖呼叫，它就 fail。
 - 每個漏斗的順序測試（假 acquirer＋假 runner 記錄 `lock, run(--check), run(apply), idempotency, release`）；非 identity 的 deploy 元件從不取鎖；`--preview-only` 從不取鎖。
-- 掉鎖測試（§4.4）：每個漏斗的 ansible-playbook 在掉鎖時被取消、結果仍是失敗（即使 ansible-playbook 以 0 結束）。
+- 掉鎖測試（§4.4）：每個漏斗的 ansible-playbook 在掉鎖時被取消、結果仍是失敗（即使 ansible-playbook 以 0 結束）；**deploy 漏斗掉鎖後的 outcome 是 `failed`、原因是 `ErrLockLost`，不是 `evidence_failed`，`step_finished` 事件存在**；`Held.Lost()` 在 `Release` 之後不關閉、`Active()` 在 `Release` 與掉鎖之後都是 false。
+- 證據不隨取消失敗（P2-5、P2-6）：取消的 ctx 下，journal sink 與 `Transaction.runStep` 仍寫入；`users-groups` run 在已有 `success` 或 `unknown` 的操作後掉鎖、逾時或收到訊號，結果是 `partial_failed`（`FailedStep` 為當時的步驟），不是 `evidence_failed`；進行中 batch 的真實答案被 journaled。
 
 ## 5 授權快取入口與探測
 
@@ -268,6 +284,8 @@ task：取 `hostname -f`；`prepare` 執行 helper 的 `auth_prepare`；`probe` 
 
 **為什麼不用計畫擬議的 stdout `AUTH_CACHE[<host>]: …` 標記**：roster 控制的文字可以進到 loop label 與輸出，標記可被偽造；解析依賴 stdout callback 與格式；而且 #108 的「解析到另一台主機的區塊」這一類錯誤在單一結果檔下不存在。這是對計畫擬議的刻意偏離，記錄於此與 §14。
 
+**結果檔的生命週期。** 入口（`prepare`／`probe`）每次呼叫各用自己新建的空暫存檔。混合 run 的 identity playbook 觀察（`observe`）在整個 transaction 內共用一個路徑，但**每次 ansible-playbook 呼叫之前**都重新建立成空檔：apply 之前由 `PrepareApply` 做，冪等性再套用之前由包住 `Idempotency` 步驟的包裝做。Verify 在冪等性之前執行（`Transaction` 的順序是 apply、verify、idempotency，`internal/delivery/transaction.go:138-178`），讀的是 apply 階段的內容；冪等性再套用寫它自己的內容，其觀察只作參考，義務以 apply 階段為準（冪等性的判準仍是 `changed=0` 與 Go 的零操作 plan）。所以不論先後，都不會把上一階段的結果當成這一階段的，也不會讀到空檔以外的殘留內容。測試：先放上一階段的內容再執行下一階段，解析器讀到的只有這一階段的結果；冪等性階段沒有輸出時 Verify 不受影響。
+
 ### 5.5 identity playbook 的觀察
 
 **決定 D11。** 為了讓混合 run 判斷「這一輪有沒有結清」，identity playbook 增加兩處：
@@ -308,7 +326,9 @@ block 內較前面的 task 失敗時沒有觀察結果：那一輪本來就是�
 **新 sentinel `delivery.ErrPartiallyApplied`**：`Transaction.RunResult` 中，apply、verify、idempotency 任一步的錯誤包著它，結果就是 `OutcomePartialFailed`、`FailedStep` 是那一步、**不 rollback**（reconciler 的效果已提交）。目前非測試程式碼沒有任何路徑會產生 `partial_failed`（只有讀取者，grep 確認），這是它的第一個 producer。使用處：
 
 - Go 已有至少一個操作的結果是 `success` 或 `unknown`，之後失敗或結果不明（`FailedStep: apply`）。（補充：設計審查寫「寫了 ≥1 個操作」；全部嘗試的操作都是確定未套用的失敗——`failed`／`conflict-failed`——時沒有東西被改動，記為一般失敗 `failed`，不是 partial。）
+- Read₃／Plan₃ 驗證失敗（`verify_failed`，§7.6）而 Go 已有 `success` 或 `unknown` 的操作：`partial_failed`，`FailedStep: verify`；沒有已提交的操作則是一般 `failed`。
 - 混合 run：Go 已提交之後 playbook 失敗（`apply`）、`pilot verify` 失敗（`verify`）、冪等性失敗（`idempotency`）。
+- 掉鎖、取消或逾時發生在 Go 已有 `success` 或 `unknown` 的操作之後（§4.4）。
 - 義務未結清（見下一點，`FailedStep: verify`）：webhook 的 `failure.class` 是 `verify_failed`、phase 是 `verify`（`failureClassFor`，`cmd/pilot/cmd/outbound_workflow.go:178-197`），都在 webhook 的 allowlist 內。
 
 ### 6.2 義務未結清
@@ -324,10 +344,14 @@ block 內較前面的 task 失敗時沒有觀察結果：那一輪本來就是�
 | 觀察到 `acked=true` | `full` | 已結清 |
 | 沒有觀察結果、缺欄位、別台主機、`acked=false`（`ipa_identity_refresh_sssd_cache` 為 false、`pilot_deferred_hosts` 與 `freeipa-client` 有交集、tag 漏掉、`no hosts matched`） | `full` | 未結清（U4 討論這條嚴格規則） |
 | Go 失敗，沒有任何操作是 `success`／`unknown`，但入口已執行 | 兩者 | 一般失敗（`failed`，結束碼 1），訊息附上「入口已執行，義務已記錄」；一次多餘的刷新無害 |
+| Plan₂ 有 `blocked`（入口已執行，零寫入） | 兩者 | 結束碼 3、outcome `failed`、`FailedStep: apply`；訊息附上「入口已執行，`auth_pending` 已記錄（多一次刷新，無害）」，`identity.auth_cache` 記 `entry_ran=true`；混合 run 不執行 playbook（I7） |
+| Plan₂ 比 Plan₁ 多出破壞性操作（§7.3），零寫入 | 兩者 | 結束碼 1、outcome `failed`、`FailedStep: apply`，訊息指出是哪些操作，要求重新預覽；入口已執行，同上 |
 
 未結清時的訊息（計畫 §(ii)）：「授權快取義務未結清，client 在 SSSD 快取過期前可能仍沿用舊授權；下一次選到 `identity` 或 `client-cache` 的 apply 或完整 apply 會刷新所有 enrolled client（`ipa_identity_refresh_sssd_cache` 為 false 時則要先改回 true）」。pilot 不自己執行 settle、刷新或 ack。
 
 本機證據：delivery 事件 `identity.auth_cache`，payload `{source: this_run|previous_run, entry_ran, probe_pending, observed_acked}`（無秘密）。
+
+**給 webhook 訂閱者與 `runs` 讀取者的注意**（寫進 `pilot` 的 `--help` 與使用說明）：`users-groups` scope 有寫入的 run，在觀察到 `acked` 的完整 run 之前，對外的 `operation.result` 一律是 `failure`（`failure.class` 是 `verify_failed`，`application_consistency` 是 `partial_or_unknown`，`confirmed_effects` 為空，R7、R11）；這不是 Go 的寫入失敗，而是授權快取義務未結清。訂閱者要以 run 的 metadata（engine、scope）與 `identity.auth_cache` 事件解讀，不能把它當成「identity 同步失敗」。零寫入且 `pending=false` 的 `users-groups` run 才是 `success`；`store.LastSuccess` 是否把它當成該主機最近一次成功交付，見 Q6。
 
 ### 6.3 結束碼
 
@@ -337,10 +361,10 @@ block 內較前面的 task 失敗時沒有觀察結果：那一輪本來就是�
 |---|---|
 | 0 | 成功：所有操作完成並驗證；義務已結清，或不需要（探測 `pending=false` 的零寫入 run） |
 | 1 | 失敗，包括 unknown 與 partial |
-| 3 | blocked：plan 有 `blocked` 項目，零寫入、沒有入口（P1 已定；`--force` 同樣） |
+| 3 | blocked：plan 有 `blocked` 項目，零寫入（P1 已定；`--force` 同樣）；Plan₁ 就 blocked 時沒有入口，Plan₂ 才出現時入口已執行（§6.2） |
 | 4 | 只剩義務未結清：每個 Go 操作都已完成並驗證，沒有別的失敗（driver 用它斷言「零 mutation 且義務如實回報」） |
 
-子行程的結束碼仍不傳遞（P1 spec §2.3）。history 記的 `run_finished.exit_code` 是 `outcomeExitCode` 的 0／1，CLI 的 3／4 是 CLI 自己的語意；兩者刻意不同。
+子行程的結束碼仍不傳遞（P1 spec §2.3）：**混合路徑也一樣**。`--scope full --force` 目前會走 `runReconcileInteractive`（`cmd/pilot/cmd/reconcile.go:90`），不經 `runReconcileGolangPreview`；那條路徑回傳的錯誤若包著 ansible-playbook 的 `*exec.ExitError`，會讓 pilot 以 ansible 的結束碼（3 或 4）結束，被誤讀成 blocked 或義務未結清（P1 spec §2.3 的同一個問題）。所以混合路徑的分派也要套 `runReconcileGolangPreview`（`reconcile_golang.go:111-118`）的 exit-code 保護：非 `golangPreviewError` 的失敗一律包成結束碼 1，只有 blocked 與義務未結清這兩種有名字的結果是 3 與 4。測試：混合 run 的 playbook 以 ansible 的結束碼 3、4 失敗時，pilot 結束碼是 1。history 記的 `run_finished.exit_code` 是 `outcomeExitCode` 的 0／1，CLI 的 3／4 是 CLI 自己的語意；兩者刻意不同。
 
 ### 6.4 outcome 讀取者強化
 
@@ -368,15 +392,13 @@ P1 的預覽繼續以 `ReadOnly: true` 建立，不帶 WriteGate。
 2. Plan₁ 有 `blocked`：停止（結束碼 3），沒有入口、零寫入（I7）。
 3. Plan₁ 的寫入數為 0：不執行入口。`users-groups` scope 做唯讀探測；混合 run 交給 playbook。
 4. Plan₁ 的寫入數大於 0：執行入口（`prepare`），並驗證結果（§5.4）。失敗就停止，零寫入。
-5. **Read₂ → Plan₂**：入口與第一批寫入之間隔著一次 ansible-playbook 啟動，Read₂ 就是計畫 §4 步驟 4 的「寫入前重讀」與「入口空窗的前置條件」；入口已執行，所以 Plan₂ 是權威。與 Plan₁ 的差異回報為 `conflict`（R5）。Plan₂ 有 `blocked`：停止、回報義務。Plan₂ 為空：Go 結束（入口執行過、Go 沒有寫入；混合 run 繼續交給 playbook）。
+5. **Read₂ → Plan₂**：入口與第一批寫入之間隔著一次 ansible-playbook 啟動，Read₂ 就是計畫 §4 步驟 4 的「寫入前重讀」與「入口空窗的前置條件」；入口已執行，所以 Plan₂ 是權威。與 Plan₁ 的差異回報為 `plan_changed`（R5）：Plan₁ 沒有、Plan₂ 有的**非破壞性**操作照常執行並回報；Plan₂ 比 Plan₁ 多出**破壞性**操作（§7.3 的集合）則**停止、零寫入、不執行**——結束碼 1，要求操作者重新預覽（`--force` 下不替操作者確認一份他沒看過的破壞性計畫）。Plan₂ 有 `blocked`：停止、零寫入、結束碼 3、outcome `failed`，訊息附上入口已執行（§6.2）；混合 run 不執行 playbook（I7）。Plan₂ 為空：Go 結束（入口執行過、Go 沒有寫入；混合 run 繼續交給 playbook）。
 6. 依 §7.3 的 stage 執行 Plan₂。
 7. **Read₃ → Plan₃**（§7.6）。
 
 **與計畫字面的差異**（§14）：計畫要入口接在「寫入前重讀與重新規劃之後」，並要求測「第一次 plan 沒有寫入、重讀後才產生寫入」。這裡的入口接在 Plan₁ 之後、Read₂ 之前：Read₂ 同時是「寫入前重讀」與「入口空窗的覆蓋」，不需要在入口前多讀一次再於入口後補讀；Plan₁ 為空時沒有任何重讀，也就沒有「重讀後才出現寫入」的情形。對應的測試改為：Plan₁ 非空→入口→Plan₂ 多出 Plan₁ 沒有的操作→入口仍先於第一個寫入；Plan₁ 為空→沒有入口、沒有重讀。
 
-**寫入前的前置條件**（計畫 §4 步驟 5）：除刪除外，不在每批之前另外讀取；前置條件由伺服器的逐項回應判斷（add 的 `DuplicateEntry`、mod／enable 的 `NotFound` 都是 `conflict-failed`，§7.4）。刪除是例外，見 S8。
-
-### 7.3 stage 與 batch
+### 7.3 stage、batch 與寫入前的前置條件
 
 **決定 D18。** 依計畫 §7.2 的順序（P1 spec §7.2），每個 stage 的操作互相獨立；跨 stage 就是依賴。每個 batch 最多 **25** 個命令（初值，常數；P2-8 量測後可調，語意不變；Q2）。
 
@@ -389,7 +411,17 @@ P1 的預覽繼續以 `ReadOnly: true` 建立，不帶 WriteGate。
 | S5 | `group_remove_member` | 每個群組每種成員一筆，含所有成員 |
 | S6 | `group_add_member` | 同上 |
 | S7 | `user_enable`／`user_disable` | |
-| S8 | 刪除 | 先一個 batch 的 `user_show`／`group_show` 加 marker 重讀，立即再 `user_del`，最後 `group_del`；marker 必須驗證描述正確才送 `group_del` |
+| S8 | 刪除 | 先一個 batch 的 `user_show`／`group_show` 加 marker 重讀並判斷下面的謂詞，立即再 `user_del`，最後 `group_del`；marker 必須驗證描述正確才送 `group_del` |
+
+**寫入前的前置條件**（計畫 §4 步驟 5：「每批寫入前檢查所需 live preconditions」；(ii) 也要求入口空窗的外部變更由它涵蓋）。除了入口之後的 Read₂，下列三處在送出前再做一次批次重讀（`user_show`／`group_show`，`all: true`，每批至多 25 個）：
+
+- **破壞性集合**（本節各處用它）：plan 的 `destructive` 為 true 的種類（`user.password.reset`、`user.delete`、`group.delete`），加上權限收斂的種類（`group.member_user.remove`、`group.member_group.remove`、`user.disable`；後者是 §14 的補充，依計畫 §4「刪除與權限收斂前即時重讀」）。**Plan₂ 比較 Plan₁ 的規則**：Plan₂ 裡這個集合的操作，以「種類、物件、成員」為粒度（成員撤銷細到每個成員），只要不在 Plan₁ 就是 conflict：停止、零寫入、結束碼 1（§7.2）。
+- **S4 之前（`passwd`）**：對所有有計畫 `passwd` 的使用者做一次批次 `user_show`，以與 plan 相同的規則重新判斷：`initialize` 要求沒有 `krblastpwdchange`；`reset` 要求 `preserve_existing: false` 且使用者仍在上次重設的密碼上（`krbpasswordexpiration` 存在且 ≤ `krblastpwdchange`）。不符的使用者 `conflict-failed`、**不送 `passwd`**，並**停止後面的 stage（S5–S8）**；通過的其他使用者照常送出（每位各自一次呼叫）。本輪 S3 新建的使用者也在這次讀取內（讀得到、且沒有 `krblastpwdchange` 才通過）。
+- **S5 之前（成員撤銷）**：對有計畫撤銷的群組批次 `group_show`，以 roster 宣告的集合重算 live 直接成員該撤銷的集合：重算結果含 Plan₂ 撤銷清單**沒有**的成員 ⇒ conflict，不撤銷、**停止後面的 stage**；Plan₂ 清單中已不在群組的成員 ⇒ `noop`。
+- **S8 之前（刪除）**：對要刪除的使用者批次 `user_show`，`user_del` 的謂詞全部成立才送出：存在；`ipauniqueid` 與 `uidnumber` 與 Plan₂ 的觀察相同（沒有被刪除後重建）；不是 preserved；不是登入的 principal；這一輪載入的 desired 仍把它列為 `state: absent`（run 綁定開始時的 `desired_revision`，Go 不在 run 中途重讀 roster 檔）。不存在 ⇒ `noop`；其他任何不成立 ⇒ `conflict-failed`，**停止後面的刪除**（含 `group_del`）。`group_del` 的謂詞同理：存在、`ipauniqueid` 與 `gidnumber` 與 Plan₂ 相同、marker 驗證通過、仍是 `absent`。
+- `LiveUser` 與 `LiveGroup` 因此增加 `ipauniqueid`（`user_find --all` 已帶，`internal/freeiparpc/find_state_fixtures_test.go:261-270`；群組與 `user_show`／`group_show` 的形態列入 K19，擷取前不寫判讀）。
+
+**其餘 stage（S1–S3、S6、S7）不另做批次重讀**：它們的前置條件由伺服器的逐項回應判斷（add 的 `DuplicateEntry`、mod／enable／disable 的 `NotFound` 都是 `conflict-failed`，§7.4）。這是對計畫 §4 步驟 5 的**刻意放寬**，列入 §14：這些操作冪等、失敗時沒有效果、前一個讀取（Read₂）才剛完成；不可逆或收斂權限的操作才各自有上面的重讀。
 
 ### 7.4 逐項分類
 
@@ -413,7 +445,7 @@ P1 的預覽繼續以 `ReadOnly: true` 建立，不帶 WriteGate。
 
 ### 7.6 驗證
 
-**決定 D20。** Read₃ 重讀整份 managed 狀態並重新規劃：Plan₃ 不得含任何**已嘗試**物件的操作，否則 `verify_failed`。這同時是行程內的「第二輪零寫入」檢查。驗證讀取用 §4.4 的有界 ctx。
+**決定 D20。** Read₃ 重讀整份 managed 狀態並重新規劃：Plan₃ 不得含任何**已嘗試**物件的操作，否則 `verify_failed`；Go 已有 `success` 或 `unknown` 的操作時，這個失敗是 `partial_failed`、`FailedStep: verify`（§6.1），否則是一般 `failed`。這同時是行程內的「第二輪零寫入」檢查。驗證讀取用 §4.4 的有界 ctx。
 
 ### 7.7 journal
 
@@ -431,7 +463,7 @@ P1 的預覽繼續以 `ReadOnly: true` 建立，不帶 WriteGate。
 
 - 值只在執行時、只為「有密碼操作」的使用者，從記憶體中的 roster 取出（`PasswordSource`）；`Desired` 只增加值的**形態**，不帶值。plan、事件、結果檔都沒有值（I6）。
 - **補充（值的形態怎麼判斷）**：P1 的 adapter 收到的是解成 `map[string]any` 的 roster（`cmd/pilot/cmd/reconcile_golang.go:205-209`、`internal/identityreconcile/desired.go:84`），`!vault`、`!unsafe` 與引號等 tag／style 在那裡已經遺失，所以不能在 adapter 判斷形態。`internal/inventory` 的 `ansibleScalarKind`（`internal/inventory/roster_admin_password.go:472`）是未匯出的、吃 `*yaml.Node` 的唯一判斷（AGENTS.md §5.7）。P2-5 新增一個匯出函式，輸入 roster 位元組、輸出每位使用者 `password.initial` 的形態，內部呼叫它，不另寫一套。
-- 範本、inline `!vault`、非字串的 `password.initial`，**在有計畫的密碼操作時**一律新的 blocked 原因 `password_value_unsupported`（roster 可以用範本寫 `password.initial`，`playbooks/apply/tasks/freeipa-identity-normalize-users-groups.yml` 的開頭註解 `:5-10` 與 `:55`）；沒有計畫的密碼操作時不擋（no-op 的 run 不該因為它被擋）。
+- `password.initial` 的處理分三層：(1) **非字串**（數字、布林、list、mapping）：P2-1 的 adapter 在建立 tunnel 之前就拒絕，不論有沒有密碼操作（訊息提醒加引號讓它保持字串，§7.9）；(2) **`null`**（`password.initial: ~`）：等於沒有 initial password，不產生密碼操作，兩個 engine 一致；(3) **範本與 inline `!vault`**：decode 之後只剩一個字串，adapter 的型別檢查看不出它們與一般字串的差別，只有上面的 Node 判斷看得出——**在有計畫的密碼操作時**一律新的 blocked 原因 `password_value_unsupported`（roster 可以用範本寫 `password.initial`，`playbooks/apply/tasks/freeipa-identity-normalize-users-groups.yml` 的開頭註解 `:5-10` 與 `:55`）；沒有計畫的密碼操作時不擋（no-op 的 run 不該因為它被擋）。
 - 語意與 playbook 相同：`preserve_existing` 預設 true；`force_change: false` 沒有作用（已知缺口，計畫 Phase −1）；決定規則在 `playbooks/apply/freeipa-identity-apply.yml:1233-1257`，roster 的預設在 normalize 檔 `:55-57`。
 - RPC 形態：`passwd [principal] {password}`（P0 的 `internal/freeiparpc/live_test.go:303` 用法）；成功與政策拒絕的真實回應列入 K6。
 
@@ -443,12 +475,24 @@ P1 的預覽繼續以 `ReadOnly: true` 建立，不帶 WriteGate。
 - Go 只碰：roster 宣告的使用者與群組、它們的 marker、roster 群組的直接成員（authoritative 撤銷＝playbook 語意）；刪除只針對 `state: absent`。其他物件永不出現在操作中。
 - **history marker**：每個套用中的群組在 S2 確保 marker 存在（`group.marker.create`；名稱 `HistoryMarkerName`，描述 `HistoryMarkerDescription` 即 `pilot.group-history/v1 name=<name>`，`internal/identityreconcile/marker.go:11-19`）；刪除群組前（S8）重讀並驗證 marker 存在且描述正確才送 `group_del`，marker 衝突維持 `blocked`（`marker_collision`）。**使用者 lifecycle**：`absent` 是永久刪除；與 preserved 使用者同名維持 `blocked`（`preserved_user`），Go 不做 preserve／undelete。
 - `blocked` 原因與 P1 spec §7.3 相同，**沒有一個變成支援**；新增 `password_value_unsupported`（§7.8）與 `protected_object`（§7.10）。
-- **#273 先修（P2-1，在任何寫入路徑之前）**：`internal/identityreconcile/desired.go:199`、`:208`、`:242` 對型別錯誤的 `password`、`ssh_keys`、`membership` 用 `x, ok := …(map[string]any)` 靜默當成未宣告；有寫入時，錯型別的 `membership` 會被讀成「authoritative、沒有成員」，撤銷所有直接成員。adapter 對非 mapping 的 `membership`／`password`／`ssh_keys` 改為 fail closed（P1 spec §5.1 嚴格檢查的同一風格，在建立 tunnel 之前失敗）。`ValidateRoster` 本身在 Phase 2 不變：改它會改變 Ansible engine 的行為，需要先擷取 playbook 對這些輸入的真實反應（§5.6；Q1）。
-- **寫入前先拒絕**：adapter 拒絕與 `blocked` 一律零寫入、沒有入口；混合 run 在這種情況下不執行 playbook（I7）。`users-groups` scope 的 `not_in_scope`（P1 spec §5.3）只報告，不阻擋，因為 scope 的定義就是不宣稱整份 identity。
+- **#273 先修（P2-1，在任何寫入路徑之前）**：P1 的 adapter 把型別錯誤與明確的 `null` 當成未宣告，或當成 Go 自己的預設值（`internal/identityreconcile/desired.go:199`、`:208`、`:242` 對 `password`、`ssh_keys`、`membership` 用 `x, ok := …(map[string]any)`；純量走 `stringOr`、`optionalString`、`optionalID`、`boolOr`）。預覽時只是顯示不對的計畫，有寫入時是錯的寫入：錯型別的 `membership` 讀成「authoritative、沒有成員」會撤銷所有直接成員；`enabled: ~` 在 playbook 是 `ipa user-disable`（`freeipa-identity-apply.yml:1697` 的 `item.enabled | default(true) | bool`，`default()` 不取代 `null`），Go 卻讀成 enabled。P2-1 讓 adapter **在任何讀取或寫入之前**拒絕（沿用既有的 roster-adapter gate：結束碼 1、沒有 tunnel、沒有請求、沒有 plan，不新增 `// gate:` id；訊息指出欄位與 roster 物件，只寫型別、不寫值）：
+  - 使用者的 `state`、`enabled`、`first`、`last`、`display_name`、`email`、`login_shell`、`home_directory`、`uid`、`gid`，與群組的 `state`、`type`、`description`、`gid`，若存在不可為 `null`（不寫才是預設或不管理）；頂層 `users`、`groups` 不可為 `null`（不寫與 `[]` 才是空）。
+  - `password`、`ssh_keys`（使用者）與 `membership`（群組）若存在必須是 mapping：`null` 與其他型別都拒絕，`{}` 與不寫視為未宣告；mapping 裡的 `membership.users`、`membership.groups`、`membership.authoritative`、`ssh_keys.values`、`ssh_keys.authoritative`、`password.preserve_existing`、`password.force_change` 若存在也不可為 `null`；`password.initial` 若存在且不是 `null` 必須是字串（只檢查型別，值不載入）。
+  - `state: absent` 的項目不被 reconcile，但仍檢查 `password`、`ssh_keys`、`membership` 三個鍵的形狀（不讀裡面的內容）：playbook 的 gate 對每個項目都呼叫 `.keys()`，一份只在 absent 項目上錯型別的 roster，Ansible engine 本來就拒絕。
+  - 仍接受：`password.initial: ~`（等於沒有 initial password，§7.8）與 `freeipa`、`freeipa.admin` 的 `null`（等於未設定，P1 spec §4 的 N3 規則）。
+  - 完整清單與 playbook 對每個 `null` 的實際讀法，記在 P1 spec §5.1 的對應條目（P2-1 更新它）。比 playbook 嚴格是允許的（P1 spec §5.1）。`ValidateRoster` 本身不變：它是 Ansible engine 的入口（Q1）。
+- **寫入前先拒絕**：adapter 拒絕與 Plan₁ 的 `blocked` 一律零寫入、沒有入口；Plan₂ 才出現的 `blocked` 也是零寫入，但入口已執行（§6.2）；混合 run 在這些情況下都不執行 playbook（I7）。`users-groups` scope 的 `not_in_scope`（P1 spec §5.3）只報告，不阻擋，因為 scope 的定義就是不宣稱整份 identity。
 
 ### 7.10 自鎖保護
 
-**決定 D24（待使用者確認 U3）。** 新增 blocked 原因 `protected_object`：刪除或停用登入的 principal、把它移出 `admins`、刪除 `admins`／`ipausers`／`editors`／`trust admins`。這比 playbook 嚴格（P1 spec D9 的同類取向）；沒有它，roster 可以在 run 中途移除 engine 自己的讀取權限，之後的驗證讀取失敗，而寫入已經套用。
+**決定 D24（待使用者確認 U3）。** 新增 blocked 原因 `protected_object`，對 **plan 執行後的狀態**判斷（不是逐項的字串規則）：
+
+- 刪除或停用登入的 principal。
+- 對登入 principal 自己的 `user.password.reset`：run 中途換掉登入密碼會讓之後的 session 與 relogin 失敗，而且 `passwd` 沒有讀回比對（§7.5）。（`initialize` 不會發生在登入帳號上：它已經有密碼。）
+- 登入 principal 對 `admins` 的**遞移**成員資格在 plan 執行後消失。以 live 的群組直接成員圖，加上 plan 的成員新增、成員撤銷、群組刪除，模擬執行後的圖，從登入 principal 出發走成員圖（`user_find` 的 `memberof_group` 是遞移的，見 P1 spec §6.3 與擷取），走不到 `admins` 才擋。所以「直接從 `admins` 撤銷、但仍經巢狀群組屬於 `admins`」不擋；「撤銷巢狀群組唯一的路徑」會擋。
+- 刪除 `admins`、`ipausers`、`editors`、`trust admins`。
+
+這比 playbook 嚴格（P1 spec D9 的同類取向）；沒有它，roster 可以在 run 中途移除 engine 自己的讀取權限，之後的驗證讀取失敗，而寫入已經套用。
 
 ## 8 入口、scope 與混合執行
 
@@ -485,10 +529,11 @@ P1 的預覽繼續以 `ReadOnly: true` 建立，不帶 WriteGate。
 
 - 額外參數 `-e pilot_identity_users_groups_engine=go -e pilot_identity_auth_cache_output=<暫存檔>`。
 - Preview：加上 Go 的唯讀 plan；有 `blocked` 就預覽失敗，不取鎖。
-- Apply：取鎖（I1）→ `PrepareApply`＝`Execute`（以 `HeldFrom(ctx)` 取得 token）→ playbook。Go 失敗，playbook 不執行（I7、計畫「混合執行模型」）。
-- Verify：先既有的 `pilot verify`，再解析觀察結果：該主機的 `acked`；否則 `ErrUnsettled`（§6.2）。
-- Idempotency（≥ staging）：playbook 再套用一次，再加上 Go 的唯讀 plan 必須 0 個操作。
+- Apply：取鎖（I1）→ `PrepareApply`＝`Execute`（ctx 以 `Attach` 帶 token，`HeldFrom` 取得，不被掉鎖取消，§4.1）→ playbook（指令 ctx 以 `Bind` 衍生）。Go 失敗，playbook 不執行（I7、計畫「混合執行模型」）。`PrepareApply` 之前先把觀察結果檔重建為空檔（§5.4 的生命週期）。
+- Verify：先既有的 `pilot verify`，再解析 apply 階段的觀察結果：該主機的 `acked`；否則 `ErrUnsettled`（§6.2）。
+- Idempotency（≥ staging）：觀察結果檔重建為空檔後，playbook 再套用一次，再加上 Go 的唯讀 plan 必須 0 個操作；它的觀察只作參考（§5.4）。
 - 在 Go 已提交至少一個操作之後，任何後續步驟的失敗都以 `ErrPartiallyApplied` 包起來（§6.1）。
+- 這條路徑的錯誤也要經 `runReconcileGolangPreview` 那一層的 exit-code 保護，包成結束碼 1、3、4（§6.3；`runReconcileInteractive` 本身不做這件事）。
 
 R1：改 `deploy.go` 是最高風險；hook 只對 identity 元件生效，並有行為測試與 H1–H5 的 live 驗證。
 
@@ -517,11 +562,11 @@ R1：改 `deploy.go` 是最高風險；hook 只對 identity 元件生效，並�
 
 ## 9 實作前必須先擷取
 
-依 AGENTS.md §5.6，判讀規則只能來自真實擷取。K6–K15 在拋棄式 FreeIPA 測試 VM 上經 P0 的 tunnel 以 `freeiparpc` 擷取，fixture 放 `internal/freeiparpc/testdata/`，以測試鎖住（每個擷取附竄改探測），擷取後刪除測試物件。已有的擷取不重做：`user_add`／`user_mod`／`user_enable`／`user_disable` 成功與常見失敗、`group_add`、`group_add_member`（成功、已是成員、成員不存在）、`group_remove_member` 的 not-member、`batch` 的混合（讀取成功、`NotFound`、`EmptyModlist`），見 `internal/freeiparpc/testdata/`。
+依 AGENTS.md §5.6，判讀規則只能來自真實擷取。K6–K19 在拋棄式 FreeIPA 測試 VM 上經 P0 的 tunnel 以 `freeiparpc` 擷取，fixture 放 `internal/freeiparpc/testdata/`，以測試鎖住（每個擷取附竄改探測），擷取後刪除測試物件。已有的擷取不重做：`user_add`／`user_mod`／`user_enable`／`user_disable` 成功與常見失敗、`group_add`、`group_add_member`（成功、已是成員、成員不存在）、`group_remove_member` 的 not-member、`batch` 的混合（讀取成功、`NotFound`、`EmptyModlist`），見 `internal/freeiparpc/testdata/`。
 
 | # | 擷取 | 決定什麼 |
 |---|---|---|
-| K6 | `passwd` 成功；密碼政策拒絕（錯誤名稱、代碼、訊息）；各 `maxlife` 下的時間戳 | §7.8 的 RPC 形態、`failed` 的分類、unknown 的時間戳提示 |
+| K6 | `passwd` 成功；密碼政策拒絕（錯誤名稱、代碼、訊息）；各 `maxlife` 下 `passwd` 之後 `user_show` 的時間戳 | §7.8 的 RPC 形態、`failed` 的分類、unknown 的時間戳提示 |
 | K7 | `user_del` 成功與 `NotFound` | 刪除的 `noop` 判讀 |
 | K8 | `group_del` 成功與 `NotFound` | 同上 |
 | K9 | `group_mod`（description）成功與 `EmptyModlist` | S2 的分類 |
@@ -533,6 +578,8 @@ R1：改 `deploy.go` 是最高風險；hook 只對 identity 元件生效，並�
 | K15 | 含一個 `DuplicateEntry` 項目、其餘成功的寫入 batch | §7.4 的 batch 部分失敗處理 |
 | K16 | 入口的真實 ansible-playbook 輸出與結束碼：`no hosts matched`（預期 0）、task 被 `when` 跳過、多台主機；以及 funnel 用的 `ansible <pattern> --list-hosts` 在空比對與多台時的輸出 | §5.4 的解析器，「入口結束碼為 0 不能證明義務已寫入」 |
 | K17 | controller 端 `copy`（`delegate_to: localhost`）結果檔：成功、目的目錄不可寫、`become` 的影響 | R6 |
+| K18 | identity playbook 的 `observe` 結果檔（§5.5）的真實輸出：`acked` 為 true；`acked` 為 false 的三種原因（`ipa_identity_refresh_sssd_cache` 為 false、`pilot_deferred_hosts` 與 `freeipa-client` 有交集、settle 沒有執行所以 `dirty` 缺值）；block 內較前面的 task 失敗而沒有觀察檔；`--limit` 之下 | §5.4 的 `observe` 解析器（「應該通過」與「應該觸發」兩種案例）、§5.5 對 `is defined`／`default` 的讀法 |
+| K19 | S4、S5、S8 之前的批次重讀（§7.3）：`user_show`／`group_show` 的 `all: true` 回應欄位——`ipauniqueid`、`uidnumber`／`gidnumber`、`krblastpwdchange`、`krbpasswordexpiration`、`preserved`、群組的直接成員；preserved 使用者的 `user_show`；batch 中一項 `NotFound` 時其餘項目的答案 | 前置條件謂詞（§7.3）的判讀；`LiveUser`／`LiveGroup` 增加 `ipauniqueid` |
 
 ## 10 測試與驗收
 
@@ -542,8 +589,8 @@ R1：改 `deploy.go` 是最高風險；hook 只對 identity 元件生效，並�
 
 - 取鎖：§4.6 lint 與變異驗證、§4.7 的交錯與順序測試、`Held.Lost()` 在 `Release` 之後不關閉、掉鎖取消 ansible-playbook、`TargetFromHostVars` 的每一列（含 `ansible_connection: docker`）。
 - 入口：結果解析器的「應該通過」與「應該觸發」兩種案例（真實輸出，K16）、`auth_inspect`（journal 不存在→`true`、domain 不符→錯誤、不建立任何檔案）、§5.6 的一致性測試、結果檔的 round-trip。
-- outcome：§6.4 的測試、結束碼矩陣、`partial_failed` 不被 `LastSuccess` 當成成功、webhook 的 `result` 與 `failure.class`。
-- writer：WriteGate 對每個寫入方法與 batch（零請求）；stage 與 batch 的邊界；逐項分類矩陣（K6–K15 的 fixture）；unknown 的分類矩陣；journal 與秘密不外洩（每條錯誤路徑）；`password_value_unsupported`、`protected_object`、#273 的每個欄位各有「應該觸發」的 row 與負向對照。
+- outcome：§6.4 的測試、結束碼矩陣（含混合路徑的 playbook 以 ansible 的結束碼 3、4 失敗時 pilot 結束碼是 1，§6.3）、`partial_failed` 不被 `LastSuccess` 當成成功、webhook 的 `result` 與 `failure.class`、`Plan₂ blocked` 與 Plan₂ 破壞性差異的結果（§6.2）、Plan₃ 驗證失敗有已提交操作時是 `partial_failed`。
+- writer：WriteGate 對每個寫入方法與 batch（零請求；`Active()` 在 `Release` 與掉鎖後都擋）；stage 與 batch 的邊界；逐項分類矩陣（K6–K15 的 fixture）；unknown 的分類矩陣；**前置條件（§7.3）**：S4 的 `passwd` 在使用者已被外部設過密碼時不送出且後面的 stage 不執行、S5 的撤銷在群組多出 Plan₂ 沒有的成員時不執行、S8 的 `user_del` 在 `ipauniqueid` 改變（刪除後重建）／preserved／登入 principal 時不送出且後面的刪除停止，每一條都有「應該觸發」與「應該通過」的 row（K19 的 fixture）；Plan₂ 多出破壞性操作（`user.delete`、`user.password.reset`、成員撤銷、`user.disable`）時零寫入，多出非破壞性操作時照常執行；journal 與秘密不外洩（每條錯誤路徑）；`password_value_unsupported`（範本與 inline `!vault`，對照：一般字串）、`protected_object`（登入 principal 被停用、刪除、移出 `admins`、遞移路徑被切斷、自己的密碼被重設，對照：非登入的 admin 被改、仍經巢狀群組屬於 `admins`）、#273 的每個欄位（`null`、錯型別、`absent` 項目的形狀）各有「應該觸發」的 row 與負向對照。
 - 混合：§8.4 的靜態與 runtime 測試；hook 只對 identity 元件生效；Go 失敗時 playbook 不執行；`ErrPartiallyApplied` 的包裝。
 - gate ledger：新增的 `// gate:` 與 row（P1 §10.1 的結構），變異驗證。
 
@@ -563,38 +610,51 @@ R1：改 `deploy.go` 是最高風險；hook 只對 identity 元件生效，並�
 
 `TestLiveGoApplyDriver` 擴充 P1 的 `TestLiveGoPreviewDriver`（`internal/identityreconcile/live_test.go:37`）：建置 `pilot` binary、只驅動 CLI。每個 candidate 用全新的拋棄式拓樸（一台 FreeIPA server 加一台已 enroll 的 client，以 sanctioned 的 `pilot vm-target topology up` 建立），先 snapshot，失敗時 rollback，每個 arm 記錄 server `error_log` 的寫入計數。evidence 記錄 candidate／tree、server 與 API 版本、每個 arm 的 PASS／FAIL、**skip 數（必須為 0；有 skip 要列原因）**，以及生效的 `--lock-wait`、batch 上限與 `--timeout`。
 
+**acked 基準（補充）。** H 系列與 A6 不從全新主機開始：journal 不存在時 helper 的 `auth_prepare` 回傳 `previous=True`（`playbooks/apply/files/freeipa-ssh-key-cache.py:196`），第一次混合 run 一定會刷新，與入口有沒有運作無關，起點就不區別 (ii) 的機制。基準做法：一次完整的 legacy `pilot reconcile --component freeipa-identity --force`（觀察到 acked）→ 以零差異的 `users-groups --force` 斷言探測讀到 `pending=false`（結束碼 0）→ snapshot；每個 arm 從這個 snapshot 開始（rollback 回來）。要驗證 client 行為的 arm，在撤銷**之前**先在 client 上以被撤銷的使用者做一次真實的登入或 `sudo`（成功＝allow），讓 SSSD 快取它的授權。
+
+**決定 D31（補充）：決定性的注入點。** 有些 arm 需要在 run 的特定位置做事（入口之後殺 pilot、stage 之間寫入外部變更、S3 中途送訊號）。靠 sleep 競爭無法重現，所以 driver 用 build tag `identity_live_hooks` 建置 pilot（driver 本來就自己建置 binary）：帶這個 tag 的檔案提供暫停點 `after_entry`、`before_stage:<S>`、`before_batch:<S>:<n>`，在該處通知 driver 並等它對一個 FIFO 寫入後才繼續；driver 在暫停時殺掉 pilot、送訊號、或用 `freeiparpc` 寫入外部變更。預設 build 與發佈的 binary 不含這些檔案；測試鎖住「沒有 tag 就沒有暫停點」（Q7）。單元層級以 fake 在同樣的位置重現。
+
 | arm | 做什麼 | 通過條件 |
 |---|---|---|
 | A1 | legacy `--force` 建立基準 → Go 預覽 | 寫入操作 0（P1 D12） |
-| A2 | 新增一位使用者（含 `password.initial`）、一個群組與成員關係，`--scope users-groups --force` | 結束碼 4；操作恰為 `group.create`、`group.marker.create`、`user.create`、`user.password.initialize`、`group.member_user.add`；server `error_log` 的寫入與操作一一對應；Read₃ 零差異 |
+| A2 | 新增一位使用者（含 `password.initial`）、一個群組與成員關係，`--scope users-groups --force` | 結束碼 4；操作恰為 `group.create`、`group.marker.create`、`user.create`、`user.password.initialize`、`group.member_user.add`；server `error_log` 的寫入與操作一一對應；Read₃ 零差異；探測讀到 `pending=true` |
 | A3 | A2 之後重跑 | 零 mutation、沒有入口；探測 `pending=true`；結束碼 4（這算通過） |
 | A4 | 一次完整的 legacy run（觀察到 acked）→ 重跑 `users-groups` | 結束碼 0、沒有入口、journal 位元組不變 |
 | A5 | 修改一個屬性 | 恰一個 `user_mod`，只帶該欄位 |
-| A6 | 撤銷：移除成員、停用、刪除使用者、刪除群組（marker 驗證） | 操作與預期相同；之後 H1 證明 client 端真實 deny |
+| A6 | 從 acked 基準、暖過 client 快取開始：撤銷（移除成員、停用、刪除使用者、刪除群組並驗證 marker），`users-groups --force` | 操作與預期相同、結束碼 4；FreeIPA 上已撤銷，但 **client 仍 allow**（`users-groups` 從不刷新，這是 H1、H3 的對照，不是 bug）；探測 `pending=true`。client 端的 deny 由 H1、H3 證明 |
 | A7 | 外部 drift：用 `freeiparpc` 寫入 `givenname`、多餘成員、停用 | 恰 3 個修復；重跑 0 |
 | A8 | 失敗與重跑：(i) 密碼政策拒絕；(ii) 在 batch 中途殺掉 tunnel 的 `ssh -W` | (i) 結束碼 1、後面的 stage 沒有執行，修正後收斂；(ii) unknown、結束碼 1、重跑收斂且沒有重複 |
 | A9 | 忙碌的鎖：legacy `pilot reconcile --force` 執行中，Go `--lock-wait 0` 與 `--lock-wait 30m` | `0` 在 tunnel 與登入之前失敗（`error_log` 沒有 session）；`30m` 等待後成功；journal 狀態符合預期 |
-| A10 | 掉鎖：S3 期間殺掉鎖的 ssh | 之後沒有寫入、結束碼 1 |
+| A10 | 掉鎖：S3 期間殺掉鎖的 ssh | 之後沒有新的寫入；進行中的 batch 的真實答案被 journaled；Read₃ 被嘗試；有 `success` 的操作時 outcome 是 `partial_failed`（不是 `evidence_failed`），結束碼 1 |
 | A11 | docker-connection 的 workspace | 在 ssh 之前被拒 |
 | A12 | uid 變更 | 結束碼 3、零寫入、沒有入口 |
 | A13 | journal 的 domain 不符 | 入口失敗、零寫入 |
-| H1 | 混合 `--scope full --force`，只有 users／groups 變更 | 觀察到 acked、client 已刷新（client 上真實 deny）、結束碼 0 |
+| A14 | 登入 principal 的自鎖：(a) 被停用、(b) 被刪除、(c) 直接移出 `admins`、(d) 移出巢狀群組而切斷它唯一到 `admins` 的路徑、(e) 自己的密碼被重設（`preserve_existing: false`） | 每一個：結束碼 3、零寫入、沒有入口。對照：另一個非登入的 admin 被停用、移出 `admins` 都通過；登入 principal 被直接移出 `admins` 但仍經巢狀群組屬於 `admins` 通過 |
+| A15 | 需要 `passwd`，但 `password.initial` 是範本，或是 inline `!vault` | 結束碼 3（`password_value_unsupported`）、零寫入、沒有入口。對照：同一個使用者用一般字串通過；未加引號的數字 `password.initial` 在 adapter 以結束碼 1 被拒，沒有 tunnel（§7.9） |
+| A16 | 混合 `--scope full --force`，plan 有 `blocked`（例如 uid 變更） | 結束碼 3、零寫入；**playbook 沒有執行**（server 上沒有任何 identity playbook 的 task：沒有 helper 呼叫、沒有 SSH key 區塊） |
+| A17 | S3 中途（`before_batch:S3:2`）收到 SIGINT；另一次是 `--timeout` 到期 | 各自：不再送新的寫入、Read₃ 仍被嘗試、進行中的寫入被分類（`unknown` 或其真實答案）、outcome 是 `partial_failed` 且 step 證據與 `identity.op` 事件照寫（不是 `evidence_failed`）；第二次 Ctrl-C 立即結束 |
+| A18 | `after_entry` 殺掉 pilot（SIGKILL） | 零寫入；探測讀到 `pending=true`。(i) 把 roster 還原成與 live 一致（零差異）後 `users-groups --force`：結束碼 4、`source=previous_run`；(ii) 原 roster 重跑：再次執行入口、結束碼 4、`source=this_run` |
+| A19 | 外部 writer 在 Plan₂ 之後、寫入之前改物件：(a) `before_stage:S4`：被計畫 `passwd` 的使用者已被外部設過密碼；(b) `before_stage:S5`：權威群組被外部加入一個 roster 沒有的直接成員；(c) `before_stage:S8`：要刪除的使用者被外部刪除後重建（`ipauniqueid` 改變）；(d) `after_entry`：外部 writer 讓 Plan₂ 比 Plan₁ 多出一個成員撤銷 | (a) 該使用者不送 `passwd`、S5–S8 不執行、結束碼 1；(b) 新成員沒有被撤銷、後面的 stage 不執行；(c) 不送 `user_del`、後面的刪除與 `group_del` 不執行；(d) 零寫入、結束碼 1、入口已執行。每個都有不注入的對照：照常完成 |
+| H1 | 從 acked 基準、暖過快取開始：混合 `--scope full --force` 套用與 A6 相同的撤銷（只有 users／groups 變更） | 結束碼 0；server 上 `auth_prepare`（入口）先於第一個寫入 RPC；client 的授權**已 deny**；之後零差異的 `users-groups --force` 結束碼 0（探測 `pending=false`，即 ack 之後 journal 是 false） |
 | H2 | H1 之後 legacy 完整重跑 | users／groups 區段的 task `changed=0`（json callback，逐 task） |
-| H3 | `users-groups` run（Go 有寫入、沒有 playbook）→ 之後混合且 Go 零寫入 | 刷新發生（等同「中斷後下一輪」） |
-| H4 | `ipa_identity_refresh_sssd_cache: false` | 結束碼 4、history 為 `partial_failed`、webhook 為 failure |
+| H3 | 緊接 A6（不 rollback，journal 為 `pending=true`、client 仍 allow）：混合 `--scope full --force`，Go 零寫入 | 結束碼 0；playbook 自己的 prepare 讀到 `previous=true`，refresh 與 ack 發生；client **已 deny**；之後探測 `pending=false`（等同「中斷後下一輪」） |
+| H4 | 從 acked 基準、暖過快取開始：混合套用同一個撤銷，`ipa_identity_refresh_sssd_cache: false` | 結束碼 4、history 為 `partial_failed`、webhook 為 failure；**client 仍 allow**；探測 `pending=true`。之後打開刷新、混合再跑一次（Go 零寫入）：結束碼 0、client 已 deny |
 | H5 | Go 寫入之後 playbook 失敗 | `partial_failed`、結束碼 1 |
-| L1–L6（P2-2） | 每個漏斗（deploy／reconcile、`access reconcile --once`、breakglass、decommission）持有鎖（同時另一個連線對 `/etc/ipa` 以 `flock --nonblock --conflict-exit-code 75` 取鎖得到 75）；第二個同時的漏斗等待或失敗；掉鎖殺掉 playbook；不支援的 inventory 被拒絕 | 各自通過 |
+| L1–L6（P2-2） | 每個漏斗（deploy／reconcile、`access reconcile --once`、breakglass、decommission）持有鎖（同時另一個連線對 `/etc/ipa` 以 `flock --nonblock --conflict-exit-code 75` 取鎖得到 75）；第二個同時的漏斗等待或失敗；掉鎖殺掉 playbook 且 outcome 是 `failed`（不是 `evidence_failed`）；不支援的 inventory 被拒絕 | 各自通過 |
 | L7（P2-2） | legacy 執行中 `kill -9` pilot，觀察 ansible-playbook 是否繼續、鎖何時釋放 | **只記錄（X5）**，不判定通過 |
+| L8（P2-2） | 取鎖等待期間（另一個持有者執行中）按 Ctrl-C | 本機沒有殘留 ssh；遠端的 `flock --wait` 行程在 `--lock-wait` 內結束（R9）；**記錄**它實際多久消失 |
 | P（P2-8） | 計畫 §6 的目標：120／40 無差異 p95 ≤ 30 秒（20 次樣本）、單一屬性 ≤ 30 秒、100 次新增 ≤ 120 秒加重跑 0、1,000／200 的完整性、入口耗時（與整輪分開呈現）、混合整輪 wall time、SSH RTT 與版本 | 記錄實際數字；未達要說明原因，不放寬門檻 |
+
+H1 與 H3 各有對照（A6 與 H4 的 client 仍 allow），兩者都從 acked 基準開始、暖過快取、做同一個撤銷；只有走過入口（H1）或由下一次零寫入混合 run 補上刷新（H3）的 run 讓 client deny。「入口之後 journal 是 `pending=true`」由 A18 與 A2 證明，「ack 之後是 `pending=false`」由 H1、H3 的最後一步證明。
 
 ### 10.3 退出條件
 
 計畫的 Phase 2 退出條件對應到上面的 arm：
 
 - 取鎖閘門已通過：lint 與兩種交錯的 regression test（§4.6、§4.7）加 L1–L6。
-- 新增、修改、撤銷、外部 drift 修復、第二輪零 mutation、失敗重跑在 live target 通過：A2–A8。`users-groups` scope 的第二輪通過條件是「零 mutation 且義務如實回報」（A3），不是「結果為成功」；成功要求兩輪之間有一次觀察到 `acked=true` 的完整 playbook run（A4）；全新主機的 journal 不存在，同樣是未結清。
+- 新增、修改、撤銷、外部 drift 修復、第二輪零 mutation、失敗重跑在 live target 通過：A2–A8；新 gate 與新路徑的觸發證明（AGENTS.md §5.12 第 2 點）：A10、A14–A19。`users-groups` scope 的第二輪通過條件是「零 mutation 且義務如實回報」（A3），不是「結果為成功」；成功要求兩輪之間有一次觀察到 `acked=true` 的完整 playbook run（A4）；全新主機的 journal 不存在，同樣是未結清。
 - 效能目標：P。
-- 混合全量 run 在 live target 通過，其後以 legacy 全量重跑時 users／groups 相關 task `changed=0`：H1、H2。
+- 混合全量 run 在 live target 通過，其後以 legacy 全量重跑時 users／groups 相關 task `changed=0`：H1、H2；授權快取刷新由 acked 基準上的對照證明（H1、H3、H4 對 A6）。
 - 完整的 `go test -race ./...` 由 CI 的 `Go test` job 執行（AGENTS.md §5）。
 
 ## 11 PR 序列
@@ -604,13 +664,13 @@ R1：改 `deploy.go` 是最高風險；hook 只對 identity 元件生效，並�
 | PR | 範圍 | 主要檔案 | 驗收 | target_validation | 相依 |
 |---|---|---|---|---|---|
 | P2-0 | 這份規格與計畫的狀態、過期敘述更正 | 本檔、計畫 | 決定與擷取表；沒有可執行的 SOP | not-needed：只有文件 | — |
-| P2-1 | #273：adapter 對型別錯誤 fail closed | `internal/identityreconcile/desired.go` 與測試、gate row | 每個欄位一個「應該觸發」的 row 與負向對照 | not-needed：純輸入驗證，無入口 | — |
-| P2-2 | **取鎖閘門** | `internal/identitylock`、`internal/sshdial/hostvars.go`、`accessgrants` options、decommission config、deploy 的 transaction option、CLI 接線、lint | §4.6 lint、§4.7 測試；`go test` 涵蓋 `cmd/pilot/cmd`、`internal/spec`、`internal/accessgrants`、`internal/decommission`、`internal/sshdial` | **required**：真實 sshd 的 flock、真實 inventory 形態（L1–L7）；**U1 確認且正式 inventory 檢查完成前不可合併** | U1 |
+| P2-1 | #273：adapter 在任何讀取或寫入之前拒絕型別錯誤與明確的 `null`（§7.9 的清單，含 `absent` 項目的形狀），並更新 P1 spec §5.1 的對應條目 | `internal/identityreconcile/desired.go` 與測試（沿用既有的 roster-adapter gate，不新增 `// gate:` id）、P1 spec §5.1 | 每個欄位（`null` 與錯型別）一個「應該觸發」的 row 與負向對照；仍接受的形狀（`password.initial: ~`、`freeipa` 的 `null`、`{}`、不寫）各一個「應該通過」的 row | not-needed：純輸入驗證，無入口 | — |
+| P2-2 | **取鎖閘門** | `internal/identitylock`（`Held` 的 `Active`／`Attach`／`Bind`）、`internal/sshdial/hostvars.go`、`accessgrants` options、decommission config、deploy 的 transaction option 與執行期拒絕、取鎖 ssh 的 `timeout` 包裝與 ServerAlive、CLI 接線、lint | §4.6 lint（含第 5 點的執行期拒絕）、§4.7 測試（含掉鎖後 outcome 是 `failed`）；`go test` 涵蓋 `cmd/pilot/cmd`、`internal/spec`、`internal/accessgrants`、`internal/decommission`、`internal/sshdial` | **required**：真實 sshd 的 flock、真實 inventory 形態（L1–L8）；**U1 確認且正式 inventory 檢查完成前不可合併** | U1 |
 | P2-3 | 入口 playbook、`auth_inspect`、identity 的觀察與 ack register、AGENTS.md §4.0 的一列、Go 的結果解析器 | `playbooks/apply/freeipa-identity-auth-cache.yml`、`files/freeipa-ssh-key-cache.py`、`freeipa-identity-apply.yml`（兩處）、`internal/identityreconcile/authcache.go` | §5 的測試；解析器可先於 playbook 完成 | **required**：`pilot vm-target test` 對入口（全新 VM：journal 不存在／true／false、domain 不符、check mode 拒絕）與 identity playbook 的觀察（acked true；refresh 關閉時 false），AGENTS.md §1.4 | P2-2（`Held` 型別出現在簽章；解析器可先做） |
 | P2-4 | 擷取 K6–K15 與 fixture 測試 | `internal/freeiparpc/testdata`、find／write 的 fixture 測試 | 每個擷取有斷言與竄改探測 | **required**：在拋棄式 VM 上擷取 | P2-2（U6） |
-| P2-5 | executor（沒有入口） | `freeiparpc` 的 WriteGate、`identityreconcile/execute.go`、journal sink 介面、`inventory` 的值形態匯出函式、新的 blocked 原因 | §7 的單元矩陣；WriteGate 零請求測試 | not-needed：沒有進入點，fixture 驅動；它的 live 證明由 P2-6 提供 | P2-1、P2-4 |
-| P2-6 | users-groups scope 的套用 | `reconcile.go`、`reconcile_golang.go`、`delivery.ErrPartiallyApplied`、outcome 讀取者強化、`--result-out` 與 #274、gate ledger | 結束碼矩陣、history 與 webhook 測試、秘密；driver A1–A13 | **required** | P2-2、P2-3、P2-5 |
-| P2-7 | 混合 | identity playbook 的 guard、`deploy.go` 的 identity hook、`--scope full` | §8.4 靜態與 runtime；driver H1–H5 | **required** | P2-6 |
+| P2-5 | executor（沒有入口） | `freeiparpc` 的 WriteGate（用 `Held.Active()`）、`identityreconcile/execute.go`（journal sink 與 Read₃ 用脫離取消的 ctx、§7.3 的前置條件重讀與破壞性差異規則）、journal sink 介面、`inventory` 的值形態匯出函式、新的 blocked 原因（`password_value_unsupported`、`protected_object`）、`LiveUser`／`LiveGroup` 的 `ipauniqueid` | §7 的單元矩陣；WriteGate 零請求測試 | not-needed：沒有進入點，fixture 驅動；它的 live 證明由 P2-6 提供 | P2-1、P2-4 |
+| P2-6 | users-groups scope 的套用 | `reconcile.go`、`reconcile_golang.go`、`delivery.ErrPartiallyApplied`、`Transaction.runStep` 的證據寫入改用脫離取消的 ctx（影響所有 deploy 元件，§4.4）、outcome 讀取者強化、`--result-out` 與 #274、gate ledger、`identity_live_hooks` 的暫停點（D31） | 結束碼矩陣、history 與 webhook 測試、秘密；`runStep` 在取消的 ctx 下仍寫證據（所有元件）；driver A1–A19（A14–A19 需要 D31 的暫停點） | **required** | P2-2、P2-3、P2-5 |
+| P2-7 | 混合 | identity playbook 的 guard、`deploy.go` 的 identity hook、`--scope full` | §8.4 靜態與 runtime；混合路徑的 exit-code 保護與結果檔生命週期（§5.4、§6.3）；driver H1–H5（在 acked 基準上，§10.2） | **required** | P2-6 |
 | P2-8 | 效能、evidence 與計畫退出條件更新 | `docs/evidence/freeipa-go-reconcile/*`、計畫 | 最終 candidate 上的 §10.2 的 P | **required**：量測 | P2-7 |
 
 順序規則：取鎖閘門（P2-2）先於 P2-4、P2-6、P2-7；在 P2-7 之前不啟用混合。P2-1 可與 P2-2 並行。
@@ -621,15 +681,15 @@ R1：改 `deploy.go` 是最高風險；hook 只對 identity 元件生效，並�
 
 - **U1　不支援的 SSH 形態讓 legacy 漏斗拒絕執行**
   預設（待使用者確認）：拒絕。`pilot deploy`、`pilot reconcile`、`pilot access`、breakglass 與 `pilot host decommission` 的 identity 路徑，遇到 freeipa-server 主機使用 ProxyCommand、密碼 SSH、docker／local connection，或不在 allowlist（`ConnectTimeout`、`ProxyJump`、`ServerAliveCountMax`、`ServerAliveInterval`、`StrictHostKeyChecking`、`UserKnownHostsFile`）的 `-o` 選項時，改為錯誤並指出那個 hostvar。
-  後果：現在能跑的這類 inventory 在 P2-2 之後會失敗。**P2-2 在操作者檢查過正式 inventory 之前不能合併**（檢查方式：以 AGENTS.md §0.1 的方法讀真實 inventory 的事實，即 `ansible-inventory -i <inventory> --graph`／`--list`，看 freeipa-server 主機的連線 hostvar；X1。這份規格沒有執行它）。不同意時的替代：提供有稽核紀錄的略過旗標，但會重新引入交錯的危害（U2 同一個理由）。
+  後果：現在能跑的這類 inventory 在 P2-2 之後會失敗。另一個行為變更（R10）：取鎖 ssh 帶 `ServerAliveInterval=15`、`ServerAliveCountMax=3`，網路中斷約 45 秒就被視為掉鎖，legacy 漏斗因此取消 ansible-playbook；今天同樣的中斷不會殺掉一輪長時間的 run。**P2-2 在操作者檢查過正式 inventory 之前不能合併**（檢查方式：以 AGENTS.md §0.1 的方法讀真實 inventory 的事實，即 `ansible-inventory -i <inventory> --graph`／`--list`，看 freeipa-server 主機的連線 hostvar；X1。這份規格沒有執行它）。不同意時的替代：提供有稽核紀錄的略過旗標，但會重新引入交錯的危害（U2 同一個理由）。
 
 - **U2　長時間執行期間的 breakglass**
   預設（待使用者確認）：CLI 最多等 30 分鐘，TUI 立即失敗；不提供略過。
-  後果：一輪完整 identity（legacy 約 26–27 分鐘）進行中，事故中的 breakglass activate 會等到那一輪結束，或在 TUI 被立即拒絕並指向 `pilot access breakglass activate`。替代：略過會重新引入清除交錯；安全的替代是計畫的選項 (iv)（`auth_pending` 加世代，改 #138 的 helper 與 journal 格式，重跑 #138 的 live 矩陣）。
+  後果：一輪完整 identity（legacy 約 26–27 分鐘）進行中，事故中的 breakglass activate 會等到那一輪結束，或在 TUI 被立即拒絕並指向 `pilot access breakglass activate`。同一組數值的取捨（R10）：ServerAlive 15 秒×3 次讓「反方向掉鎖」約 45 秒內被偵測到，代價是短暫的網路中斷就會殺掉長時間的 legacy run；調大（例如 15 秒×12 次）容忍較久的中斷，但 server 先放鎖、client 還沒發現的視窗（R8）也隨之變長。替代：略過會重新引入清除交錯；安全的替代是計畫的選項 (iv)（`auth_pending` 加世代，改 #138 的 helper 與 journal 格式，重跑 #138 的 live 矩陣）。
 
 - **U3　自鎖保護**
   預設（待使用者確認）：啟用 `protected_object`（§7.10）。
-  後果：roster 若刪除或停用登入 principal、把它移出 `admins`、刪除 `admins`／`ipausers`／`editors`／`trust admins`，Go engine 回報 `blocked`（結束碼 3）而不套用；這比 playbook 嚴格（Ansible engine 照樣會套用這種 roster）。不啟用的後果：roster 可以在 run 中途移除 engine 自己的讀取權限，之後的驗證讀取失敗，而寫入已套用。
+  後果：roster 若刪除或停用登入 principal、重設它自己的密碼、讓它對 `admins` 的遞移成員資格在 plan 執行後消失（直接移出而仍經巢狀群組屬於 `admins` 不算）、刪除 `admins`／`ipausers`／`editors`／`trust admins`，Go engine 回報 `blocked`（結束碼 3）而不套用；這比 playbook 嚴格（Ansible engine 照樣會套用這種 roster）。不啟用的後果：roster 可以在 run 中途移除 engine 自己的讀取權限，之後的驗證讀取失敗，而寫入已套用。
 
 - **U4　延後的 optional client 讓混合 run 永不成功**
   預設（待使用者確認）：保留計畫的語意並寫進文件：只要有 `freeipa-client` 被延後（`pilot_deferred_hosts`），ack 被略過，`acked=false`，混合 run 的結果是結束碼 4。
@@ -647,11 +707,13 @@ R1：改 `deploy.go` 是最高風險；hook 只對 identity 元件生效，並�
 
 | # | 問題 | 由什麼解決 |
 |---|---|---|
-| Q1 | `ValidateRoster` 要不要也拒絕型別錯誤的 `membership`／`password`／`ssh_keys`（會改變 Ansible engine 的行為）？Phase 2 只讓 Go adapter 拒絕（P2-1） | 先擷取 playbook 對這些輸入的真實反應（AGENTS.md §5.6），再另案決定 |
+| Q1 | `ValidateRoster`（與 `pilot roster lint`）要不要也拒絕同一批型別錯誤與明確的 `null`，讓兩個 engine 在同一個早的點拒絕？Phase 2 只讓 Go adapter 拒絕（P2-1，涵蓋 #273 的範圍）；`ValidateRoster` 本身不變，因為它是 Ansible engine 的入口（改它會改變 Ansible engine 對這些輸入的行為） | 產品決定，另案。「先擷取 playbook 對這些輸入的真實反應」這一半已由 P2-1 完成（ansible-core 2.19.2 對同一批運算式的重播，記在 P1 spec §5.1），不再阻擋這個決定 |
 | Q2 | batch 上限 25 是否合適 | P2-8 的量測；語意不變，只調常數 |
 | Q3 | 使用者決定 U1–U6 | 使用者 |
 | Q4 | `partial_failed` 的 webhook 沒有 `confirmed_effects`，訂閱者看不到已提交的 users／groups 變更（R7） | 需要時另案修改 webhook 規格；不在 Phase 2 |
 | Q5 | 正式環境的 SSH RTT 與 FreeIPA 版本（X2）；SIGKILL 後的 legacy 子行程（X5）；#261 的孫行程拖延（R2）；#277 的三份實作（R4） | 各自的量測或另案，不在本階段修 |
+| Q6 | `store.LastSuccess`（`pilot runs last-success`，`cmd/pilot/cmd/runs.go:141-150`）要不要依 scope 過濾：零寫入、`pending=false` 的 `users-groups` 成功 run 目前會被它當成該主機最近一次成功交付（R11）。建議預設：排除 `scope=users-groups` 的 run，另提供旗標納入 | 使用者；P2-6 前決定（run 的 metadata 已記 scope，§8.2） |
+| Q7 | D31 的 build tag 暫停點是否可接受（替代：driver 以 PATH 前置的 ansible-playbook 包裝腳本只做 `after_entry` 一種注入，其餘 arm 退回單元層級） | 使用者或 Root；P2-6 前決定 |
 
 ## 14 與設計審查和計畫的差異、補充
 
@@ -663,6 +725,7 @@ R1：改 `deploy.go` 是最高風險；hook 只對 identity 元件生效，並�
 4. 計畫說「helper 的每個動作都寫 journal，沒有唯讀動作」，已不符 main：自 `4e774a95` 起有唯讀路徑（計畫在這個 PR 更正）；探測因此只需四行（§5.3）。
 5. 計畫列出三個讀取 outcome 的地方，漏了 `aggregateWorkflowResult` 的 `default` 會把未列出的 outcome 發布成 `success`（§6.1、§6.4）。
 6. 計畫 §(ii) 引用的密碼判斷 task 行號已過期（計畫在這個 PR 更正）。
+7. **寫入前的前置條件放寬了一部分**：計畫 §4 步驟 5 與 (ii) 要求「每批寫入前檢查所需 live preconditions」。規格只對 S4（`passwd`）、S5（成員撤銷）、S8（刪除）在送出前做批次重讀，並對 Plan₂ 多出的破壞性操作停止（§7.3）；S1–S3、S6、S7 靠伺服器的逐項回應（`DuplicateEntry`、`NotFound` 為 `conflict-failed`）判斷，不另做批次重讀。理由在 §7.3：這些操作冪等、失敗時沒有效果、Read₂ 才剛完成。
 
 **補充**（設計審查沒有寫、這份規格補上的決定；請特別 review）：
 
@@ -678,6 +741,17 @@ R1：改 `deploy.go` 是最高風險；hook 只對 identity 元件生效，並�
 | E8 | skip 變數的值必須是 `ansible` 或 `go`（assert）；混合 run 對已提交 Go 操作之後的任何步驟失敗一律包 `ErrPartiallyApplied` | §8.3、§8.4 |
 | E9 | 入口的共用輸入一致性測試也掃 `freeipa-ssh-cache-preflight.yml`（同一個 journal 表達式的第三處） | §5.6 |
 | E10 | L7：SIGKILL 後 legacy 子行程的行為只記錄（X5） | §1.2、§10.2 |
+| E11 | `Held` 拆成 `Active`／`Attach`／`Bind`：掉鎖只取消 ansible-playbook 的指令 ctx；`RunResult`、證據、Go 的 RPC 與驗證讀取的 ctx 不取消，進行中的 batch 回真實答案；WriteGate 用 `Active()`（`Release` 之後也擋） | §4.1、§4.4 |
+| E12 | 掉鎖、取消、逾時之後的 journal 事件、step 證據與終端寫入用 `WithoutCancel` 加有界期限；P2-5 的 `Execute` 與 P2-6 的 `Transaction.runStep` 負責，後者影響所有 deploy 元件取消後的 outcome（從 `evidence_failed` 變成步驟自己的失敗） | §4.4、§11 |
+| E13 | 前置條件：S4、S5、S8 的批次重讀與謂詞；破壞性集合（含 `user.disable`，比 plan 的 `destructive` 旗標多）與「Plan₂ 比 Plan₁ 多出破壞性操作就停止」；`LiveUser`／`LiveGroup` 增加 `ipauniqueid` | §7.3 |
+| E14 | live 驗證改從 acked 基準開始、暖 client 快取，並加對照（A6、H4 的 client 仍 allow）；H1／H3 才讓 client deny；A6 不再宣稱 client deny | §10.2 |
+| E15 | 新 gate 與新路徑的觸發證明：A14–A19、L8；決定性注入點 D31（build tag，Q7） | §10.2 |
+| E16 | `protected_object` 依 plan 執行後的遞移成員資格判斷，並擋登入 principal 自己的密碼重設 | §7.10 |
+| E17 | 混合 run 的結果檔生命週期（每次 ansible-playbook 前重建為空檔、Verify 先於冪等性）；identity playbook 的 `observe` 輸出列入 K18 | §5.4、§9 |
+| E18 | `executeDeploymentTransaction` 對 identity playbook 沒有 `IdentityLock` 時執行期拒絕（涵蓋 `executeDeployment` 與直接建構 options 的呼叫者） | §4.6 |
+| E19 | Plan₃ 驗證失敗而 Go 已有 `success`／`unknown` 操作 ⇒ `partial_failed`、`FailedStep: verify`；Plan₂ `blocked`（入口已執行）⇒ 結束碼 3、`failed`；混合路徑也套 exit-code 保護 | §6.1、§6.2、§6.3 |
+| E20 | 風險 R9（取鎖等待時 Ctrl-C 的遠端等待者）、R10（ServerAlive 45 秒掉鎖，記入 U1、U2）、R11（`users-groups` 寫入 run 的 webhook 一律 `failure`，文件寫明給訂閱者）；Q6（`LastSuccess` 依 scope 過濾） | §1.3、§6.2、§12、§13 |
+| E21 | #273 的範圍與 P2-1 實作一致：使用者與群組純量、頂層清單、`password`／`ssh_keys`／`membership` 及其內部鍵的明確 `null`，以及 `absent` 項目的形狀，都在任何讀取或寫入之前拒絕；`password.initial` 分三層處理（非字串＝adapter、`~`＝沒有密碼、範本與 `!vault`＝blocked）；Q1 縮小為「要不要搬進 `ValidateRoster`」 | §7.8、§7.9、§13 |
 
 ## 15 交給後續階段
 
