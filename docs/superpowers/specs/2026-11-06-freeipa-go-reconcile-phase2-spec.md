@@ -2,13 +2,13 @@
 
 日期：2026-11-06。對應計畫：`docs/superpowers/plans/2026-10-15-freeipa-go-ssh-reconcile.md` Phase 2。前一階段：`docs/superpowers/specs/2026-10-30-freeipa-go-reconcile-phase1-spec.md`（下稱 P1 spec；目前驗收紀錄見 [LATEST](../../evidence/freeipa-go-reconcile/LATEST.md)）與 `docs/superpowers/specs/2026-10-16-freeipa-go-reconcile-phase0-contract.md`（P0）。
 
-狀態：草稿（P2-0，文件）。P2-1（#273 的 adapter 拒絕，§7.9）與 P2-2（取鎖閘門，§4）已在 Phase 2 分支實作；P2-2 只有單元、lint 與以假 ssh 跑真實 flock 的整合測試，**還沒有任何 live arm（L1–L9）的實跑**，U1 也還沒確認，所以不可合併。其餘 Phase 2 沒有程式碼，也沒有任何實跑。規格由 2026-11-06 對 main `402ca398`（含 Phase 1，PR #255）的設計審查整理而成，文中的檔案與行號都是那個 commit 的樣子；行號會漂移，實作與 lint 以符號與 task 名稱為準，不寫死行號。
+狀態：草稿（P2-0，文件）。P2-1（#273 的 adapter 拒絕，§7.9）與 P2-2（取鎖閘門，§4）已在 Phase 2 分支實作；P2-2 的 live arm L1–L11 已在 candidate `91f82abb` 對拋棄式 FreeIPA 實跑（[pr-284](../../evidence/freeipa-go-reconcile/pr-284.md)），U1 已由維護者在 2026-11-06 確認（§12）。其餘 Phase 2 沒有程式碼，也沒有任何實跑。規格由 2026-11-06 對 main `402ca398`（含 Phase 1，PR #255）的設計審查整理而成，文中的檔案與行號都是那個 commit 的樣子；行號會漂移，實作與 lint 以符號與 task 名稱為準，不寫死行號。
 
 **讀法：每一項都標明它是什麼。**
 
 - **決定 Dn**：這份規格已定下，實作照做；§3 是總表，細節在各節。
 - **補充**：設計審查沒有寫、這份規格為了讓行為完整而補上的決定，review 時請特別看（§14 列出全部）。
-- **待使用者確認 Un**（§12）：附有設計審查的預設值與它的後果，**不是已確認的決定**。未確認前實作不得假設它們已成立；U1 擋住 P2-2 的合併。
+- **待使用者確認 Un**（§12）：附有設計審查的預設值與它的後果，**不是已確認的決定**，除非該項寫明已確認。未確認前實作不得假設它們已成立；U1 已於 2026-11-06 確認，其餘 U2–U6 仍待確認。
 - **未決 Qn**（§13）與**未知 Xn**（§1）：還沒有答案，各自寫明由什麼擷取、量測或誰的回答解決。
 
 修訂：第二、三輪 review（F1–F4、R2-N1 到 R2-N4 與 P3／P4）與 #273 的 adapter 實作已併入，§14 的 E11–E41 列出（E38 是 P2-2 實作時的差異，E39 是 P2-2 review 之後的取鎖前檢查與已知限制，E40 是 breakglass 自動化步驟失敗被回報成功的修正與措辭收斂，E41 是 decommission 的鎖取得太晚〔違反 D1〕的 live 發現與修正）。
@@ -53,7 +53,7 @@ AGENTS.md §0.2 要求明列；沒有列出的項目不是「沒有」，是尚�
 
 | # | 未知 | 怎麼解決 |
 |---|---|---|
-| X1 | 正式環境的 inventory 形態：freeipa-server 主機是否用 ProxyCommand、密碼 SSH、docker／local connection 或不在 allowlist 的 `-o` | **操作者檢查正式 inventory**；U1 的前提，P2-2 合併前必須完成 |
+| X1 | 正式環境的 inventory 形態：freeipa-server 主機是否用 ProxyCommand、密碼 SSH、docker／local connection 或不在 allowlist 的 `-o` | **已解決（2026-11-06）**：維護者確認正式 inventory 不使用 ProxyCommand、密碼 SSH、docker／local connection（U1）。這是維護者的陳述；這份規格沒有執行 `ansible-inventory` 讀過正式 inventory |
 | X2 | 正式環境的 SSH RTT 與 FreeIPA 版本 | P2-8 量測，接入前確認（計畫 Phase 0 已列） |
 | X3 | 寫入回應的真實形態（`passwd`、刪除、`group_mod`、marker、重複、batch 部分失敗…） | §9 的 K6–K15 擷取；擷取前不寫 fixture、不寫判讀 |
 | X4 | 入口在 `no hosts matched`、task 被 `when` 跳過、多台主機時 ansible-playbook 的真實輸出；controller 端 `copy` 結果檔的行為 | §9 的 K16、K17 |
@@ -93,7 +93,7 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 | B4 | `passwd`（重設不可逆，也無法讀回比對） | 每位使用者一次呼叫、不進 batch、不重送；結果不明就 unknown（§7.5、§7.8） |
 | B5 | `user_disable` | 與 playbook 相同；自鎖保護見 U3 |
 | B6 | 入口把 FreeIPA 主機上的 `auth_pending` 設為 true | 這是義務，刻意持久化；沒有寫入就不執行入口（§7.2） |
-| B7 | 取鎖閘門讓既有入口對不支援的 inventory 形態拒絕執行，而且是在任何 ansible-playbook、ssh 與任何步驟**之前**（取鎖前檢查，§4.2），不是取鎖時才拒絕 | 行為變更，待使用者確認（U1） |
+| B7 | 取鎖閘門讓既有入口對不支援的 inventory 形態拒絕執行，而且是在任何 ansible-playbook、ssh 與任何步驟**之前**（取鎖前檢查，§4.2），不是取鎖時才拒絕 | 行為變更；U1 已於 2026-11-06 確認 |
 | B8 | 沒有自動 rollback | Go 的寫入是 reconciler 效果，失敗後以「重讀、重算」重跑收斂；不 fallback 到舊 playbook（計畫 §4） |
 
 ## 2 不變量
@@ -775,7 +775,7 @@ H1 與 H3 各有對照（A6 與 H4 的 client 仍 allow），兩者都從 acked 
 |---|---|---|---|---|---|
 | P2-0 | 這份規格與計畫的狀態、過期敘述更正 | 本檔、計畫 | 決定與擷取表；沒有可執行的 SOP | not-needed：只有文件 | — |
 | P2-1 | #273：adapter 在任何讀取或寫入之前拒絕型別錯誤與明確的 `null`（§7.9 的清單，含 `absent` 項目的形狀與 `freeipa.admin.principal`；Go 不管理的鍵的 `null` 接受）。**已在 Phase 2 分支實作**；P1 spec §5.1 的對應條目已更新 | `internal/identityreconcile/desired.go` 與測試（沿用既有的 roster-adapter gate，不新增 `// gate:` id）、P1 spec §5.1 | 每個拒絕的鍵（`null` 與錯型別）與每種形狀錯誤（`users`／`groups` 不是 list、元素不是 mapping、`name` 不是字串）一個「應該觸發」的 row；接受的形狀（`uid`／`gid`／`display_name`／`email`／群組 `gid` 的 `null`、`password.initial: ~`、`freeipa` 的 `null`、`{}`、不寫）各一個「應該通過」的 row；隨 repo 出貨的範例 roster 與 `pilot edit` 寫出的 roster 通過 | not-needed：拒絕發生在建立 tunnel 之前，沒有連線可驗證（預覽會走到 adapter，由 cobra 層測試涵蓋） | — |
-| P2-2 | **取鎖閘門** | `internal/identitylock`（`Held` 的 `Active`／`Attach`／`Bind`）、`internal/sshdial/hostvars.go`、`accessgrants` options、decommission config、deploy 的 transaction option 與執行期拒絕、取鎖 ssh 的 ServerAlive、CLI 接線、lint | §4.6 lint（含第 5 點的執行期拒絕）、§4.7 測試（含掉鎖後 outcome 是 `failed`）；`go test` 涵蓋 `cmd/pilot/cmd`、`internal/spec`、`internal/accessgrants`、`internal/decommission`、`internal/sshdial` | **required**：真實 sshd 的 flock、真實 inventory 形態（L1–L9）；**U1 確認且正式 inventory 檢查完成前不可合併** | U1 |
+| P2-2 | **取鎖閘門** | `internal/identitylock`（`Held` 的 `Active`／`Attach`／`Bind`）、`internal/sshdial/hostvars.go`、`accessgrants` options、decommission config、deploy 的 transaction option 與執行期拒絕、取鎖 ssh 的 ServerAlive、CLI 接線、lint | §4.6 lint（含第 5 點的執行期拒絕）、§4.7 測試（含掉鎖後 outcome 是 `failed`）；`go test` 涵蓋 `cmd/pilot/cmd`、`internal/spec`、`internal/accessgrants`、`internal/decommission`、`internal/sshdial` | **required**：真實 sshd 的 flock、真實 inventory 形態（L1–L11）；U1 已於 2026-11-06 確認（維護者陳述正式 inventory 不使用被拒絕的形態） | —（U1 已確認） |
 | P2-3 | 入口 playbook、`auth_inspect`、identity 的觀察與 ack register、AGENTS.md §4.0 的一列、Go 的結果解析器；**擷取 K16–K18**（真實 `ansible-playbook` 輸出，§9） | `playbooks/apply/freeipa-identity-auth-cache.yml`、`files/freeipa-ssh-key-cache.py`、`freeipa-identity-apply.yml`（兩處）、`internal/identityreconcile/authcache.go`、`internal/identityreconcile/testdata/`（K16–K18 的 fixture） | §5 的測試；解析器可先於 playbook 完成 | **required**，程序如下（AGENTS.md §1.4）。(1) identity playbook 的新觀察 task：`pilot vm-target test --playbook playbooks/apply/freeipa-identity-apply.yml --spec docs/verification/freeipa-identity.md`，L3 的 `--check --diff` 照跑（觀察 task 在 check mode 被跳過）。(2) 入口：它依 §5.2 拒絕 check mode，L3 會在它自己的 gate 失敗，所以用 `pilot vm-target test --playbook playbooks/apply/freeipa-identity-auth-cache.yml --spec docs/verification/freeipa-identity.md --skip-checkmode`，在已套用 identity roster 的全新 VM 上；`--skip-checkmode` 的理由、以及「`--spec` 用 identity 的 spec 是因為入口不是 component、沒有自己的 spec（§5.1），L5 驗證的是入口沒有弄壞 identity 狀態、L6 要求入口 `changed=0`」寫進 evidence 的「未涵蓋」段。(3) 入口的拒絕路徑（check mode、`--tags`、多台主機、錯的 action、domain 不符）與 K16、K17 的擷取用 `pilot vm-target run`，不是 test 鏈：它們不是一條會成功的鏈，這是對 AGENTS.md §1.4「首選鏈」的有文件的偏離。journal 不存在／true／false 各一次，AGENTS.md §1.4 | P2-2（`Held` 型別出現在簽章；解析器可先做） |
 | P2-4 | **擷取 K6–K15、K19、K21**（RPC，§9）與 fixture 測試 | `internal/freeiparpc/testdata`、find／write 的 fixture 測試 | 每個擷取有斷言與竄改探測；`passwd` 的 fixture 不含密碼，由掃描 fixture 目錄的測試鎖住 | **required**：在拋棄式 VM 上擷取 | P2-2（U6） |
 | P2-5 | executor（沒有入口） | `freeiparpc` 的 WriteGate（用 `Held.Active()`）、`identityreconcile/execute.go`（journal sink 與 Read₃ 用脫離取消的 ctx、§7.3 的前置條件重讀與破壞性差異規則、§7.10 的逐 stage 自鎖檢查）、journal sink 介面、`inventory` 的值形態匯出函式、新的 blocked 原因（`password_value_unsupported`、`protected_object`）、`LiveUser`／`LiveGroup` 的 `ipauniqueid`；Q8 決定之後才寫送出 `""` 的程式碼 | §7 的單元矩陣；WriteGate 零請求測試 | **required（重跑 P1 的 driver）**：這個 PR 改了 `user_find` 的解析（`LiveUser` 增加 `ipauniqueid`）與 `freeiparpc.New`（`!ReadOnly && WriteGate == nil` 拒絕），所以在全新 VM 上對不可變 candidate 重跑 `TestLiveGoPreviewDriver`，確認預覽仍是 0 寫入；executor 本身沒有進入點，它的 live 證明由 P2-6 提供 | P2-1（已實作）、P2-4；Q8 |
@@ -789,11 +789,12 @@ H1 與 H3 各有對照（A6 與 H4 的 client 仍 allow），兩者都從 acked 
 
 ## 12 待使用者確認
 
-**下面六項是設計審查的預設值與它的後果，不是已確認的決定。** 每項都需要使用者回答；沒有回答前，實作只能依預設值寫程式碼、不得把它當成已同意。
+**下面六項是設計審查的預設值與它的後果，不是已確認的決定，除非該項寫明已確認（目前只有 U1）。** 每項都需要使用者回答；沒有回答前，實作只能依預設值寫程式碼、不得把它當成已同意。
 
 - **U1　不支援的 SSH 形態讓 legacy 漏斗拒絕執行**
-  預設（待使用者確認）：拒絕。`pilot deploy`、`pilot reconcile`、`pilot access`、breakglass 與 `pilot host decommission` 的 identity 路徑，遇到 freeipa-server 主機使用 ProxyCommand、密碼 SSH、docker／local connection，或不在 allowlist（`ConnectTimeout`、`ProxyJump`、`ServerAliveCountMax`、`ServerAliveInterval`、`StrictHostKeyChecking`、`UserKnownHostsFile`）的 `-o` 選項時，改為錯誤並指出那個 hostvar。
-  後果：現在能跑的這類 inventory 在 P2-2 之後會失敗。另一個行為變更（R10）：取鎖 ssh 帶 `ServerAliveInterval=15`、`ServerAliveCountMax=3`，網路中斷約 45 秒就被視為掉鎖，legacy 漏斗因此取消 ansible-playbook；今天同樣的中斷不會殺掉一輪長時間的 run。**P2-2 在操作者檢查過正式 inventory 之前不能合併**（檢查方式：以 AGENTS.md §0.1 的方法讀真實 inventory 的事實，即 `ansible-inventory -i <inventory> --graph`／`--list`，看 freeipa-server 主機的連線 hostvar；X1。這份規格沒有執行它）。不同意時的替代：提供有稽核紀錄的略過旗標，但會重新引入交錯的危害（U2 同一個理由）。
+  **已確認（2026-11-06）**：維護者確認正式 inventory 不使用 ProxyCommand、密碼 SSH，也不使用 docker／local connection，所以下面的預設（拒絕）成立，P2-2 不再因它被擋住。這是維護者的陳述：這份規格沒有執行 `ansible-inventory` 讀過正式 inventory（X1 的檢查方式仍是下面括號內的那一個，之後接入正式環境時照做）。
+  預設：拒絕。`pilot deploy`、`pilot reconcile`、`pilot access`、breakglass 與 `pilot host decommission` 的 identity 路徑，遇到 freeipa-server 主機使用 ProxyCommand、密碼 SSH、docker／local connection，或不在 allowlist（`ConnectTimeout`、`ProxyJump`、`ServerAliveCountMax`、`ServerAliveInterval`、`StrictHostKeyChecking`、`UserKnownHostsFile`）的 `-o` 選項時，改為錯誤並指出那個 hostvar。
+  後果：現在能跑的這類 inventory 在 P2-2 之後會失敗。另一個行為變更（R10）：取鎖 ssh 帶 `ServerAliveInterval=15`、`ServerAliveCountMax=3`，網路中斷約 45 秒就被視為掉鎖，legacy 漏斗因此取消 ansible-playbook；今天同樣的中斷不會殺掉一輪長時間的 run。**（已確認前：P2-2 在操作者檢查過正式 inventory 之前不能合併；現已確認，見上）**（檢查方式：以 AGENTS.md §0.1 的方法讀真實 inventory 的事實，即 `ansible-inventory -i <inventory> --graph`／`--list`，看 freeipa-server 主機的連線 hostvar；X1。這份規格沒有執行它）。不同意時的替代：提供有稽核紀錄的略過旗標，但會重新引入交錯的危害（U2 同一個理由）。
 
 - **U2　長時間執行期間的 breakglass**
   預設（待使用者確認）：CLI 最多等 30 分鐘，TUI 立即失敗；不提供略過。
@@ -821,7 +822,7 @@ H1 與 H3 各有對照（A6 與 H4 的 client 仍 allow），兩者都從 acked 
 |---|---|---|
 | Q1 | `ValidateRoster`（與 `pilot roster lint`）要不要也拒絕同一批型別錯誤與明確的 `null`，讓兩個 engine 在同一個早的點拒絕？Phase 2 只讓 Go adapter 拒絕（P2-1，涵蓋 #273 的範圍）；`ValidateRoster` 本身不變，因為它是 Ansible engine 的入口（改它會改變 Ansible engine 對這些輸入的行為）。P2-1 已在分支實作 | 產品決定，另案。「先擷取 playbook 對這些輸入的真實反應」這一半已由 P2-1 完成（ansible-core 2.19.2 對同一批運算式的重播，記在 P1 spec §5.1），不再阻擋這個決定 |
 | Q2 | batch 上限 25 是否合適 | P2-8 的量測；語意不變，只調常數 |
-| Q3 | 使用者決定 U1–U6 | 使用者 |
+| Q3 | 使用者決定 U2–U6（U1 已於 2026-11-06 確認） | 使用者 |
 | Q4 | `partial_failed` 的 webhook 沒有 `confirmed_effects`，訂閱者看不到已提交的 users／groups 變更（R7） | 需要時另案修改 webhook 規格；不在 Phase 2 |
 | Q5 | 正式環境的 SSH RTT 與 FreeIPA 版本（X2）；SIGKILL 後的 legacy 子行程（X5）；#261 的孫行程拖延（R2）；#277 的三份實作（R4） | 各自的量測或另案，不在本階段修 |
 | Q6 | `store.LastSuccess`（`pilot runs last-success`，`cmd/pilot/cmd/runs.go:141-150`）要不要依 scope 過濾：零寫入、`pending=false` 的 `users-groups` 成功 run 目前會被它當成該主機最近一次成功交付（R11）。建議預設：排除 `scope=users-groups` 的 run，另提供旗標納入 | 使用者；P2-6 前決定（run 的 metadata 已記 scope，§8.2） |
