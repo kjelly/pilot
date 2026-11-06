@@ -200,6 +200,45 @@ func TestBindOfALostLockIsAlreadyCancelled(t *testing.T) {
 	}
 }
 
+// Require is how a step inside a run whose owner took the lock gets it: the
+// token Attach or Bind carried, refused when there is none and when the lock is
+// no longer usable. Each refusal is a different one (ErrNoLock, ErrLockLost, the
+// released lock), and the usable lock is the very *Held the owner holds, not a
+// copy: a second session on the same server would be a second lock.
+func TestRequireReturnsTheRunsLockAndRefusesWhatIsNotUsable(t *testing.T) {
+	r := newFakeRemote()
+	h := New("ipa-1", r)
+	bound, cancel := h.Bind(context.Background())
+	defer cancel()
+	for name, ctx := range map[string]context.Context{"Attach": h.Attach(context.Background()), "Bind": bound} {
+		got, err := Require(ctx)
+		if err != nil || got != h {
+			t.Fatalf("%s: Require = %v, %v, want the owner's lock", name, got, err)
+		}
+	}
+
+	if got, err := Require(context.Background()); !errors.Is(err, ErrNoLock) || got != nil {
+		t.Fatalf("no lock in the context: Require = %v, %v, want ErrNoLock", got, err)
+	}
+
+	lost := New("ipa-2", newFakeRemote())
+	lostCtx := lost.Attach(context.Background())
+	lost.remote.(*fakeRemote).drop()
+	if got, err := Require(lostCtx); !errors.Is(err, ErrLockLost) || got != nil {
+		t.Fatalf("a lost lock: Require = %v, %v, want ErrLockLost", got, err)
+	}
+
+	released := New("ipa-3", newFakeRemote())
+	releasedCtx := released.Attach(context.Background())
+	if err := released.Release(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Require(releasedCtx)
+	if err == nil || got != nil || errors.Is(err, ErrNoLock) || errors.Is(err, ErrLockLost) {
+		t.Fatalf("a released lock: Require = %v, %v, want the 'already released' refusal, which is neither a missing nor a lost lock", got, err)
+	}
+}
+
 // Held over the real sshdial.Lock (the fake ssh runs the remote command
 // locally, flock and all): a clean Release is not a loss and frees the lock;
 // Dialer.Close, which ends the session the way a dropped connection does, is.

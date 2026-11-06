@@ -44,9 +44,10 @@ import (
 // derived by Bind.
 var ErrLockLost = errors.New("lock lost; FreeIPA may be partially reconciled; rerun")
 
-// ErrNoLock is returned by a funnel that was handed no Acquirer. A funnel
-// that runs the identity apply playbook refuses before running anything
-// rather than run without the lock.
+// ErrNoLock is returned by a funnel that was handed no Acquirer, and by a step
+// that runs the identity apply playbook inside a run whose owner holds the lock
+// (Require) when its context carries none. Either refuses before running
+// anything rather than run without the lock.
 var ErrNoLock = errors.New("identitylock: no lock acquirer: a run of the FreeIPA identity apply playbook must hold the /etc/ipa lock")
 
 // ApplyPlaybook is the identity apply playbook, the one every funnel the lint
@@ -224,4 +225,23 @@ func (h *Held) Bind(ctx context.Context) (context.Context, context.CancelFunc) {
 func HeldFrom(ctx context.Context) *Held {
 	h, _ := ctx.Value(heldKey{}).(*Held)
 	return h
+}
+
+// Require is for a step that runs the identity apply playbook inside a run
+// whose owner took the lock before its first step (a decommission: its first
+// change is the client's uninstall, not the playbook that comes last, so the
+// lock is the run's and not the step's). It returns the lock ctx carries, and
+// refuses with ErrNoLock when there is none and with Check's error when the lock
+// is already lost or released: the step never takes a lock of its own, which
+// would be a second session on the same server (flock from one process to one
+// file does not nest) and, taken at the step, too late.
+func Require(ctx context.Context) (*Held, error) {
+	h := HeldFrom(ctx)
+	if h == nil {
+		return nil, fmt.Errorf("%w (this step takes none of its own: the run's owner takes it before the first step and carries it in the context)", ErrNoLock)
+	}
+	if err := h.Check(); err != nil {
+		return nil, err
+	}
+	return h, nil
 }
