@@ -287,19 +287,24 @@ identity drift` 的 `--repair-managed`、`pilot edit` 的 break-glass 與 `pilot
 才放。別的 pilot 執行持有鎖時 CLI 最多等 30 分鐘（`pilot reconcile --lock-wait` 可調，`0` 是忙碌
 就立即失敗；`pilot edit` 的 TUI 不等待，訊息會指向 `pilot access breakglass activate`）。
 freeipa-server 主機若用 docker／local connection、ProxyCommand、密碼 SSH、`ansible_ssh_executable`
-或不在 allowlist 的 `-o`，這些入口會拒絕並指出是哪個 hostvar，**不會無鎖執行**；而且是在**做任何
-事之前**拒絕（見下面第 1 點），不是取鎖時才拒絕。鎖只約束 pilot 自己的程式碼路徑：上面
+或不在 allowlist 的 `-o`，這些入口會拒絕並指出是哪個 hostvar，**不會無鎖執行**；而且是在任何
+ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（見下面第 1 點），不是取鎖時才拒絕。鎖只約束 pilot 自己的程式碼路徑：上面
 的 `ansible-playbook` 手動執行與 `pilot vm-target run`／`test` 不取鎖，也不會被鎖擋住。
 
 操作者要知道的行為與限制（同一份說明在各指令的 `--help`）：
 
-1. **拒絕發生在任何 ansible-playbook、ssh 與步驟之前。** 每個入口先用取鎖本身那一套規則做一次不啟動
-   ssh 的檢查（`pilot deploy`／`pilot reconcile` 在顯示計畫與依賴 apply 之前，`--preview-only` 與
+1. **拒絕發生在任何 ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前。** 每個入口先用取鎖本身
+   那一套規則做一次不啟動 ssh 的檢查（`pilot deploy`／`pilot reconcile` 在顯示計畫與依賴 apply 之前，`--preview-only` 與
    `--force` 的結果一致；access、breakglass、drift 修復在探測之前；`pilot host decommission apply`／
    `resume` 在記錄 approval 與第一個步驟之前，所以 client 不會在拒絕之前被解除安裝）。
    `--repair-managed` 即使沒有 drift 也會被拒絕（檢查在探測之前）。`resume` 即使 converge 步驟已經做完，
    inventory 後來變成不支援也會被拒絕。`pilot host decommission plan` **不拒絕**：它在 stderr 印警告，
    plan 照存、結束碼 0；之後的 apply 才會被拒絕。取鎖時仍會再檢查一次。
+   **不是在所有事情之前**：只整理 workspace 的事仍在檢查之前——精靈的問題、從 `hosts.yml` 重新產生
+   `inventory.yml`、roster 的 schema 自動升級（會留備份），decommission 的 stage 確認與 `inventory.yml`
+   的重新產生。**webhook**：互動式單一元件 `pilot deploy`（沒有 `--component`）無論錯誤出在哪個階段都會發
+   一個 `failure` 事件，所以被拒絕也會發一個（沒有元件被執行）；`pilot reconcile`、`pilot deploy
+   --component`、`pilot access …`、breakglass 的 CLI 在拒絕時不發事件。
 2. **這些入口現在用 `ansible-inventory --list`（不帶 vault 密碼）讀 inventory。**（行為變更）
    `pilot access`、breakglass、drift 修復與 `pilot host decommission` 原本不經過這一步：group_vars／
    host_vars 裡有 contract 宣告為 `secret: true` 的明文輸入、或整份 group_vars 被 ansible-vault 加密
@@ -319,6 +324,15 @@ freeipa-server 主機若用 docker／local connection、ProxyCommand、密碼 SS
 6. **breakglass `activate`／`deactivate` 在掉鎖時會在記錄 activation 之前回傳錯誤**，即使 playbook 已以 0
    結束：規則可能已在 FreeIPA 啟用（或已被收掉），而 `breakglass-activations.json` 沒有這筆紀錄（或仍是
    active）。處理：重跑同一個指令（`activate` 的 apply 是冪等的）；要收掉就跑 `deactivate`。
+7. **`pilot edit --actions`、scenario 與 MCP apply 的 `activate_breakglass`／`deactivate_breakglass` 失敗就是
+   步驟失敗**：預檢查拒絕、鎖忙碌（TUI 不等待）、掉鎖、playbook 失敗時，`--actions` 結束碼非 0、stderr 是
+   `step N (activate_breakglass): break-glass <name> was not activated: <原因>`（之前的步驟保留），apply 整個
+   rollback、MCP 回 `apply_failed`；失敗的啟用不留紀錄，失敗的停用不改紀錄。（修正之前這些情況回報成功，
+   結束碼 0 而沒有任何緊急存取生效。）**plan 不執行這兩個步驟**：它回 warning「沒有執行 …」，不是失敗；要實際
+   啟用請 apply，或用 `pilot access breakglass activate`。
+8. **apply 的 rollback 收不回已生效的 breakglass 啟用**：scenario 裡 `activate_breakglass` 之後的步驟失敗時，
+   workspace 的檔案會還原，但啟用已在 FreeIPA 生效、也已記錄。把 breakglass 步驟放在 scenario 最後，或失敗後
+   用 `pilot access breakglass status` 檢查並 `deactivate`。
 
 ### 4.4 只跑一部分（tags）
 
