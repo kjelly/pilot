@@ -188,10 +188,14 @@ func FromRoster(root map[string]any) (Desired, error) {
 func desiredUser(u map[string]any, name, state string) (DesiredUser, error) {
 	du := DesiredUser{Name: name, PreserveExisting: true}
 	var err error
-	if du.First, err = stringOr(u, "first", name); err != nil {
+	// first, last and home_directory are refused when empty, as when null: the
+	// server refuses them (RequirementError for givenname and sn,
+	// ObjectclassViolation for homedirectory; captured, K21), and an engine that
+	// writes would find that out in the middle of a stage (Q8).
+	if du.First, err = nonEmptyStringOr(u, "first", name); err != nil {
 		return du, err
 	}
-	if du.Last, err = stringOr(u, "last", name); err != nil {
+	if du.Last, err = nonEmptyStringOr(u, "last", name); err != nil {
 		return du, err
 	}
 	if du.DisplayName, err = unmanagedString(u, "display_name"); err != nil {
@@ -209,7 +213,7 @@ func desiredUser(u map[string]any, name, state string) (DesiredUser, error) {
 	if du.Shell, err = stringOr(u, "login_shell", "/bin/bash"); err != nil {
 		return du, err
 	}
-	if du.Home, err = stringOr(u, "home_directory", "/home/"+name); err != nil {
+	if du.Home, err = nonEmptyStringOr(u, "home_directory", "/home/"+name); err != nil {
 		return du, err
 	}
 	if du.Enabled, err = boolOr(u, "enabled", state != "disabled"); err != nil {
@@ -368,6 +372,21 @@ func stringOr(m map[string]any, key, def string) (string, error) {
 	s, ok := v.(string)
 	if !ok {
 		return "", fmt.Errorf("%s must be a string", key)
+	}
+	return s, nil
+}
+
+// nonEmptyStringOr is stringOr for a key the server refuses to leave empty:
+// an empty string is refused like a null, with the operator told to leave the
+// key out or give a value (spec Q8, decision (a): the roster adapter refuses
+// "" for first, last and home_directory before any read or write).
+func nonEmptyStringOr(m map[string]any, key, def string) (string, error) {
+	s, err := stringOr(m, key, def)
+	if err != nil {
+		return "", err
+	}
+	if _, present := m[key]; present && s == "" {
+		return "", fmt.Errorf("%s must not be empty: FreeIPA refuses an empty value for it (leave it out for the default, or give a value)", key)
 	}
 	return s, nil
 }

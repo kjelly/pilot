@@ -263,7 +263,7 @@ func (b *builder) groups(d Desired) {
 			}
 			createID = b.add(Operation{Kind: KindGroupCreate, Object: name, Fields: fields})
 			b.createdGroups[name] = createID
-		} else if !isOnly(live.Description, g.Description) {
+		} else if !descriptionMatches(live.Description, g.Description) {
 			b.add(Operation{Kind: KindGroupUpdate, Object: name, Fields: map[string]Change{"description": {From: listValue(live.Description), To: g.Description}}})
 		}
 		b.ensureMarker(g.Name, createID)
@@ -336,7 +336,7 @@ func desiredAttrs(u DesiredUser) map[string]any {
 		out["displayname"] = *u.DisplayName
 	}
 	if u.Email != nil {
-		out["mail"] = []string{*u.Email}
+		out["mail"] = mailValues(*u.Email)
 	}
 	if u.UID != nil {
 		out["uidnumber"] = strconv.FormatInt(*u.UID, 10)
@@ -361,10 +361,51 @@ func attrChanges(u DesiredUser, live LiveUser) map[string]Change {
 	if u.DisplayName != nil {
 		cmp("displayname", live.DisplayName, *u.DisplayName)
 	}
-	if u.Email != nil && !isOnly(live.Mail, *u.Email) {
-		out["mail"] = Change{From: listValue(live.Mail), To: []string{*u.Email}}
+	if u.Email != nil {
+		if want := mailValues(*u.Email); !sameValues(live.Mail, want) {
+			out["mail"] = Change{From: listValue(live.Mail), To: want}
+		}
 	}
 	return out
+}
+
+// An empty string in the roster means "no value" for login_shell, display_name,
+// email and a group's description (spec Q8, decided as the default pending the
+// maintainer's confirmation). FreeIPA agrees: given "" for any of them, add and
+// mod succeed and the attribute is not there afterwards, on add instead of the
+// default and on mod clearing a value (captured, K21). So desired "" and a live
+// attribute that is absent are the same state, and a plan made against either
+// has nothing to do: what a preview shows is what an apply converges to
+// (Plan₃ empty), because both are this one Build.
+
+// mailValues is the set of mail values an email key declares: none for "".
+func mailValues(email string) []string {
+	if email == "" {
+		return []string{}
+	}
+	return []string{email}
+}
+
+// sameValues reports whether live holds exactly the values of want, in no
+// particular order: FreeIPA does not keep a multi-valued attribute's order
+// (captured), and an empty want is an attribute that is absent.
+func sameValues(live, want []string) bool {
+	if len(live) != len(want) {
+		return false
+	}
+	return len(want) == 0 || slices.Equal(sortedCopy(live), sortedCopy(want))
+}
+
+func sortedCopy(in []string) []string {
+	out := slices.Clone(in)
+	sort.Strings(out)
+	return out
+}
+
+// descriptionMatches reports whether a group's live description is what the roster
+// declares: an empty declared description is no description at all.
+func descriptionMatches(live []string, want string) bool {
+	return sameValues(live, mailValues(want))
 }
 
 func idChange(u DesiredUser, live LiveUser) string {
