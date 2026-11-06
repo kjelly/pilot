@@ -133,7 +133,7 @@ vars 檔沿用 `promptVault` 在預設值模式下的選擇：`<inventory 目錄
 | `ansible_user` | `User` | — |
 | `ansible_ssh_private_key_file` | `IdentityFile` | — |
 | `ansible_ssh_common_args`、`ansible_ssh_extra_args` | `Options` | 只接受 `-o Key=Value`，且 key 在 `sshdial` 的 `allowedOptions` 內；其他任何內容拒絕 |
-| `ansible_connection` | — | 只接受未設定或 `ssh`；`docker`、`local` 等拒絕 |
+| `ansible_connection` | — | 只接受未設定、`ssh` 或 `ansible.builtin.ssh`（同一個外掛；Phase 2 P2-2 起，與取鎖共用 `sshdial.TargetFromHostVars`）；`docker`、`local`、`paramiko` 等拒絕 |
 | `ansible_ssh_args` | — | 只接受 `ControlMaster`、`ControlPath`、`ControlPersist`（vm-target 的 inventory 帶這三項），不採用：tunnel 自己管理連線重用（計畫 §3）；其他選項拒絕 |
 | `ansible_ssh_host`、`ansible_ssh_port`、`ansible_ssh_user`、`ansible_private_key_file`、`ansible_ssh_executable`、`ansible_ssh_password` | — | 舊名稱或改變 ssh 程式的設定，有設定就拒絕 |
 | `ansible_ssh_pipelining` 等其他變數 | — | 不影響 SSH 連線本身，忽略 |

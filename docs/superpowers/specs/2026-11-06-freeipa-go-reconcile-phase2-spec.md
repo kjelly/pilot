@@ -11,7 +11,7 @@
 - **待使用者確認 Un**（§12）：附有設計審查的預設值與它的後果，**不是已確認的決定**。未確認前實作不得假設它們已成立；U1 擋住 P2-2 的合併。
 - **未決 Qn**（§13）與**未知 Xn**（§1）：還沒有答案，各自寫明由什麼擷取、量測或誰的回答解決。
 
-修訂：第二、三輪 review（F1–F4、R2-N1 到 R2-N4 與 P3／P4）與 #273 的 adapter 實作已併入，§14 的 E11–E38 列出（E38 是 P2-2 實作時的差異）。
+修訂：第二、三輪 review（F1–F4、R2-N1 到 R2-N4 與 P3／P4）與 #273 的 adapter 實作已併入，§14 的 E11–E39 列出（E38 是 P2-2 實作時的差異，E39 是 P2-2 review 之後的取鎖前檢查與已知限制）。
 
 本文件不提供操作 SOP。文中的指令、旗標、檔名與 JSON 欄位是要實作的介面（欄位名稱為擬議），不是已實跑的步驟。AGENTS.md §4.0 的資料夾表**不在這個 PR 修改**（入口 playbook 還不存在），P2-3 新增該列（§5.1）。
 
@@ -65,7 +65,7 @@ AGENTS.md §0.2 要求明列；沒有列出的項目不是「沒有」，是尚�
 | # | 風險 | 處理 |
 |---|---|---|
 | R1 | 混合執行改 `cmd/pilot/cmd/deploy.go`，AGENTS.md §5.5 列為最高風險檔案 | hook 只對 identity 元件生效；新增行為測試；全量路徑 live 跑（H1–H5） |
-| R2 | legacy 漏斗掉鎖時只殺 ansible-playbook（`exec.CommandContext`），孫行程握著 pipe 時返回會被拖延（#261 第 2 項） | 不在本階段修；P2-2 記錄 |
+| R2 | legacy 漏斗掉鎖時只殺 ansible-playbook 主行程（`exec.CommandContext`），不殺它的 process group：孫行程握著 pipe 時返回會被拖延（#261 第 2 項），而 fork 出的 worker 可能在掉鎖**之後**把進行中的 task 做完（那一個 task 沒有鎖的保護；之後不會再有新的 task，因為 ansible-playbook 主行程已死） | 不在本階段修；P2-2 記錄（runbook §4.3 寫給操作者） |
 | R3 | 鎖只約束 pilot 的程式碼路徑：手動 `ansible-playbook`、dev 路徑（`vm-target run`／`vm-target test`／`topology test`）、不經 pilot 的 IPA 管理工具、X5 的情形 | 計畫的殘餘風險；`pilot` 輸出與文件要寫明這個前提（§8.6） |
 | R4 | `users-groups` scope 在 `inventory.yml` 落後 `hosts.yml` 時拒絕（唯讀，P1 spec §2.2 步驟 2），混合路徑則照 Ansible engine 現況重新產生（可能 migrate roster）；「inventory.yml 是否最新」有三份實作（#277） | 不在本階段統一；兩種行為都寫進輸出 |
 | R5 | 入口之後的 Plan₂ 可能比 Plan₁ 多出操作（外部 writer） | 執行 Plan₂ 是安全的（入口已執行）；差異回報為 `conflict`（§7.2） |
@@ -75,6 +75,9 @@ AGENTS.md §0.2 要求明列；沒有列出的項目不是「沒有」，是尚�
 | R9 | 取鎖等待期間（最長 30 分鐘）按 Ctrl-C：本機 ssh 被殺，但遠端 `flock --wait N` 行程在 sshd 關閉連線後仍等到它自己的期限 `N`（flock 自己保證在 `N` 秒結束，`internal/sshdial/lock.go:56-59`）；它取得鎖時會因 stdin EOF 立刻結束並放鎖，不會長期占鎖，但這段時間它是一個幽靈等待者，會讓另一個合法等待者的那一次嘗試多等一輪 | **不加 `timeout` 包裝**：`flock --wait N` 已經在 `N` 秒結束；而把整條遠端指令包在 `timeout` 之下，會在 `N` 加寬限之後連**持有中**的鎖一起殺掉（等於掉鎖），flock 的等待與持有又在同一個行程裡，包裝沒辦法只套在等待階段。處理：接受 `--wait N` 界定的上限；live arm L8 記錄 Ctrl-C 之後遠端行程多久消失，L9 證明持有中的鎖不會被計時器殺掉（§10.2） |
 | R10 | 取鎖 ssh 的 `ServerAliveInterval=15`、`ServerAliveCountMax=3` 讓網路中斷約 45 秒就被視為掉鎖，legacy 漏斗因此取消 ansible-playbook；今天同樣的中斷不會殺掉一輪長時間的 run。這是行為變更，也是「偵測反方向掉鎖要多快」與「容忍短暫中斷」的取捨 | 寫進 U1、U2 的後果；數值是常數，P2-2 的 live arm 量測後可調（調大＝R8 的偵測更慢） |
 | R11 | `users-groups` 的寫入 run 在觀察到 `acked` 的完整 run 之前，webhook 一律是 `failure`（義務未結清，§6.2）；`store.LastSuccess`（`pilot runs last-success`）會把零寫入、`pending=false` 的 `users-groups` 成功 run 當成該主機最近一次成功交付，而它沒有執行完整 playbook | 文件寫明給 webhook 訂閱者；`LastSuccess` 是否依 scope 過濾見 Q6 |
+| R12 | 取鎖的 target 只來自 `ansible-inventory --list` 的 hostvars，下列連線設定它看不到（§4.2 已知缺口）：`-e @file`（與 JSON 物件形式的 `-e`）提供的 `ansible_host`、`ansible_user`、`ansible_port`、`target_group`，`ansible.cfg` 的 `ssh_args`／`host_key_checking`，環境變數 `ANSIBLE_SSH_ARGS`。`target_group` 或 `ansible_host` 只由 `-e @file` 提供時，鎖可能鎖 A 機而 playbook 的目標是 B 機 | 接受並記錄：連線設定寫在 inventory（host_vars／group_vars）而不是 `-e @file` 或 ansible.cfg；`-e target_group=<g>`（key=value 形式）在 deploy 路徑有被解析，access 與 decommission 不傳 `target_group`；runbook §4.3 寫給操作者；L1–L6 的 live arm 對真實 inventory 驗證，不涵蓋 `-e @file` 提供的連線變數 |
+| R13 | `--ask-vault-pass`／`--ask-become-pass`（deploy／reconcile 精靈的答案）的密碼提示發生在 ansible-playbook 裡，也就是**取鎖之後**：操作者輸入密碼的時間算在持鎖時間裡，與 D1「互動確認的等待不持鎖」不同 | **接受並記錄，不拒絕這兩個旗標**：拒絕會讓今天可用的 ansible engine 流程失效，而且沒有辦法在取鎖前先問（提示在 ansible-playbook 內）；後果只是持鎖變長（別的 run 要多等，互斥本身不受影響）。要避免就用 `--vault-password-file`。runbook §4.3 寫給操作者 |
+| R14 | breakglass `Activate` 在掉鎖時回傳 `ErrLockLost`，而那在它記錄 activation **之前**：即使 playbook 已以 0 結束、規則已在 FreeIPA 啟用，`breakglass-activations.json` 沒有這筆紀錄，直到重跑；`Deactivate` 同理，掉鎖時不標記 `deactivated`（規則可能已被收掉，紀錄仍是 active） | 接受並記錄：錯誤訊息已說 FreeIPA 可能已被部分調和、要重跑；`activate` 重跑是冪等的 apply，`deactivate` 重跑把規則收掉；runbook §4.3 寫給操作者 |
 
 ### 1.4 destructive 邊界
 
@@ -88,7 +91,7 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 | B4 | `passwd`（重設不可逆，也無法讀回比對） | 每位使用者一次呼叫、不進 batch、不重送；結果不明就 unknown（§7.5、§7.8） |
 | B5 | `user_disable` | 與 playbook 相同；自鎖保護見 U3 |
 | B6 | 入口把 FreeIPA 主機上的 `auth_pending` 設為 true | 這是義務，刻意持久化；沒有寫入就不執行入口（§7.2） |
-| B7 | 取鎖閘門讓既有入口對不支援的 inventory 形態拒絕執行 | 行為變更，待使用者確認（U1） |
+| B7 | 取鎖閘門讓既有入口對不支援的 inventory 形態拒絕執行，而且是在任何 ansible-playbook、ssh 與任何步驟**之前**（取鎖前檢查，§4.2），不是取鎖時才拒絕 | 行為變更，待使用者確認（U1） |
 | B8 | 沒有自動 rollback | Go 的寫入是 reconciler 效果，失敗後以「重讀、重算」重跑收斂；不 fallback 到舊 playbook（計畫 §4） |
 
 ## 2 不變量
@@ -109,7 +112,7 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 |---|---|---|---|
 | D1 | 取鎖位置 | 在漏斗處、確認之後、第一次執行之前；一輪一把鎖；混合 run 沿用已持有的鎖 | §4.5 |
 | D2 | 取鎖包裝 | 新套件 `internal/identitylock`；`Acquirer` 由 `cmd` 建好注入，各漏斗的 options 必填，nil 即錯誤 | §4.1 |
-| D3 | target 推導 | host 取 inventory 名稱、剛好一台；推導函式下沉到 `internal/sshdial/hostvars.go`；不支援的 inventory 形態拒絕執行，不退回無鎖（U1） | §4.2 |
+| D3 | target 推導 | host 取 inventory 名稱、剛好一台；推導函式下沉到 `internal/sshdial/hostvars.go`；不支援的 inventory 形態拒絕執行，不退回無鎖（U1）；**每個漏斗在做任何事之前先用同一個推導做無 ssh 的取鎖前檢查**，取鎖時的檢查保留當縱深防禦 | §4.2 |
 | D4 | 等待策略 | CLI 漏斗最多等 30 分鐘並每 30 秒印一行；`pilot reconcile --lock-wait`；TUI breakglass 等待 0；Phase 2 不提供略過（U2） | §4.3 |
 | D5 | 掉鎖與取消 | 只取消 ansible-playbook 的指令 ctx（`Bind`），`RunResult`、證據與 Go RPC 的 ctx 不取消；Go writer 用 `Held.Active()` 在每批前檢查，進行中的 batch 回真實答案；`Held.Lost()` 只在沒有 Release 的結束時關閉；**一條類別規則：記錄 run 結果的每一個寫入（journal、step 證據、終端寫入、`--result-out`、外送 projection、outbox、webhook 送出）在取消之後用 `WithoutCancel` 加有界期限**，sink 清單與負責 PR 在 §4.4 | §4.1、§4.4 |
 | D6 | 全 repo lint | 引用 allowlist、具名漏斗 AST 檢查、contract 守衛，附變異驗證；`executeDeploymentTransaction` 對 identity playbook 沒有 `IdentityLock` 時執行期拒絕 | §4.6 |
@@ -167,10 +170,22 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 規則：
 
 - **host 是 inventory 名稱，剛好一台**（AGENTS.md §5.13：`ansible_host` 是連線位址，不是身分）；不是剛好一台，在任何 ansible-playbook 之前拒絕。
-- 把 `sshTargetFromHostVars`、`sshOptionArgs`、`splitShellWords`（連同 `unsupportedSSHHostVars`、`multiplexOptions`，`cmd/pilot/cmd/reconcile_golang.go:402-550`）搬到 `internal/sshdial/hostvars.go`，公開為 `TargetFromHostVars`。`// gate:` 註解隨函式搬走；ledger 的持有者清單（`cmd/pilot/cmd/reconcile_golang_ledger_test.go:49-56`）與每個 row 一起搬到 `internal/sshdial` 的對應測試，`TestReconcileGolangEveryGateHasARow` 的函式清單同步更新。規則與 P1 spec §4 完全相同：只接受 allowlist 內的 `-o`（`internal/sshdial/sshdial.go:48-55`）；`ansible_connection` 未設或 `ssh`；`ansible_ssh_args` 只准 `ControlMaster`／`ControlPath`／`ControlPersist`（忽略）；密碼 SSH、`ansible_ssh_executable`、舊名稱一律拒絕。
-- 取鎖用的 ssh 另外帶 `ServerAliveInterval=15`、`ServerAliveCountMax=3`，除非 target 自己設了（約 45 秒的網路中斷就會被視為掉鎖，行為變更與取捨見 R10、U1、U2）。
+- 把 `sshTargetFromHostVars`、`sshOptionArgs`、`splitShellWords`（連同 `unsupportedSSHHostVars`、`multiplexOptions`，`cmd/pilot/cmd/reconcile_golang.go:402-550`）搬到 `internal/sshdial/hostvars.go`，公開為 `TargetFromHostVars`。`// gate:` 註解隨函式搬走；ledger 的持有者清單（`cmd/pilot/cmd/reconcile_golang_ledger_test.go:49-56`）與每個 row 一起搬到 `internal/sshdial` 的對應測試，`TestReconcileGolangEveryGateHasARow` 的函式清單同步更新。規則與 P1 spec §4 完全相同：只接受 allowlist 內的 `-o`（`internal/sshdial/sshdial.go:48-55`）；`ansible_connection` 未設、`ssh` 或 `ansible.builtin.ssh`（ansible-core 把兩個名字解析成同一個外掛，所以長名字的 inventory 與短名字連線方式相同；P2-2 review 之後補上，Go engine 的 tunnel 同一個函式因此也接受；`paramiko`、`smart`、`docker`、`local`、帶 collection 的其他名字與非字串的值維持拒絕）；`ansible_ssh_args` 只准 `ControlMaster`／`ControlPath`／`ControlPersist`（忽略）；密碼 SSH、`ansible_ssh_executable`、舊名稱一律拒絕。
+- 取鎖用的 ssh 另外帶 `ServerAliveInterval=15`、`ServerAliveCountMax=3`，除非 target 自己設了（約 45 秒的網路中斷就會被視為掉鎖，行為變更與取捨見 R10、U1、U2），以及 `ConnectTimeout=30`，除非 target 自己設了：TUI breakglass 同步取鎖、等待 0、沒有 ctx 可以取消，對不回應的 server 原本要等作業系統的 TCP connect 逾時（數分鐘）。它只限制連線階段，不限制忙碌時的等待（那是 `flock --wait`）或持鎖的時間；tunnel 的 ssh 沒有這些選項。
 - **不支援的形態（`ansible_connection: docker`／`local`、ProxyCommand、密碼 SSH、不在 allowlist 的 `-o`）：拒絕執行，訊息指出是哪個 hostvar；永不「無鎖執行」。** repo 內的 topology 檔（`docs/topologies/*`）是 `vm-target topology` 的輸入（docker-target 沒有 topology 指令），vm-target 的 inventory 是 `ansible_connection: ssh` 加 `ControlMaster` 與兩個 allowlist 內的 `-o`（`internal/vmtarget/vmtarget.go:1488-1494`）；docker-target 的 inventory 是 `ansible_connection: docker`（`internal/dockertarget/dockertarget.go:618`），repo 內沒有 FreeIPA 角色跑在它上面。**這是行為變更：見 U1。**
-- 已知缺口（與 P1 同類）：透過 `-e @file` 提供的連線變數，推導時看不到。
+- **取鎖前檢查（P2-2 review 之後補上；「在任何 ansible-playbook 之前拒絕」的實作）。** 取鎖是漏斗在送出 playbook 之前做的**最後**一件事，而多數漏斗在那之前已經做了別的事：decommission 的 converge 步驟排在 `freeipa_client_uninstall` 與 `freeipa_roster_host_absent` 之後（拒絕時 client 已解除安裝、roster 已 tombstone，是沒有人能完成的半套狀態）；deploy 與 reconcile 在 preflight、freeipa-server 依賴的 apply 與 `--check` 之後，而且 `--preview-only` 通過並不預告 `--force` 會被拒絕；access、breakglass、drift 修復在能力探測或唯讀探測之後。所以每個漏斗在做任何事之前，先用**取鎖用的同一個推導**檢查：`identityLockTarget`（剛好一台 freeipa-server 主機，加上對 inventory snapshot 的 `sshdial.TargetFromHostVars`）。取鎖（`productionIdentityLock`）與預檢查（`checkIdentityLockTarget`）都呼叫它，是同一個決定而不是第二份複本（AGENTS.md §5.7；測試對真實 inventory 斷言兩者同意，且理由相同）。預檢查只問 `ansible` 與 `ansible-inventory`，**不啟動 ssh、不啟動 ansible-playbook**；不支援就拒絕並指出是哪個 hostvar；取鎖時的檢查保留當縱深防禦。位置：
+
+  | 漏斗 | 預檢查的位置 |
+  |---|---|
+  | deploy、reconcile（ansible engine） | `executeRecordedDeploymentWithAuthorizationResult` 的一開頭（`precheckIdentityDeploy`），在顯示計畫、要求授權、freeipa-server 依賴的 apply、preflight 與任何預覽之前，`--preview-only` 也一樣；批次執行（`executeCatalogBatch`，`pilot reconcile`／多元件 deploy）另在顯示計畫與要求授權**之前**（`precheckIdentityBatch`）。主機是解析後 scope（含 `--limit`、`target_group`）裡**尚未被 availability 排除**的候選主機；apply 步驟鎖的主機是它的子集，而 contract 的 exactly-one 在候選主機多於一台時本來就會在自己的 preflight 失敗，只是更晚 |
+  | `pilot access reconcile`、`access breakglass activate`／`deactivate`、`access drift --repair-managed`、`identity drift --repair-managed` | 指令一開頭（`identityLockFor`），在能力探測、唯讀探測與 playbook 之前。`--repair-managed` 即使沒有 drift 也會被拒絕：檢查在探測之前，探測結果出來前不知道要不要鎖 |
+  | `pilot edit` 的 TUI breakglass | 畫面動作一開頭（`tuiIdentityLockFor`），訊息顯示在 banner |
+  | `pilot host decommission apply`、`resume`（與 TUI 的 decommission 流程，同一個函式） | `runHostDecommissionApply`：舞台確認與 provider 的建立（它會重新產生 `inventory.yml`）之後、記錄 approval 與第一個步驟**之前**，而且只對有 `freeipa_identity_apply_converge` 步驟的 plan；已完成的 plan 重播 receipt、不檢查。`resume` 即使 converge 步驟已經做完，只要 inventory 後來變成不支援也會被拒絕（fail closed，訊息寫明） |
+  | `pilot host decommission plan` | **不拒絕**，改在 stderr 印警告（stdout 的 JSON 不受影響，plan 照存、結束碼 0）。理由：blocker 會進 plan hash 與 freshness 的重新推導（`PlanInputForFreshness` 會對同一組 provider 重跑 `PlanHost`），而這個條件取決於 inventory 的連線 hostvar，那些不在 plan 記錄的外部狀態裡，做成 blocker 會讓連線 hostvar 的改動變成 `plan_stale`，讓一份沒有人能 apply 的 plan 看起來只是過期；apply／resume 自己會在第一個步驟之前拒絕 |
+
+  預檢查的拒絕發生在 workflow 開始之前，與其他執行前的驗證錯誤一樣：不發 outbound 事件、不留 approval。`TestEveryCLIFunnelRefusesAnUnlockableInventoryBeforeRunningAnything` 等測試對每個漏斗、每種拒絕原因（ProxyCommand、docker connection、密碼、不在 allowlist 的 `-o`、`ansible_ssh_executable`）用真實的 `ansible`／`ansible-inventory` 與 `ansible-playbook`、`ssh` 的記錄器斷言「什麼都沒執行」，並對同一批漏斗斷言可鎖的 inventory 不被預檢查擋下；lint（§4.6 第 6 點）鎖住每個進入點的預檢查先於它的第一個執行呼叫，以及沒有從清單外的函式呼叫漏斗。
+- **三個漏斗的 hostvars 都是 `loadDeployInventorySnapshot`（行為變更，P2-2 review 之後補記）。** 它先跑 `validateInventorySecretStorage`，再跑**不帶 vault 密碼**的 `ansible-inventory --list`。所以 `pilot access`、breakglass、drift 修復與 `pilot host decommission` 對下列 workspace 現在會在取鎖前拒絕：group_vars／host_vars 裡有 contract 宣告為 `secret: true` 的明文輸入（secret 該放 `.vault/main.yaml`）；整份 group_vars 被 ansible-vault 加密（`ansible-inventory` 沒有密碼讀不了：`Attempting to decrypt but no vault secrets found.`，2026-11-06 以本機 ansible-core 2.19.2 實測）。這些指令原本不經過這兩道檢查，同一個 workspace 在 P2-2 之前能跑；runbook §4.3 與各指令的 `--help` 寫給操作者。
+- **已知缺口（P2-2 review 之後補記，風險 R12）。** 取鎖的 target 只來自 `ansible-inventory --list` 的 hostvars，所以下列對 playbook 有效、對鎖與預檢查**看不見**：`-e @file`（與 JSON 物件形式的 `-e`）提供的 `ansible_host`、`ansible_user`、`ansible_port` 等連線變數與 `target_group`；`ansible.cfg` 的 `ssh_args`、`host_key_checking`；環境變數 `ANSIBLE_SSH_ARGS`（pilot 自己的 ssh 固定 `BatchMode=yes`、`ControlPath=none`，不讀這些）。後果最重的是：`target_group` 或 `ansible_host` 只由 `-e @file` 提供時，鎖可能鎖 A 機而 playbook 的目標是 B 機。這不是這個 PR 修的：連線設定要寫在 inventory，不要寫在 `-e @file` 或 ansible.cfg；`-e target_group=<g>`（key=value 形式）在 deploy 路徑有被解析（`resolveDeploymentScope` 的 `extraVarValue`），access 與 decommission 不傳 `target_group`。已知缺口與 P1 同類，live arm 以真實 inventory 驗證，不涵蓋 `-e @file` 提供的連線變數。
 
 ### 4.3 等待與失敗策略
 
@@ -184,6 +199,7 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 - **不提供略過（bypass）**：略過會重新引入清除交錯與覆蓋交錯。安全的替代方案是計畫的選項 (iv)（`auth_pending` 加世代）。見 U2。
 - **補充（`--timeout` 與等待）**：`pilot reconcile --engine golang --force` 的 `--timeout` 分段計算：取鎖之前的 preflight 在自己的期限內（沿用 P1 的 `--timeout` 語意）、取鎖等待由 `--lock-wait` 界定、取鎖之後的讀取、入口、寫入與驗證整段**重新**以 `--timeout` 計時。否則預設 30 分鐘的等待會吃掉整個 30 分鐘的執行期限。SIGINT／SIGTERM／SIGHUP 在任何階段都取消。
 - **補充（`--lock-wait` 的適用）**：`--lock-wait` 只對會取鎖的執行（`--force`）有意義；與 `--preview-only` 同時使用即拒絕（預覽不持鎖），與 `--plan-out` 對 Ansible engine 的處理一致。
+- **已知限制（P2-2 review 之後補記，風險 R13）：`--ask-vault-pass`／`--ask-become-pass`。** deploy／reconcile 精靈選了這兩個之一時，密碼提示發生在 ansible-playbook 裡，也就是取鎖**之後**：操作者輸入密碼的時間算在持鎖時間裡，與 D1「預覽、唯讀查詢與互動確認的等待都不持鎖」不同（`--check` 預覽同樣會問，但它不持鎖）。**選擇記錄為已知限制，不拒絕這兩個旗標**：拒絕會讓今天可用的 ansible engine 流程失效，而且沒有辦法在取鎖前先問（提示在 ansible-playbook 內，要先問就得由 pilot 自己問密碼再傳進去，那是 Phase 4 的 `--ask-vault-pass` 範圍）；後果只是持鎖變長（別的 run 要多等，互斥本身不受影響，I1 不被破壞）。要避免就用 `--vault-password-file`。decommission、access、breakglass、drift 沒有這兩個旗標。
 
 ### 4.4 `Lost()` 處理
 
@@ -193,6 +209,8 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 - **Go writer**：WriteGate 用 `Active()` 在每次寫入呼叫或每個 batch 之前檢查，掉鎖後拒絕**新的**寫入。Go 的 RPC ctx **不因掉鎖取消**，所以進行中的 batch 回傳它真正的答案並照實記錄（成功就是 `success`，不是 `unknown`）；之後不再送任何寫入；驗證讀取（Read₃）照常執行（讀取不需要鎖）；結果是失敗，若已有 `success` 或 `unknown` 的操作則為 `partial_failed`（§6.1）。取消 RPC 的只有操作者的訊號與 `--timeout`，那種取消下進行中的寫入是 `unknown`（P0 的語意）。
 - 驗證讀取用 `context.WithoutCancel` 加上有界的期限（**補充**，常數 `golangVerifyTimeout`，初值 60 秒；比照 P1 登出用的 10 秒），所以掉鎖、`--timeout` 與第一次 Ctrl-C 之後仍會嘗試讀一次；第二次 Ctrl-C 立即結束 pilot（P1 spec §2.5 已知限制 3）。讀取失敗就保留 unknown。
 - 殘餘（R8）：server 端先放掉鎖、client 還沒發現的情形看不到；文件記錄。
+- 殘餘（R2，P2-2 review 之後補記）：掉鎖時 `Bind` 取消的指令 ctx 只殺 ansible-playbook **主行程**（`exec.CommandContext`），不殺它的 process group。ansible 的 fork worker 可能在掉鎖**之後**把正在執行的那一個 task 做完，那個 task 沒有鎖的保護；不會有新的 task（主行程已死）。與 R2 的孫行程拖延同一個原因，一併留給 #261；runbook §4.3 寫給操作者。
+- 殘餘（R14，P2-2 review 之後補記）：breakglass `Activate` 在掉鎖時回傳 `ErrLockLost`，而那在它記錄 activation **之前**（`applyPlan` 先回傳）：即使 playbook 已以 0 結束、規則已在 FreeIPA 啟用，`breakglass-activations.json` 沒有這筆紀錄，直到重跑 `activate`（apply 是冪等的）或 `deactivate`（把規則收掉）；`Deactivate` 同理，掉鎖時不標記 `deactivated`，規則可能已被收掉而紀錄仍是 active。不改順序：先記錄再 apply 會在 apply 失敗時留下一筆不存在的啟用；錯誤訊息已寫明 FreeIPA 可能已被部分調和、要重跑；runbook §4.3 寫給操作者。
 
 **類別規則：記錄 run 結果的寫入不隨取消失敗。** 同一類錯誤出現過兩次：一個可能已被取消的 run ctx 傳進了「記錄這個 run 結果」的寫入，寫入因 ctx 已取消而失敗，把真正的結果遮掉。第一次是 step 證據，第二次是外送的 webhook。所以這裡只定**一條**規則，不逐點修補：
 
@@ -225,6 +243,8 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 
 **決定 D1。** 鎖取在「確認之後、第一個會改動的執行之前」；預覽、唯讀查詢與互動確認的等待都不持鎖。
 
+- **取鎖前的檢查不是取鎖：** 在下面每個位置之前，每個漏斗已經用同一個推導做過無 ssh 的取鎖前檢查（§4.2），所以不支援的 inventory 在任何步驟之前就被拒絕；取鎖時的檢查保留當縱深防禦。
+
 - **deploy runner**：在 `executeDeploymentTransaction` 的 `apply` closure 裡，確認分支之後（`cmd/pilot/cmd/deploy.go:1446-1460`）、`PrepareApply`（`:1461-1465`）之前取鎖；`txn.RunResult` 回傳後才釋放（涵蓋 verify、冪等性再套用、rollback）。`RunResult` 的 ctx **不**被掉鎖取消；每個會執行 ansible-playbook 的步驟閉包（apply、冪等性、rollback）把自己的指令 ctx 以 `held.Bind` 衍生（§4.1、§4.4）。取到的 `Held` 由 `executeDeploymentTransaction` 的區域變數持有，供各步驟閉包與最後的 `defer Release` 使用。`PrepareApply`（`deploy.go:1330`）目前沒有非測試的設定者，混合執行是它的第一個使用者（§8.3）。
 - **`accessgrants.applyPlan`**：extra-vars 檔寫好之後（`internal/accessgrants/reconcile.go:481-487`）、`runner.Run` 之前（`:493`）。
 - **decommission converge**：`Execute` 內、`e.provider.exec` 之前（`internal/decommission/providers/freeipa_client.go:477`）。
@@ -233,13 +253,14 @@ Go 在 Phase 2 才第一次送出寫入 RPC。每一項都有對應的保護，�
 
 ### 4.6 全 repo lint（AGENTS.md §5.10）
 
-**決定 D6。** `cmd/pilot/cmd/identity_lock_funnel_test.go`，五部分：
+**決定 D6。** `cmd/pilot/cmd/identity_lock_funnel_test.go`，六部分（第 6 點是 P2-2 review 之後補上的取鎖前檢查）：
 
 1. **引用 allowlist**：對 `cmd/`、`internal/` 的非測試 `.go` 做 AST 走訪；凡是不含空白、且包含 `freeipa-identity-apply.yml` 或 `freeipa-identity-auth-cache.yml` 的字串 `BasicLit`，以及每個對 `accessgrants.DefaultPlaybook`（含 package 內的裸識別字）的引用，都必須在 allowlist 項目 `{檔案, 角色: 漏斗或資料, 理由}` 內。目前的項目：`internal/accessgrants/reconcile.go:30`（常數與 `applyPlan` 所在，漏斗）、`internal/accessgrants/breakglass.go:123`／`:187`（把它交給 `applyPlan`，漏斗輸入）、`cmd/pilot/cmd/host_decommission.go:596`（資料，接進 decommission 的漏斗）、`cmd/pilot/cmd/deploy_catalog.go:74`（catalog 資料）、`cmd/pilot/cmd/access_cli.go:86`、`cmd/pilot/cmd/access_breakglass_cli.go:88`、`:92`（旗標預設值，資料）。含空白的說明文字（例如 `cmd/pilot/cmd/roster_lint.go:27-28`、`cmd/pilot/cmd/edit_actions_registry.go:906`）依構造排除。
 2. **具名漏斗 AST 檢查**（以函式與方法名稱比對，不比 receiver，因為漏斗經介面呼叫）：`applyPlan`、`(*freeipaIdentityConvergeStep).Execute`、`executeDeploymentTransaction` 的 apply closure、`executeRecordedDeploymentCore`（在 options 的字面值設 `IdentityLock`），以及 Go 的入口路徑。要求取鎖呼叫先於第一個執行呼叫（`runner.Run`、`e.provider.exec`、`runOnce(false…`）；執行 auth-cache 入口的函式必須接收 `*identitylock.Held`。注意 `--playbook` 可以覆寫（`cmd/pilot/cmd/access_cli.go:86`、`cmd/pilot/cmd/access_breakglass_cli.go:88`、`:92`），所以 `applyPlan` 裡的取鎖是無條件的。
 3. **contract 守衛**：沒有元件的 `dependencies` 指向 `freeipa-identity`（目前確實沒有）；`freeipa-identity` 沒有 `canonical_apply` 的 remediation（目前只有 `contracts/alertmanager.yaml:35`）；`freeipa-identity` 維持 `site.include: false`（`contracts/freeipa-identity.yaml:65`）。之後任何一項被改變，測試失敗，直到那條路徑也取鎖。
 4. 註解寫明 dev 路徑的排除與理由（I1）。
 5. **執行期拒絕**（lint 第 1 點看不到的呼叫者）：`executeDeploymentTransaction`（`cmd/pilot/cmd/deploy.go:1381`）在任何 ansible-playbook 之前檢查，playbook 是 identity apply（以與第 1 點相同的檔名常數判斷）而 `options.IdentityLock == nil` 就回傳錯誤。預覽也要求設定它（它只是 acquirer，預覽不呼叫）。`executeDeployment`（`deploy.go:1323`）傳空的 options，目前沒有非測試的呼叫者，卻是最容易被新程式碼拿去用的入口；這道檢查把它與其他直接建構 options 的呼叫者一併擋下。測試：`executeDeployment` 與空 options 的呼叫對 identity playbook 失敗，對其他 playbook 不受影響。
+6. **取鎖前檢查**（§4.2）：每個進入點（`identityPrecheckFunnels`：deploy 與 reconcile 的 `executeRecordedDeploymentWithAuthorizationResult` 與 `executeCatalogBatch`、五個 CLI 指令、兩個 TUI 畫面動作、`runHostDecommissionApply`、`identityLockFor`）要在它的第一個執行呼叫之前呼叫預檢查，並先於它之後才能做的事（顯示計畫、要求授權、記錄 approval）；無條件（decommission 的條件是 `plan.Status != Completed`，TUI 的呼叫在畫面的 closure 裡，只檢查順序）。呼叫漏斗的函式（`executeRecordedDeploymentCore`、`accessgrants.{ReconcileOnce,RepairManaged,Activate,Deactivate}`、`decommission.Apply`）只能從清單上的函式呼叫（`identityProtectedCalls`），清單上的項目必須仍然真的呼叫它（過期項目失敗）；直接呼叫 `newIdentityLock` 的地方（`identityLockBuilders`，目前是 `identityLockFor`、deploy 的 Core 與 decommission 的 provider 建立）逐檔計數，清單外的呼叫失敗；`identityLockPrecheck` 與其他測試接縫一樣不准非測試程式碼賦值。
 
 **負向對照**：lint 自己的表格測試餵合成原始碼（缺取鎖呼叫、取鎖在執行之後、新的未列入引用），比照 `internal/sshdial/start_lint_test.go`（`TestRegression_SSHStartsOnlyThroughStart`）；PR 附變異驗證的紀錄（拿掉任一漏斗的取鎖，lint 與 §4.7 的序列化測試都要 fail）。
 
@@ -710,7 +731,8 @@ A9 的兩個子案例（`--lock-wait 0` 與 `30m`）各自 rollback 到基準，
 | H3 | 緊接 A6（不 rollback，journal 為 `pending=true`、client 仍 allow）：混合 `--scope full --force`，Go 零寫入 | 結束碼 0；playbook 自己的 prepare 讀到 `previous=true`，refresh 與 ack 發生；client **已 deny**；之後探測 `pending=false`（等同「中斷後下一輪」） |
 | H4 | 從 acked 基準、暖過快取開始：混合套用同一個撤銷，`ipa_identity_refresh_sssd_cache: false` | 結束碼 4、history 為 `partial_failed`、webhook 為 failure；**client 仍 allow**；探測 `pending=true`。之後打開刷新、混合再跑一次（Go 零寫入）：結束碼 0、client 已 deny |
 | H5 | Go 寫入之後 playbook 失敗 | `partial_failed`、結束碼 1 |
-| L1–L6（P2-2） | 每個漏斗（deploy／reconcile、`access reconcile --once`、breakglass、decommission）持有鎖（同時另一個連線對 `/etc/ipa` 以 `flock --nonblock --conflict-exit-code 75` 取鎖得到 75）；第二個同時的漏斗等待或失敗；掉鎖殺掉 playbook 且 outcome 是 `failed`（不是 `evidence_failed`）；不支援的 inventory 被拒絕 | 各自通過 |
+| L1–L6（P2-2） | 每個漏斗（deploy／reconcile、`access reconcile --once`、breakglass、decommission）持有鎖（同時另一個連線對 `/etc/ipa` 以 `flock --nonblock --conflict-exit-code 75` 取鎖得到 75）；第二個同時的漏斗等待或失敗；掉鎖殺掉 playbook 且 outcome 是 `failed`（不是 `evidence_failed`）；不支援的 inventory 被拒絕（L10 專測拒絕發生的時機：在任何步驟之前） | 各自通過 |
+| L10（P2-2，取鎖前檢查） | 對**真實 inventory**（不是假的 `ansible-inventory`）的 freeipa-server 主機設定 ProxyCommand（另可各測 docker connection、`ansible_ssh_pass`、不在 allowlist 的 `-o`），在 ssh 與 ansible-playbook 的記錄器之下依序跑：(a) `pilot host decommission apply`（plan 含 freeipa-client 的 converge 步驟）與 `resume`；(b) `pilot reconcile --component freeipa-identity --preview-only` 與 `--force`；(c) `pilot access reconcile --once`、`access breakglass activate`／`deactivate`、`access drift --repair-managed`、`identity drift --repair-managed`；(d) `pilot edit --actions` 的 breakglass；(e) `decommission plan` | (a) 拒絕且訊息指出 ProxyCommand；client 沒有被解除安裝（`ipa-client` 仍在）、roster 沒有 tombstone、沒有留下 approval；沒有任何 ansible-playbook 或 ssh 啟動；(b) 兩者**同樣被拒絕**，沒有依賴 apply、沒有預覽；(c)(d) 拒絕、沒有探測、沒有 playbook；(e) plan 成功、結束碼 0、stderr 有警告。拿掉 ProxyCommand 後同一批指令不被預檢查擋下 |
 | L7（P2-2） | legacy 執行中 `kill -9` pilot，觀察 ansible-playbook 是否繼續、鎖何時釋放 | **只記錄（X5）**，不判定通過 |
 | L8（P2-2） | 取鎖等待期間（另一個持有者執行中）按 Ctrl-C | 本機沒有殘留 ssh；遠端的 `flock --wait` 行程不會超過 `--lock-wait`（它本來就在 `N` 秒結束，`internal/sshdial/lock.go:56-59`，R9）；**記錄**它實際多久消失 |
 | L9（P2-2） | **持有者是 pilot 自己的 `AcquireLock`**（測試 harness 以 `sshdial` 取鎖並持有，不是外部的 `flock`；要證明的是 pilot 自己的取鎖指令沒有被計時器限制），持有的時間遠超過另一個等待者的 `--lock-wait` 加寬限（例如等待 10 秒、持有 60 秒） | 等待者在 `N` 秒後以 `ErrLockBusy` 結束；**持有者的鎖沒有被任何計時器殺掉**（60 秒後另一個連線對 `/etc/ipa` 以 `flock --nonblock --conflict-exit-code 75` 仍得到 75）——這證明取鎖的遠端指令沒有被 `timeout` 之類的包裝限制住持有階段（R9） |
@@ -845,6 +867,7 @@ H1 與 H3 各有對照（A6 與 H4 的 client 仍 allow），兩者都從 acked 
 | E36 | 其餘小項：§7.9 補上 `users`／`groups` 不是 list、元素不是 mapping、`name` 不是字串的拒絕；A17(iii) 用 `after_send`；Q7 說明退回 `after_entry` 的代價；L9 的持有者是 pilot 自己的 `AcquireLock`；`deploymentMetadata` 辨認 JSON 物件形式的 `-e` 只記 key；`golangPreviewStage` 與 `stageDecisionFromFlag` 的單一來源或一致性測試；P2-6 列的需要暫停點的 arm 更正 | §7.9、§10.2、§13、§8.3、§5.7、§11 |
 | E37 | 最後的措辭修正：`publishTerminalWorkflow` 只在 `ctx.Err() != nil` 時脫離取消並套用期限，正常路徑保留今天的 30 秒 flush 預算與無期限的 projection；混合的 playbook 閘門用 D20 的「嘗試過的物件上仍有操作」，無關物件的 drift 不擋；A16 與 A17(iii)(iv) 移到 P2-7；`FailedStep` 在 `users-groups` 是 `verify`、混合是 `apply`；`internal/tools` 的 verify evidence 加入登記表掃描（T8，有理由的豁免） | §4.4、§7.6、§11 |
 | E38 | P2-2（取鎖閘門）實作時與本規格字面不同或補上的地方（理由在各項）：(1) `executeDeploymentTransaction` 的 apply closure 在 `PrepareApply` 之前還有第二個確認（`runOnce(false, dryRunFirst)` 內的「確定要執行正式套用指令嗎？」），所以 `runOnce` 拆成 `announce`（印指令與確認）與 `execute`，鎖取在最後一個確認之後、`PrepareApply` 之前，`PrepareApply`（目前沒有非測試的設定者）因此移到 announce 之後；(2) §4.6 第 3 點的 contract 守衛另外要求 `freeipa-identity` 不宣告 rollback／upgrade／decommission playbook（那些是別的檔名，`executeDeploymentTransaction` 的檔名判斷看不到）；(3) lint 另有一部分：非測試程式碼中每個 `accessgrants.{Reconcile,Activate,Deactivate}Options` 與 `providers.FreeIPAClientProviderConfig` 的 literal 都要設定它的鎖欄位，`identitylocktest`（測試用的假鎖）只准測試 import，`newIdentityLock`／`newIdentityLockDialer`（測試接縫）非測試程式碼不得賦值；(4) ServerAlive 實作在 `sshdial.AcquireLock` 內（`Target.lockTarget`），不是在 cmd 組 Target 時，所以每個取鎖者都有，tunnel 的 ssh 沒有；(5) 三個漏斗的 hostvars 都用 `loadDeployInventorySnapshot`（含它的 `validateInventorySecretStorage` 檢查），所以 `pilot access`、breakglass、drift repair、`pilot host decommission` 對 group_vars 有明文 secret 的 workspace 現在會在取鎖時拒絕（行為變更）；(6) `pilot access drift --repair-managed` 也是漏斗（經 `RepairManaged` → `ReconcileOnce` → `applyPlan`），§4.2 的表與 §10.2 的 L1–L6 沒有點名它，`RepairManaged` 在探測之前就拒絕 nil 的鎖；(7) `--lock-wait` 只接受 0 或至少 1s 的 Go duration（遠端 `flock --wait` 是整數秒），未設為 30 分鐘，與 `--preview-only` 同用即拒絕；(8) 取鎖等待的進度行走 stderr：`pilot reconcile` 經 context 帶 `cmd.ErrOrStderr()`，其他路徑預設 `os.Stderr` | §4.2、§4.3、§4.5、§4.6 |
+| E39 | P2-2 review 之後的修正（一輪，只動 P2-2 的範圍）：(1) 取鎖前檢查：每個漏斗在任何 ansible-playbook、ssh 與步驟之前，用取鎖用的同一個推導（`identityLockTarget`）拒絕不支援的 inventory，取鎖時的檢查保留當縱深防禦；deploy 與 reconcile 的 `--preview-only` 與 `--force` 一致；decommission apply／resume 在記錄 approval 與第一個步驟之前拒絕，`decommission plan` 選擇印警告而不是 blocker（理由在 §4.2）；lint 第 6 部分；(2) access、breakglass、drift 修復與 decommission 讀 hostvars 的行為變更（明文 secret、整份 vault 加密的 group_vars 在取鎖前拒絕）補進 §4.2、runbook §4.3 與各指令的 `--help`；(3) `-e @file`、ansible.cfg 的 `ssh_args`、`ANSIBLE_SSH_ARGS`、`host_key_checking` 的已知缺口（R12）；`ansible_connection: ansible.builtin.ssh` 接受為 ssh（同一個外掛；其他外掛維持拒絕，測試各有 row）；(4) `--ask-vault-pass`／`--ask-become-pass` 選擇記錄為已知限制、不拒絕（R13，理由在 §4.3）；(5) 掉鎖只殺 ansible-playbook 主行程，fork worker 可能做完進行中的 task（R2、§4.4）；(6) breakglass 掉鎖在記錄 activation 之前回傳（R14、§4.4）；(7) 等待進度行不再在 ssh 還在連線時說「另一輪持有中」，取鎖 ssh 預設 `ConnectTimeout=30`（TUI `Wait: 0` 路徑原本沒有）。**沒有改**：deploy 取鎖被拒絕或忙碌時 `FailedStep` 是 `apply`（取鎖在 apply 步驟的 closure 裡，拆成獨立步驟要動 delivery 的步驟模型，不是一行的修正）。這一輪同樣**沒有 live arm 的實跑**；live arm 要加：decommission 對被拒絕的 inventory 的 apply 與 resume（client 沒有被解除安裝、approval 沒有留下）、deploy／reconcile 的 `--preview-only` 對被拒絕的 inventory（與 `--force` 同樣的拒絕）、drift 修復對被拒絕的 inventory（沒有探測就拒絕） | §1.3、§4.2、§4.3、§4.4、§4.6 |
 
 ## 15 交給後續階段
 

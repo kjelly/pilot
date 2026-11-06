@@ -286,9 +286,39 @@ identity drift` 的 `--repair-managed`、`pilot edit` 的 break-glass 與 `pilot
 的 identity 收斂，都在最後一個確認之後、送出 playbook 之前取鎖，playbook（含冪等性再套用）結束
 才放。別的 pilot 執行持有鎖時 CLI 最多等 30 分鐘（`pilot reconcile --lock-wait` 可調，`0` 是忙碌
 就立即失敗；`pilot edit` 的 TUI 不等待，訊息會指向 `pilot access breakglass activate`）。
-freeipa-server 主機若用 docker／local connection、ProxyCommand、密碼 SSH 或不在 allowlist 的 `-o`，
-這些入口會拒絕並指出是哪個 hostvar，**不會無鎖執行**。鎖只約束 pilot 自己的程式碼路徑：上面
+freeipa-server 主機若用 docker／local connection、ProxyCommand、密碼 SSH、`ansible_ssh_executable`
+或不在 allowlist 的 `-o`，這些入口會拒絕並指出是哪個 hostvar，**不會無鎖執行**；而且是在**做任何
+事之前**拒絕（見下面第 1 點），不是取鎖時才拒絕。鎖只約束 pilot 自己的程式碼路徑：上面
 的 `ansible-playbook` 手動執行與 `pilot vm-target run`／`test` 不取鎖，也不會被鎖擋住。
+
+操作者要知道的行為與限制（同一份說明在各指令的 `--help`）：
+
+1. **拒絕發生在任何 ansible-playbook、ssh 與步驟之前。** 每個入口先用取鎖本身那一套規則做一次不啟動
+   ssh 的檢查（`pilot deploy`／`pilot reconcile` 在顯示計畫與依賴 apply 之前，`--preview-only` 與
+   `--force` 的結果一致；access、breakglass、drift 修復在探測之前；`pilot host decommission apply`／
+   `resume` 在記錄 approval 與第一個步驟之前，所以 client 不會在拒絕之前被解除安裝）。
+   `--repair-managed` 即使沒有 drift 也會被拒絕（檢查在探測之前）。`resume` 即使 converge 步驟已經做完，
+   inventory 後來變成不支援也會被拒絕。`pilot host decommission plan` **不拒絕**：它在 stderr 印警告，
+   plan 照存、結束碼 0；之後的 apply 才會被拒絕。取鎖時仍會再檢查一次。
+2. **這些入口現在用 `ansible-inventory --list`（不帶 vault 密碼）讀 inventory。**（行為變更）
+   `pilot access`、breakglass、drift 修復與 `pilot host decommission` 原本不經過這一步：group_vars／
+   host_vars 裡有 contract 宣告為 `secret: true` 的明文輸入、或整份 group_vars 被 ansible-vault 加密
+   （`ansible-inventory` 沒有密碼讀不了，錯誤是 `Attempting to decrypt but no vault secrets found.`），
+   現在這些指令在取鎖前就失敗。處理：secret 放 `.vault/main.yaml`，group_vars 不要整份加密。
+3. **檢查看不到只靠下列方式提供的連線設定**：`-e @file`（與 JSON 物件形式的 `-e`）裡的 `ansible_host`、
+   `ansible_user`、`ansible_port`、`target_group`；`ansible.cfg` 的 `ssh_args`、`host_key_checking`；環境變數
+   `ANSIBLE_SSH_ARGS`。最嚴重的後果：`target_group` 或 `ansible_host` 只由 `-e @file` 提供時，鎖可能鎖
+   A 機而 playbook 的目標是 B 機。連線設定請寫在 inventory（host_vars／group_vars）。`ansible_connection`
+   接受 `ssh` 與 `ansible.builtin.ssh`（同一個外掛），其他（`paramiko`、`smart` 等）一律拒絕。
+4. **`--ask-vault-pass`／`--ask-become-pass`（deploy／reconcile 精靈的答案）的密碼提示發生在取鎖之後**，
+   在 ansible-playbook 裡：輸入密碼的時間算在持鎖時間裡，別的 pilot 執行要多等。互斥本身不受影響。
+   這是已知限制，不是拒絕；要避免就用 `--vault-password-file`。
+5. **掉鎖（網路中斷約 45 秒、ssh 結束）時 pilot 只殺 ansible-playbook 的主行程**，不殺它的 process
+   group：ansible 的 fork worker 可能在掉鎖**之後**把正在執行的那一個 task 做完，那個 task 沒有鎖的保護
+   （之後不會有新的 task）。掉鎖後整個 run 一律回報失敗、要重跑。
+6. **breakglass `activate`／`deactivate` 在掉鎖時會在記錄 activation 之前回傳錯誤**，即使 playbook 已以 0
+   結束：規則可能已在 FreeIPA 啟用（或已被收掉），而 `breakglass-activations.json` 沒有這筆紀錄（或仍是
+   active）。處理：重跑同一個指令（`activate` 的 apply 是冪等的）；要收掉就跑 `deactivate`。
 
 ### 4.4 只跑一部分（tags）
 
