@@ -186,6 +186,9 @@ func (d *applyDriver) arm(name string, f func(a *armCtx)) {
 		}()
 		f(a)
 	}()
+	if _, ok := a.facts["journal_after"]; !ok {
+		a.fact("journal_after", d.lv.journal())
+	}
 	rec := applyArm{Name: name, Pass: len(a.fails) == 0, Seconds: time.Since(start).Seconds(), Failures: a.fails, Facts: a.facts}
 	d.summary.Arms = append(d.summary.Arms, rec)
 	d.lv.t.Logf("arm %s: pass=%v (%.0fs) %s", name, rec.Pass, rec.Seconds, strings.Join(a.fails, "; "))
@@ -248,7 +251,21 @@ func (a *armCtx) collect(r pilotResult, result string, logAt int64) applyRun {
 			run.WriteN += n
 		}
 	}
+	a.recordRun(run)
 	return run
+}
+
+// recordRun puts what a run left in the arm's facts, so the summary carries the real exit code, the
+// result file's verdict and outcome and the writes the server logged for every run of every arm.
+func (a *armCtx) recordRun(r applyRun) {
+	rec := map[string]any{"exit": r.ExitCode, "result_file": r.HasDoc, "server_writes": r.Writes}
+	if r.HasDoc {
+		rec["verdict"], rec["outcome"], rec["failed_step"] = r.Doc.Verdict, r.Doc.Outcome, r.Doc.FailedStep
+		rec["entry_ran"] = r.Doc.Entry.Ran
+		rec["operations"] = len(r.Doc.Ops)
+	}
+	runs, _ := a.facts["runs"].([]map[string]any)
+	a.facts["runs"] = append(runs, rec)
 }
 
 func (a *armCtx) preview(ws string) (pilotResult, Document, bool) {
