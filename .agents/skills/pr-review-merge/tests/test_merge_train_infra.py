@@ -305,19 +305,26 @@ class LabelCleanupTests(DeliveryTests):
 
     def test_reads_that_fail_after_the_merge_are_a_stop_not_an_unconfirmed_merge(self):
         # Not being able to look says nothing about the PR: it must not count as "the merge did not show".
+        # Only the reads that confirm the merge fail: the ones after them (the error count's) would work,
+        # so an ERROR made of the failed reads would be counted, and the run would not stop.
         self.queue()
-        real = self.gh.merge_pr
+        real_merge, real_view, outage = self.gh.merge_pr, self.gh.pr_view, {'reads': 0}
 
         def merge_then_outage(repo, number, head):
-            real(repo, number, head)
-            self.gh.failing['pr_view'] = GitHubError('gh pr view failed (1): HTTP 502')
-            self.gh.fail_from['pr_view'] = self.gh.counts.get('pr_view', 0) + 1
-        self.gh.merge_pr = merge_then_outage
+            real_merge(repo, number, head)
+            outage['reads'] = merge_train.CONFIRM_TRIES
+
+        def view(repo, number):
+            if outage['reads'] > 0:
+                outage['reads'] -= 1
+                raise GitHubError('gh pr view failed (1): HTTP 502')
+            return real_view(repo, number)
+        self.gh.merge_pr, self.gh.pr_view = merge_then_outage, view
         out = self.train().run()
         self.assertEqual(('INFRA', 'GitHubError', 42), (out['status'], out['error_kind'], out['pr']), out)
+        self.assertIn('HTTP 502', out['error'])
         self.assertEqual('MERGED', self.gh.prs[42]['state'])
-        entry = merge_train.load_entry(REPO, 42)
-        self.assertEqual(0, entry['errors'])
+        self.assertEqual(0, merge_train.load_entry(REPO, 42)['errors'], 'a failure to look is not the PR\'s error')
         self.assertNotIn(('label-', 42), self.gh.writes, 'nothing is cleaned up for a merge that was never read back')
 
     def test_a_label_that_cannot_be_removed_does_not_change_the_merge(self):
