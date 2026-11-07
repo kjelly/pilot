@@ -454,7 +454,7 @@ func finishGolangApply(ctx context.Context, cmd *cobra.Command, out io.Writer, p
 			Stats: identityreconcile.Stats{HTTPRequests: run.stats.HTTPRequests, Reads: run.stats.Reads, Writes: run.stats.Writes, Relogins: run.stats.Relogins, ReadRetries: run.stats.ReadRetries},
 		})
 	}
-	printGolangApply(out, prep, run, doc, haveDoc)
+	printGolangApply(out, reconcileScopeUsersGroups, prep, run, doc, haveDoc)
 	if resultOut != nil {
 		if haveDoc {
 			data, rerr := doc.Render()
@@ -507,8 +507,8 @@ func publishGolangApply(ctx context.Context, out io.Writer, prep *golangPrep, ru
 
 // printGolangApply is the run's summary on stdout: what was planned, what became of it, the
 // verification and the obligation. It holds no secret (I6): operations are names and kinds.
-func printGolangApply(out io.Writer, prep *golangPrep, run *golangApplyRun, doc identityreconcile.ApplyDocument, haveDoc bool) {
-	fmt.Fprintf(out, "═══ pilot reconcile --engine %s --scope %s --force ═══\n", reconcileEngineGolang, reconcileScopeUsersGroups)
+func printGolangApply(out io.Writer, scope string, prep *golangPrep, run *golangApplyRun, doc identityreconcile.ApplyDocument, haveDoc bool) {
+	fmt.Fprintf(out, "═══ pilot reconcile --engine %s --scope %s --force ═══\n", reconcileEngineGolang, scope)
 	fmt.Fprintf(out, "stage：%s　目標：%s（%s）　FreeIPA %s／API %s\n", prep.stage, prep.host, run.session.fqdn, run.session.server.ServerVersion, run.session.server.APIVersion)
 	if !haveDoc {
 		fmt.Fprintf(out, "結果：%s（沒有進到第一次讀取，沒有寫入）\n", run.tx.Outcome)

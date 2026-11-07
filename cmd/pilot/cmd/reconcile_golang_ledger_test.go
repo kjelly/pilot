@@ -47,6 +47,9 @@ var golangGateExemptions = map[string]string{
 	"apply-entry":           "NewAuthCacheEntry refuses only a missing result file, command, lock or FQDN, all of which this function has just made or checked",
 	"apply-start-run":       "StartRun fails only on a store that opened a moment ago (a failing open is apply-store's row)",
 	"preview-plan-commit":   "a write or close error on a file created a moment ago: needs a full disk; commitOutput's own write failure is output-write's row",
+	// P2-7: golangPreviewPlan was cut out of golangPreview so the mixed run's preview and idempotency check
+	// read the same plan; the return that hands its error on has no gate of its own.
+	"preview-plan-passthrough": "returns what golangPreviewPlan returned, whose own returns carry the gates (preview-connect, observe, writes-guard, plan-marshal, preview-plan-commit, blocked-plan, each with its row)",
 }
 
 // AGENTS.md §5.10 and §5.12 for the Go preview: every return that refuses
@@ -59,8 +62,8 @@ func TestReconcileGolangEveryGateHasARow(t *testing.T) {
 	holders := map[string][]string{
 		"reconcile.go": {"runReconcile"},
 		"reconcile_golang.go": {
-			"validateReconcileEngineFlags", "runReconcileGolangPreview", "golangPreview", "inventoryCurrentWithHosts",
-			"golangPreviewStage", "rosterServer", "golangPreflight", "golangConnect",
+			"validateReconcileEngineFlags", "runReconcileGolangPreview", "golangPreview", "golangPreviewPlan", "inventoryCurrentWithHosts",
+			"golangPreviewStage", "rosterServer", "golangPreflightFor", "golangConnect",
 		},
 		"reconcile_golang_apply.go": {
 			"reserveOutput", "commitOutput", "runReconcileGolangApply", "golangApply", "runGolangApplyUnderLock",
@@ -103,7 +106,7 @@ func TestReconcileGolangGateLedgerFiresOnTheRealSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	scan := func(source string) []string {
-		res, err := gateledger.Scan("reconcile_golang.go", []byte(source), "golangPreview", "golangConnect")
+		res, err := gateledger.Scan("reconcile_golang.go", []byte(source), "golangPreviewPlan", "golangConnect")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -132,7 +135,7 @@ func TestReconcileGolangGateLedgerFiresOnTheRealSource(t *testing.T) {
 		if !strings.Contains(string(src), anchor) {
 			t.Fatal("the anchor line moved")
 		}
-		mutated := strings.Replace(string(src), anchor, "\tif host == \"\" {\n\t\treturn fmt.Errorf(\"new refusal\")\n\t}\n"+anchor, 1)
+		mutated := strings.Replace(string(src), anchor, "\tif prep.host == \"\" {\n\t\treturn identityreconcile.Document{}, fmt.Errorf(\"new refusal\")\n\t}\n"+anchor, 1)
 		if p := scan(mutated); !slices.ContainsFunc(p, func(s string) bool { return strings.Contains(s, "new refusal") }) {
 			t.Fatalf("problems = %v, want the added return named", p)
 		}

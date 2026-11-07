@@ -192,6 +192,16 @@ func golangPreview(cmd *cobra.Command) error {
 	if err != nil {
 		return err // gate: preview-preflight
 	}
+	_, err = golangPreviewPlan(ctx, out, prep, planOut)
+	return err // gate: preview-plan-passthrough
+}
+
+// golangPreviewPlan is the read-only plan of the Go engine for a prepared run (spec §2.2 steps 7
+// to 15): it connects with a read-only client, reads, plans, prints the plan and writes the plan
+// file. It sends no write, and no ssh it started outlives it. The preview is this function, and
+// so are the preview and the idempotency check of the mixed run (--scope full). It returns the
+// plan document, and the error of a plan with blocked objects (exit code 3).
+func golangPreviewPlan(ctx context.Context, out io.Writer, prep *golangPrep, planOut *outputFile) (identityreconcile.Document, error) {
 	dialer := newGolangDialer(prep.target)
 	// The first deferred call here, so the last to run: after the logout
 	// and CloseIdleConnections it ends what is still running, among it a
@@ -201,21 +211,21 @@ func golangPreview(cmd *cobra.Command) error {
 	defer dialer.Close()
 	session, err := golangConnect(ctx, prep, dialer, freeiparpc.Config{ReadOnly: true})
 	if err != nil {
-		return err // gate: preview-connect
+		return identityreconcile.Document{}, err // gate: preview-connect
 	}
 	defer session.close()
 	client, desired := session.client, prep.desired
 	observedAt := time.Now()
 	obs, err := identityreconcile.Observe(ctx, client, desired.Principal)
 	if err != nil {
-		return err // gate: observe
+		return identityreconcile.Document{}, err // gate: observe
 	}
 	plan := identityreconcile.Build(desired, obs.Users, obs.Groups)
 	stats := client.Stats()
 	if stats.Writes != 0 {
 		// Before anything is printed or written: a preview that sent a write
 		// has no plan to show.
-		return fmt.Errorf("內部錯誤：預覽送出了 %d 個寫入", stats.Writes) // gate: writes-guard
+		return identityreconcile.Document{}, fmt.Errorf("內部錯誤：預覽送出了 %d 個寫入", stats.Writes) // gate: writes-guard
 	}
 	doc := identityreconcile.NewDocument(desired, obs, plan, session.target(prep), session.serverInfo(),
 		pilotRevision(), observedAt,
@@ -225,17 +235,17 @@ func golangPreview(cmd *cobra.Command) error {
 	if planOut != nil {
 		data, err := json.MarshalIndent(doc, "", "  ")
 		if err != nil {
-			return err // gate: plan-marshal
+			return doc, err // gate: plan-marshal
 		}
 		if err := commitOutput(planOut, append(data, '\n')); err != nil {
-			return err // gate: preview-plan-commit
+			return doc, err // gate: preview-plan-commit
 		}
 		fmt.Fprintf(out, "plan JSON：%s\n", planOut.path)
 	}
 	if doc.Result == identityreconcile.ResultBlocked {
-		return &golangPreviewError{err: fmt.Errorf("--engine %s 預覽：%d 個物件被阻擋，見上方清單", reconcileEngineGolang, len(doc.Blocked)), code: golangPreviewBlockedExitCode} // gate: blocked-plan
+		return doc, &golangPreviewError{err: fmt.Errorf("--engine %s 預覽：%d 個物件被阻擋，見上方清單", reconcileEngineGolang, len(doc.Blocked)), code: golangPreviewBlockedExitCode} // gate: blocked-plan
 	}
-	return nil
+	return doc, nil
 }
 
 // golangPrep is what the preview and the apply both know before they connect: the one
@@ -254,10 +264,28 @@ type golangPrep struct {
 	target         sshdial.Target
 }
 
-// golangPreflight is steps 1 to 6 of spec §2.2: nothing is sent to FreeIPA and no ssh
-// is started. The preview and the apply share it, so a refusal means the same in both.
+// golangPreflightInput is what a run is prepared from: the inventory file, the --limit, the
+// stage asked for ("" is sandbox) and the --staging-attested-within-hours it came with.
+type golangPreflightInput struct {
+	Inventory string
+	Limit     string
+	Stage     string
+	Attested  string
+}
+
+// golangPreflight is golangPreflightFor with the command's flags: the preview and the
+// users-groups apply.
 func golangPreflight(ctx context.Context, runtime deployAnsibleRuntime) (*golangPrep, error) {
-	inv := workspacePath(reconcileDirFlag, reconcileInventoryFlag)
+	return golangPreflightFor(ctx, runtime, golangPreflightInput{
+		Inventory: workspacePath(reconcileDirFlag, reconcileInventoryFlag), Limit: limitFlag, Stage: stageFlag, Attested: stagingAttestedHoursFlag,
+	})
+}
+
+// golangPreflightFor is steps 1 to 6 of spec §2.2: nothing is sent to FreeIPA and no ssh
+// is started. The preview and the apply share it, so a refusal means the same in both, and
+// the mixed run's Go phase asks it for the inventory, limit and stage of its own transaction.
+func golangPreflightFor(ctx context.Context, runtime deployAnsibleRuntime, in golangPreflightInput) (*golangPrep, error) {
+	inv := in.Inventory
 	if err := validateFileExists(inv); err != nil {
 		return nil, err // gate: inventory-missing
 	}
@@ -275,15 +303,15 @@ func golangPreflight(ctx context.Context, runtime deployAnsibleRuntime) (*golang
 	if len(violations) > 0 {
 		return nil, formatCompletenessViolations(violations) // gate: completeness
 	}
-	hosts, err := resolvePatternHosts(ctx, inv, "freeipa-server", limitFlag)
+	hosts, err := resolvePatternHosts(ctx, inv, "freeipa-server", in.Limit)
 	if err != nil {
 		return nil, err // gate: list-hosts
 	}
 	if len(hosts) != 1 {
-		return nil, fmt.Errorf("freeipa-identity 需要剛好一台 freeipa-server 主機(contract hostCardinality: exactly-one)，--limit %q 之後有 %d 台：%v", limitFlag, len(hosts), hosts) // gate: exactly-one-server
+		return nil, fmt.Errorf("freeipa-identity 需要剛好一台 freeipa-server 主機(contract hostCardinality: exactly-one)，--limit %q 之後有 %d 台：%v", in.Limit, len(hosts), hosts) // gate: exactly-one-server
 	}
 	host := hosts[0]
-	stage, err := golangPreviewStage(host, snapshot.Groups, stageFlag, stagingAttestedHoursFlag)
+	stage, err := golangPreviewStage(host, snapshot.Groups, in.Stage, in.Attested)
 	if err != nil {
 		return nil, err // gate: stage-gate
 	}
