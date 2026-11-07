@@ -66,7 +66,11 @@ func (d *applyDriver) runA19(base func() rosterDoc) {
 		}
 		ws := lv.copyWorkspace(pwx(), "", nil)
 		r := a.stopped(ws, "before_stage:S4", func() {
-			ipaOrFail(a, "printf '%s\\n%s\\n' 'External-Set-1' 'External-Set-1' | ipa passwd p26-pwx >/dev/null")
+			// Someone else sets the password the plan means to initialize: through the Phase 0 client,
+			// with a generated value, not through a command line.
+			if err := lv.ipaDo(freeiparpc.Command{Method: "passwd", Args: []any{"p26-pwx"}, Options: map[string]any{"password": d.pw("p26-external")}}); err != nil {
+				a.fail("the external writer: %v", err)
+			}
 		})
 		a.exit(r, 1)
 		a.ok(r.HasDoc && a.outcome(r, "user.password.initialize:p26-pwx") == OutcomeConflictFailed, "the password operation is %q, want conflict-failed", a.outcome(r, "user.password.initialize:p26-pwx"))

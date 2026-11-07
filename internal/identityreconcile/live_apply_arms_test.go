@@ -258,9 +258,17 @@ func (d *applyDriver) runA8(base func() rosterDoc, oneUser func(string, ...func(
 		// password again is a reuse; its expiry moved out so the plan chooses a reset (the user is not
 		// on a password an administrator set last).
 		pw := d.pw("p26-ben")
-		setup := "ipa pwpolicy-add team-p26 --priority=1 --history=3 >/dev/null && printf '%s\\n%s\\n' '" + pw + "' '" + pw + "' | ipa passwd p26-ben >/dev/null && ipa user-mod p26-ben --setattr krbPasswordExpiration=20371231000000Z >/dev/null"
-		if out, err := lv.ipaCLI(setup); err != nil {
-			a.fail("set-up: %v\n%s", err, tail(out, 400))
+		// The password goes to the server through the Phase 0 client, not through a command line.
+		if out, err := lv.ipaCLI("ipa pwpolicy-add team-p26 --priority=1 --history=3 >/dev/null"); err != nil {
+			a.fail("set-up (policy): %v\n%s", err, tail(out, 400))
+			return
+		}
+		if err := lv.ipaDo(freeiparpc.Command{Method: "passwd", Args: []any{"p26-ben"}, Options: map[string]any{"password": pw}}); err != nil {
+			a.fail("set-up (password): %v", err)
+			return
+		}
+		if out, err := lv.ipaCLI("ipa user-mod p26-ben --setattr krbPasswordExpiration=20371231000000Z >/dev/null"); err != nil {
+			a.fail("set-up (expiry): %v\n%s", err, tail(out, 400))
 			return
 		}
 		roster := d.mutate(base(), func(r rosterDoc) {
@@ -600,7 +608,7 @@ func (d *applyDriver) runA15(base func() rosterDoc) {
 	for _, rw := range []row{
 		{"a template", `"{{ lookup('env', 'HOME') }}"`, 3, "password_value_unsupported", true},
 		{"an inline !vault", "__VAULT__", 3, "password_value_unsupported", true},
-		{"a plain string (the control)", `"Plain-String-Value-1"`, 4, "", true},
+		{"a plain string (the control)", `"` + d.pw("p26-plain") + `"`, 4, "", true},
 		{"an unquoted number", "12345678", 1, "quote the password", false},
 	} {
 		rw := rw
