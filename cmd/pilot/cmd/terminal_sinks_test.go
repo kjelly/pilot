@@ -52,6 +52,8 @@ var terminalSinks = []terminalSink{
 		"a local file write that takes no context: it is made on the way out of a cancelled run like any other"},
 	{"cmd/pilot/cmd/reconcile_golang.go", "golangPreviewPlan", "commitOutput", "T4", "P2-6",
 		"the preview's --plan-out (and the mixed run's preview, which is the same function): a local file write that takes no context (a preview writes nothing to FreeIPA, so there is no committed result to lose to a cancellation)"},
+	{"cmd/pilot/cmd/reconcile_golang_mixed.go", "mixedIdentityRun.finish", "commitOutput", "T4", "P2-7",
+		"the mixed run's --result-out: a local file write that takes no context, made on the way out of a run that may have been cancelled; the run's other records (journal, step evidence, run row, outbox) are T1 to T3 and T5 to T7 in the functions they already are"},
 	{"cmd/pilot/cmd/outbound_workflow.go", "publishTerminalWorkflow", "CheckWorkspaceBinding", "T6", "P2-6",
 		"publishTerminalWorkflow continues on context.WithoutCancel bounded by outboundPublishTimeout when ctx was cancelled on entry"},
 	{"cmd/pilot/cmd/outbound_workflow.go", "publishTerminalWorkflow", "ReconcileWebhookConfig", "T6", "P2-6", "the same"},
@@ -271,8 +273,9 @@ func rosterForTwoStages() string {
 // failed on the cancelled context (evidence_failed, the step's own error dropped) and the
 // publication failed with "event NOT durable".
 //
-// The mixed run (Go stage and playbook stage, P2-7) has no row here: it does not exist yet. Its rows
-// are added with it.
+// The mixed run (Go stage and playbook stage, P2-7) has its rows in
+// TestMixedRunRecordsEverythingAfterTheFirstCtrlC (reconcile_golang_mixed_cli_test.go): the same sinks and the
+// same assertions, through its own command.
 func TestTerminalSinksSurviveCancel(t *testing.T) {
 	type outcome struct {
 		exit       int

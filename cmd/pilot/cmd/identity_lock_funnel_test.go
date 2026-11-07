@@ -91,7 +91,7 @@ var identityLockReferences = []lockReference{
 	{File: "internal/accessgrants/breakglass.go", Token: "ref:DefaultPlaybook", Count: 2, Role: "funnel input",
 		Reason: "Activate and Deactivate hand the default playbook to applyPlan, the funnel"},
 	{File: "cmd/pilot/cmd/reconcile_golang_apply.go", Token: "ref:identitylock.AuthCachePlaybook", Count: 1, Role: "funnel",
-		Reason: "runGoAuthCacheEntry runs the entry playbook on the host whose /etc/ipa lock the run holds, under a context bound to that lock; it takes the *identitylock.Held (entryProblems), and runGolangApplyUnderLock, the only caller, is reached only from golangApply after the lock"},
+		Reason: "runGoAuthCacheEntry runs the entry playbook on the host whose /etc/ipa lock the run holds, under a context bound to that lock; it takes the *identitylock.Held (entryProblems), and its callers, runGolangApplyUnderLock (reached only from golangApply after the lock) and runMixedGoPhase (reached only from PrepareApply, which the apply step of the deploy transaction calls after the lock), hold it"},
 	{File: "internal/identitylock/identitylock.go", Token: "lit:playbooks/apply/freeipa-identity-apply.yml", Count: 1, Role: "data",
 		Reason: "the definition of the name the funnels and this lint are keyed on"},
 	{File: "internal/identitylock/identitylock.go", Token: "lit:playbooks/apply/freeipa-identity-auth-cache.yml", Count: 1, Role: "data",
@@ -472,7 +472,14 @@ var identityProtectedCalls = []protectedCall{
 	}},
 	{callMatcher{"decommission.Apply", "method:decommission.Apply"}, []string{"cmd/pilot/cmd/host_decommission.go runHostDecommissionApply"}},
 	{callMatcher{"runGolangApplyUnderLock", "ident:runGolangApplyUnderLock"}, []string{"cmd/pilot/cmd/reconcile_golang_apply.go golangApply"}},
-	{callMatcher{"identityreconcile.Execute", "method:identityreconcile.Execute"}, []string{"cmd/pilot/cmd/reconcile_golang_apply.go runGolangApplyUnderLock"}},
+	{callMatcher{"identityreconcile.Execute", "method:identityreconcile.Execute"}, []string{
+		"cmd/pilot/cmd/reconcile_golang_apply.go runGolangApplyUnderLock",
+		"cmd/pilot/cmd/reconcile_golang_mixed.go runMixedGoPhase",
+	}},
+	// The mixed run's Go phase (P2-7): reached only from PrepareApply, which the apply step of
+	// executeDeploymentTransaction calls after it has taken the lock (identityLockFunnels, Before), and
+	// which requires the lock in its context before it calls the phase.
+	{callMatcher{"runMixedGoPhase", "ident:runMixedGoPhase"}, []string{"cmd/pilot/cmd/reconcile_golang_mixed.go PrepareApply"}},
 }
 
 // identityLockBuilders are the places that build a funnel's Acquirer by calling
@@ -1403,6 +1410,18 @@ func TestIdentityLockLintFailsOnMutationsOfTheRealFunnels(t *testing.T) {
 		"a new caller of the Go writer": {
 			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "func sneakyWrite(ctx context.Context, c *freeiparpc.Client) {\n\t_, _ = identityreconcile.Execute(ctx, c, identityreconcile.Options{})\n}\n\nvar accessReconcileEffects",
 			"sneakyWrite: calls identityreconcile.Execute but is not on the list of entry points",
+		},
+		"the mixed run's Go phase takes no Held": {
+			"cmd/pilot/cmd/reconcile_golang_mixed.go", "func runMixedGoPhase(ctx context.Context, held *identitylock.Held, s *mixedStep) error {", "func runMixedGoPhase(ctx context.Context, s *mixedStep) error {",
+			"runMixedGoPhase: calls the Go writer (identityreconcile.Execute) without taking a *identitylock.Held",
+		},
+		"a new caller of the mixed run's Go phase": {
+			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "func sneakyMixed() {\n\t_ = runMixedGoPhase(ctx, held, step)\n}\n\nvar accessReconcileEffects",
+			"sneakyMixed: calls runMixedGoPhase but is not on the list of entry points",
+		},
+		"a second caller of the Go writer inside the mixed file": {
+			"cmd/pilot/cmd/reconcile_golang_mixed.go", "func (s *mixedStep) PrepareApply(ctx context.Context) error {", "func (s *mixedStep) sneakyWriter(ctx context.Context, c *freeiparpc.Client) {\n\t_, _ = identityreconcile.Execute(ctx, c, identityreconcile.Options{})\n}\n\nfunc (s *mixedStep) PrepareApply(ctx context.Context) error {",
+			"sneakyWriter: calls identityreconcile.Execute but is not on the list of entry points",
 		},
 		"a new caller of the Go apply under the lock": {
 			"cmd/pilot/cmd/access_cli.go", "var accessReconcileEffects", "func sneakyApply() {\n\t_, _ = runGolangApplyUnderLock(ctx, held, prep, d, cmd, rt, t)\n}\n\nvar accessReconcileEffects",

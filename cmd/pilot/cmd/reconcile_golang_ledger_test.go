@@ -49,6 +49,7 @@ var golangGateExemptions = map[string]string{
 	"preview-plan-commit":   "a write or close error on a file created a moment ago: needs a full disk; commitOutput's own write failure is output-write's row",
 	// P2-7: golangPreviewPlan was cut out of golangPreview so the mixed run's preview and idempotency check
 	// read the same plan; the return that hands its error on has no gate of its own.
+	"mixed-passthrough":        "returns what the Ansible engine's reconcile path returned for the mixed run, whose own refusals carry their gates (the Go phase's in executeDeploymentTransaction and the mixed step's wrappers have rows in reconcile_golang_mixed_test.go and reconcile_golang_mixed_cli_test.go; the rest are the Ansible engine's)",
 	"preview-plan-passthrough": "returns what golangPreviewPlan returned, whose own returns carry the gates (preview-connect, observe, writes-guard, plan-marshal, preview-plan-commit, blocked-plan, each with its row)",
 }
 
@@ -68,6 +69,7 @@ func TestReconcileGolangEveryGateHasARow(t *testing.T) {
 		"reconcile_golang_apply.go": {
 			"reserveOutput", "commitOutput", "runReconcileGolangApply", "golangApply", "runGolangApplyUnderLock",
 		},
+		"reconcile_golang_mixed.go": {"runReconcileGolangMixed", "golangMixed"},
 	}
 	var res gateledger.Result
 	for file, funcs := range holders {

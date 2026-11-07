@@ -79,7 +79,8 @@ jobs:
       # (internal/livehooks, spec 2026-11-06 phase 2 D31); it is not part of the
       # released binary, so nothing else compiles it. Without this step the stop
       # points could rot unnoticed until the next live run. Compiling is not
-      # enough: where the executor stops (TestExecuteStopsAt...) is what the
+      # enough: where the executor stops (TestExecuteStopsAt..., and where the
+      # mixed run's Go phase stops, TestMixedGoPhasePauses...) is what the
       # driver's arms rely on, and it is a test of the tagged build only, so
       # nothing else runs it (TestCITaggedStepRunsThePlacementTests).
       - name: go build, vet and test with the live-driver hooks
@@ -88,6 +89,7 @@ jobs:
           go vet -tags identity_live_hooks ./internal/livehooks/ ./internal/identityreconcile/ ./internal/freeiparpc/ ./cmd/...
           go test -count=1 -timeout 10m -tags identity_live_hooks ./internal/livehooks/
           go test -count=1 -timeout 10m -tags identity_live_hooks -run 'TestExecuteStopsAt' ./internal/identityreconcile/
+          go test -count=1 -timeout 10m -tags identity_live_hooks -run 'TestMixedGoPhasePauses' ./cmd/pilot/cmd/
 
       - name: Select Go packages
         env:

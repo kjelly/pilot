@@ -1372,6 +1372,26 @@ type deploymentTransactionOptions struct {
 	// idempotency re-apply and rollback. Ignored for every other playbook: a
 	// component that is not the identity playbook never locks.
 	IdentityLock identitylock.Acquirer
+	// Mixed is set for the identity transaction of a mixed run (`pilot reconcile --engine golang
+	// --scope full`, spec 2026-11-06 phase 2 section 8.3) and nothing else: the Go writer's work
+	// is its PrepareApply, and it wraps the steps and the runs of the playbook (mixedTransaction).
+	// Ignored for any other playbook.
+	Mixed mixedTransaction
+}
+
+// playbookRun runs the transaction's playbook once, with extra arguments after its own.
+type playbookRun func(ctx context.Context, extraArgs []string) (*ansible.Result, error)
+
+// mixedTransaction is the hook of the mixed run into executeDeploymentTransaction. It exists only
+// for the identity playbook, and the one place that decides which transaction gets one is
+// executeRecordedDeploymentCore, from a marker on the context that only the command sets.
+type mixedTransaction interface {
+	// WrapStep wraps one step of the transaction: "preview", "apply", "verify" or "idempotency".
+	// inner may be nil for a step the transaction does not have.
+	WrapStep(step string, inner delivery.StepFunc) delivery.StepFunc
+	// RunPlaybook runs the playbook for a step ("preview", "apply" or "idempotency") through run,
+	// which it may hand arguments, and returns what the command returned.
+	RunPlaybook(ctx context.Context, step string, run playbookRun) (*ansible.Result, error)
 }
 
 // deploymentRuntimeRaceOptions carries what executeDeploymentTransaction's
@@ -1397,6 +1417,10 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 	identity := identitylock.IsApplyPlaybook(playbook)
 	if identity && options.IdentityLock == nil {
 		return fmt.Errorf("deploy %s: %w", playbook, identitylock.ErrNoLock)
+	}
+	mixed := options.Mixed
+	if !identity {
+		mixed = nil
 	}
 	// held is the lock the apply step takes once everything has been confirmed.
 	// Every later step runs under it and it is given back when the transaction
@@ -1471,12 +1495,30 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		}
 		return args, nil
 	}
-	execute := func(ctx context.Context, check bool, args []string) (*ansible.Result, error) {
-		if !check && options.RuntimeRace.ResultPath != "" {
-			env := resultCallbackEnv(options.RuntimeRace.CallbackPluginsDir, options.RuntimeRace.ResultPath)
-			return runner.RunWithExtraEnv(ctx, env, args...)
+	// runPlaybook runs the playbook once with args. The mixed run's hook adds to the command what
+	// it needs (the file the playbook's observation is written to) and reads what the run left.
+	runPlaybook := func(ctx context.Context, step string, args []string, raceCallback bool) (*ansible.Result, error) {
+		run := func(ctx context.Context, extra []string) (*ansible.Result, error) {
+			all := args
+			if len(extra) > 0 {
+				all = append(append([]string{}, args...), extra...)
+			}
+			if raceCallback {
+				env := resultCallbackEnv(options.RuntimeRace.CallbackPluginsDir, options.RuntimeRace.ResultPath)
+				return runner.RunWithExtraEnv(ctx, env, all...)
+			}
+			return runner.Run(ctx, all...)
 		}
-		return runner.Run(ctx, args...)
+		if mixed != nil {
+			return mixed.RunPlaybook(ctx, step, run)
+		}
+		return run(ctx, nil)
+	}
+	execute := func(ctx context.Context, check bool, args []string) (*ansible.Result, error) {
+		if check {
+			return runPlaybook(ctx, "preview", args, false)
+		}
+		return runPlaybook(ctx, "apply", args, options.RuntimeRace.ResultPath != "")
 	}
 	runOnce := func(ctx context.Context, check, confirm bool) (*ansible.Result, error) {
 		args, err := announce(check, confirm)
@@ -1578,7 +1620,7 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 			fmt.Fprintln(out, "▶ 冪等性檢查：重新套用相同 playbook")
 			runCtx, cancel := commandCtx(ctx)
 			defer cancel()
-			res, err := runner.Run(runCtx, baseArgs...)
+			res, err := runPlaybook(runCtx, "idempotency", baseArgs, false)
 			if lost := lockLost(); lost != nil {
 				return fmt.Errorf("冪等性檢查被中止：%w", lost)
 			}
@@ -1628,6 +1670,20 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 				return fmt.Errorf("rollback 被中止：%w", lost)
 			}
 			return err
+		}
+	}
+	if mixed != nil {
+		// The mixed run's steps: the Go plan before the preview, the Go phase's failure shaped as a
+		// partial application, the playbook's observation consumed by the verification, the Go plan
+		// held to zero operations after the re-apply (spec section 8.3). Each wrapper sees the
+		// step's own error and returns it, changed only to say that the Go writer had committed.
+		if preview != nil {
+			preview = mixed.WrapStep("preview", preview)
+		}
+		apply = mixed.WrapStep("apply", apply)
+		verify = mixed.WrapStep("verify", verify)
+		if idempotency != nil {
+			idempotency = mixed.WrapStep("idempotency", idempotency)
 		}
 	}
 	txn := delivery.Transaction{
@@ -2076,6 +2132,10 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	if err != nil {
 		return err
 	}
+	// The --limit the run was asked for: the mixed run's Go phase resolves the one FreeIPA server it
+	// writes with it, as the preflight of the users-groups scope does, and checks that it is the
+	// host this transaction locks. limit itself is widened below.
+	requestedLimit := limit
 	applied, selected, scope, hosts, dependencyExpandedLimit, err := resolveDeploymentScope(ctx, catalog, components, inv, limit, extraVars, playbook == "playbooks/site.yml")
 	if err != nil {
 		return err
@@ -2168,17 +2228,40 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	}
 	extraVars = append(extraVars, deferredHostsExtraVar)
 
+	// The mixed run of `pilot reconcile --engine golang --scope full`: the one identity transaction
+	// the command's marker on the context asks for, and no other (the dependency chain's
+	// freeipa-server run, or any other playbook, never sees it). The Go engine writes the users and
+	// groups before the playbook, which is told to skip them.
+	var mixed *mixedStep
+	if identitylock.IsApplyPlaybook(playbook) {
+		if mixedRun := mixedIdentityRunFrom(ctx); mixedRun != nil {
+			mixed, err = mixedRun.begin(inv, requestedLimit, stage)
+			if err != nil {
+				return err
+			}
+			defer mixed.close()
+			extraVars = append(extraVars, mixed.extraVars()...)
+		}
+	}
+
 	st, err := openSpecStore()
 	if err != nil {
 		return fmt.Errorf("open deployment evidence store: %w", err)
 	}
+	metadata := deploymentMetadata(root, playbook, components, extraVars, vault, tags, execScope.Deferred)
+	if mixed != nil {
+		mixed.addMetadata(metadata)
+	}
 	writer, err := store.StartRun(ctx, st, store.RunStarted{
 		Stage: stage, Component: components[0], Components: components, Playbook: playbook,
-		Inventory: inv, Hosts: hosts, Metadata: deploymentMetadata(root, playbook, components, extraVars, vault, tags, execScope.Deferred),
+		Inventory: inv, Hosts: hosts, Metadata: metadata,
 	})
 	if err != nil {
 		_ = st.Close()
 		return fmt.Errorf("start deployment evidence run: %w", err)
+	}
+	if mixed != nil {
+		mixed.bind(writer)
 	}
 	writer.StartHeartbeat(ctx, 10*time.Second)
 	fmt.Fprintf(out, "ℹ️  deployment run: %s\n", writer.RunID())
@@ -2244,14 +2327,24 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	}
 
 	var txnResult delivery.Result
-	err = executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, deploymentTransactionOptions{
+	transaction := deploymentTransactionOptions{
 		Writer: writer, Preflight: preflight, Verify: verify, Rollback: rollback,
 		Stage: stage, Idempotency: delivery.IdempotencyStageGTEStaging, RollbackPolicy: rollbackPolicy,
 		RuntimeRace: runtimeRace, Authorization: authorization, ResultOut: &txnResult,
 		AppliedHosts:            appliedHosts,
 		RequireEveryAppliedHost: requireEveryHost,
 		IdentityLock:            identityLock,
-	})
+	}
+	if mixed != nil {
+		// The Go writer runs as PrepareApply, under the lock the apply step has taken and before the
+		// playbook, which it does not let start when the Go phase did not apply and verify its plan.
+		transaction.PrepareApply = mixed.PrepareApply
+		transaction.Mixed = mixed
+	}
+	err = executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, transaction)
+	if mixed != nil {
+		mixed.finished(txnResult, writer.RunID())
+	}
 	if resultOut != nil {
 		*resultOut = ComponentDeliveryResult{ComponentIDs: components, RunID: writer.RunID(), Outcome: txnResult.Outcome, FailedStep: txnResult.FailedStep}
 	}

@@ -308,20 +308,22 @@ func TestGateRefusesEveryWriteOfTheModelUntilTheEntryIsObserved(t *testing.T) {
 	}
 }
 
-// The executor has one entry point: the users-groups apply of the reconcile command (P2-6). Nothing
-// else outside this package and its tests refers to the things that start a run; the mixed path
-// (P2-7) adds its own file here, on purpose, and changes this list then.
-func TestTheExecutorIsReachedOnlyFromTheUsersGroupsApply(t *testing.T) {
+// The executor has two entry points: the users-groups apply of the reconcile command (P2-6) and the mixed
+// run's Go phase (P2-7), each in a file of its own, under the lock of its run. Nothing else outside this
+// package and its tests refers to the things that start a run.
+func TestTheExecutorIsReachedOnlyFromTheUsersGroupsApplyAndTheMixedRun(t *testing.T) {
 	startsARun := []string{"Execute", "NewGate", "NewAuthCacheEntry", "NewRosterPasswords", "Options"}
-	const entry = "cmd/pilot/cmd/reconcile_golang_apply.go"
+	entries := []string{"cmd/pilot/cmd/reconcile_golang_apply.go", "cmd/pilot/cmd/reconcile_golang_mixed.go"}
 	problems := reachabilityProblems(t, map[string]string{}, startsARun)
 	var want []string
-	for _, n := range startsARun {
-		want = append(want, entry+": identityreconcile."+n)
+	for _, entry := range entries {
+		for _, n := range startsARun {
+			want = append(want, entry+": identityreconcile."+n)
+		}
 	}
 	slices.Sort(want)
 	if !slices.Equal(problems, want) {
-		t.Fatalf("the executor is referred to by %v, want exactly %v (the users-groups apply and nothing else)", problems, want)
+		t.Fatalf("the executor is referred to by %v, want exactly %v (the users-groups apply, the mixed run and nothing else)", problems, want)
 	}
 	// The scan sees a reference in any other file, through an import alias too.
 	fake := map[string]string{"cmd/pilot/cmd/x.go": "package cmd\nimport ir \"github.com/kjelly/pilot/internal/identityreconcile\"\nfunc f() { ir.Execute(nil, nil, ir.Options{}) }\n"}

@@ -47,7 +47,7 @@ const (
 // (the Go writer for users and groups, the identity playbook for the rest; P2-7).
 const (
 	reconcileScopeUsersGroups = identityreconcile.ScopeUsersGroups
-	reconcileScopeFull        = "full"
+	reconcileScopeFull        = identityreconcile.ScopeFull
 )
 
 var (
@@ -106,8 +106,6 @@ func validateReconcileEngineFlags(engine string, previewOnly, force bool, compon
 		return fmt.Errorf("--scope 只能是 %s 或 %s：%q", reconcileScopeUsersGroups, reconcileScopeFull, scope) // gate: engine-scope-value
 	case force && scope == "":
 		return fmt.Errorf("--engine %s --force 需要 --scope %s 或 %s：套用的範圍要明講", reconcileEngineGolang, reconcileScopeUsersGroups, reconcileScopeFull) // gate: engine-scope-required
-	case scope == reconcileScopeFull:
-		return fmt.Errorf("--scope %s(混合執行：Go 寫 users／groups，其餘交給 identity playbook)還沒有提供：目前只有 --scope %s", reconcileScopeFull, reconcileScopeUsersGroups) // gate: engine-scope-full
 	case resultOut != "" && !force:
 		return fmt.Errorf("--result-out 只能與 --force 一起使用(預覽的結果是 --plan-out)") // gate: engine-result-out-needs-force
 	case planOut != "" && force:

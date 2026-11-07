@@ -231,8 +231,6 @@ func TestReconcileGolangFlagMatrix(t *testing.T) {
 		{name: "golang with --preview-only and --force", args: previewArgs("--force", "--scope", "users-groups"), gate: "ansible-force-and-preview-only", want: "--force 不能與 --preview-only 同時使用"},
 		{name: "golang with --force and no --scope", args: []string{"--engine", "golang", "--force", "--component", "freeipa-identity"}, gate: "engine-scope-required", want: "需要 --scope"},
 		{name: "golang with an unknown --scope", args: []string{"--engine", "golang", "--force", "--scope", "everything", "--component", "freeipa-identity"}, gate: "engine-scope-value", want: "--scope 只能是"},
-		{name: "golang with --scope full, not yet", args: []string{"--engine", "golang", "--force", "--scope", "full", "--component", "freeipa-identity"}, gate: "engine-scope-full", want: "還沒有提供"},
-		{name: "golang preview with --scope full, not yet", args: previewArgs("--scope", "full"), gate: "engine-scope-full", want: "還沒有提供"},
 		{name: "--scope without golang", args: []string{"--preview-only", "--component", "freeipa-identity", "--scope", "users-groups"}, gate: "engine-scope", want: "--scope 只能與 --engine golang"},
 		{name: "--result-out without golang", args: []string{"--force", "--component", "freeipa-identity", "--result-out", "r.json"}, gate: "engine-result-out", want: "--result-out 只能與 --engine golang"},
 		{name: "--result-out of a preview", args: previewArgs("--result-out", "r.json"), gate: "engine-result-out-needs-force", want: "只能與 --force"},

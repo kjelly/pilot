@@ -38,8 +38,19 @@ const golangEngineHelp = `--engine golang --component freeipa-identity 只處理
                             有寫入時先經入口 playbook 記下「授權快取義務」，再由 Go 寫入並重讀驗證；
                             --result-out 存這一輪的結果(plan、逐項結果、驗證、義務)，--lock-wait 設
                             等鎖的時間。
+  --scope full              混合執行(--preview-only 與 --force 都可以)：沿用 Ansible engine 的 reconcile
+                            流程(依賴、availability、預覽、stage、history、webhook、冪等性)，但 identity
+                            這一步改由 Go engine 先寫 users 與 groups(取鎖之後，入口 → 寫入 → 重讀驗證)，
+                            Go 階段完成並通過驗證之後才執行 identity playbook(以 -e
+                            pilot_identity_users_groups_engine=go 略過 users／groups 的兩個區段，SSH key
+                            與其餘 section 照常)，最後要求 playbook 的觀察結果說已確認授權快取義務。
+                            Go 階段失敗、重讀失敗、或這一輪動過的物件在重讀後仍有操作，playbook 不會
+                            執行。預覽是 Go 的唯讀 plan 加 Ansible 的 --check --diff(不取鎖)；plan 有
+                            被阻擋的物件時預覽在 playbook 開始之前就失敗。
 結束碼：0 成功(全部完成並驗證，且沒有義務未結清)；1 失敗(含結果不明、部分套用)；3 plan 有被阻擋的
-物件(零寫入)；4 每個 Go 操作都已完成並驗證，只剩授權快取義務未結清。
+物件(零寫入)；4 每個 Go 操作都已完成並驗證，只剩授權快取義務未結清(--scope full：playbook 已執行，但它的
+觀察結果沒有說已確認，例如 ipa_identity_refresh_sssd_cache 為 false 或有 optional client 被延後)。
+ansible-playbook 自己的結束碼不會成為 pilot 的結束碼(它的 3 或 4 不會被讀成被阻擋或義務未結清)。
 義務未結清是 users-groups scope 有寫入就會有的結果：它不執行 playbook，client 在 SSSD 快取過期前可能
 仍沿用舊授權；下一次選到 identity 或 client-cache 的 apply 或完整 apply 會刷新所有 enrolled client
 (ipa_identity_refresh_sssd_cache 為 false 時要先改回 true)。這一輪對外的 operation.result 因此是
@@ -80,9 +91,9 @@ func init() {
 	reconcileCmd.Flags().StringVar(&limitFlag, "limit", "", "只對這些主機(或 Ansible 的主機樣式)執行，等同回答「要限定只套用到某台主機嗎？」；--force/--preview-only 也適用")
 	reconcileCmd.Flags().StringVar(&stageFlag, "stage", "", "直接指定 stage(sandbox、staging、prod)，不再詢問；在指令列指定 staging/prod 即視為確認；--force/--preview-only 沒帶 --stage 時一律是 sandbox")
 	reconcileCmd.Flags().StringVar(&reconcileEngineFlag, "engine", reconcileEngineAnsible, "調和引擎：ansible(預設)或 golang。golang 只能與 --component freeipa-identity 一起使用，處理使用者與群組：--preview-only 唯讀預覽，--force --scope users-groups 套用(不執行 playbook；授權快取義務未結清時結束碼 4，見 pilot reconcile --help)")
-	reconcileCmd.Flags().StringVar(&reconcilePlanOutFlag, "plan-out", "", "--engine golang --preview-only：把 plan JSON 寫到這個新檔案(0600，已存在時拒絕；寫入失敗時移除)")
-	reconcileCmd.Flags().StringVar(&reconcileScopeFlag, "scope", "", "--engine golang：users-groups(只有使用者與群組，不執行 playbook)。--force 必填；--preview-only 預設 users-groups。full(混合執行)還沒有提供")
-	reconcileCmd.Flags().StringVar(&reconcileResultOutFlag, "result-out", "", "--engine golang --force：把這一輪的結果(pilot.identity-apply/v1：plan、逐項結果、驗證、授權快取義務)寫到這個新檔案(0600；已存在時在任何寫入之前拒絕；沒有進到第一次讀取的失敗不寫，寫入失敗時移除)")
+	reconcileCmd.Flags().StringVar(&reconcilePlanOutFlag, "plan-out", "", "--engine golang --preview-only(--scope full 時是 Go 的唯讀 plan)：把 plan JSON 寫到這個新檔案(0600，已存在時拒絕；寫入失敗時移除)")
+	reconcileCmd.Flags().StringVar(&reconcileScopeFlag, "scope", "", "--engine golang：users-groups(只有使用者與群組，不執行 playbook)或 full(混合執行：Go engine 寫使用者與群組，identity playbook 略過那兩個區段並做其餘的，驗證義務已確認)。--force 必填；--preview-only 預設 users-groups")
+	reconcileCmd.Flags().StringVar(&reconcileResultOutFlag, "result-out", "", "--engine golang --force(--scope users-groups 或 full)：把這一輪的結果(pilot.identity-apply/v1：plan、逐項結果、驗證、授權快取義務)寫到這個新檔案(0600；已存在時在任何寫入之前拒絕；沒有進到第一次讀取的失敗不寫，寫入失敗時移除)")
 	reconcileCmd.Flags().StringVar(&reconcileLockWaitFlag, "lock-wait", "", "套用 freeipa-identity 前，FreeIPA server 的 /etc/ipa 鎖被另一輪執行持有時最多等多久(Go duration，例如 30m；0 表示忙碌就立即失敗；預設 30m，約一輪完整 identity 執行的時間)；預覽不持鎖，與 --preview-only 同用會被拒絕。鎖只約束 pilot 自己的程式碼路徑，手動執行的 ansible-playbook 不受它約束")
 	reconcileCmd.Flags().StringVar(&stagingAttestedHoursFlag, "staging-attested-within-hours", "", "--stage prod 必填：上次 staging 驗證距今幾小時(0-168)")
 	rootCmd.AddCommand(reconcileCmd)
@@ -117,6 +128,11 @@ func runReconcile(cmd *cobra.Command, _ []string) error {
 		return runStandalonePromptWorkflow(cmd, "reconcile", reconcileActionsPath, reconcilePresentation, reconcileTracePath) // gate: ansible-actions-dispatch
 	}
 	if reconcileEngineFlag == reconcileEngineGolang {
+		if reconcileScopeFlag == reconcileScopeFull {
+			// The mixed run: the Ansible engine's own reconcile path, with the Go engine writing the
+			// users and groups of the identity transaction (preview and --force alike).
+			return runReconcileGolangMixed(cmd) // gate: entry-golang-mixed-dispatch
+		}
 		if reconcileForceFlag {
 			return runReconcileGolangApply(cmd) // gate: entry-golang-apply-dispatch
 		}
@@ -130,6 +146,15 @@ func runReconcile(cmd *cobra.Command, _ []string) error {
 }
 
 func runReconcileInteractive(cmd *cobra.Command) error {
+	return runReconcileInteractiveIn(cmd, func(runtime deployAnsibleRuntime) (context.Context, context.CancelFunc) {
+		return withDeployAnsibleRuntime(cmd.Context(), runtime), func() {}
+	})
+}
+
+// runReconcileInteractiveIn is the wizard with the root context of the run made by base from the
+// Ansible runtime: the Ansible engine's is the command's context, and the mixed run's (--engine golang
+// --scope full) is the Go engine's signal context with the mixed marker on it.
+func runReconcileInteractiveIn(cmd *cobra.Command, base func(deployAnsibleRuntime) (context.Context, context.CancelFunc)) error {
 	// Same defaults driver as deploy --force/--preview-only, installed before
 	// the TTY gate so CI can run it.
 	if reconcileForceFlag || reconcilePreviewOnlyFlag {
@@ -149,7 +174,9 @@ func runReconcileInteractive(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
-	ctx, err := reconcileLockContext(withDeployAnsibleRuntime(cmd.Context(), runtime), cmd)
+	baseCtx, stopBase := base(runtime)
+	defer stopBase()
+	ctx, err := reconcileLockContext(baseCtx, cmd)
 	if err != nil {
 		return err
 	}
