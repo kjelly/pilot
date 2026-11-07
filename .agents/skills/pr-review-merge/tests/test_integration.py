@@ -33,7 +33,9 @@ if a[:2] == ['pr', 'view']:
             d['view'].pop('baseRefName', None)
         else:
             d['view']['baseRefName'] = names[count]
-    emit(d['view'])
+    # What `gh pr view --json labels` reports: the labels the PR carries (the listing below is a different
+    # read, and lags it in real life).
+    emit(dict(d['view'], labels=[{'name': n} for n in d.get('labels', [])]))
 if a[:2] == ['pr', 'checks']:
     persist()
     print(json.dumps(d['checks']))
@@ -59,7 +61,9 @@ if a[0] == 'api' and '/pulls?' in a[-1]:
     emit(d.get('pages', []))
 if a[0] == 'api' and '/issues?' in a[-1]:
     label = a[-1].split('labels=')[1].split('&')[0]
-    emit([[{'number': d['view']['number'], 'pull_request': {}}] if label in d.get('labels', []) else []])
+    d['listing_reads'] = d.get('listing_reads', 0) + 1
+    lagging = d['listing_reads'] <= d.get('listing_lag', 0)   # the issues listing lags the label write
+    emit([[{'number': d['view']['number'], 'pull_request': {}}] if label in d.get('labels', []) and not lagging else []])
 if a[:2] == ['pr', 'edit']:
     if d.get('fail_label'):
         persist(); print('label denied', file=sys.stderr); sys.exit(1)
@@ -214,6 +218,45 @@ class Integration(unittest.TestCase):
         proc, out = self.actor(execute=True)
         self.assertEqual(out['outcome'], 'ERROR')
         self.assertFalse(self.state().get('labels'))
+
+    def test_a_listing_that_lags_the_label_write_does_not_make_the_actor_report_an_error(self):
+        # Seen live on #271: the issues listing lagged the label write by seconds, the actor read it and
+        # reported ERROR for a PR that was enqueued. The PR itself shows its label at once.
+        self.patch(listing_lag=1000)
+        proc, out = self.actor(execute=True)
+        self.assertEqual((proc.returncode, out['outcome'], out['verified_remote_state']), (0, 'ENQUEUED', 'ENQUEUED'),
+                         proc.stdout + proc.stderr)
+        d = self.state()
+        self.assertEqual(d['labels'], ['merge-queue'])
+        self.assertIn('Merge train: enqueued', d['comments'][0])
+        self.assertEqual(0, d.get('listing_reads', 0), 'the actor must not depend on the issues listing')
+
+    def test_an_enqueued_comment_that_fails_after_the_label_is_a_warning(self):
+        self.patch(fail_comment=True)
+        proc, out = self.actor(execute=True)
+        self.assertEqual((proc.returncode, out['outcome']), (0, 'ENQUEUED'), proc.stdout + proc.stderr)
+        self.assertIn('could not be posted', out['warnings'][0])
+        self.assertIn('comment denied', out['warnings'][0])
+        self.assertEqual(self.state()['labels'], ['merge-queue'])
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import merge_train
+        from gh_runtime import Repo
+        self.assertIsNotNone(merge_train.load_entry(Repo.parse('acme/demo'), 42), 'the saved evidence is kept')
+
+    def test_a_state_directory_that_cannot_hold_the_entry_is_a_structured_error_not_a_traceback(self):
+        # The saved entry is written first, under the real lock. When that fails (a full disk, a queue
+        # directory that is a file) the command must still print its JSON and exit 2.
+        state = Path(self.env['PRM_STATE_DIR'])
+        state.mkdir(parents=True)
+        (state / 'queue').write_text('not a directory')
+        proc = self.script('apply_decision.py', '--pr', '42', '--evidence', str(self.evidence_file), '--execute')
+        self.assertNotIn('Traceback', proc.stderr)
+        self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+        out = json.loads(proc.stdout)
+        self.assertEqual(('ERROR', 'NotADirectoryError'), (out['outcome'], out['error_kind']), out)
+        self.assertIn('queue', out['error'])
+        self.assertFalse(self.state().get('labels'), 'nothing was labelled')
+        self.assertFalse(self.state().get('comments'))
 
     def test_other_merge_methods_are_not_queued(self):
         a = ['--pr','42','--evidence',str(self.evidence_file),'--method','squash','--execute']
