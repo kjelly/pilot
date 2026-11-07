@@ -55,7 +55,7 @@ func playbookAccepts(vars map[string]string, envGroup string) bool {
 		stage = "sandbox" // the play's default
 	}
 	confirmed := map[string]bool{"confirm_staging": vars["confirm_staging"] == "true", "confirm_prod": vars["confirm_prod"] == "true"}
-	if stage != "sandbox" && !(stage == "staging" && confirmed["confirm_staging"]) && !(stage == "prod" && confirmed["confirm_prod"]) {
+	if stage != "sandbox" && (stage != "staging" || !confirmed["confirm_staging"]) && (stage != "prod" || !confirmed["confirm_prod"]) {
 		return false
 	}
 	inGroup := func(g string) bool { return envGroup == g }
