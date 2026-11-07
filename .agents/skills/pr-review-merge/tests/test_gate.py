@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from gh_runtime import Repo, GitHubError
+from gh_runtime import CompareLimitError, Repo, GitHubError
 from review_gate import evaluate, COVERAGE
 from scan_stub import CleanScan
 
@@ -47,10 +47,20 @@ class Fake:
         self.calls = []
         self.live_base = B
         self.ancestor = True
+        # {(base, head): bool}; pairs not listed answer `ancestor`.
+        self.ancestry = {}
 
     def is_ancestor(self, repo, base, head):
         self.calls.append(('is_ancestor', base, head))
-        return self.ancestor
+        return self.ancestry.get((base, head), self.ancestor)
+
+    def merge_base(self, repo, a, b):
+        self.calls.append(('merge_base', a, b))
+        if (a, b) in self.compares and self.compares[(a, b)] is not None:
+            return self.compares[(a, b)]['merge_base']
+        if a == b or self.ancestry.get((a, b), self.ancestor) is True:
+            return a
+        raise GitHubError('merge base unknown to the fake')
 
     def branch_head(self, repo, branch):
         return self.live_base
@@ -91,13 +101,14 @@ class GateTests(unittest.TestCase):
         f = Fake(); f.v['isDraft'] = True
         self.assertEqual(self.gate(gh=f)['decision'], 'SKIP')
 
-    def test_base_ref_mismatch_drafts_even_without_review(self):
+    def test_lagging_base_metadata_alone_is_not_a_draft(self):
+        # HEAD already contains the live tip; only PR Base metadata lags (kjelly/pilot#307).
         f = Fake(); f.live_base = 'c' * 40
-        result = self.gate(data={}, gh=f)
-        self.assertEqual(result['decision'], 'DRAFT')
-        self.assertIn(B, result['reasons'][0])
-        self.assertIn(f.live_base, result['reasons'][0])
-        self.assertIn('pr-ready', result['reasons'][0])
+        result = self.gate(gh=f)
+        self.assertEqual('aligned', result['alignment'])
+        self.assertFalse(result['needs_alignment'])
+        self.assertEqual('MERGE', result['decision'], result['reasons'])
+        self.assertIn(('is_ancestor', 'c' * 40, H), f.calls)
 
     def test_missing_or_malformed_base_name_waits(self):
         for name in (None, '', 7, []):
@@ -132,14 +143,50 @@ class GateTests(unittest.TestCase):
         f.branch_head = unavailable
         self.assertEqual(self.gate(gh=f)['decision'], 'WAITING')
 
-    def test_head_missing_latest_base_drafts_without_review(self):
+    def behind(self, pr_files=('pkg/a.go',), base_files=('docs/x.md',)):
         f = Fake(); f.ancestor = False
-        result = self.gate(data={}, gh=f)
-        self.assertEqual(result['decision'], 'DRAFT')
+        f.compares[(B, H)] = {'files': list(pr_files), 'merge_base': 'e' * 40, 'ancestor': False}
+        f.compares[(H, B)] = {'files': list(base_files), 'merge_base': 'e' * 40, 'ancestor': False}
+        return f
+
+    def test_head_behind_with_a_clean_disjoint_merge_goes_to_the_train(self):
+        f = self.behind()
+        result = self.gate(gh=f)
+        self.assertEqual('train', result['alignment'])
         self.assertTrue(result['base_behind'])
-        self.assertIn(H, result['reasons'][0])
-        self.assertIn(B, result['reasons'][0])
+        self.assertTrue(result['needs_alignment'])
+        self.assertEqual('MERGE', result['decision'], result['reasons'])
         self.assertIn(('is_ancestor', B, H), f.calls)
+
+    def test_head_behind_with_overlap_or_conflict_drafts_without_review(self):
+        f = self.behind(base_files=('pkg/a.go', 'docs/x.md'))
+        result = self.gate(data={}, gh=f)
+        self.assertEqual(('DRAFT', 'overlap', ['pkg/a.go']), (result['decision'], result['alignment'], result['overlap']))
+        self.assertIn(H, result['reasons'][0])
+        self.assertIn('both sides changed pkg/a.go', result['reasons'][0])
+        self.assertIn('pr-ready', result['reasons'][0])
+        for mergeable, state in (('CONFLICTING', 'DIRTY'), ('CONFLICTING', 'CLEAN'), ('MERGEABLE', 'DIRTY')):
+            with self.subTest(mergeable=mergeable, state=state):
+                f = self.behind(); f.v['mergeable'] = mergeable; f.v['mergeStateStatus'] = state
+                result = self.gate(data={}, gh=f)
+                self.assertEqual(('DRAFT', 'conflict'), (result['decision'], result['alignment']))
+                self.assertIn('merge conflict', result['reasons'][0])
+
+    def test_head_behind_with_unknown_mergeability_or_file_lists_waits(self):
+        f = self.behind(); f.v['mergeable'] = 'UNKNOWN'
+        result = self.gate(gh=f)
+        self.assertEqual(('WAITING', 'unknown'), (result['decision'], result['alignment']))
+        self.assertIn("'UNKNOWN'", result['reasons'][0])
+        f = self.behind(); del f.compares[(H, B)]
+        result = self.gate(gh=f)
+        self.assertEqual(('WAITING', 'unknown'), (result['decision'], result['alignment']))
+        f = self.behind()
+        def too_many(repo, base, head):
+            raise GitHubError('GitHub lists at most 300 changed files')
+        f.compare = too_many
+        result = self.gate(gh=f)
+        self.assertEqual(('WAITING', 'unknown'), (result['decision'], result['alignment']))
+        self.assertIn('300', result['reasons'][0])
 
     def test_unknown_ancestry_waits(self):
         f = Fake(); f.ancestor = None
@@ -179,8 +226,17 @@ class GateTests(unittest.TestCase):
         self.assertEqual(self.gate(data=e)['decision'], 'WAITING')
 
     def test_stale_base(self):
-        e = sample(); e['base_sha'] = H
-        self.assertEqual(self.gate(data=e)['decision'], 'WAITING')
+        # A reviewed Base that is not on the live base branch does not bind the review.
+        f = Fake(); f.ancestry[('c' * 40, B)] = False
+        e = sample(); e['base_sha'] = 'c' * 40
+        result = self.gate(data=e, gh=f)
+        self.assertEqual(result['decision'], 'WAITING')
+        self.assertIn('is not on live main', ' '.join(result['reasons']))
+
+    def test_older_reviewed_base_on_the_live_branch_still_binds_the_same_head(self):
+        f = Fake(); f.ancestry[('c' * 40, B)] = True
+        e = sample(); e['base_sha'] = 'c' * 40
+        self.assertEqual('MERGE', self.gate(data=e, gh=f)['decision'])
 
     def test_missing_independent_review(self):
         e = sample(); e['independent'] = False
@@ -355,6 +411,161 @@ class GateTests(unittest.TestCase):
     def test_unresolved_dependencies(self):
         e = sample(); e['dependencies']['resolved'] = False
         self.assertEqual(self.gate(data=e)['decision'], 'WAITING')
+
+class WaitKindTests(unittest.TestCase):
+    """Every WAITING result says whether it resolves by itself (`transient`) or needs a person.
+
+    The merge train keeps a transient PR enqueued and stops its run; it takes a `person` PR out of the
+    queue with the reasons, so the PRs behind it can merge (kjelly/pilot#307). Each class below has a case
+    that reaches it through the real `evaluate`, and a case that must NOT be taken for the other class.
+    """
+
+    def waiting(self, gh=None, data=None, patch=None):
+        from unittest import mock
+        with mock.patch.object(__import__('review_gate'), 'check_secrets', **(patch or {'return_value': (
+                [], [], {'status': 'CLEAN'})})):
+            result = evaluate(Repo.parse('acme/demo'), 42, sample() if data is None else data,
+                              client=Fake() if gh is None else gh)
+        self.assertEqual('WAITING', result['decision'], result['reasons'])
+        return result['wait_kind'], ' | '.join(result['reasons'])
+
+    def fails(self, name, exc=GitHubError('HTTP 502')):
+        def raise_it(*args, **kwargs):
+            raise exc
+        return name, raise_it
+
+    def test_a_gate_that_decides_has_no_wait_kind(self):
+        self.assertNotIn('wait_kind', evaluate(Repo.parse('acme/demo'), 42, sample(), client=Fake()))
+        f = Fake(); f.c[0]['bucket'] = 'fail'
+        self.assertNotIn('wait_kind', evaluate(Repo.parse('acme/demo'), 42, sample(), client=f))
+
+    def test_transient_states_resolve_by_themselves(self):
+        cases = {}
+        f = Fake(); f.c[0]['bucket'] = 'pending'
+        cases['CI pending'] = (f, None, None)
+        f = Fake(); f.v['mergeable'] = 'UNKNOWN'; f.v['mergeStateStatus'] = 'UNKNOWN'
+        cases['mergeability and merge state not computed'] = (f, None, None)
+        f = Fake(); f.v['mergeStateStatus'] = 'BEHIND'
+        cases['merge state BEHIND'] = (f, None, None)
+        for name, label in (('pr_checks', 'CI state unavailable'), ('unresolved_threads', 'Cannot verify review threads'),
+                            ('branch_rules', 'active branch rules')):
+            f = Fake(); setattr(f, *self.fails(name))
+            cases['API error: ' + label] = (f, None, None)
+        f = Fake(); setattr(f, *self.fails('pr_view'))
+        cases['API error: PR unreadable'] = (f, None, None)
+        f = Fake(); setattr(f, *self.fails('branch_head'))
+        cases['API error: base unreadable'] = (f, None, None)
+        f = Fake(); f.ancestor = None
+        cases['ancestry unavailable'] = (f, None, None)
+        f = Fake(); setattr(f, *self.fails('is_ancestor'))
+        cases['API error: ancestry'] = (f, None, None)
+        f = Fake(); f.files[('.github/pr-evidence.json', B)] = b'{not json'
+        cases['base manifest does not parse'] = (f, None, None)
+        f = Fake()
+        cases['secret scan could not run'] = (f, None, {'return_value': ([], ['Secret scan unavailable: no checkout'],
+                                                                         {'status': 'NOT_RUN'})})
+        f = Fake(); f.ancestor = False
+        f.compares[(B, H)] = {'files': ['pkg/a.go'], 'merge_base': 'e' * 40, 'ancestor': False}
+        f.compares[(H, B)] = {'files': ['docs/x.md'], 'merge_base': 'e' * 40, 'ancestor': False}
+        f.v['mergeable'] = 'UNKNOWN'
+        cases['behind and mergeability not computed'] = (f, None, None)
+        f = Fake(); f.ancestor = False
+        f.compares[(B, H)] = {'files': ['pkg/a.go'], 'merge_base': 'e' * 40, 'ancestor': False}
+        setattr(f, *self.fails('compare'))
+        cases['behind and a comparison failed'] = (f, None, None)
+        for name, (gh, data, patch) in cases.items():
+            with self.subTest(case=name):
+                kind, reasons = self.waiting(gh, data, patch)
+                self.assertEqual('transient', kind, reasons)
+
+    def test_states_only_a_person_can_change(self):
+        reasons = {}
+        for decision, text in (('CHANGES_REQUESTED', 're-review'), ('REVIEW_REQUIRED', 'Human approval required'),
+                               ('SOMETHING_NEW', 'Unrecognized GitHub reviewDecision')):
+            f = Fake(); f.v['reviewDecision'] = decision
+            reasons[text] = (f, None, None)
+        f = Fake(); f.v['reviewDecision'] = None
+        f.r = [{'type': 'pull_request', 'parameters': {'required_approving_review_count': 1}}]
+        reasons['require reviewer approval'] = (f, None, None)
+        f = Fake(); f.c[0]['bucket'] = 'fail'
+        e = sample()
+        e['unrelated_failing_checks'] = [{'name': 'test', 'reviewer_confirmed': True,
+                                          'reason': 'Same timeout fails on main at the base SHA, run 40802511042'}]
+        reasons['unrelated to this PR'] = (f, e, None)
+        e = sample(); e['verdict'] = 'BLOCK'
+        e['findings'] = [{'severity': 'P2', 'path': 'pkg/a.go', 'line': 21, 'reason': 'Rescue skips rollback',
+                          'recommendation': 'Tag the rescue always', 'blocking': True,
+                          'disputed_reply_url': 'https://github.com/acme/demo/pull/42#issuecomment-6501033173'}]
+        reasons['without new evidence'] = (Fake(), e, None)
+        f = Fake(); f.v['mergeStateStatus'] = 'BLOCKED'
+        reasons["Merge state is not CLEAN: 'BLOCKED'"] = (f, None, None)
+        f = Fake(); f.v['mergeable'] = 'SOMETHING_NEW'
+        reasons['Mergeability unknown/not mergeable'] = (f, None, None)
+        f = Fake(); f.r = [{'type': 'merge_queue'}]
+        reasons['merge queue'] = (f, None, None)
+        f = Fake(); f.c = []
+        reasons['No GitHub CI'] = (f, None, None)
+        f = Fake(); f.c[0]['bucket'] = 'weird'
+        reasons['Unknown GitHub CI check bucket'] = (f, None, None)
+        e = sample(); e['independent'] = False
+        reasons['independent prm-reviewer'] = (Fake(), e, None)
+        e = sample(); e['head_sha'] = B
+        reasons['Stale review evidence'] = (Fake(), e, None)
+        e = sample(); e['coverage']['security'] = False
+        reasons['coverage incomplete'] = (Fake(), e, None)
+        e = sample(); e['dependencies']['resolved'] = False
+        reasons['inter-PR dependencies'] = (Fake(), e, None)
+        f = Fake(); f.ancestor = False
+        f.compares[(B, H)] = {'files': ['pkg/a.go'], 'merge_base': 'e' * 40, 'ancestor': False}
+        def cut(repo, base, head):
+            raise CompareLimitError('GitHub lists at most 300 changed files')
+        f.compare = cut
+        reasons['300 changed files'] = (f, None, None)
+        for text, (gh, data, patch) in reasons.items():
+            with self.subTest(reason=text):
+                kind, joined = self.waiting(gh, data, patch)
+                self.assertEqual('person', kind, joined)
+                self.assertIn(text, joined)
+
+    def test_a_person_reason_wins_over_a_transient_one_and_a_derived_one_follows_the_others(self):
+        f = Fake(); f.c[0]['bucket'] = 'pending'; f.v['reviewDecision'] = 'CHANGES_REQUESTED'
+        self.assertEqual('person', self.waiting(f)[0])
+        f = Fake(); f.c[0]['bucket'] = 'pending'; f.v['mergeStateStatus'] = 'BLOCKED'
+        kind, reasons = self.waiting(f)
+        self.assertEqual('transient', kind, 'BLOCKED only says that the pending check is not done: ' + reasons)
+        f = Fake(); f.v['mergeStateStatus'] = 'UNSTABLE'
+        self.assertEqual('person', self.waiting(f)[0], 'nothing else explains it')
+
+    def test_a_reason_nobody_registered_needs_a_person(self):
+        from review_gate import WaitKinds
+        kinds = WaitKinds()
+        later = kinds.later('GitHub is down')
+        self.assertEqual('transient', kinds.kind([later]))
+        self.assertEqual('person', kinds.kind([later, 'a reason nobody classified']))
+        self.assertEqual('person', kinds.kind(['a reason nobody classified']))
+        self.assertEqual('person', kinds.kind([]))
+        self.assertEqual('person', kinds.kind([kinds.secondary('merge state')]))
+        self.assertEqual('transient', kinds.kind([later, kinds.secondary('merge state')]))
+
+    def test_train_alignment_says_whether_unknown_will_pass_or_needs_a_person(self):
+        from review_gate import train_alignment
+        def view_of(f):
+            return f.pr_view(None, 42)
+        f = Fake(); f.ancestor = False; f.v['mergeable'] = 'UNKNOWN'
+        out = train_alignment(f, Repo.parse('acme/demo'), 42, view_of(f))
+        self.assertEqual(('unknown', 'transient'), (out['alignment'], out['unknown_reason']))
+        f = Fake(); f.ancestor = False
+        setattr(f, *self.fails('compare'))
+        out = train_alignment(f, Repo.parse('acme/demo'), 42, view_of(f))
+        self.assertEqual(('unknown', 'transient'), (out['alignment'], out['unknown_reason']))
+        f = Fake(); f.ancestor = False
+        setattr(f, *self.fails('compare', CompareLimitError('GitHub lists at most 300 changed files')))
+        out = train_alignment(f, Repo.parse('acme/demo'), 42, view_of(f))
+        self.assertEqual(('unknown', 'needs-person'), (out['alignment'], out['unknown_reason']))
+        f = Fake(); f.ancestor = False
+        out = train_alignment(f, Repo.parse('acme/demo'), 42, view_of(f))
+        self.assertEqual(('unknown', 'transient'), (out['alignment'], out['unknown_reason']), 'no compare answer')
+
 
 if __name__ == '__main__':
     unittest.main()

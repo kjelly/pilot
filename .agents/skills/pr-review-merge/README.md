@@ -62,13 +62,13 @@ python3 "$SNAP/.agents/skills/pr-review-merge/scripts/review_gate.py" --repo OWN
 # 乾跑（不變更 GitHub）
 python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json --worktree "$REPO_ROOT"
 
-# 真正執行：僅在通過 live gate 時才合併或降草稿
+# 真正執行：僅在通過 live gate 時才排入 merge train 或降草稿
 python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json --worktree "$REPO_ROOT" --execute
 ```
 
 執行 actor 前，先依 shared checkout 契約完成起始分支/SHA 的安全復原；復原失敗就保持 PR 狀態不變。復原成功後用已保存的 PR HEAD/Base 和 checkout 外的 evidence 重跑 live gate，再執行 actor；不得用復原後的本地 HEAD 取代被審查的 candidate，也不得在 PR 狀態變更後才切回分支。
 
-`apply_decision.py` 不會相信先前的 gate 結果，會在 mutation 前重新檢查 HEAD/Base 與 GitHub API 狀態，並使用同一 repository 的跨程序寫入鎖（POSIX `flock`）。`gh pr merge --match-head-commit` 可防止合併錯誤的 HEAD；結果還要遠端驗證 `state == MERGED`。Draft 先留言具體 blocking findings 才執行 `gh pr ready --undo`。
+`apply_decision.py` 不會相信先前的 gate 結果，會在 mutation 前重新檢查 HEAD/Base 與 GitHub API 狀態，並使用同一 repository 的跨程序寫入鎖（POSIX `flock`）。MERGE 決定時 actor 不直接合併：它保存 evidence、加上 `merge-queue` label（`ENQUEUED`），由 `scripts/merge_train.py` 這個唯一的 consumer 依 label 加上的時間依序處理：HEAD 不含最新 base 且可乾淨合併、兩邊沒有改到同一檔案時，先把 live base tip 合併進 PR 分支並推上去，等該 HEAD 的 CI，再重跑 gate、以 `gh pr merge --match-head-commit` 合併並遠端驗證 `state == MERGED`。見 [Merge train](references/merge-train.md)（kjelly/pilot#307）。Draft 先留言具體 blocking findings 才執行 `gh pr ready --undo`。
 
 **重要限制：**程式可強制校對 SHA、CI、threads、規則、PR 狀態與 Evidence Schema，但**無法機械證明 Reviewer 真實獨立、分析完整或程式邏輯完全正確**。Agent 必須確實調用獨立 reviewer 並提供可追溯證據。不可單憑 `Review PASS` 字串進行 Merge。
 
@@ -83,7 +83,7 @@ python3 -m unittest discover -s tests -v
 ## 與其他 Skill 的關係
 
 - `issue-to-pr`：Issue → 建立 Ready PR。
-- `pr-review-merge`：Ready PR → `MERGED` / `DRAFT-BLOCKED` / `WAITING`。
+- `pr-review-merge`：Ready PR → `ENQUEUED`（merge train 之後 `MERGED`）/ `DRAFT-BLOCKED` / `WAITING`。
 - `pr-ready`：修復 Draft PR → Ready PR。
 
 所有規則及契約見 [SKILL.md](SKILL.md)、[Quality Gate](references/quality-gate.md)、[Evidence Contract](references/evidence-contract.md) 及 [Platforms](references/platforms.md)。

@@ -157,7 +157,7 @@ def evidence_context(worktree: Path | None, head: Any, base_name: Any, remote: s
     if module is None:
         return None
     try:
-        return module.Context.load(worktree, head, f"refs/remotes/{remote}/{base_name}")
+        return module.Context.load(worktree, head, f"refs/remotes/{remote}/{base_name}", integrated_base=True)
     except (OSError, RuntimeError, ValueError):
         return None
 
@@ -210,30 +210,52 @@ def merge_gate_modules() -> tuple[Any, Any]:
         sys.path.pop(0)
 
 
-def base_alignment_errors(pr: dict[str, Any], repo: str) -> list[str]:
-    """Ready and merge use the same live-base ancestry requirement."""
+def base_alignment(pr: dict[str, Any], repo: str) -> tuple[list[str], list[str]]:
+    """(errors, pending) for the live base, by the merge gate's own classifier (kjelly/pilot#307).
+
+    A PR need not contain the live base tip to become Ready: the merge train integrates it. What
+    must hold is that the train can: GitHub's test merge against the live base is clean and no file
+    changed on both sides since the merge base. A conflict or an overlap is an error (integrate the
+    base here and re-review); mergeability GitHub has not computed yet is pending.
+    """
     try:
         module, client = merge_gate_modules()
-        result = module.check_base_alignment(client, client.Repo.parse(repo), pr["number"], pr)
-        if result["base_mismatch"]:
-            return [f"PR Base SHA {pr['baseRefOid']} differs from live {pr['baseRefName']} SHA {result['live_base_sha']}"]
-        if result["base_behind"]:
-            return [f"PR HEAD {pr['headRefOid']} does not include live {pr['baseRefName']} SHA "
-                    f"{result['live_base_sha']}; integrate the latest base and rerun validation/CI and independent review"]
-        return []
+        result = module.train_alignment(client, client.Repo.parse(repo), pr["number"], pr)
     except (ImportError, OSError, ValueError, KeyError, RuntimeError) as exc:
-        return [f"Base alignment verification unavailable: {exc}"]
+        return [f"Base alignment verification unavailable: {exc}"], []
+    head, name, live = pr.get("headRefOid"), pr.get("baseRefName"), result["live_base_sha"]
+    kind = result["alignment"]
+    if kind == "conflict":
+        return [f"PR HEAD {head} does not include live {name} SHA {live} and GitHub reports a merge conflict "
+                "with it; integrate the latest base and rerun validation/CI and independent review"], []
+    if kind == "overlap":
+        return [f"PR HEAD {head} does not include live {name} SHA {live} and both sides changed "
+                + ", ".join(result["overlap"][:5]) + "; integrate the latest base and rerun validation/CI "
+                "and independent review"], []
+    if kind == "unknown":
+        return [], [f"Merge-train alignment against live {name} SHA {live} not known yet: "
+                    + result.get("alignment_detail", "unknown")]
+    return [], []
+
+
+def base_alignment_errors(pr: dict[str, Any], repo: str) -> list[str]:
+    errors, pending = base_alignment(pr, repo)
+    return errors + pending
 
 
 def target_evidence_errors(pr: dict[str, Any], evidence: dict[str, Any], repo: str) -> list[str]:
     """Use the same base-manifest/target-run verifier as the final merge gate."""
     try:
         module, gh_runtime = merge_gate_modules()
-        head, base = pr.get("headRefOid"), pr.get("baseRefOid")
-        if not isinstance(head, str) or not SHA.fullmatch(head) or not isinstance(base, str) or not SHA.fullmatch(base):
+        head = pr.get("headRefOid")
+        if not isinstance(head, str) or not SHA.fullmatch(head):
             return ["Current HEAD/base SHA unavailable for target evidence validation"]
-        gaps, _ = module.check_target_validation(gh_runtime, gh_runtime.Repo.parse(repo), head, base, evidence,
-                                                base_name=pr.get("baseRefName"))
+        # The policy is read at the live base and reuse imports from the base HEAD contains: the merge
+        # train integrates the live tip later (kjelly/pilot#307).
+        client_repo = gh_runtime.Repo.parse(repo)
+        base = gh_runtime.branch_head(client_repo, pr.get("baseRefName"))
+        gaps, _ = module.check_target_validation(gh_runtime, client_repo, head, base, evidence,
+                                                base_name=pr.get("baseRefName"), integrated_base=True)
         return gaps
     except (ImportError, OSError, ValueError, KeyError, RuntimeError) as exc:
         return [f"Target evidence validation unavailable: {exc}"]
@@ -787,7 +809,9 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
         errs.append("GitHub PR head SHA unavailable/invalid")
     if not isinstance(pr.get("headRefName"), str) or not pr["headRefName"]:
         errs.append("GitHub PR head branch unknown")
-    if pr.get("mergeable") != "MERGEABLE":
+    # A conflict is an error; mergeability GitHub has not computed yet (it recomputes after main
+    # moves) is pending in wait mode: base_alignment() reports it.
+    if pr.get("mergeable") == "CONFLICTING" or (pr.get("mergeable") != "MERGEABLE" and not allow_pending):
         errs.append(f"Mergeability not confirmed clean: {pr.get('mergeable')}")
     # Do not block merely because a human CHANGES_REQUESTED review remains:
     # technical comments may have been addressed, while human re-approval is
@@ -975,18 +999,21 @@ class WaitPins:
     reviews: str
     artifacts: dict[str, tuple[str, str]]
     base: str | None
+    base_sha: str | None = None  # PR Base SHA when the wait started; reported, not pinned
 
     @classmethod
     def capture(cls, s: Snapshot, evidence_path: Path, evidence: dict[str, Any],
                 root: Path, remote: str) -> WaitPins:
-        keys = ("number", "url", "headRefOid", "headRefName", "baseRefOid", "baseRefName", "title", "body")
+        # baseRefOid is not pinned: main advancing during the wait no longer blocks Ready (the merge
+        # train integrates it); base_alignment() re-classifies the live base on every poll.
+        keys = ("number", "url", "headRefOid", "headRefName", "baseRefName", "title", "body")
         if any(not isinstance(s.pr.get(key), str) for key in keys if key != "number"):
             raise GateError("Wait requires complete PR identity/title/body")
         if not SHA.fullmatch(s.pr["baseRefOid"]):
             raise GateError("Wait requires a valid base SHA")
         return cls({key: s.pr[key] for key in keys}, review_pin(s),
                    artifact_pins(evidence_path, evidence, root, s.pr["headRefOid"]),
-                   fetched_base(root, remote, s.pr["baseRefName"]))
+                   fetched_base(root, remote, s.pr["baseRefName"]), s.pr["baseRefOid"])
 
     def verify(self, s: Snapshot, evidence_path: Path, evidence: dict[str, Any],
                root: Path, remote: str) -> list[str]:
@@ -1069,7 +1096,7 @@ def main() -> int:
                 result["head_sha"] = pins.identity["headRefOid"]
                 result["pinned_artifacts"] = pins.artifacts
                 result["pinned_branch"] = pins.identity["headRefName"]
-                result["pinned_base_sha"] = pins.identity["baseRefOid"]
+                result["base_sha_at_start"] = pins.base_sha
                 result["pinned_fetched_base"] = pins.base
                 result["pinned_review_sha256"] = hashlib.sha256(pins.reviews.encode()).hexdigest()
                 result["pinned_pr_sha256"] = hashlib.sha256(json.dumps(pins.identity, sort_keys=True).encode()).hexdigest()
@@ -1117,7 +1144,11 @@ def main() -> int:
                 pending.extend(lifecycle.pending)
             if pins is not None:
                 errors.extend(pins.verify(snapshot, args.evidence, evidence, args.worktree, args.base_remote))
-            errors.extend(base_alignment_errors(snapshot.pr, args.repo))
+            align_errors, align_pending = base_alignment(snapshot.pr, args.repo)
+            errors.extend(align_errors)
+            pending.extend(align_pending)
+            if snapshot.pr.get("mergeable") not in ("MERGEABLE", "CONFLICTING"):
+                pending.append(f"GitHub mergeability not computed yet: {snapshot.pr.get('mergeable')}")
             return errors, pending, list(ctx.accepted) if ctx is not None else []
 
         while True:
@@ -1180,7 +1211,7 @@ def main() -> int:
                     after_pr = after.pr if after is not None else gh_pr(args.repo, args.pr)
                     if after_pr.get("isDraft") is not False or after_pr.get("headRefOid") != evidence["head_sha"]:
                         raise GateError("PR state/HEAD changed during Ready transition; status requires reevaluation")
-                    alignment_errors = base_alignment_errors(after_pr, args.repo)
+                    alignment_errors = base_alignment(after_pr, args.repo)[0]
                     if alignment_errors:
                         raise GateError("Ready invoked but post-action verification failed: " + "; ".join(alignment_errors))
                     if pins is not None:

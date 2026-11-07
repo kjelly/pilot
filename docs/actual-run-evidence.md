@@ -223,6 +223,10 @@ Agent 判讀先讀 command result 或 compact summary：candidate/tree、exit co
   `contracts/**`、`group_vars/**`、`host_vars/**`、`ansible.cfg`、`requirements.yml`、
   共用的 playbook `tasks/`/`templates/`/`files/`）、PR 自己或衝突解決改過的執行檔案。
 
+Ready 與 merge gate 以「HEAD 已整合的 base」（HEAD 與 live main 的 merge base）判斷上面兩條，manifest 則讀 live main。
+PR 不必在 Ready 前追上 main：`pr-review-merge` 的 merge train 會在合併前把 live main 合併進 PR、
+在合併結果上跑 CI，並對該 commit 用同樣的規則重新判斷 record 是否仍涵蓋 HEAD（kjelly/pilot#307）。
+
 預設 ambient controller 的 record 不會有完整 closure（resolver 只證明 literal
 `copy`/`debug.msg`，vault 永遠是 external；`--evidence-controller=pinned` 只清掉 ambient
 那幾項），所以上面兩條是它唯一的沿用方式。欄位與機器判定見

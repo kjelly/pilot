@@ -46,7 +46,11 @@ The shared verifier checks:
    predating both: a candidate that is itself on the base, or a base that never advanced
    past the candidate's fork, is refused. The remote verifier resolves the live base
    branch too; stale PR `baseRefOid` metadata is not accepted as proof of the current
-   base. The local verifier also refuses a candidate and base with more than one merge
+   base. The Ready and merge gates (`pr-ready`, `pr-review-merge`) use the **integrated
+   base**: the newest base commit HEAD contains (merge base of HEAD and the live tip), since
+   the merge train integrates the live tip before merging (kjelly/pilot#307); at the train's
+   final gate HEAD contains the live tip, so the two coincide. They read the manifest at the
+   live tip. `issue-to-pr` keeps the live base, which HEAD must contain. The local verifier also refuses a candidate and base with more than one merge
    base (criss-cross merges); GitHub's compare API reports a single merge base, so the
    remote verifier cannot see that case and the rejection is enforced locally only.
 2. `execution_paths` lists unique exact regular files, including dependencies.
@@ -114,7 +118,8 @@ original candidate when:
    declaration.
 
 `pr-ready`'s gate applies the same proof to `independent_review`: the PR's own content
-is byte-identical to what was reviewed. Local check receipts never use it: an imported
+is byte-identical to what was reviewed. HEAD must also carry the base's side (see "Base changes
+HEAD must carry" below). Local check receipts never use it: an imported
 Go test must run against the PR's code, so receipts are rerun for the packages the
 import touches, and current-HEAD CI is required as before. Accepted imports are
 reported under `delta_accepted` with `method: non-execution-base-import`.
@@ -239,3 +244,35 @@ reviews are reported with `closure_complete: false` and the entries.
 What remains the reviewer's judgment: that an imported runtime file outside the closure
 is not named by a reference the resolver could not read (a variable path, a computed
 include). A file the closure names, or a path in `rerun_paths`, is never left to it.
+
+## Base changes HEAD must carry
+
+The pure-import proofs above compare the reviewed (or tested) tree R with HEAD, so they see only
+the paths where the two differ. A merge that keeps the PR's bytes of a file the base changed since
+the fork (the `ours` merge strategy, a conflict resolved with the PR's side, a deletion the base made
+undone) leaves R and HEAD equal at that path: nothing differs, and the merge silently reverts the
+base while the review is taken to cover it. `Context._dropped_base_change` closes that. With F the
+fork of R and the base B (the merge base of HEAD and the live tip, or the live tip itself outside
+the merge train), every path outside the evidence-only globs with B[p] != F[p] needs HEAD[p] == B[p]
+and R[p] in {F[p], B[p]}; otherwise the proof fails with `base change not carried into HEAD: <path>`.
+
+It applies to every review reuse, in both modes of `Context._non_execution_import` (a pure import of
+any file for the merge gate, a declared non-execution file for `pr-ready`), and before the
+evidence-only shortcut of those two (`Context._review_shortcut`: an evidence-only delta, an empty one
+included, holds the reviewed bytes, which says nothing about what main added since). The same check
+inside the target no-attestation path (`accepts_target` with no `target_reuse`) only runs when a
+non-evidence file was imported; the evidence-only shortcut stays, and so does
+`_verify_target_trees`: both prove that HEAD holds the bytes the target run tested (in the
+attested path every path where R equals HEAD is the tested content, and every path where they
+differ is checked), so a revert of the base cannot make a record cover a HEAD it does not. The
+revert itself is a review question, and the review gates refuse it.
+
+## Merge train
+
+After `pr-review-merge` queues a PR, its merge train may push one commit that merges the live
+base tip into the PR (clean merge, every changed file equal to the base). For the target record
+that commit is an ordinary pure base import: the rules above decide whether the record still
+covers the new HEAD, and if not the train returns the PR to Draft for `pr-ready`. The independent
+review carries across it as a pure import of any files (`Context.accepts_pure_import`), and only
+when HEAD carries the base's changes too; check receipts never do. The train works only on a HEAD
+the gate decided on or that it pushed itself. Details: `pr-review-merge/references/merge-train.md`.

@@ -299,8 +299,13 @@ class Context:
     """Evidence rules for one gate run at a fixed HEAD."""
 
     def __init__(self, worktree: Path, head: str, manifest: dict[str, Any] | None,
-                 errors: list[str], warnings: list[str], base_ref: str | None = None):
+                 errors: list[str], warnings: list[str], base_ref: str | None = None, *,
+                 integrated_base: bool = False):
         self.worktree, self.head, self.manifest, self.base_ref = worktree, head, manifest, base_ref
+        # False: a reuse proof imports from the live base, which HEAD must contain (issue-to-pr).
+        # True: from the newest base commit HEAD contains (merge base of HEAD and the live base). The
+        # Ready and merge gates use it since the merge train integrates the live base (kjelly/pilot#307).
+        self.integrated_base = integrated_base
         self.errors, self.warnings = errors, warnings
         self.accepted: list[dict[str, Any]] = []
         self._cache: dict[str, list[str] | None] = {}
@@ -316,7 +321,8 @@ class Context:
         self._review_errors: dict[str, str] = {}
 
     @classmethod
-    def load(cls, worktree: Path, head: str, base_ref: str | None) -> "Context":
+    def load(cls, worktree: Path, head: str, base_ref: str | None, *,
+             integrated_base: bool = False) -> "Context":
         errors: list[str] = []
         warnings: list[str] = []
         manifest = None
@@ -341,7 +347,7 @@ class Context:
                         if bad:
                             errors += [f"{MANIFEST_PATH} on {base_ref}: {e}" for e in bad]
                             manifest = None
-        return cls(worktree, head, manifest, errors, warnings, base_ref)
+        return cls(worktree, head, manifest, errors, warnings, base_ref, integrated_base=integrated_base)
 
     def delta_files(self, sha: str) -> list[str] | None:
         """Files changed from `sha` to HEAD, or None when `sha` is not an ancestor."""
@@ -390,6 +396,19 @@ class Context:
             return None
         rc, out = git(self.worktree, "rev-parse", "--verify", f"{self.base_ref}^{{commit}}")
         return None if rc else out.strip()
+
+    def merge_base_of(self, a: str, b: str) -> str | None:
+        """The single merge base of `a` and `b`, or None (none, several, or unavailable)."""
+        cmp = self.comparison(a, b)
+        return cmp["merge_base"] if cmp else None
+
+    def reuse_base(self) -> str | None:
+        """The base commit a reuse proof imports from: the live base or, with `integrated_base`,
+        the newest base commit HEAD already contains."""
+        live = self.base_revision()
+        if not live or not self.integrated_base:
+            return live
+        return self.merge_base_of(live, self.head)
 
     def tree_entries(self, revision: str) -> dict[str, tuple[str, str]] | None:
         rc, out = git(self.worktree, "ls-tree", "-r", "-z", "--full-tree", revision)
@@ -526,16 +545,21 @@ class Context:
             return None, "target reuse requires a candidate branch and an advanced base"
         return fork["merge_base"], None
 
-    def _non_execution_import(self, sha: Any, machine: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
-        """Every change since `sha` is evidence-only or a pure base import of a declared
-        non-execution regular file that the recorded closure (if any) cannot reach."""
-        if not self.non_execution:
+    def _non_execution_import(self, sha: Any, machine: dict[str, Any] | None, *,
+                              require_non_execution: bool = True) -> tuple[dict[str, Any], list[str]]:
+        """Every change since `sha` is evidence-only or a pure base import (the file is unchanged at
+        `sha` since the fork and equals the base at HEAD). With `require_non_execution` each imported
+        file must also be a declared non-execution regular file the recorded closure cannot reach;
+        without it any pure import passes (review reuse across a merge-train base integration).
+        Both modes also require HEAD to carry every base change since the fork (see the last loop)."""
+        what = "non-execution reuse" if require_non_execution else "base-import reuse"
+        if require_non_execution and not self.non_execution:
             return {}, ["no non_execution_paths declared on the base branch"]
         if not isinstance(sha, str) or not SHA.fullmatch(sha):
-            return {}, ["non-execution reuse needs a full tested SHA"]
-        base = self.base_revision()
+            return {}, [f"{what} needs a full tested SHA"]
+        base = self.reuse_base()
         if not base:
-            return {}, ["non-execution reuse needs the current base"]
+            return {}, [f"{what} needs the current base"]
         fork, error = self._base_fork(sha, base)
         if error:
             return {}, [error]
@@ -548,23 +572,64 @@ class Context:
                 continue
             if tested.get(path) != ancestor.get(path) or head.get(path) != upstream.get(path):
                 return {}, ["change is neither evidence-only nor a pure base import: " + path]
+            if not require_non_execution:
+                continue
             if not self.non_execution_path(path):
                 return {}, ["base import is not a declared non-execution path: " + path]
             if any(t.get(path) and t[path][0] not in REGULAR for t in (tested, head)):
                 return {}, ["non-execution import must be a regular file: " + path]
             if machine and (reach := self._closure_reach(path, machine)):
                 return {}, [f"non-execution import is reachable from the recorded closure ({reach}): {path}"]
+        if (path := self._dropped_base_change(tested, head, upstream, ancestor)):
+            return {}, ["base change not carried into HEAD: " + path]
         return {"base": base, "changed": sorted(
             p for p in tested.keys() | head.keys()
             if tested.get(p) != head.get(p) and not any(rx.match(p) for rx in self.patterns))}, []
+
+    def _dropped_base_change(self, tested: dict[str, Any], head: dict[str, Any], upstream: dict[str, Any],
+                             ancestor: dict[str, Any]) -> str | None:
+        """The first path whose change on the base since the fork HEAD does not carry, or None.
+
+        The pure-import loop sees only paths where the reviewed/tested tree and HEAD differ. A path the
+        base changed since the fork is also a change HEAD must carry: a merge that keeps the PR's bytes of
+        it (`-s ours`, a conflict resolved with the PR side, a deletion main made undone) differs from the
+        reviewed tree nowhere, so it passes unseen while it silently reverts the base. HEAD must hold the
+        base's bytes there, and the reviewed tree only the fork's (a pure import) or the base's own (the PR
+        made the same change). Evidence-only paths are never a revert worth refusing."""
+        for path in sorted(p for p in upstream.keys() | ancestor.keys() if upstream.get(p) != ancestor.get(p)):
+            if any(rx.match(path) for rx in self.patterns):
+                continue
+            if head.get(path) != upstream.get(path) or tested.get(path) not in (ancestor.get(path), upstream.get(path)):
+                return path
+        return None
+
+    def _review_shortcut(self, sha: Any, label: str) -> bool:
+        """`accepts` for a review, unless the base moved past the fork and HEAD dropped one of its changes.
+
+        An evidence-only delta (an empty one too) from the reviewed commit holds the reviewed bytes, which
+        is right for a receipt but not for a review across a base integration: when HEAD contains base
+        commits the reviewed commit lacks, the merge must carry what they changed. Only when it can be
+        decided: the reviewed commit and the base are related by one merge base and HEAD contains the base."""
+        if sha != self.head and isinstance(sha, str) and SHA.fullmatch(sha) and (base := self.reuse_base()):
+            fork = self.merge_base_of(sha, base)
+            contained = self.integrated_base or self.merge_base_of(base, self.head) == base
+            if fork and fork not in (sha, base) and contained:
+                trees = [self.tree_entries(r) for r in (sha, self.head, base, fork)]
+                if any(t is None for t in trees):
+                    self._review_errors[str(sha)] = "complete Git trees unavailable for base-import reuse"
+                    return False
+                if (path := self._dropped_base_change(*trees)):
+                    self._review_errors[str(sha)] = "base change not carried into HEAD: " + path
+                    return False
+        return self.accepts(sha, label)
 
     def accepts_review(self, sha: Any, label: str) -> bool:
         """A review (never a check receipt) taken at `sha` covers HEAD: `accepts`, or every change
         since is evidence-only or a pure base import of declared non-execution files. The PR's own
         content is then byte-identical to what was reviewed; the imported tests still run in CI."""
-        if self.accepts(sha, label):
+        if self._review_shortcut(sha, label):
             return True
-        if not self.non_execution:
+        if not self.non_execution or str(sha) in self._review_errors:
             return False
         info, errors = self._non_execution_import(sha, None)
         if errors:
@@ -578,6 +643,21 @@ class Context:
         if str(sha) in self._review_errors:
             return self._review_errors[str(sha)]
         return self.stale_reason(sha)
+
+    def accepts_pure_import(self, sha: Any, label: str) -> bool:
+        """The merge gate's review reuse (kjelly/pilot#307): a review taken at `sha` covers HEAD when
+        every change since is evidence-only or a pure import from the base, whatever the files. The
+        PR's own content is byte-identical to what was reviewed; CI on HEAD covers the integration.
+        Never used for check receipts."""
+        if self._review_shortcut(sha, label):
+            return True
+        info, errors = self._non_execution_import(sha, None, require_non_execution=False)
+        if errors:
+            self._review_errors[str(sha)] = self.stale_reason(sha) + "; base-import reuse: " + "; ".join(errors)
+            return False
+        self.accepted.append({"label": label, "from": sha, "head": self.head,
+                              "method": "pure-base-import", **info})
+        return True
 
     def _target_item(self, rid: Any) -> dict[str, Any] | None:
         """The `kind: target-run` item a target record answers, or None."""
@@ -658,7 +738,7 @@ class Context:
         base = reuse.get("base_sha")
         if not isinstance(base, str) or not SHA.fullmatch(base) or not self.base_ref:
             return ["target reuse needs the current full base SHA"]
-        if self.base_revision() != base:
+        if self.reuse_base() != base:
             return ["target reuse base SHA does not match current base"]
         return self._verify_target_trees(sha, base, reuse, machine, item)
 

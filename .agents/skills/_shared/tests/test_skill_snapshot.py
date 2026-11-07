@@ -230,6 +230,12 @@ elif a[:2] == ["api", "graphql"]:
     field = "reviewThreads"
     print(json.dumps({"data": {"repository": {"pullRequest": {field: {
         "nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}}))
+elif a[0] == "api" and "/git/ref/heads/" in a[-1]:
+    # The Ready gate reads the live base tip (merge train alignment and the manifest, kjelly/pilot#307).
+    print(json.dumps({"object": {"type": "commit", "sha": base}}))
+elif a[0] == "api" and "/compare/" in a[-1]:
+    left, right = a[-1].split("/compare/")[1].split("...")
+    print(json.dumps({"status": "ahead", "behind_by": 0, "merge_base_commit": {"sha": left}}))
 elif a[0] == "api" and "/contents/" in a[-1]:
     manifest = {"schema_version": 1, "required_evidence": [
         {"id": "actual-run", "kind": "target-run", "source": "AGENTS.md actual-run rule",

@@ -243,6 +243,48 @@ class GateTests(unittest.TestCase):
             self.assertIn("base import is not a declared non-execution path: src/other.go",
                           module.stale_detail(ctx, reviewed, review=True))
 
+    def test_review_reuse_through_the_real_context_refuses_a_merge_that_drops_the_base_side(self):
+        """A merge that keeps the PR's bytes of a file main changed holds the reviewed tree, so no file
+        differs between the reviewed commit and HEAD; the review must still not carry (kjelly/pilot#308)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            wt = Path(tmp)
+
+            def git(*args):
+                return subprocess.run(["git", "-C", tmp, *args], check=True, capture_output=True, text=True).stdout.strip()
+
+            def put(path, text):
+                (wt / path).parent.mkdir(parents=True, exist_ok=True)
+                (wt / path).write_text(text)
+                git("add", path)
+                git("commit", "-q", "-m", path)
+                return git("rev-parse", "HEAD")
+
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "t@example.org")
+            git("config", "user.name", "t")
+            put(".github/pr-evidence.json", json.dumps({
+                "schema_version": 1, "evidence_only_paths": ["docs/evidence/**"],
+                "non_execution_paths": [".agents/**", "**/*_test.go"]}))
+            git("checkout", "-q", "-b", "fix-one")
+            reviewed = put("src/app.go", "package app\n")
+            git("checkout", "-q", "main")
+            put(".agents/skills/x/SKILL.md", "rule\n")
+            git("update-ref", "refs/remotes/origin/main", "main")
+            git("checkout", "-q", "fix-one")
+            git("merge", "-q", "-s", "ours", "--no-edit", "main")
+            head = git("rev-parse", "HEAD")
+            self.assertEqual(git("rev-parse", reviewed + "^{tree}"), git("rev-parse", head + "^{tree}"))
+            ctx = module.evidence_context(wt, head, "main", "origin")
+            self.assertFalse(module.review_covers_head(ctx, reviewed, head, "independent_review"))
+            self.assertIn("base change not carried into HEAD: .agents/skills/x/SKILL.md",
+                          module.stale_detail(ctx, reviewed, review=True))
+            # The same graph merged the ordinary way takes main's file and the review carries.
+            git("reset", "-q", "--hard", reviewed)
+            git("merge", "-q", "--no-edit", "main")
+            head = git("rev-parse", "HEAD")
+            ctx = module.evidence_context(wt, head, "main", "origin")
+            self.assertTrue(module.review_covers_head(ctx, reviewed, head, "independent_review"))
+
     def test_without_a_context_only_head_receipts_count(self):
         s, e = good()
         e["local_validation"]["tests"][0]["head_sha"] = OLD
