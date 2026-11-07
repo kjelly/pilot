@@ -454,9 +454,27 @@ func TestRegression_IdentityObservationStructure(t *testing.T) {
 			t.Errorf("the observation reads %s without checking that it is defined", reg)
 		}
 	}
-	// Nothing else in the playbook (nor its tasks files) knows the output variable.
+	// Nothing else in the playbook (nor its tasks files) knows the output variable, but the gate of
+	// the mixed run (spec §8.4): the Go engine variable is refused without it, since the Go writes are
+	// not seen by the settle task and the run must be able to say whether it acknowledged them.
+	allowed := map[string]bool{}
+	pre, _ := plays[0]["pre_tasks"].([]any)
+	for _, item := range pre {
+		if m, _ := item.(map[string]any); m["name"] == "Gate: the users/groups engine is ansible or go, and go brings the observation file" {
+			gate, err := yaml.Marshal(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, scalar := range yamlScalars(t, gate) {
+				allowed[scalar] = true
+			}
+		}
+	}
+	if len(allowed) == 0 {
+		t.Error("the mixed run's gate is not among the pre_tasks")
+	}
 	for _, scalar := range yamlScalars(t, raw) {
-		if strings.Contains(scalar, "pilot_identity_auth_cache_output") && !strings.Contains(scalar, "ipa_auth_cache_observe") &&
+		if strings.Contains(scalar, "pilot_identity_auth_cache_output") && !strings.Contains(scalar, "ipa_auth_cache_observe") && !allowed[scalar] &&
 			scalar != "pilot_identity_auth_cache_output is defined" && scalar != "{{ pilot_identity_auth_cache_output }}" {
 			t.Errorf("a scalar of the identity playbook mentions the output variable outside the observation: %q", scalar)
 		}

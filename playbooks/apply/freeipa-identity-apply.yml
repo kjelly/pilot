@@ -857,6 +857,32 @@
       when: stage == 'prod'
       tags: [always]
 
+    # The mixed run of `pilot reconcile --engine golang --scope full` (spec 2026-11-06
+    # phase 2, section 8.4): pilot writes the users and groups itself, through the Go
+    # engine, and hands this playbook `-e pilot_identity_users_groups_engine=go` so that
+    # the tasks of those two sections below are skipped (every one of them has the same
+    # `when`; the SSH key block between them is not skipped: Go only reads keys). It is an
+    # `-e` variable on purpose, never an inventory one: a group_vars line would switch
+    # users and groups off in every run of this playbook without a word, and a contract
+    # input or an example file naming it fails a test. `go` always comes with the
+    # observation file (pilot_identity_auth_cache_output): the Go writes are not seen by
+    # the settle task below, so the run must say whether it acknowledged the obligation
+    # the entry recorded, and a run that cannot is refused before anything changes.
+    - name: "Gate: the users/groups engine is ansible or go, and go brings the observation file"
+      ansible.builtin.assert:
+        that:
+          - pilot_identity_users_groups_engine | default('ansible') in ['ansible', 'go']
+          - >-
+            pilot_identity_users_groups_engine | default('ansible') != 'go'
+            or (pilot_identity_auth_cache_output | default('') | string | length > 0)
+        fail_msg: >-
+          pilot_identity_users_groups_engine must be ansible (the default) or go, and go is only
+          for a run that is handed pilot_identity_auth_cache_output, which
+          `pilot reconcile --engine golang --scope full` does: without the observation file the
+          run cannot say whether the authorization cache obligation was settled, and the users
+          and groups would be skipped with nobody to write them.
+      tags: [always]
+
   tasks:
     # Every task below runs with the admin ticket in a private cache, destroyed
     # in always: on success, failure and any --tags (issue #69). Before, it went
@@ -962,6 +988,13 @@
           tags: [freeipa_host_absent_inspect]
 
         # ── Groups ─────────────────────────────────────────────────────────
+        # Every task from here to "Gate: every password this run set was accepted", and
+        # again from "Ensure user group membership" to "Delete canonical groups explicitly
+        # marked absent", is skipped when pilot_identity_users_groups_engine is `go`: the
+        # Go engine of a mixed run (pilot reconcile --engine golang --scope full) has
+        # already written the users and groups. The SSH key block between them is not.
+        # A task added in either range needs the same `when`
+        # (TestRegression_IdentityUsersGroupsEngineGuard).
         # One listing replaces a `group-add` per group on reruns, the same way
         # and for the same reasons as the user listings below. Groups missing
         # from it still get `group-add`; private user groups are not listed and
@@ -975,6 +1008,7 @@
             ipa_group_find_all.rc != 0
             or 'Search result has been truncated' in (ipa_group_find_all.stderr | default(''))
           check_mode: false
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, groups, C11, C12]
 
         - name: "Index the existing IPA groups"
@@ -982,6 +1016,7 @@
             ipa_existing_groups: >-
               {{ ipa_group_find_all.stdout_lines | select('match', '^  Group name: ')
                  | map('regex_replace', '^  Group name: ', '') | map('trim') | map('lower') | list }}
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, groups, C11, C12]
 
         - name: "Gate: the group listing was parsed completely"
@@ -994,6 +1029,7 @@
               `ipa group-find` printed a listing this playbook cannot parse: it parsed
               {{ ipa_existing_groups | length }} groups, but the listing ends with
               {{ ipa_group_find_all.stdout_lines[-2:] }}.
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, groups, C11, C12]
 
         - name: "Ensure IPA groups exist"
@@ -1013,7 +1049,9 @@
           failed_when:
             - ipa_group_add.rc != 0
             - "'already exists' not in (ipa_group_add.stderr | default(''))"
-          when: (item.name | lower) not in ipa_existing_groups
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - (item.name | lower) not in ipa_existing_groups
           tags: [identity, groups, C11, C12]
 
         # `group-add` above no-ops on "already exists" — an already-created
@@ -1035,6 +1073,7 @@
           failed_when:
             - ipa_group_mod.rc != 0
             - "'no modifications to be performed' not in (ipa_group_mod.stderr | default(''))"
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, groups, C11, C12]
 
         # Every applied group gets a durable, deterministic history marker
@@ -1054,6 +1093,7 @@
             label: "{{ pilot_group_history_loop_item.name }}"
           vars:
             pilot_group_history_name: "{{ pilot_group_history_loop_item.name }}"
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, groups]
 
         # ── Users ──────────────────────────────────────────────────────────
@@ -1075,6 +1115,7 @@
             ipa_user_find_all.rc != 0
             or 'Search result has been truncated' in (ipa_user_find_all.stderr | default(''))
           check_mode: false
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, users, C9, C10]
 
         - name: "List disabled IPA users"
@@ -1087,6 +1128,7 @@
              and 'Number of entries returned 0' not in (ipa_user_find_disabled.stdout | default('')))
             or 'Search result has been truncated' in (ipa_user_find_disabled.stderr | default(''))
           check_mode: false
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, users, C9, C10]
 
         - name: "Index the existing and the disabled IPA users"
@@ -1097,6 +1139,7 @@
             ipa_disabled_users: >-
               {{ ipa_user_find_disabled.stdout_lines | select('match', '^  User login: ')
                  | map('regex_replace', '^  User login: ', '') | map('trim') | map('lower') | list }}
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, users, C9, C10]
 
         # A listing the parser does not understand (another output format or
@@ -1117,6 +1160,7 @@
               {{ ipa_existing_users | length }} users and {{ ipa_disabled_users | length }}
               disabled users, but the listings end with
               {{ ipa_user_find_all.stdout_lines[-2:] }} and {{ ipa_user_find_disabled.stdout_lines[-2:] }}.
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, users, C9, C10]
 
         - name: "Ensure IPA users exist"
@@ -1145,7 +1189,9 @@
           failed_when:
             - ipa_user_add.rc != 0
             - "'already exists' not in (ipa_user_add.stderr | default(''))"
-          when: (item.name | lower) not in ipa_existing_users
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - (item.name | lower) not in ipa_existing_users
           tags: [identity, users, C9, C10]
 
         # `user-add` above no-ops on "already exists" — an already-created
@@ -1178,6 +1224,7 @@
           failed_when:
             - ipa_user_mod.rc != 0
             - "'no modifications to be performed' not in (ipa_user_mod.stderr | default(''))"
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, users, C9, C10]
 
         # Password semantics follow the roster schema (freeipa-config.md §6.4):
@@ -1218,12 +1265,14 @@
           changed_when: false
           failed_when: false
           no_log: true
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, users, passwords]
 
         - name: "Start the password action accumulators"
           ansible.builtin.set_fact:
             ipa_pwd_actions: {}
             ipa_pwd_lookup_failures: []
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, users, passwords]
 
         # A lookup that failed says nothing about the account; reading it as "no
@@ -1252,7 +1301,9 @@
           loop: "{{ ipa_pwd_state.results }}"
           loop_control:
             label: "{{ item.item.name | default('n/a') }}"
-          when: not (item.skipped | default(false))
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - not (item.skipped | default(false))
           no_log: true
           tags: [identity, users, passwords]
 
@@ -1264,6 +1315,7 @@
               ipa user-show failed for {{ ipa_pwd_lookup_failures | join(', ') }}.
               No password was set: a failed lookup must not be taken for an
               account without a password.
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, users, passwords]
 
         - name: "Set password for users that need one (first-time onboard, or requested reset)"
@@ -1303,7 +1355,9 @@
           loop: "{{ ipa_active_users | selectattr('password', 'defined') | rejectattr('password', 'none') | list }}"
           loop_control:
             label: "{{ item.name }}"
-          when: (ipa_pwd_actions | default({})).get(item.name, 'none') in ['initialize', 'reset']
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - (ipa_pwd_actions | default({})).get(item.name, 'none') in ['initialize', 'reset']
           register: ipa_passwd
           changed_when: ipa_passwd.rc == 0
           # Not failed here: no_log would hide which user failed. The gate below
@@ -1325,6 +1379,7 @@
               {{ r.stderr_lines | default([]) | select('match', 'ipa: ERROR:') | join(' ') }}){{ '; ' if not loop.last }}{% endfor %}
           vars:
             ipa_passwd_failed: "{{ (ipa_passwd.results | default([])) | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | list }}"
+          when: pilot_identity_users_groups_engine | default('ansible') != 'go'
           tags: [identity, users, passwords]
 
         # SSH public keys are declarative: user-mod REPLACES the whole ipaSshPubKey
@@ -1501,7 +1556,9 @@
           failed_when:
             - ipa_grp_member.rc != 0
             - "'already a member' not in (ipa_grp_member.stdout | default('') + ipa_grp_member.stderr | default(''))"
-          when: freeipa_roster.schema_version is not defined
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - freeipa_roster.schema_version is not defined
           tags: [identity, users, groups, C11]
 
         # `group-add-member` above only ever adds — a user removed from their
@@ -1523,7 +1580,9 @@
           register: ipa_user_show
           changed_when: false
           failed_when: ipa_user_show.rc != 0
-          when: freeipa_roster.schema_version is not defined
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - freeipa_roster.schema_version is not defined
           tags: [identity, users, groups]
 
         - name: "Compute stale group memberships to remove"
@@ -1539,6 +1598,7 @@
           loop_control:
             label: "{{ item.item.name | default('n/a') }}"
           when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
             - freeipa_roster.schema_version is not defined
             - not (item.skipped | default(false))
           tags: [identity, users, groups]
@@ -1557,7 +1617,9 @@
           changed_when: "'Number of members removed 1' in (ipa_grp_removal.stdout | default(''))"
           failed_when:
             - ipa_grp_removal.rc != 0
-          when: freeipa_roster.schema_version is not defined
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - freeipa_roster.schema_version is not defined
           tags: [identity, users, groups]
 
         - name: "Look up canonical group direct membership"
@@ -1569,7 +1631,9 @@
           register: canonical_group_show
           changed_when: false
           failed_when: canonical_group_show.rc != 0
-          when: freeipa_roster.schema_version is defined
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - freeipa_roster.schema_version is defined
           tags: [identity, users, groups]
 
         - name: "Compute stale canonical group membership"
@@ -1595,6 +1659,7 @@
           loop_control:
             label: "{{ item.item.name | default('n/a') }}"
           when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
             - freeipa_roster.schema_version is defined
             - not (item.skipped | default(false))
             - (item.item.membership | default({})).authoritative | default(true) | bool
@@ -1609,7 +1674,9 @@
         - name: "Start the canonical group member index"
           ansible.builtin.set_fact:
             canonical_group_live_members: {}
-          when: freeipa_roster.schema_version is defined
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - freeipa_roster.schema_version is defined
           tags: [identity, users, groups]
 
         - name: "Index canonical group direct members"
@@ -1628,6 +1695,7 @@
           loop_control:
             label: "{{ item.item.name | default('n/a') }}"
           when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
             - freeipa_roster.schema_version is defined
             - not (item.skipped | default(false))
           tags: [identity, users, groups]
@@ -1641,7 +1709,9 @@
           register: canonical_group_user_remove
           changed_when: "'Number of members removed 1' in (canonical_group_user_remove.stdout | default(''))"
           failed_when: canonical_group_user_remove.rc != 0
-          when: freeipa_roster.schema_version is defined
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - freeipa_roster.schema_version is defined
           tags: [identity, users, groups]
 
         - name: "Remove stale canonical direct nested groups"
@@ -1653,7 +1723,9 @@
           register: canonical_nested_group_remove
           changed_when: "'Number of members removed 1' in (canonical_nested_group_remove.stdout | default(''))"
           failed_when: canonical_nested_group_remove.rc != 0
-          when: freeipa_roster.schema_version is defined
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - freeipa_roster.schema_version is defined
           tags: [identity, groups, C12]
 
         - name: "Ensure canonical direct user membership"
@@ -1668,6 +1740,7 @@
             - canonical_group_user_add.rc != 0
             - "'already a member' not in (canonical_group_user_add.stdout | default('') + canonical_group_user_add.stderr | default(''))"
           when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
             - freeipa_roster.schema_version is defined
             - >-
               (item.1 | lower) not in
@@ -1686,6 +1759,7 @@
             - canonical_nested_group_add.rc != 0
             - "'already a member' not in (canonical_nested_group_add.stdout | default('') + canonical_nested_group_add.stderr | default(''))"
           when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
             - freeipa_roster.schema_version is defined
             - >-
               (item.1 | lower) not in
@@ -1709,6 +1783,7 @@
           # Skipped when the listings above show the account already in the
           # declared state; users missing from them are always reconciled.
           when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
             - freeipa_roster.schema_version is defined
             - >-
               (item.name | lower) not in ipa_existing_users
@@ -1726,7 +1801,9 @@
           failed_when:
             - canonical_user_delete.rc != 0
             - "'not found' not in (canonical_user_delete.stderr | default(''))"
-          when: freeipa_roster.schema_version is defined
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - freeipa_roster.schema_version is defined
           tags: [identity, users]
 
         # "group not found" means already gone; any other failure stops the run
@@ -1742,7 +1819,9 @@
           failed_when:
             - canonical_group_absent_show.rc != 0
             - "'group not found' not in (canonical_group_absent_show.stderr | default(''))"
-          when: freeipa_roster.schema_version is defined
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - freeipa_roster.schema_version is defined
           tags: [identity, groups]
 
         # A group's history marker must exist BEFORE it is ever deleted
@@ -1763,6 +1842,7 @@
           vars:
             pilot_group_history_name: "{{ pilot_group_history_loop_item.item.name }}"
           when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
             - freeipa_roster.schema_version is defined
             - pilot_group_history_loop_item.rc == 0
           tags: [identity, groups]
@@ -1778,7 +1858,9 @@
           failed_when:
             - canonical_group_delete.rc != 0
             - "'not found' not in (canonical_group_delete.stderr | default(''))"
-          when: freeipa_roster.schema_version is defined
+          when:
+            - pilot_identity_users_groups_engine | default('ansible') != 'go'
+            - freeipa_roster.schema_version is defined
           tags: [identity, groups]
 
         # ── Host groups ────────────────────────────────────────────────────
