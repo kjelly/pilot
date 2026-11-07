@@ -74,7 +74,9 @@ type sinkCall struct{ File, Func, Call string }
 func (c sinkCall) key() string { return c.File + "|" + c.Func + "|" + c.Call }
 
 // scanTerminalSinks finds the calls of terminalSinkCalls in the non-test sources of the scanned
-// packages: a selector call or a function call by one of those names.
+// packages: a selector call or a function call by one of those names, in a function or method or
+// in the initializer of a package-level variable (which is where a function literal assigned to
+// one lives: `var f = func() { ... }`).
 func scanTerminalSinks(t *testing.T, src lockSources) []sinkCall {
 	t.Helper()
 	names := map[string]bool{}
@@ -94,23 +96,10 @@ func scanTerminalSinks(t *testing.T, src lockSources) []sinkCall {
 			continue
 		}
 		file := parseLockSource(t, fset, name, src[name])
-		for _, decl := range file.Decls {
-			fd, ok := decl.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
-				continue
-			}
-			fn := fd.Name.Name
-			if fd.Recv != nil && len(fd.Recv.List) == 1 {
-				typ := fd.Recv.List[0].Type
-				if star, ok := typ.(*ast.StarExpr); ok {
-					typ = star.X
-				}
-				if id, ok := typ.(*ast.Ident); ok {
-					fn = id.Name + "." + fn
-				}
-			}
+		// find records the sink calls inside node, once per call name, under the function's name.
+		find := func(fn string, node ast.Node) {
 			seen := map[string]bool{}
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
+			ast.Inspect(node, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
@@ -128,6 +117,45 @@ func scanTerminalSinks(t *testing.T, src lockSources) []sinkCall {
 				}
 				return true
 			})
+		}
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Body == nil {
+					continue
+				}
+				fn := d.Name.Name
+				if d.Recv != nil && len(d.Recv.List) == 1 {
+					typ := d.Recv.List[0].Type
+					if star, ok := typ.(*ast.StarExpr); ok {
+						typ = star.X
+					}
+					if id, ok := typ.(*ast.Ident); ok {
+						fn = id.Name + "." + fn
+					}
+				}
+				find(fn, d.Body)
+			case *ast.GenDecl:
+				// A package-level variable can hold a function (`var f = func() { ... }`, a table of
+				// handlers, a test seam): a sink called from it is as much a sink as one in a FuncDecl.
+				// It is registered as "var <name>".
+				if d.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range d.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, v := range vs.Values {
+						ident := vs.Names[0]
+						if i < len(vs.Names) {
+							ident = vs.Names[i]
+						}
+						find("var "+ident.Name, v)
+					}
+				}
+			}
 		}
 	}
 	return out
@@ -188,6 +216,11 @@ func TestTerminalSinkRegisterFailsOnWhatItShouldCatch(t *testing.T) {
 		"a new enqueue":     {with("package cmd\nfunc announce(o O) { _, _ = o.EnqueueBatch(ctx, d) }\n"), "announce: calls EnqueueBatch"},
 		"a new result file": {with("package cmd\nfunc writeTheResult(o *outputFile) { _ = commitOutput(o, nil) }\n"), "writeTheResult: calls commitOutput"},
 		"a new flush":       {with("package cmd\nfunc flushNow(d D) { d.FlushWebhooks(ctx, w, o) }\n"), "flushNow: calls FlushWebhooks"},
+		// The scan used to read FuncDecl bodies only: a sink called from a function literal that
+		// a package-level variable holds was never seen.
+		"a sink in a package-level function literal":   {with("package cmd\nvar recordLater = func(w W) { _ = w.AppendEvent(ctx, ev) }\n"), "var recordLater: calls AppendEvent"},
+		"a sink in a literal of a package-level table": {with("package cmd\nvar handlers = map[string]func(O){\"end\": func(o O) { _, _ = o.EnqueueBatch(ctx, d) }}\n"), "var handlers: calls EnqueueBatch"},
+		"a sink in a grouped package-level var":        {with("package cmd\nvar (\n\tquiet = 1\n\tfinish = func(w W) { _ = w.Finish(ctx, fin) }\n)\n"), "var finish: calls Finish"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
