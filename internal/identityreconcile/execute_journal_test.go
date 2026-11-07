@@ -308,18 +308,24 @@ func TestGateRefusesEveryWriteOfTheModelUntilTheEntryIsObserved(t *testing.T) {
 	}
 }
 
-// The executor has no entry point: nothing outside this package and its tests
-// refers to the things that start a run (P2-6 wires them, on purpose, and changes
-// this list then).
-func TestTheExecutorIsNotReachableFromAnyCommand(t *testing.T) {
+// The executor has one entry point: the users-groups apply of the reconcile command (P2-6). Nothing
+// else outside this package and its tests refers to the things that start a run; the mixed path
+// (P2-7) adds its own file here, on purpose, and changes this list then.
+func TestTheExecutorIsReachedOnlyFromTheUsersGroupsApply(t *testing.T) {
 	startsARun := []string{"Execute", "NewGate", "NewAuthCacheEntry", "NewRosterPasswords", "Options"}
+	const entry = "cmd/pilot/cmd/reconcile_golang_apply.go"
 	problems := reachabilityProblems(t, map[string]string{}, startsARun)
-	if len(problems) != 0 {
-		t.Fatalf("the executor is referred to: %v", problems)
+	var want []string
+	for _, n := range startsARun {
+		want = append(want, entry+": identityreconcile."+n)
 	}
-	// The scan sees a reference when there is one.
+	slices.Sort(want)
+	if !slices.Equal(problems, want) {
+		t.Fatalf("the executor is referred to by %v, want exactly %v (the users-groups apply and nothing else)", problems, want)
+	}
+	// The scan sees a reference in any other file, through an import alias too.
 	fake := map[string]string{"cmd/pilot/cmd/x.go": "package cmd\nimport ir \"github.com/kjelly/pilot/internal/identityreconcile\"\nfunc f() { ir.Execute(nil, nil, ir.Options{}) }\n"}
-	if got := reachabilityProblems(t, fake, startsARun); len(got) != 2 {
+	if got := reachabilityProblems(t, fake, startsARun); len(got) != len(want)+2 {
 		t.Fatalf("a reference through an import alias was not found: %v", got)
 	}
 }

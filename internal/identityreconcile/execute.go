@@ -16,10 +16,10 @@ import (
 )
 
 // The Go writer (spec §7). Execute carries out a plan under a lock the run already
-// holds, in the stages of stage.go, and reads the result back. It has no entry
-// point in this change: nothing in cmd calls it (P2-6 wires it into the
-// users-groups scope, P2-7 into the mixed run), and a test fails if anything outside
-// this package does.
+// holds, in the stages of stage.go, and reads the result back. It has one entry
+// point: the users-groups apply of the reconcile command (cmd/pilot/cmd/reconcile_golang_apply.go,
+// P2-6; P2-7 adds the mixed run), and a test fails if any other file outside this package
+// refers to it.
 
 // MaxBatch is the most commands the executor puts in one batch (spec §7.3; the
 // value is a first estimate that the performance work of P2-8 may change, the rest
