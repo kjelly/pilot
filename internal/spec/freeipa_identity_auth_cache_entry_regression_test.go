@@ -292,8 +292,13 @@ func sharedInputsAtRuntime(t *testing.T, entry, identity []byte, setDomain, setJ
 		args = append(args, "-e", string(encoded))
 	}
 	cmd := exec.Command("ansible-playbook", args...)
+	// ANSIBLE_HOME moves ansible's default collection path with it (<home>/collections), and the json stdout callback
+	// of ansible-core 2.19.15 lives in ansible.posix, which CI installs in the user's ~/.ansible/collections: with the
+	// override alone the callback cannot be loaded and ansible-playbook ends with status 1 and no output (CI run
+	// 42360313970). The user's collection directory stays on the path.
 	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False",
-		"ANSIBLE_CACHE_PLUGIN_CONNECTION="+filepath.Join(dir, "factcache"), "ANSIBLE_HOME="+filepath.Join(dir, "home"))
+		"ANSIBLE_CACHE_PLUGIN_CONNECTION="+filepath.Join(dir, "factcache"), "ANSIBLE_HOME="+filepath.Join(dir, "home"),
+		"ANSIBLE_COLLECTIONS_PATH="+usersAnsibleCollectionsPath())
 	out, runErr := cmd.Output()
 	var cb struct {
 		Plays []struct {
@@ -528,4 +533,17 @@ func TestRegression_AuthCacheEntryStructure(t *testing.T) {
 			t.Errorf("play vars declare %s: it is an input and a play var would shadow what the caller passes (AGENTS.md §4.5 point 3)", key)
 		}
 	}
+}
+
+// usersAnsibleCollectionsPath is the collection path a test that moves ANSIBLE_HOME still wants: the one the environment
+// names, then the default directory of the real home (what ansible-galaxy installs into without -p).
+func usersAnsibleCollectionsPath() string {
+	var dirs []string
+	if v := os.Getenv("ANSIBLE_COLLECTIONS_PATH"); v != "" {
+		dirs = append(dirs, v)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".ansible", "collections"))
+	}
+	return strings.Join(dirs, string(os.PathListSeparator))
 }
