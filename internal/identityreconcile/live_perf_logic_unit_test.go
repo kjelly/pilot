@@ -513,17 +513,19 @@ func TestPerfBucketProfile(t *testing.T) {
 // The recap of the profile_tasks callback as ansible-core 2.19.2 with the ansible.posix collection printed it for a
 // three-task play of this lab (PROFILE_TASKS_TASK_OUTPUT_LIMIT=all, descending): the lines that are not task lines (the play recap, the
 // timestamp line, the rule of equals signs) are not read as tasks.
-const realProfileRecap = `PLAY RECAP *********************************************************************
-localhost                  : ok=3    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
-
-
-TASKS RECAP ********************************************************************
-Saturday 07 November 2026  19:41:43 +0800 (0:00:02.021)       0:00:03.420 ***** 
-=============================================================================== 
-Normalize canonical users for the compatibility reconciler -------------- 2.02s
-Attach services to HBAC rules ------------------------------------------- 1.02s
-Gate - canonical user objects are structurally valid -------------------- 0.37s
-`
+var realProfileRecap = strings.Join([]string{
+	"PLAY RECAP *********************************************************************",
+	"localhost                  : ok=3    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   ",
+	"",
+	"",
+	"TASKS RECAP ********************************************************************",
+	"Saturday 07 November 2026  19:41:43 +0800 (0:00:02.021)       0:00:03.420 ***** ",
+	"=============================================================================== ",
+	"Normalize canonical users for the compatibility reconciler -------------- 2.02s",
+	"Attach services to HBAC rules ------------------------------------------- 1.02s",
+	"Gate - canonical user objects are structurally valid -------------------- 0.37s",
+	"",
+}, "\n")
 
 func TestPerfParseProfileTasks(t *testing.T) {
 	got := parseProfileTasks(realProfileRecap)
