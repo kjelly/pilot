@@ -1,0 +1,8 @@
+tampered.rpm:
+    Header V3 RSA/SHA256 Signature, key ID 29111145: OK
+    Header SHA256 digest: OK
+    Header SHA1 digest: OK
+    Payload SHA256 digest: BAD (Expected 810dfee7a8f6fbda87413434c3fe7bd4179e7e7e742f0bf1199f108f437580cf != 46ba4536dcec62045bf48e258b65785e25166714d985457a80afc4ed1dfb2fc7)
+    Payload SHA256 ALT digest: NOTFOUND
+    V3 RSA/SHA256 Signature, key ID 29111145: BAD
+    MD5 digest: BAD (Expected 5ebe47620c7fe4251d98ba30c7f7f271 != 5ad295c22852cb30f0a10e15a1f7551d)

@@ -68,6 +68,15 @@ controller-generated PASS receipt is used.
 
 ## 3. Recovery and limitations
 
+Version contract (Issue #244, part A): the manager apply and C12 fail closed, with a typed reason
+naming the agent ID, when the registry holds an agent that never connected
+(`agent_control -i` shows `Client version: (null)`), an agent on a pre-4.14 release, or an agent newer
+than the manager. Remove the offender with `manage_agents -r <ID>` inside the manager container, or
+upgrade the manager out of band to at least the newest agent; this is the accepted fail-closed skew
+behaviour. A stopped or partial existing stack is also refused (start or repair it first). The apt hold
+and preference protect the agent against ordinary updaters and pilot's own runs, not against an explicit
+`apt-get install wazuh-agent=<version>`.
+
 The apply snapshots managed configuration and narrow ACLs before mutation. The
 ACL transaction records object identities in a private transient `/run` journal.
 Rescue restores ACLs on the captured objects, cleans transaction-inherited grants

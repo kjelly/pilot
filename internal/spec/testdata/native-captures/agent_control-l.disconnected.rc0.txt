@@ -1,0 +1,6 @@
+Wazuh agent_control. List of available agents:
+   ID: 000, Name: wazuh.manager (server), IP: 127.0.0.1, Active/Local
+   ID: 001, Name: wf244-deb, IP: any, Active
+   ID: 002, Name: wf244-el, IP: any, Disconnected
+
+List of agentless devices:

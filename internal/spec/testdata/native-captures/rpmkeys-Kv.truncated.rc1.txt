@@ -1,0 +1,2 @@
+trunc.rpm:
+error: trunc.rpm: signature hdr blob(5492): BAD, read returned 0

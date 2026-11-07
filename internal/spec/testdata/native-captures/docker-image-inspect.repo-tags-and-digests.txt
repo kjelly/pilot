@@ -1,0 +1,6 @@
+/single-node-wazuh.dashboard-1 cfg=wazuh/wazuh-dashboard:4.14.1 img=sha256:ee865c777a39e4de74104edbffda9f79bca7e5ebb447c74356e6bcde82acd885
+[wazuh/wazuh-dashboard:4.14.1] [wazuh/wazuh-dashboard@sha256:ee865c777a39e4de74104edbffda9f79bca7e5ebb447c74356e6bcde82acd885]
+/single-node-wazuh.indexer-1 cfg=wazuh/wazuh-indexer:4.14.1 img=sha256:35542dd4088f78948c1858045a5a385d006b79274005ac0ab2ad13a12d62beac
+[wazuh/wazuh-indexer:4.14.1] [wazuh/wazuh-indexer@sha256:35542dd4088f78948c1858045a5a385d006b79274005ac0ab2ad13a12d62beac]
+/single-node-wazuh.manager-1 cfg=wazuh/wazuh-manager:4.14.1 img=sha256:a6df0df2831ad80d3d390626b1fd1d14fc91429b7196fe9df189d96899209e33
+[wazuh/wazuh-manager:4.14.1] [wazuh/wazuh-manager@sha256:a6df0df2831ad80d3d390626b1fd1d14fc91429b7196fe9df189d96899209e33]
