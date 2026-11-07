@@ -279,7 +279,7 @@ ansible-playbook -i inventory-freeipa.yaml \
 > 沒有「是誰、什麼密碼」。
 
 **pilot 自己的入口會先取 FreeIPA server 的 `/etc/ipa` 遠端鎖**（Phase 2 P2-2 的行為契約；
-這一段是程式碼的行為說明，**還沒有對真實 sshd 實跑驗證**，驗證結果會寫進該 PR 的 evidence
+這一段是程式碼的行為說明，已在 P2-2 的 live arm（L1–L11）對真實 sshd 實跑驗證，結果在該 PR 的 evidence
 record，不在這裡累積）：`pilot deploy`／`pilot reconcile` 選到 freeipa-identity、`pilot access
 reconcile --once`、`pilot access breakglass activate`／`deactivate`、`pilot access drift`／`pilot
 identity drift` 的 `--repair-managed`、`pilot edit` 的 break-glass，都在最後一個確認之後、送出
