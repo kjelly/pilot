@@ -200,6 +200,7 @@ func (d *applyDriver) runAll() {
 	d.runA20(base)
 	d.runA21(base)
 	d.runA22(base)
+	d.runMixed(base, oneUser)
 }
 
 // runA1 makes the baseline: the roster applied by the Ansible engine and acknowledged, the Go
