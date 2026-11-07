@@ -1,0 +1,14 @@
+Wazuh agent_control. Agent information:
+   Agent ID:   002
+   Agent Name: wf244-el
+   IP address: any
+   Status:     Disconnected
+
+   Operating system:    Linux |wf244-el |5.14.0-687.5.3.el9_8.x86_64 |#1 SMP PREEMPT_DYNAMIC Tue May 19 14:53:22 EDT 2026 |x86_64
+   Client version:      Wazuh v4.14.9
+   Configuration hash:  ab73af41699f13fdd81903b5f23d8d00
+   Shared file hash:    e7c5c4c31c37ff20e25ba7c05c17a7e9
+   Last keep alive:     1793895066
+
+   Syscheck last started at:  Thu Nov  5 16:08:54 2026
+   Syscheck last ended at:    Thu Nov  5 16:08:56 2026

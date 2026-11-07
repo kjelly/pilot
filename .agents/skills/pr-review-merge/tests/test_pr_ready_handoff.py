@@ -19,6 +19,9 @@ from gh_runtime import Repo  # noqa: E402
 from review_gate import evaluate as prm_evaluate  # noqa: E402
 import review_gate  # noqa: E402
 from test_gate import Fake, sample  # noqa: E402
+from scan_stub import CleanScan  # noqa: E402
+
+setUpModule, tearDownModule = CleanScan.up, CleanScan.down
 
 MANIFEST = '.github/pr-evidence.json'
 REQUIRES_RECORD = (HERE.parents[3] / MANIFEST).read_bytes()
@@ -56,18 +59,30 @@ def ready_evidence(failing, unresolved, exempt_threads):
 
 
 class HandoffTests(unittest.TestCase):
-    def test_both_workflows_require_latest_base_ancestry(self):
-        for aligned in (True, False):
-            with self.subTest(aligned=aligned):
-                gh = Fake(); gh.ancestor = aligned; gh.Repo = Repo
+    def test_both_workflows_classify_the_live_base_alike(self):
+        # kjelly/pilot#307: what pr-ready lets through to Ready, the merge gate queues for the train;
+        # what it refuses (conflict, overlap), the merge gate drafts.
+        H, B = sample()['head_sha'], sample()['base_sha']
+        for case, ready_ok, decision in (('aligned', True, 'MERGE'), ('train', True, 'MERGE'),
+                                         ('overlap', False, 'DRAFT'), ('conflict', False, 'DRAFT')):
+            with self.subTest(case=case):
+                gh = Fake(); gh.Repo = Repo
+                if case != 'aligned':
+                    gh.ancestor = False
+                    base_files = ['pkg/a.go'] if case == 'overlap' else ['docs/x.md']
+                    gh.compares[(B, H)] = {'files': ['pkg/a.go'], 'merge_base': 'e' * 40, 'ancestor': False}
+                    gh.compares[(H, B)] = {'files': base_files, 'merge_base': 'e' * 40, 'ancestor': False}
+                if case == 'conflict':
+                    gh.v.update(mergeable='CONFLICTING', mergeStateStatus='DIRTY')
                 draft_view = dict(gh.v, isDraft=True)
                 gh.v = draft_view
                 with mock.patch.object(pr_ready, 'merge_gate_modules', return_value=(review_gate, gh)):
                     errors = pr_ready.base_alignment_errors(draft_view, 'acme/demo')
-                self.assertEqual(not aligned, bool(errors))
+                self.assertEqual(not ready_ok, bool(errors), errors)
                 gh.v = dict(gh.v, isDraft=False)
                 result = prm_evaluate(Repo.parse('acme/demo'), 42, sample(), client=gh)
-                self.assertEqual('MERGE' if aligned else 'DRAFT', result['decision'])
+                self.assertEqual(decision, result['decision'], result['reasons'])
+                self.assertEqual(case, result['alignment'])
 
     def states(self):
         """GitHub states a PR can be in when pr-ready runs; this repository has no required checks."""

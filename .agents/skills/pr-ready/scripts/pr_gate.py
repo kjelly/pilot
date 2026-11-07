@@ -19,7 +19,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 sys.dont_write_bytecode = True
 
@@ -47,6 +47,66 @@ def cmd(argv: list[str], *, allow_nonzero_json: bool = False, empty_if: re.Patte
     except json.JSONDecodeError as exc:
         raise GateError(f"Invalid/missing JSON from {argv[0]} (exit {p.returncode}): {(p.stderr or p.stdout).strip()[:700]}") from exc
     return val
+
+
+SECRET_SCAN_PATH = Path(__file__).resolve().parents[2] / "_shared" / "scripts" / "secret_scan.py"
+
+
+def load_secret_scan() -> Any:
+    """The shared secret scanner, loaded by path from the `_shared` bundle directory.
+
+    The module name is shared with issue_gate.py and review_gate.py, so one process loads it once.
+    A scanner that is missing or does not load is a refusal (GateError), never a skipped check.
+    """
+    name = "pilot_secret_scan"
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(name, SECRET_SCAN_PATH)
+    if spec is None or spec.loader is None or not SECRET_SCAN_PATH.is_file():
+        raise GateError(f"the shared secret scanner is missing: {SECRET_SCAN_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # a scanner that does not load must refuse, whatever the reason
+        sys.modules.pop(name, None)
+        raise GateError(f"the shared secret scanner cannot be loaded ({type(exc).__name__})") from None
+    return module
+
+
+def secret_scan_errors(worktree: Path, pr: dict[str, Any], secret_files: Sequence[Path] = (),
+                       cache: dict[tuple[str, str], tuple[list[str], dict[str, Any]]] | None = None
+                       ) -> tuple[list[str], dict[str, Any]]:
+    """Refusal messages and a value-free summary from scanning EVERY commit of baseRefOid..headRefOid.
+
+    The range is named by the PR's own SHAs, never by the checked-out HEAD: Ready may be invoked
+    after the checkout moved back to the starting branch, and the PR head is what gets published.
+    History counts, not just the final diff. `cache` holds one scan per (base, head) so a --wait
+    loop does not re-walk the same commits at every poll; a new head or base is scanned again.
+    """
+    base, head = pr.get("baseRefOid"), pr.get("headRefOid")
+    if not (isinstance(base, str) and SHA.fullmatch(base) and isinstance(head, str) and SHA.fullmatch(head)):
+        return (["Secret scan unavailable: the PR base/head SHA is missing or invalid"], {"status": "ERROR"})
+    key = (base.lower(), head.lower())
+    if cache is not None and key in cache:
+        messages, summary = cache[key]
+        return list(messages), dict(summary)
+    try:
+        scanner = load_secret_scan()
+    except GateError as exc:
+        outcome: tuple[list[str], dict[str, Any]] = ([f"Secret scan unavailable: {exc}"], {"status": "ERROR"})
+    else:
+        try:
+            known = scanner.load_secret_files([str(p) for p in secret_files], worktree)
+        except ValueError as exc:  # SecretScanError
+            outcome = ([f"Secret scan refused its --secret-file input: {exc}"], {"status": "ERROR"})
+        else:
+            result = scanner.scan_range(worktree, key[0], key[1], known=known)
+            outcome = (scanner.refusal_messages(result), result.summary())
+    if cache is not None:
+        cache[key] = outcome
+    return list(outcome[0]), dict(outcome[1])
 
 
 def gh_pr(repo: str, pr: int) -> dict[str, Any]:
@@ -97,7 +157,7 @@ def evidence_context(worktree: Path | None, head: Any, base_name: Any, remote: s
     if module is None:
         return None
     try:
-        return module.Context.load(worktree, head, f"refs/remotes/{remote}/{base_name}")
+        return module.Context.load(worktree, head, f"refs/remotes/{remote}/{base_name}", integrated_base=True)
     except (OSError, RuntimeError, ValueError):
         return None
 
@@ -107,11 +167,25 @@ def covers_head(ctx: Any, value: Any, sha: Any, label: str) -> bool:
     return value == sha or (ctx is not None and ctx.accepts(value, label))
 
 
-def stale_detail(ctx: Any, value: Any) -> str:
+def review_covers_head(ctx: Any, value: Any, sha: Any, label: str) -> bool:
+    """A review (never a check receipt) taken at `value` covers HEAD: `covers_head`, or every
+    change since is evidence-only or a pure import of the base manifest's non_execution_paths.
+    Check receipts stay on `covers_head`: imported test files must run against the PR's code."""
+    if value == sha:
+        return True
+    if ctx is None:
+        return False
+    try:
+        return ctx.accepts_review(value, label)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def stale_detail(ctx: Any, value: Any, *, review: bool = False) -> str:
     if ctx is None or not isinstance(value, str):
         return ""
     try:
-        return " (" + ctx.stale_reason(value) + ")"
+        return " (" + (ctx.review_stale_reason(value) if review else ctx.stale_reason(value)) + ")"
     except (OSError, RuntimeError, ValueError):
         return ""
 
@@ -136,30 +210,52 @@ def merge_gate_modules() -> tuple[Any, Any]:
         sys.path.pop(0)
 
 
-def base_alignment_errors(pr: dict[str, Any], repo: str) -> list[str]:
-    """Ready and merge use the same live-base ancestry requirement."""
+def base_alignment(pr: dict[str, Any], repo: str) -> tuple[list[str], list[str]]:
+    """(errors, pending) for the live base, by the merge gate's own classifier (kjelly/pilot#307).
+
+    A PR need not contain the live base tip to become Ready: the merge train integrates it. What
+    must hold is that the train can: GitHub's test merge against the live base is clean and no file
+    changed on both sides since the merge base. A conflict or an overlap is an error (integrate the
+    base here and re-review); mergeability GitHub has not computed yet is pending.
+    """
     try:
         module, client = merge_gate_modules()
-        result = module.check_base_alignment(client, client.Repo.parse(repo), pr["number"], pr)
-        if result["base_mismatch"]:
-            return [f"PR Base SHA {pr['baseRefOid']} differs from live {pr['baseRefName']} SHA {result['live_base_sha']}"]
-        if result["base_behind"]:
-            return [f"PR HEAD {pr['headRefOid']} does not include live {pr['baseRefName']} SHA "
-                    f"{result['live_base_sha']}; integrate the latest base and rerun validation/CI and independent review"]
-        return []
+        result = module.train_alignment(client, client.Repo.parse(repo), pr["number"], pr)
     except (ImportError, OSError, ValueError, KeyError, RuntimeError) as exc:
-        return [f"Base alignment verification unavailable: {exc}"]
+        return [f"Base alignment verification unavailable: {exc}"], []
+    head, name, live = pr.get("headRefOid"), pr.get("baseRefName"), result["live_base_sha"]
+    kind = result["alignment"]
+    if kind == "conflict":
+        return [f"PR HEAD {head} does not include live {name} SHA {live} and GitHub reports a merge conflict "
+                "with it; integrate the latest base and rerun validation/CI and independent review"], []
+    if kind == "overlap":
+        return [f"PR HEAD {head} does not include live {name} SHA {live} and both sides changed "
+                + ", ".join(result["overlap"][:5]) + "; integrate the latest base and rerun validation/CI "
+                "and independent review"], []
+    if kind == "unknown":
+        return [], [f"Merge-train alignment against live {name} SHA {live} not known yet: "
+                    + result.get("alignment_detail", "unknown")]
+    return [], []
+
+
+def base_alignment_errors(pr: dict[str, Any], repo: str) -> list[str]:
+    errors, pending = base_alignment(pr, repo)
+    return errors + pending
 
 
 def target_evidence_errors(pr: dict[str, Any], evidence: dict[str, Any], repo: str) -> list[str]:
     """Use the same base-manifest/target-run verifier as the final merge gate."""
     try:
         module, gh_runtime = merge_gate_modules()
-        head, base = pr.get("headRefOid"), pr.get("baseRefOid")
-        if not isinstance(head, str) or not SHA.fullmatch(head) or not isinstance(base, str) or not SHA.fullmatch(base):
+        head = pr.get("headRefOid")
+        if not isinstance(head, str) or not SHA.fullmatch(head):
             return ["Current HEAD/base SHA unavailable for target evidence validation"]
-        gaps, _ = module.check_target_validation(gh_runtime, gh_runtime.Repo.parse(repo), head, base, evidence,
-                                                base_name=pr.get("baseRefName"))
+        # The policy is read at the live base and reuse imports from the base HEAD contains: the merge
+        # train integrates the live tip later (kjelly/pilot#307).
+        client_repo = gh_runtime.Repo.parse(repo)
+        base = gh_runtime.branch_head(client_repo, pr.get("baseRefName"))
+        gaps, _ = module.check_target_validation(gh_runtime, client_repo, head, base, evidence,
+                                                base_name=pr.get("baseRefName"), integrated_base=True)
         return gaps
     except (ImportError, OSError, ValueError, KeyError, RuntimeError) as exc:
         return [f"Target evidence validation unavailable: {exc}"]
@@ -713,7 +809,9 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
         errs.append("GitHub PR head SHA unavailable/invalid")
     if not isinstance(pr.get("headRefName"), str) or not pr["headRefName"]:
         errs.append("GitHub PR head branch unknown")
-    if pr.get("mergeable") != "MERGEABLE":
+    # A conflict is an error; mergeability GitHub has not computed yet (it recomputes after main
+    # moves) is pending in wait mode: base_alignment() reports it.
+    if pr.get("mergeable") == "CONFLICTING" or (pr.get("mergeable") != "MERGEABLE" and not allow_pending):
         errs.append(f"Mergeability not confirmed clean: {pr.get('mergeable')}")
     # Do not block merely because a human CHANGES_REQUESTED review remains:
     # technical comments may have been addressed, while human re-approval is
@@ -743,8 +841,9 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
     else:
         if r.get("agent") != "pr-reviewer":
             errs.append("Independent pr-reviewer agent is not identified")
-        if not covers_head(ctx, r.get("head_sha"), sha, "independent_review"):
-            errs.append("Independent reviewer result stale for current HEAD" + stale_detail(ctx, r.get("head_sha")))
+        if not review_covers_head(ctx, r.get("head_sha"), sha, "independent_review"):
+            errs.append("Independent reviewer result stale for current HEAD"
+                        + stale_detail(ctx, r.get("head_sha"), review=True))
         if r.get("status") != "PASS" or r.get("blocking_findings") != []:
             errs.append("Independent review has not passed / still has blocking findings")
         if not isinstance(r.get("report"), str) or len(r["report"].strip()) < 12:
@@ -900,18 +999,21 @@ class WaitPins:
     reviews: str
     artifacts: dict[str, tuple[str, str]]
     base: str | None
+    base_sha: str | None = None  # PR Base SHA when the wait started; reported, not pinned
 
     @classmethod
     def capture(cls, s: Snapshot, evidence_path: Path, evidence: dict[str, Any],
                 root: Path, remote: str) -> WaitPins:
-        keys = ("number", "url", "headRefOid", "headRefName", "baseRefOid", "baseRefName", "title", "body")
+        # baseRefOid is not pinned: main advancing during the wait no longer blocks Ready (the merge
+        # train integrates it); base_alignment() re-classifies the live base on every poll.
+        keys = ("number", "url", "headRefOid", "headRefName", "baseRefName", "title", "body")
         if any(not isinstance(s.pr.get(key), str) for key in keys if key != "number"):
             raise GateError("Wait requires complete PR identity/title/body")
         if not SHA.fullmatch(s.pr["baseRefOid"]):
             raise GateError("Wait requires a valid base SHA")
         return cls({key: s.pr[key] for key in keys}, review_pin(s),
                    artifact_pins(evidence_path, evidence, root, s.pr["headRefOid"]),
-                   fetched_base(root, remote, s.pr["baseRefName"]))
+                   fetched_base(root, remote, s.pr["baseRefName"]), s.pr["baseRefOid"])
 
     def verify(self, s: Snapshot, evidence_path: Path, evidence: dict[str, Any],
                root: Path, remote: str) -> list[str]:
@@ -946,7 +1048,12 @@ def main() -> int:
     parser.add_argument("--repo", required=True, help="OWNER/REPO")
     parser.add_argument("--pr", type=int, required=True, help="Existing PR number")
     parser.add_argument("--evidence", type=Path, required=True, help="HEAD-specific evidence JSON")
-    parser.add_argument("--worktree", type=Path, help="Original PR-branch worktree; verify clean and HEAD")
+    parser.add_argument("--worktree", type=Path, required=True,
+                        help="Original PR-branch worktree: verified clean and on the PR head, and the repository whose "
+                             "commits are scanned for secrets (baseRefOid..headRefOid, every commit)")
+    parser.add_argument("--secret-file", action="append", default=[], type=Path, metavar="FILE",
+                        help="File OUTSIDE the repository with one secret value per line (8+ bytes each) that must "
+                             "appear in no commit, message or path of the PR. Repeatable. Values are never printed.")
     parser.add_argument("--ready", action="store_true", help="Execute 'gh pr ready' only after all gates pass")
     parser.add_argument("--restore-sha", help="Restore this verified starting commit before Ready; abort on restore failure")
     parser.add_argument("--restore-branch", help="Starting branch to restore (omit for a detached start)")
@@ -959,8 +1066,6 @@ def main() -> int:
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repo) or args.pr <= 0:
         parser.error("--repo must be OWNER/REPO and --pr must be positive")
-    if (args.ready or args.wait) and not args.worktree:
-        parser.error("--ready/--wait requires --worktree to verify branch/clean tree")
     if args.restore_branch is not None and not args.restore_sha:
         parser.error("--restore-branch requires --restore-sha")
     if args.restore_sha is not None and (not args.ready or not SHA.fullmatch(args.restore_sha)):
@@ -978,6 +1083,8 @@ def main() -> int:
     restored_local = None
     handlers = {}
     workflows = WorkflowHistory() if args.wait else None
+    scans: dict[tuple[str, str], tuple[list[str], dict[str, Any]]] = {}
+    scan_summary: dict[str, Any] = {}
 
     def emit(result: dict[str, Any]) -> None:
         if status_path is not None:
@@ -989,7 +1096,7 @@ def main() -> int:
                 result["head_sha"] = pins.identity["headRefOid"]
                 result["pinned_artifacts"] = pins.artifacts
                 result["pinned_branch"] = pins.identity["headRefName"]
-                result["pinned_base_sha"] = pins.identity["baseRefOid"]
+                result["base_sha_at_start"] = pins.base_sha
                 result["pinned_fetched_base"] = pins.base
                 result["pinned_review_sha256"] = hashlib.sha256(pins.reviews.encode()).hexdigest()
                 result["pinned_pr_sha256"] = hashlib.sha256(json.dumps(pins.identity, sort_keys=True).encode()).hexdigest()
@@ -1017,7 +1124,7 @@ def main() -> int:
         conversation = args.wait or bool(args.restore_sha) or bool(evidence.get("disputed_review_comments"))
 
         def inspect(snapshot: Snapshot) -> tuple[list[str], list[str], list[Any]]:
-            local = check_local(args.worktree) if args.worktree else None
+            local = check_local(args.worktree)
             ctx = evidence_context(args.worktree, snapshot.pr.get("headRefOid"), snapshot.pr.get("baseRefName"),
                                    args.base_remote)
             errors = evaluate(snapshot, evidence, repo=args.repo, number=args.pr,
@@ -1026,6 +1133,10 @@ def main() -> int:
             if restored_local is not None and local != restored_local:
                 errors.append("Restored checkout changed before Ready transition")
             errors.extend(target_evidence_errors(snapshot.pr, evidence, args.repo))
+            scan_errors, summary = secret_scan_errors(args.worktree, snapshot.pr, args.secret_file, scans)
+            scan_summary.clear()
+            scan_summary.update(summary)
+            errors.extend(scan_errors)
             pending = classify_ci(snapshot, evidence).pending
             if workflows is not None:
                 lifecycle = workflows.inspect(snapshot, args.repo)
@@ -1033,7 +1144,11 @@ def main() -> int:
                 pending.extend(lifecycle.pending)
             if pins is not None:
                 errors.extend(pins.verify(snapshot, args.evidence, evidence, args.worktree, args.base_remote))
-            errors.extend(base_alignment_errors(snapshot.pr, args.repo))
+            align_errors, align_pending = base_alignment(snapshot.pr, args.repo)
+            errors.extend(align_errors)
+            pending.extend(align_pending)
+            if snapshot.pr.get("mergeable") not in ("MERGEABLE", "CONFLICTING"):
+                pending.append(f"GitHub mergeability not computed yet: {snapshot.pr.get('mergeable')}")
             return errors, pending, list(ctx.accepted) if ctx is not None else []
 
         while True:
@@ -1053,6 +1168,7 @@ def main() -> int:
             if not pending and not args.ready:
                 emit({"status": "GATE-PASS", "pr": before.pr.get("url"),
                       "head_sha": before.pr.get("headRefOid"), "receipt_reuse": reuse,
+                      "secret_scan": dict(scan_summary),
                       "message": "Use --ready after final review to transition Draft -> Ready for Review"})
                 return 0
             if not pending:
@@ -1095,7 +1211,7 @@ def main() -> int:
                     after_pr = after.pr if after is not None else gh_pr(args.repo, args.pr)
                     if after_pr.get("isDraft") is not False or after_pr.get("headRefOid") != evidence["head_sha"]:
                         raise GateError("PR state/HEAD changed during Ready transition; status requires reevaluation")
-                    alignment_errors = base_alignment_errors(after_pr, args.repo)
+                    alignment_errors = base_alignment(after_pr, args.repo)[0]
                     if alignment_errors:
                         raise GateError("Ready invoked but post-action verification failed: " + "; ".join(alignment_errors))
                     if pins is not None:
@@ -1112,7 +1228,7 @@ def main() -> int:
                         if errors:
                             raise GateError("Ready invoked but post-action verification failed: " + "; ".join(errors))
                     emit({"status": "READY", "pr": after_pr.get("url"), "head_sha": after_pr["headRefOid"],
-                          "receipt_reuse": reuse, "message": "Ready for Review; no merge performed"})
+                          "receipt_reuse": reuse, "secret_scan": dict(scan_summary), "message": "Ready for Review; no merge performed"})
                     return 0
             if not args.wait:
                 # inspect() normally rejects pending outside wait mode.

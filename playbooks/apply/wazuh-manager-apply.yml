@@ -42,6 +42,12 @@
 #   siem_forward_port      default: 514
 #   wazuh_docker_version   default: "4.14.1" (official wazuh-docker tag,
 #                           also pins the three official image tags)
+#   wazuh_version          optional — the same release expressed as the common
+#                           release shared with the wazuh-fim agents; it must not
+#                           differ from an explicit wazuh_docker_version. A fresh
+#                           install pins exactly this release. Changing it on an
+#                           existing stack is a typed refusal that changes nothing:
+#                           this playbook does not upgrade or downgrade a stack.
 #
 # Stage gating (same convention as freeipa-server-apply.yml):
 #   sandbox  default; runs immediately
@@ -106,6 +112,16 @@
       when: stage == 'prod'
       tags: [always]
 
+    - name: "Gate: common and legacy Wazuh release inputs agree"
+      ansible.builtin.assert:
+        that:
+          - >-
+            (wazuh_version | default('') | string | length == 0)
+            or (wazuh_docker_version | default('') | string | length == 0)
+            or (wazuh_version | string) == (wazuh_docker_version | string)
+        fail_msg: "wazuh_version conflicts with wazuh_docker_version; set one release"
+      tags: [always]
+
     # Values an operator may set in group_vars/host_vars (contract groupVars,
     # group_vars/<role>.example.yml). They are defaulted here instead of in
     # the play's vars:, which outrank group_vars/host_vars and silently
@@ -135,7 +151,7 @@
       ansible.builtin.set_fact:
         # Empty or null falls back to 514, as in audit-log-forwarding-apply.yml.
         siem_forward_port: "{{ siem_forward_port | default('514', true) }}"
-        wazuh_docker_version: "{{ wazuh_docker_version | default('4.14.1') }}"
+        wazuh_docker_version: "{{ wazuh_docker_version | default(wazuh_version | default('4.14.1', true), true) }}"
         siem_forward_transport: "{{ siem_forward_transport | default('tcp') }}"
         siem_relp_port: "{{ siem_relp_port | default(20514) }}"
       tags: [always]
@@ -226,6 +242,13 @@
         wazuh_heartbeat_preflight: {skipped: true}
       tags: [always]
 
+    - name: "Gate: the effective Wazuh release is an exact stable 4.14.x"
+      ansible.builtin.assert:
+        that:
+          - (wazuh_docker_version | string) is match('^4[.]14[.](0|[1-9][0-9]*)$')
+        fail_msg: "The Wazuh release must be an exact stable 4.14.x (wazuh_version / wazuh_docker_version)."
+      tags: [always]
+
     # Same fail-early gate as keycloak-db-apply.yml — a missing docker
     # engine should fail here with a clear message, not five tasks later
     # inside the compose module.
@@ -233,6 +256,7 @@
       ansible.builtin.command: docker info
       register: docker_pre
       changed_when: false
+      tags: [always]
       # check_mode: false makes this run for real even under --check, so a
       # missing engine fails here with a clear message instead of five tasks
       # later inside the compose module — but on a from-scratch host being
@@ -242,6 +266,55 @@
       # mandatory check-mode gate.
       failed_when: docker_pre.rc != 0 and not ansible_check_mode
       check_mode: false
+
+    # An existing central stack must already run the requested release; the
+    # coordinator reads the native effective releases, the registered agents'
+    # releases and the stack's health, and refuses ANY release change (and an
+    # agent newer than the manager) with a typed reason, before this playbook
+    # touches the stack. Its output is secret-free, so it is shown on failure.
+    # Absent a stack (or a docker engine that a check-mode preview of a fresh host
+    # has not installed yet) it reports a fresh install, which pins the requested release.
+    - name: "Gate: an existing Wazuh central stack already runs the requested release"
+      ansible.builtin.script:
+        cmd: >-
+          files/wazuh-transaction.py central --version {{ wazuh_version | default('') | quote }}
+          --legacy {{ wazuh_docker_version | quote }}
+        executable: python3
+      register: wazuh_central_gate
+      changed_when: false
+      check_mode: false
+      when: docker_pre.rc == 0
+      tags: [always]
+
+    - name: "Reset this play's selected manager installation plan"
+      ansible.builtin.set_fact:
+        pilot_wazuh_manager_install_planned: false
+      tags: [always]
+
+    - name: "Mark this run's selected Wazuh manager installation plan"
+      ansible.builtin.set_fact:
+        pilot_wazuh_manager_install_planned: true
+      tags: [C1, C2, C3]
+
+    # Read by the wazuh-fim play of the same run (hostvars) to defer observing a
+    # manager that this check-mode run only previews.
+    - name: "Record whether this check-mode preview covers a fresh central stack"
+      ansible.builtin.set_fact:
+        pilot_wazuh_manager_preview_fresh: >-
+          {{ ansible_check_mode and
+             ((wazuh_central_gate is skipped) or
+              ((wazuh_central_gate.stdout | default('{}') | from_json).fresh | default(false))) }}
+      tags: [always]
+
+    - name: "Gate: a fresh central stack requires selected container installation tasks"
+      ansible.builtin.assert:
+        that:
+          - pilot_wazuh_manager_install_planned is defined and pilot_wazuh_manager_install_planned
+        fail_msg: "Fresh Wazuh central tasks require C1/C2/C3 container installation to be selected"
+      when:
+        - not (wazuh_central_gate is skipped)
+        - (wazuh_central_gate.stdout | from_json).fresh | default(false)
+      tags: [always]
 
     - name: "Wazuh: install native RELP preflight prerequisites before configuration changes"
       tags: [C10, C11]
@@ -626,3 +699,21 @@
             - wazuh_acl_journal is defined
             - wazuh_acl_journal.path is defined
             - wazuh_acl_journal_committed | default(false) | bool or (wazuh_acl_restore_result.rc | default(-1)) == 0
+
+    # Outside the block on purpose: a failing native verification must fail the
+    # run without the rescue above recreating a stack that is itself fine.
+    - name: "Install the root-owned Wazuh coordinator used by C12"
+      tags: [C12]
+      ansible.builtin.copy:
+        src: files/wazuh-transaction.py
+        dest: /usr/local/sbin/pilot-wazuh-transaction
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: "Verify native releases, retained-agent compatibility and readiness (spec C12)"
+      tags: [C12]
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/pilot-wazuh-transaction, central-verify]
+      changed_when: false
+      when: not ansible_check_mode

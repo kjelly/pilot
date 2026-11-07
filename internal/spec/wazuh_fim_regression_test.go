@@ -2,12 +2,53 @@ package spec
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
+func TestRegression_WazuhFimC1InstalledSelectionStates(t *testing.T) {
+	s, err := Parse("../../docs/verification/wazuh-fim.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := ""
+	for _, row := range s.Rows {
+		if row.ID == "C1" {
+			command = row.Command
+		}
+	}
+	if command == "" {
+		t.Fatal("missing C1 command")
+	}
+	directory := t.TempDir()
+	grep, err := exec.LookPath("grep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(grep, filepath.Join(directory, "grep")); err != nil {
+		t.Fatal(err)
+	}
+	query := "#!/bin/sh\nprintf '%s\\n' \"$PILOT_DPKG_STATE\"\n"
+	if err := os.WriteFile(filepath.Join(directory, "dpkg-query"), []byte(query), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"install ok installed", "hold ok installed", "hold ok config-files", "deinstall ok installed", "install reinstreq half-installed", ""} {
+		t.Run(state, func(t *testing.T) {
+			cmd := exec.Command("/bin/sh", "-c", command)
+			cmd.Env = []string{"PATH=" + directory, "PILOT_DPKG_STATE=" + state}
+			err := cmd.Run()
+			wantInstalled := state == "install ok installed" || state == "hold ok installed"
+			if (err == nil) != wantInstalled {
+				t.Fatalf("C1 installed-state result for %q: %v", state, err)
+			}
+		})
+	}
+}
+
 // TestRegression_WazuhFimSpec locks the structure of
-// docs/verification/wazuh-fim.md (v1.1 — Wazuh agent FIM/syscheck with
+// docs/verification/wazuh-fim.md (v1.3 — Wazuh agent FIM/syscheck with
 // whodata on a per-host-overridable directory list, auditd-backed who-data
 // attribution, optional enrollment against
 // docs/verification/wazuh-manager.md):
@@ -21,6 +62,7 @@ import (
 //	C7      /etc/hosts pins the wazuh-manager alias
 //	C8      <address> in ossec.conf points at the wazuh-manager alias
 //	C9      client.keys populated (agent-auth registration completed)
+//	C10     native/package version equality, exact pin and service availability
 //
 // Cross-row invariants locked below:
 //
@@ -51,7 +93,7 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -83,10 +125,21 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 			t.Errorf("%s package probe must support both EL rpm and Ubuntu dpkg, got %q", id, cmd[id])
 		}
 	}
+	if !strings.Contains(cmd["C1"], "grep -qxE '(install|hold) ok installed'") {
+		t.Errorf("C1 must recognize native held installed packages without accepting incomplete dpkg states: %q", cmd["C1"])
+	}
 
 	// C9 must use the `sh -c '... && echo 0 || echo 1'` form.
 	if !strings.Contains(cmd["C9"], "&& echo 0") || !strings.Contains(cmd["C9"], "|| echo 1") {
 		t.Errorf("C9 must use the `... && echo 0 || echo 1` form, got %q", cmd["C9"])
+	}
+	for _, token := range []string{"agent-verify", "--family", "/etc/debian_version", "/etc/redhat-release", "&& echo 0", "|| echo 1"} {
+		if !strings.Contains(cmd["C10"], token) {
+			t.Errorf("C10 native effective-state probe lacks %q", token)
+		}
+	}
+	if !NeedsBecome(s.Rows[len(s.Rows)-1]) {
+		t.Error("C10 root-only coordinator must execute with verify privilege escalation")
 	}
 
 	// C5 must gate on check_all+whodata attributes together, but must NOT

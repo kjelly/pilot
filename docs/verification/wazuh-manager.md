@@ -1,6 +1,6 @@
 # Verification Spec — wazuh-manager（Wazuh 中央伺服器：FIM/who-data 告警引擎 + CVE 弱點掃描 + 選填轉送 SIEM，Docker 部署）
 
-> 版本：v2.1（Issue #211）
+> 版本：v2.1（Issue #211、Issue #244 A）
 > 對齊規範：pilot 通用 config-only 服務規範；為 `wazuh-fim.md`（agent 端 FIM +
 > auditd who-data）提供中央分析/告警引擎，轉送目標為 `docs/verification/log-server.md`
 > （rsyslog 中央接收端）。三份 spec 搭配構成一組 Shape 3（agent → manager →
@@ -59,6 +59,7 @@
 | `siem_relp_cert_pem` | Client certificate PEM private deployment input | RELP 必填 | 無 |
 | `siem_relp_key_pem` | Client private-key PEM from vault | RELP 必填 | 無 |
 | `wazuh_docker_version` | 官方 `wazuh-docker` 發行包版本（GitHub tag `v<版本>`，同時決定三個官方 image 的 tag） | 否 | `4.14.1`（本 spec 實測版本；見 §7） |
+| `wazuh_version` | 選填的共同 release（與 wazuh-fim agent 共用）；與明示且不同的 `wazuh_docker_version` 衝突時拒絕。新安裝固定該版本；對既有 stack 變更版本一律 typed 拒絕且不改動任何東西 | 否 | 未設定（沿用 `wazuh_docker_version`） |
 
 `siem_forward_host` 與 `siem_forward_port` 沿用 audit-log-forwarding 的契約。
 manager 本地告警與 CVE 功能可獨立運作；未指定目的地且 inventory 無 log-server
@@ -98,6 +99,37 @@ transport 設定，**不證明 delivery**。啟用轉送必須同時通過
 
 ## 2. Checklist
 
+### 版本契約（Issue #244，A 部分）
+
+manager、indexer、dashboard 的 Wazuh release 必須完全一致（包含 patch）。manager 讀取
+`wazuh-control info`，dashboard 讀取 Wazuh plugin `package.json`，indexer 讀取原生
+`/usr/share/wazuh-indexer/VERSION.json`；同時檢查 image 的不可變官方 repository digest，不能以
+可變 tag 或底層 OpenSearch 版本代替 Wazuh release。running 本身不證明版本與資料健康。
+
+- 既有 `wazuh_docker_version` 預設 `4.14.1` 不變；共同目標 `wazuh_version` 選填，兩者同時
+  指定必須一致，且只接受 exact stable `4.14.x`。
+- 新安裝（沒有任何 `single-node` Compose project）固定所要求的 release。
+- 既有 stack 在任何 Compose／bundle 變更之前先被原生觀察：release 必須與要求完全相同，
+  否則 typed 拒絕（升級與降級都不在本版範圍，沒有 `wazuh_upgrade`）；缺件、停止、版本混合、
+  無官方 digest、native daemon 或 indexer 不健康的 stack 也 fail closed，不被當成「不存在」。
+  已註冊 agent 的版本若高於 manager（欄位 fleet 的 skew）同樣拒絕，直到 manager 以其他方式
+  升到不低於所有 agent 的版本。這個 gate 唯讀，且被拒絕時 Compose 設定、image 與資料都不變。
+- 已註冊但**從未連線**的 agent（原生 `agent_control -i` rc 0，`Client version: (null)`）、或回報 pre-4.14
+  版本的 agent，沒有可比較的 4.14.x 版本，因此同樣讓 manager 的套用閘門與 C12 fail closed，typed 原因帶出
+  該 agent 的數字 ID（只有 ID，不含名稱或 IP）：`unknown retained agent version in manager registry
+  (agent ID <ID>)`。這是被接受的 skew fail-closed 行為（使用者決定 A4），不是 bug；要解除，在 manager
+  容器內以 `manage_agents -r <ID>` 移除該 agent（`docker exec single-node-wazuh.manager-1
+  /var/ossec/bin/manage_agents -r <ID>`）。已連線但較舊、或已斷線（Disconnected）但仍回報版本的 agent
+  不受影響。
+- dashboard 與 indexer 的 release 各自獨立讀取：dashboard 讀 Wazuh plugin 的 `package.json`（不是
+  OpenSearch Dashboards 的根 `package.json`，其頂層 `version` 是 OpenSearch 版本），indexer 讀
+  `VERSION.json`；任何一個與 manager 不同都 fail closed。
+- 因為 manager 的有效版本是 agent 的相容性上限，wazuh-fim 在動 agent 之前會讀取同一個 native
+  值（見 `wazuh-fim.md`）。
+- C12 是不注入事件的目前狀態原生 oracle：三個 release 相同、所有已註冊 agent 版本不超過
+  manager、native daemon 與 indexer API 健康。它在 apply 的設定區塊之外執行，驗證失敗不會觸發
+  設定 rollback。Compose 設定或 image 的版本變更、備份與回復不在本版範圍。
+
 | ID  | Category  | Check                                                              | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|
 | C1  | container | manager 容器（`single-node-wazuh.manager-1`）為 running                | 0        | sh -c 'docker ps --filter name=wazuh.manager --filter status=running -q | grep -q . && echo 0 || echo 1' |
@@ -111,8 +143,9 @@ transport 設定，**不證明 delivery**。啟用轉送必須同時通過
 | C9  | functional| 規則引擎可比對出一筆已知規則並判定為需告警（`wazuh-logtest` 灌入一行完整的 sshd 失敗登入 syslog 訊息，不需要真實 agent） | 0 | sh -c 'printf "%s\n" "Jul  6 00:00:00 wazuh-fim sshd[12345]: Failed password for invalid user test from 10.0.0.9 port 12345 ssh2" | docker exec -i single-node-wazuh.manager-1 timeout 15 /var/ossec/bin/wazuh-logtest 2>&1 | grep -qF "Alert to be generated." && echo 0 || echo 1' |
 | C10 | forward   | `/etc/hosts` 已 pin `siem-log-server` 別名                            | 0        | getent hosts siem-log-server >/dev/null 2>&1; echo $? |
 | C11 | forward | Host rsyslog has loaded the dedicated imfile/transport pipeline and can read the current real alert file (local check only; delivery requires wazuh-alert-delivery.md) | 0 | sh -c '/usr/local/libexec/pilot-wazuh-delivery local && echo 0 || echo 1' |
+| C12 | functional | 三個原生 Wazuh release 相同、所有已註冊 agent 版本不超過 manager，且 native daemon / indexer API 健康 | 0 | sh -c '/usr/local/sbin/pilot-wazuh-transaction central-verify >/dev/null && echo 0 || echo 1' |
 
-C1–C9 establish the local Wazuh stack. C10 establishes the host destination alias;
+C1–C9 and C12 establish the local Wazuh stack and its native version/health contract. C10 establishes the host destination alias;
 C11 establishes the loaded local ingestion and transport state. Their numeric
 positive-logic verdict wrappers always return shell rc 0 and print 0/1.
 
@@ -124,13 +157,13 @@ must run fresh check/apply/verify/idempotency and the real-alert cross-host chal
 
 ## 4. PASS / FAIL
 
-When forwarding is configured, require C1–C11 **and** the receiver row in
+When forwarding is configured, require C1–C12 **and** the receiver row in
 [wazuh-alert-delivery.md](wazuh-alert-delivery.md). Blocking the selected transport
 must fail the receiver row even when the manager's C11 still passes. C11 must
 never be reported alone as proof of delivery. Each receiver verification consumes
 its challenge and needs a newly emitted real alert on the next invocation.
 
-Standalone deployments without a destination verify C1–C9; C10/C11 and the
+Standalone deployments without a destination verify C1–C9 and C12; C10/C11 and the
 delivery cross-check are inapplicable. A receiver in inventory enables forwarding
 automatically unless that inventory omits the optional dependency.
 
@@ -159,7 +192,9 @@ Docker bundle/cert generation/compose covers C1–C3; indexer readiness covers C
 manager port waits cover C5/C6; C7/C8/C9 are derived or verify-only. Host destination
 resolution and pin cover C10. `tasks/wazuh-alert-forward.yml`, legacy output
 migration and live-config convergence cover C11. The cross-host fixture and
-receiver helper independently verify real-engine delivery.
+receiver helper independently verify real-engine delivery. C12 uses the root-only
+read-only native coordinator installed by the apply playbook; ordinary verification
+injects nothing.
 
 ## 7. Target verification plan
 
@@ -172,8 +207,18 @@ Do not reuse a challenge for negative or recovery trials.
 
 The current procedure and evidence link are in [wazuh-manager](../runbooks/wazuh-manager.md).
 
+Issue #244 版本契約的 target chain 用 `docs/topologies/wazuh-version-topology.yaml`（三台：manager 兼
+agent、Ubuntu 24.04 agent 兼 log-server receiver、AlmaLinux 9 agent）與
+`playbooks/test/fixtures/wazuh-version-topology.yml`（docker、receiver、manager、agents 依序）。receiver 在
+inventory 內，manager 才會轉送（`siem_forward_host` 由 log-server group 推導），C10 與 C11 才適用；
+沒有 receiver 時 forwarding 保持關閉，C10 與 C11 無法通過，而 `topology test --verify` 沒有 row 篩選，鏈路因此驗不到全 PASS。該 run 只驗
+manager 與 wazuh-fim 的列；receiver 的 self-forwarding 與 real-alert delivery（上面的 fresh nonce 檢查）
+不在其範圍。
+
 ## 變更紀錄
 
 | 日期 | PR | 驗收語意變更 |
 |------|----|-------------|
 | 2026-11-03 | Issue #211 | Replace UDP syslog_output with host imfile over TCP/RELP; distinguish local C11 health from a fresh real-alert receiver delivery oracle. |
+| 2026-11-05 | Issue #244 (A) | 新增 `wazuh_version` 與 C12：manager、indexer、dashboard 的原生 release 一致且所有已註冊 agent 不高於 manager；既有 stack 的任何 release 變更與 agent 新於 manager 一律在變更前 typed 拒絕。升級、備份與回復不在本版範圍。未放寬任何既有 Expected。 |
+| 2026-11-06 | Issue #244 (A) | 原生實跑後修正：從未連線或 pre-4.14 agent 的 fail closed 帶出 agent ID 並記載 `manage_agents -r` 解除方式；target chain 加入 log receiver 使 C10/C11 適用；dashboard/indexer 各自獨立讀取 release。未放寬任何 Expected。 |

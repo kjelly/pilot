@@ -3,7 +3,8 @@
 `issue-to-pr`、`pr-ready`、`pr-review-merge` 與 `pilot-code-review` 共用此檔。修復或審查 pilot 時先讀，再選與 diff 有關的列；
 不把所有歷史案例都變成每次必跑的測試。現行 `AGENTS.md`、
 `docs/actual-run-evidence.md` 與需求是規則來源，歷史留言只是選題線索。
-案例記錄截至 2026-10-30，**不代表各 PR 目前仍有同一缺陷**。
+案例記錄截至 2026-10-30（2026-11-06 依 issue 回顧新增的列，以 issue 連結為依據），**不代表各 PR 目前仍有同一缺陷**。
+表中標「有 lint」的類別，審查時確認對應 CI 測試有跑即可，不必重新推導；標「須人工檢查」的才是 reviewer 要親自判斷的。
 
 ## 先建立能驗證的問題
 
@@ -31,6 +32,11 @@
 | lock、journal、cleanup、交易 | 鎖住實體資源 identity 與完整 probe→mutate→rollback 期間；測 symlink/hardlink、另一 writer 建檔、程序結束與 namespace。PID、路徑字串與 Go race PASS 不能取代 flock/transaction 的 invariant；cleanup 不得刪除其他 live owner 的資料。 | #146：`58847c24`、`a64e33c7`、`5f814f13`、`b07fd542` |
 | 主機探索、啟動時限、遠端服務 | 用實際 enrollment server / 可觀察 readiness，而非設計上應該可用的 DNS 或任意 timeout。需要時測 fresh boot、慢啟動、永不就緒的有界失敗、multi-node 真實連線；不能把增加 timeout 當作已證明原始自然故障。 | #191 `9b81c591`、#192 `f8d85c08` |
 | gate / 回歸測試 / evidence | 每道拒絕測試確認拒絕原因；錯誤碼與輸出內容一起約束，確認 counterexample 能觸發測試。區分 repo-wide lint 的掃描邊界、exception 與真實 task selection；測試要讀新路徑。 | #155 `9ab3d55e`、#146 `4b97aded`、`22cad092` |
+| 外部 CLI／查詢輸出被當成「查無資料」（**須人工檢查**，只有部分 lint） | 錯誤與空結果必須能分開：同時用**真實擷取**的「查無」輸出與「查詢失敗」輸出（stderr、rc、診斷字串）測；`failed_when: false`、`rc != 0` 當 absent、`dig +short` 這類 rc=0 的失敗，後面都要有看 rc/stderr 的檢查。同一寫法在其他元件是否還在（先 `git grep` 再讀）。 | [#105 decommission DNS](https://github.com/kjelly/pilot/issues/105) 之後 [#151](https://github.com/kjelly/pilot/issues/151)、[#152](https://github.com/kjelly/pilot/issues/152)、[#155](https://github.com/kjelly/pilot/issues/155) 重犯；[#49](https://github.com/kjelly/pilot/issues/49) |
+| verify row／matcher／`changed_when` 永遠 PASS 或永遠 FAIL（**須人工檢查**） | 自己動手弄壞一次：在 scratch 複本把被驗證的設定改錯或撤回修復，確認該 row 因**指定 invariant** 失敗。只有「通過」案例的測試不算證明。apply 與 verify 都綠但實際沒生效（協定、旗標、label 對不上）要追到接收端是否真的收到。 | [#172 旗標不存在被吞](https://github.com/kjelly/pilot/issues/172)、[#211 UDP 對 TCP](https://github.com/kjelly/pilot/issues/211)、[#213 label 對不上](https://github.com/kjelly/pilot/issues/213)、[#173](https://github.com/kjelly/pilot/issues/173)、[#285](https://github.com/kjelly/pilot/issues/285) |
+| 授權／撤銷的生效時間（SSSD 快取，**有 lint**：`TestRegression_SSSDCacheClearsOnlyInVettedHelpers` 擋新的清快取 workaround） | 新增與撤銷分開看，撤銷更嚴格；生效要靠「有上限的等待加驗證」，不是 `sss_cache`、重啟或手動同步。確認驗證的是 client 實際生效的狀態（`sudo -n`、key 登入被拒、`sudoLastFullRefreshTime`），逐台回報 partial。FreeIPA server／replica 自身的 SSSD 與長連線主機是否在範圍內。新的清快取 helper 要有 evidence 才能進 allowlist。 | umbrella [#291](https://github.com/kjelly/pilot/issues/291)（[#114](https://github.com/kjelly/pilot/issues/114)、[#262](https://github.com/kjelly/pilot/issues/262)、[#263](https://github.com/kjelly/pilot/issues/263)、[#267](https://github.com/kjelly/pilot/issues/267)、[#269](https://github.com/kjelly/pilot/issues/269)）；已修 [#214](https://github.com/kjelly/pilot/issues/214) |
+| 修 bug 的 PR（同 class 再現，**須人工檢查**） | PR 要寫出同類掃描的範圍與結果，並說明這類會不會在新程式碼重犯、有沒有 class 層級 lint。第二次看到同 class：要求 SA 盤點受影響路徑並補全 repo lint，不接受只修新發現的那一處。新 lint 要先對修正前的程式碼證明會 fail。 | [#142 同類掃描範本](https://github.com/kjelly/pilot/issues/142)；重犯鏈 [#69](https://github.com/kjelly/pilot/issues/69)→[#96](https://github.com/kjelly/pilot/issues/96)/[#97](https://github.com/kjelly/pilot/issues/97)、[#189](https://github.com/kjelly/pilot/issues/189)→[#195](https://github.com/kjelly/pilot/issues/195)/[#206](https://github.com/kjelly/pilot/issues/206)/[#207](https://github.com/kjelly/pilot/issues/207) |
+| 同一件事記在兩處（**須人工檢查**，個別配對有一致性測試） | 要有單一來源或一致性測試，而且測試已「故意改壞」證明會 fail。審查時列出 A 改了 B 要跟著改的配對（contract 與 playbook、spec 與 inventory、兩份名冊值、兩份實作），逐一對照；pilot 驗證通過但 Ansible 載入失敗這種分歧也算。 | [#277 三份實作](https://github.com/kjelly/pilot/issues/277)、[#146](https://github.com/kjelly/pilot/issues/146)、[#256](https://github.com/kjelly/pilot/issues/256)、[#81](https://github.com/kjelly/pilot/issues/81) |
 
 更細的 pilot 檢查依變更選讀
 [pilot-code-review](../SKILL.md) 及其 references；不要複製一份
@@ -102,7 +108,9 @@ snapshot 內同名）。要點如下：
   `testdata/`，連同 lab 使用者的 `ipanthash` 一起 commit 並 push 出去。
 - `--evidence-record` 的 redaction 不涵蓋手寫段落、加密 vault 的值與衍生值。
 - reviewer 要搜尋 `BASE..HEAD` 的每個 commit，不能只看最終 diff。任何 commit 含秘密
-  即為 P0 leaked secret，HEAD 已移除也一樣。
+  即為 P0 leaked secret，HEAD 已移除也一樣。三個 gate（`issue_gate.py`、`pr_gate.py`、
+  `review_gate.py`）已用共用的 `.agents/skills/_shared/scripts/secret_scan.py` 逐 commit 掃描並拒絕，
+  沒有 override；reviewer 手動搜尋是補充，不是取代。
 
 ## 可直接放進 task envelope 的提示詞
 

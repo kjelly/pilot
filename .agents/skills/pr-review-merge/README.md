@@ -46,6 +46,8 @@ $pr-review-merge 審查 kjelly/pilot 單一非 Draft PR #123；合格則 merge�
 
 **Actual-run 紀錄：**base branch 的 `.github/pr-evidence.json` 要求 `actual-run` 紀錄時，`review_gate.py` 以 GitHub API 在 PR 的 **base SHA** 讀這份 manifest（不讀 head，PR 不能放寬自己的要求），並檢查 reviewer evidence 的 `target_validation`：缺少或格式錯、`blocked`、PR 改到 manifest `required_paths`（`playbooks/**`、`contracts/**`）卻寫 `not-needed`、或 `required` 卻沒有 HEAD 上已提交且寫明 tested revision 的 `docs/evidence/**` 紀錄（tested revision 等於 HEAD，或是 HEAD 的祖先且之後只改 evidence-only 檔案），一律 `WAITING`，不會 merge。manifest 格式、glob 與 evidence-only delta 規則沿用 issue-to-pr 的 `scripts/repo_evidence.py`（依路徑載入）。缺紀錄本身轉 Draft 仍需 reviewer 開 blocking `P1` finding。
 
+**秘密掃描：**`review_gate.py` 與 `apply_decision.py` 的 `--worktree`（本機含該 PR commit 的 checkout，PR 的 head 不在時先 `git fetch`）讓 gate 用 PR 的 `baseRefOid..headRefOid`（以 SHA 指定，與目前 checkout 的 HEAD 無關）掃描**每一個 commit** 的新增行、commit message 與路徑（共用 `_shared/scripts/secret_scan.py`，規則見 `.agents/skills/_shared/committed-secrets.md`）。任何 commit 有發現就是 `DRAFT`（即使 HEAD 已移除值），留言要 Root 停下並交由使用者決定撤銷/輪替與歷史處理，沒有 override，補一個清除 commit 也不算數；留言與所有輸出只有類別、檔案與 commit，絕不含值。無法掃描（沒給 `--worktree`、commit 不在本機、scanner 載入失敗、`--secret-file` 不可用）是 `WAITING`，不會在未掃描的情況下合併。`--secret-file FILE`（須在 repo 之外，一行一個值，每個至少 8 bytes）可加入已知的秘密值。
+
 ## 內部安全檢查（供 Agent 呼叫）
 
 `$SNAP` 是 checkout 契約取得的 snapshot 目錄；腳本從那裡執行，不從目前切到的 branch 執行。
@@ -55,18 +57,18 @@ $pr-review-merge 審查 kjelly/pilot 單一非 Draft PR #123；合格則 merge�
 python3 "$SNAP/.agents/skills/pr-review-merge/scripts/list_ready.py" --repo OWNER/REPO
 
 # Reviewer 綁定 HEAD/Base SHA 的證據檔產生後，進行唯讀 Quality Gate
-python3 "$SNAP/.agents/skills/pr-review-merge/scripts/review_gate.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/review_gate.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json --worktree "$REPO_ROOT"
 
 # 乾跑（不變更 GitHub）
-python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json --worktree "$REPO_ROOT"
 
-# 真正執行：僅在通過 live gate 時才合併或降草稿
-python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json --execute
+# 真正執行：僅在通過 live gate 時才排入 merge train 或降草稿
+python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 --evidence /safe/state/123/review.json --worktree "$REPO_ROOT" --execute
 ```
 
 執行 actor 前，先依 shared checkout 契約完成起始分支/SHA 的安全復原；復原失敗就保持 PR 狀態不變。復原成功後用已保存的 PR HEAD/Base 和 checkout 外的 evidence 重跑 live gate，再執行 actor；不得用復原後的本地 HEAD 取代被審查的 candidate，也不得在 PR 狀態變更後才切回分支。
 
-`apply_decision.py` 不會相信先前的 gate 結果，會在 mutation 前重新檢查 HEAD/Base 與 GitHub API 狀態，並使用同一 repository 的跨程序寫入鎖（POSIX `flock`）。`gh pr merge --match-head-commit` 可防止合併錯誤的 HEAD；結果還要遠端驗證 `state == MERGED`。Draft 先留言具體 blocking findings 才執行 `gh pr ready --undo`。
+`apply_decision.py` 不會相信先前的 gate 結果，會在 mutation 前重新檢查 HEAD/Base 與 GitHub API 狀態，並使用同一 repository 的跨程序寫入鎖（POSIX `flock`）。MERGE 決定時 actor 不直接合併：它保存 evidence、加上 `merge-queue` label（`ENQUEUED`），由 `scripts/merge_train.py` 這個唯一的 consumer 依 label 加上的時間依序處理：HEAD 不含最新 base 且可乾淨合併、兩邊沒有改到同一檔案時，先把 live base tip 合併進 PR 分支並推上去，等該 HEAD 的 CI，再重跑 gate、以 `gh pr merge --match-head-commit` 合併並遠端驗證 `state == MERGED`。見 [Merge train](references/merge-train.md)（kjelly/pilot#307）。Draft 先留言具體 blocking findings 才執行 `gh pr ready --undo`。
 
 **重要限制：**程式可強制校對 SHA、CI、threads、規則、PR 狀態與 Evidence Schema，但**無法機械證明 Reviewer 真實獨立、分析完整或程式邏輯完全正確**。Agent 必須確實調用獨立 reviewer 並提供可追溯證據。不可單憑 `Review PASS` 字串進行 Merge。
 
@@ -81,7 +83,7 @@ python3 -m unittest discover -s tests -v
 ## 與其他 Skill 的關係
 
 - `issue-to-pr`：Issue → 建立 Ready PR。
-- `pr-review-merge`：Ready PR → `MERGED` / `DRAFT-BLOCKED` / `WAITING`。
+- `pr-review-merge`：Ready PR → `ENQUEUED`（merge train 之後 `MERGED`）/ `DRAFT-BLOCKED` / `WAITING`。
 - `pr-ready`：修復 Draft PR → Ready PR。
 
 所有規則及契約見 [SKILL.md](SKILL.md)、[Quality Gate](references/quality-gate.md)、[Evidence Contract](references/evidence-contract.md) 及 [Platforms](references/platforms.md)。

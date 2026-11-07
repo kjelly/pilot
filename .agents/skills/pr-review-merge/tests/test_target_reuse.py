@@ -5,9 +5,12 @@ import unittest
 from unittest import mock
 
 from test_gate import Fake, sample, B, H
+from scan_stub import CleanScan
 from test_target_validation import API, R, ART, RECORD, MANIFEST, REPO, repo_manifest, replay
 import gh_runtime
 from review_gate import evaluate
+
+setUpModule, tearDownModule = CleanScan.up, CleanScan.down
 
 A = "d" * 40
 APP = "playbooks/apply/x.yml"
@@ -194,24 +197,28 @@ class TargetReuseRemoteTests(unittest.TestCase):
         del e["target_validation"]["target_reuse"]
         self.assertIn("files outside evidence_only_paths changed: " + OTHER, self.reasons(gh, e))
 
-    def test_stale_pr_base_metadata_does_not_prove_live_base(self):
+    def test_stale_pr_base_metadata_does_not_prove_the_attested_base(self):
+        # PR Base metadata (B) lags a live base (A): HEAD contains A, so this is no alignment problem,
+        # but the attestation must name the base HEAD actually integrates (kjelly/pilot#307).
         gh, e, _ = self.fixture()
         gh.branch_head = lambda repo, name: A
-        r = evaluate(REPO, 42, e, client=gh)
-        self.assertEqual("DRAFT", r["decision"])
-        self.assertIn("differs from live", " ".join(r["reasons"]))
+        gh.files[(MANIFEST, A)] = gh.files[(MANIFEST, B)]  # the policy is read at the live base
+        self.assertIn("target reuse base SHA does not match current base", self.reasons(gh, e))
 
-    def test_fresh_target_attestation_cannot_hide_stale_overall_review_base(self):
+    def test_target_attestation_binds_the_integrated_base(self):
         gh, e, trees = self.fixture()
         current = "e" * 40
         trees[current] = trees[B].copy()
         gh.branch_head = lambda repo, name: current
+        gh.files[(MANIFEST, current)] = gh.files[(MANIFEST, B)]  # the policy is read at the live base
         gh.compares[(current, H)] = {"ancestor": True, "merge_base": current, "files": [ART, APP]}
         gh.compares[(R, current)] = {"ancestor": False, "merge_base": A, "files": [OTHER]}
+        # Attesting the base HEAD contained earlier (B) does not cover the base it contains now.
+        self.assertIn("target reuse base SHA does not match current base", self.reasons(gh, e))
         e["target_validation"]["target_reuse"]["base_sha"] = current
         r = evaluate(REPO, 42, e, client=gh)
-        self.assertEqual("DRAFT", r["decision"])
-        self.assertIn("differs from live", " ".join(r["reasons"]))
+        self.assertEqual("MERGE", r["decision"], r["reasons"])
+        self.assertEqual("aligned", r["alignment"])
 
     def reasons(self, gh, e):
         r = evaluate(REPO, 42, e, client=gh)
@@ -264,13 +271,24 @@ class TargetReuseRemoteTests(unittest.TestCase):
         self.assertEqual("WAITING", r["decision"])
         self.assertIn("requires kind: target-run", " ".join(r["reasons"]))
 
-    def test_stale_independent_review_and_test_receipts_remain_rejected(self):
-        gh, e, _ = self.fixture()
-        stale = copy.deepcopy(e)
-        stale["head_sha"] = R
-        self.assertIn("Stale review evidence: reviewed HEAD/Base does not match GitHub", self.reasons(gh, stale))
-        e["tests"][0]["sha"] = R
-        self.assertIn("Test evidence is not bound to current PR HEAD: unit", self.reasons(gh, e))
+    def test_review_carries_only_across_a_pure_base_import(self):
+        # Reviewed at the candidate R; HEAD = R + the merge of main (OTHER) + the evidence-only record.
+        gh, e, trees = self.fixture()
+        reviewed = copy.deepcopy(e)
+        reviewed["head_sha"] = R
+        reviewed["tests"][0]["sha"] = R
+        r = evaluate(REPO, 42, reviewed, client=gh)
+        self.assertEqual("MERGE", r["decision"], r["reasons"])
+        self.assertEqual("pure-base-import", r["review_reuse"]["method"])
+        # Tests stay bound to the reviewed HEAD.
+        reviewed["tests"][0]["sha"] = H
+        self.assertIn("Test evidence is not bound to the reviewed HEAD: unit", self.reasons(gh, reviewed))
+        # A PR-side edit after the review is not a base import: the review is stale.
+        reviewed["tests"][0]["sha"] = R
+        trees[H][APP] = blob(9)
+        reason = self.reasons(gh, reviewed)
+        self.assertIn("Stale review evidence: reviewed HEAD/Base does not cover GitHub HEAD", reason)
+        self.assertIn("neither evidence-only nor a pure base import: " + APP, reason)
 
     def test_missing_or_truncated_tree_waits(self):
         gh, e, _ = self.fixture()
@@ -334,6 +352,83 @@ class GitTreeAdapterTests(unittest.TestCase):
             with self.subTest(data=data), mock.patch.object(gh_runtime, "gh_json", return_value=data):
                 with self.assertRaises(gh_runtime.GitHubError):
                     gh_runtime.tree_entries(REPO, H)
+
+
+SKILL = ".agents/skills/x/SKILL.md"
+OTHER_PLAYBOOK = "playbooks/apply/other.yml"
+UNRELATED_REASON = "Another component's playbook: no include, lookup, template or spec of this run names it."
+
+
+class NonExecutionReuseRemoteTests(unittest.TestCase):
+    """kjelly/pilot#304 on the remote gate, under this repository's own manifest."""
+
+    def fixture(self, imported):
+        gh = Fake()
+        gh.files[(MANIFEST, B)] = repo_manifest()
+        gh.files[(ART, H)] = RECORD
+        gh.compares[(R, H)] = {"ancestor": True, "merge_base": R, "files": [ART, imported]}
+        gh.compares[(B, H)] = {"ancestor": True, "merge_base": B, "files": [ART, APP]}
+        gh.compares[(R, B)] = {"ancestor": False, "merge_base": A, "files": [imported]}
+        trees = {A: {DEP: blob(1)}, R: {APP: blob(2), DEP: blob(1)},
+                 B: {DEP: blob(1), imported: blob(3)},
+                 H: {APP: blob(2), DEP: blob(1), imported: blob(3), ART: blob(4)}}
+        gh.tree_entries = lambda repo, revision: trees[revision]
+        gh.branch_head = lambda repo, name: B
+        gh.commit_tree = lambda repo, revision: "e" * 40
+        e = sample()
+        e["target_validation"] = {"decision": "required", "artifact": ART, "tested_revision": R,
+                                  "reason": "Native target chain passed on the candidate; main only brought declared inputs."}
+        return gh, e
+
+    def machine(self, gh):
+        record = {"schema": "pilot-evidence-record/v1", "outcome": "success",
+                  "candidate": {"commit": R, "tree": "e" * 40, "source": "git"},
+                  "closure": {"resolution_version": 10, "frozen": True,
+                              "files": [{"path": APP, "mode": "100644", "blob": blob(2)[1]}], "patterns": [APP],
+                              "unresolved": [{"from": "environment", "ref": "ambient Ansible plugin discovery",
+                                              "reason": "external plugin, collection and Python discovery paths are not fingerprinted"}],
+                              "external": ["/home/operator/.vault/sandbox.yaml"]}}
+        gh.files[(ART, H)] = ("<!-- pilot-evidence-record v1 -->\n```json\n" + json.dumps(record) + "\n```\n").encode()
+
+    def reuse(self, **kw):
+        return dict({"head_sha": H, "base_sha": B, "reviewer_confirmed": True, "non_execution_changes": [],
+                     "dependency_review": "Reviewed the machine closure and every runtime file main brought in; none is reachable from this run."}, **kw)
+
+    def test_non_execution_import_merges_without_attestation(self):
+        for record in ("legacy", "machine"):
+            with self.subTest(record=record):
+                gh, e = self.fixture(SKILL)
+                if record == "machine":
+                    self.machine(gh)
+                r = evaluate(REPO, 42, e, client=gh)
+                self.assertEqual("MERGE", r["decision"], r["reasons"])
+
+    def test_runtime_import_without_attestation_waits(self):
+        gh, e = self.fixture(OTHER_PLAYBOOK)
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("WAITING", r["decision"], r)
+        self.assertIn("base import is not a declared non-execution path: " + OTHER_PLAYBOOK, " ".join(r["reasons"]))
+
+    def test_reviewed_runtime_import_outside_an_incomplete_closure(self):
+        gh, e = self.fixture(OTHER_PLAYBOOK)
+        self.machine(gh)
+        e["target_validation"]["target_reuse"] = self.reuse(
+            unrelated_runtime_changes=[{"path": OTHER_PLAYBOOK, "reason": UNRELATED_REASON}])
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("MERGE", r["decision"], r["reasons"])
+        e["target_validation"]["target_reuse"] = self.reuse()
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("WAITING", r["decision"], r)
+        self.assertIn("needs a reviewed unrelated_runtime_changes entry: " + OTHER_PLAYBOOK, " ".join(r["reasons"]))
+
+    def test_rerun_path_import_waits_even_when_explained(self):
+        gh, e = self.fixture(OTHER)
+        self.machine(gh)
+        e["target_validation"]["target_reuse"] = self.reuse(
+            unrelated_runtime_changes=[{"path": OTHER, "reason": UNRELATED_REASON}])
+        r = evaluate(REPO, 42, e, client=gh)
+        self.assertEqual("WAITING", r["decision"], r)
+        self.assertIn("always needs a new run (rerun_paths): " + OTHER, " ".join(r["reasons"]))
 
 
 if __name__ == "__main__":

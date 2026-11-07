@@ -43,6 +43,11 @@ siem_forward_host: ""
 #  audit-log-forwarding group 時,這個值也會用在它的 rsyslog TCP 轉送,而那
 #  個埠必須等於 log-server 的 siem_receiver_tcp_port。
 # wazuh_docker_version: "4.14.1"
+# Optional common release shared with agents; conflicts with an explicitly
+# different wazuh_docker_version are rejected. A fresh install pins this release;
+# changing it on an existing stack is a typed refusal that changes nothing (this
+# playbook does not upgrade or downgrade a stack).
+# wazuh_version: "4.14.1"
 
 # Host rsyslog imfile ships real alerts.json over the existing transport.
 # C11 checks local loaded state; wazuh-alert-delivery.md checks the actual receiver file.

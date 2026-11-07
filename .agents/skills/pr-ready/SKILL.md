@@ -77,10 +77,12 @@ another point fix. Verify tests fail for the intended reason when the fix is abs
 Nothing committed or posted carries a secret. That covers fixtures from real
 captures, evidence records (including their hand-written sections), runbooks and
 PR comments. Give every Coder and Reviewer the snapshot path of
-`.agents/skills/_shared/committed-secrets.md`. Root runs its staged-diff check
-before each commit and its commit-range check before each push. A secret found in
-any commit of the PR stops the work until the user decides; a scrubbing commit does
-not close it.
+`.agents/skills/_shared/committed-secrets.md`. Root reads the staged diff before
+each commit and runs `_shared/scripts/secret_scan.py` over the commit range before
+each push. `pr_gate.py` runs the same scanner over every commit of
+`baseRefOid..headRefOid` (named by SHA, never by the checkout) and answers
+`DRAFT-BLOCKED` on a finding; it has no override. A secret found in any commit of the
+PR stops the work until the user decides; a scrubbing commit does not close it.
 
 SA/Root must record `target_validation = required | not-needed | blocked` with a
 reason before implementation; Reviewer must re-evaluate it before PASS. If the
@@ -115,7 +117,10 @@ to answer. These rules remove that cost without weakening a gate:
    since matches the base manifest's `evidence_only_paths` (the rule `issue_gate.py` already
    applies; the gate lists accepted deltas under `receipt_reuse`). Order the work
    accordingly: freeze the code, review it, run the target evidence on that commit, commit
-   the record, let the receipts carry over. `evidence.head_sha` still names HEAD.
+   the record, let the receipts carry over. `evidence.head_sha` still names HEAD. The
+   review (not the receipts) also survives a merge of main that brought in only the base
+   manifest's `non_execution_paths` (rule 5); the merge gate's review survives any pure base
+   import, since the merge train tests the merged result in CI.
 3. **P3/P4 close the round; they do not start another.** When the reviewer returns PASS
    with only P3/P4 remarks, do not dispatch a Coder: reply, resolve the thread, and record
    them under "Not in this PR" in the PR body or in a follow-up issue. Fix one in the same
@@ -123,22 +128,35 @@ to answer. These rules remove that cost without weakening a gate:
 4. **One reviewer per round over the whole diff**; a delta review only for a delta. Two
    reviewers split by layer doubled the cost and still missed the defects the merge review
    found afterwards.
-5. **Align with the latest base before Ready.** Independently read the current
-   base ref (`main` here) and require that exact commit to be an ancestor of PR
-   HEAD, even when GitHub reports no conflicts and PR Base SHA equals the live tip.
-   When behind, integrate the verified base into the original head branch using
-   a merge commit under the checkout contract; no force-push. A feature HEAD
-   normally differs from main: SHA equality of HEAD and main is not required.
-   Reconcile any PR Base/live-base metadata mismatch as well. Before Ready,
-   `pr_gate.py` verifies both metadata and ancestry against the live remote;
-   rerun affected validation/CI and obtain fresh independent review after base
-   integration. Repeat alignment if main advances before the final gate.
-   If access or metadata still prevents reconciliation, keep Draft with the exact
-   observed SHAs and blocker. A conflict confined to Markdown (changelog rows, runbook wording) is a
-   non-execution edit: keep the target evidence through `target_reuse`
-   (`$SNAP/.agents/skills/_shared/target-evidence-reuse.md`), rerun the touched-package
-   receipts and a delta review. A conflict in an execution-affecting file is a new
-   candidate.
+5. **Do not chase main; the merge train integrates it (kjelly/pilot#307).** A PR need not
+   contain the live base tip to become Ready. `pr_gate.py` classifies it on every poll with
+   the merge gate's own `train_alignment`:
+   - **Contains the live tip, or lacks it with a clean GitHub test merge and no file changed
+     on both sides since the merge base:** Ready is allowed. `pr-review-merge` queues it and
+     the merge train merges the live tip in, waits for CI and merges; its review carries
+     across that pure import. Main moving while CI runs no longer blocks the wait (the PR
+     Base SHA is not pinned).
+   - **A merge conflict, or a file changed on both sides:** an error. Integrate the verified
+     base into the original head branch with a merge commit under the checkout contract (no
+     force-push), then what the integration costs depends on what main brought in (the gate
+     computes it; `$SNAP/.agents/skills/_shared/target-evidence-reuse.md`):
+     - **only `non_execution_paths`** (skills, prose, Go tests, `.github/**`): the
+       **align-only path**: merge, push, rerun the local receipts for the packages the
+       imported files touch (an imported Go test or lint runs against the PR's code), wait
+       for current-HEAD CI, rerun the gate. The target record and the independent review
+       carry over without attestation; no Coder, SA or full reviewer;
+     - **runtime files outside the target record's closure** (another component's playbook
+       or spec): a delta review of the merge writes `target_reuse` with
+       `unrelated_runtime_changes`; no new target run. A file the closure reaches, or one in
+       the item's `rerun_paths` (compiled Go, contracts, group_vars, shared task/template
+       directories), needs a new candidate and run;
+     - the conflict resolution itself is a PR-side edit: a conflict confined to Markdown
+       (changelog rows, runbook wording) is an audited non-execution edit in `target_reuse`
+       plus a delta review; a conflict in an execution-affecting file is a new candidate.
+   - **Mergeability GitHub has not computed yet** (it recomputes after main moves): pending.
+   Target evidence at Ready imports from the base HEAD already contains (the merge base with
+   the live tip), and the manifest is read at the live tip. If access or metadata prevents
+   classification, keep Draft with the exact observed SHAs and blocker.
 6. **A bounced PR gets the merge reviewer's rubric before Ready.** When the PR carries an
    `Automated PR review: Draft required` comment, the final review round also follows
    [the merge gate's reviewer definition](../pr-review-merge/platforms/claude/agents/prm-reviewer.md):
@@ -178,7 +196,7 @@ to answer. These rules remove that cost without weakening a gate:
 4. **Reviewer (`pr-reviewer`)** must be an independent agent/context, not the Coder relabelled. Review current diff for correctness, architecture, security, concurrency, edge cases, semantic regressions and test adequacy. Use [the shared severity/origin rubric](../issue-to-pr/references/severity.md); return P0/P1/P2 blocking findings with precise file:line evidence and report P3/P4 separately. Origin is relative to the PR base, not the previous review. A fix is not closed until its regression and relevant target evidence are checked; an outdated thread alone is not proof. Give it each review comment Root would dispute with the comment and the code only, not Root's conclusion; the dispute stands only if the reviewer's own verdict agrees.
 5. If blocking findings remain, hand back to Coder; rerun impacted checks and reviewer on the new commit. A PASS with only P3/P4 remarks ends the round (cycle-time rule 3). After **three effective unsuccessful fix rounds**, reassign SA for a fresh diagnosis. If still stuck, record `DRAFT-BLOCKED`, preserve the PR, and end this invocation without starting another item.
 6. Before pushing, verify branch identity, uncommitted changes, and remote movement. Push **only the original PR head branch** (no force). After any push, discard all previously successful CI results as evidence for the new HEAD. Prepare evidence, then keep the active invocation waiting with the command in step 7 until checks settle or a real blocker prevents completion. Pending alone does not end the invocation.
-7. Create a HEAD-specific evidence JSON using `references/evidence-schema.md`. Prefer `scripts/run_check.py` for local check receipts; receipts and the review taken before an evidence-only commit stay valid (cycle-time rule 2). Run `scripts/pr_gate.py` for a **fail-closed** machine-assisted gate; unresolved items remain Draft. Use `python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr N --evidence "$REPO_ROOT/.pr-ready/N/evidence.json" --worktree "$REPO_ROOT" --wait --ready --restore-sha "$START_SHA" --restore-branch="$START_BRANCH"` as the default after push and evidence preparation. Keep this process attached to the active session, poll its output, and report progress; do not launch it as an unobserved background task or move local attestations into GitHub Actions. `--wait` pins HEAD/base/branch, fetched base policy, PR description, review/comment content, evidence and referenced local artifacts; each poll repeats the full gate and verifies all current-HEAD Actions runs have settled, including previously active attempts superseded by reruns. Green visible checks do not prove dependent jobs have registered. Any pin change or non-CI blocker stops for triage. Resolve START_SHA from the recorded starting branch tip, or use the recorded detached SHA and omit --restore-branch. Keep the evidence JSON, logs and receipts in ignored .pr-ready paths that survive restoration; a file the PR commits (for example the `target_validation.artifact` record under `docs/evidence/`) need not exist on the starting branch, because it is pinned and checked by its Git blob at the PR head. When CI settles, final PR-branch preflight → safe checkout restoration → fresh remote/pin preflight → Ready exactly once → post-action verification runs automatically. Restore failure leaves Draft; no checkout switching follows Ready. `pr_gate.py --ready` is the *only* recommended mutation step to call `gh pr ready` after passing all automated checks and explicit reviewer/acceptance attestations. Never invoke `gh pr ready` on a failing gate.
+7. Create a HEAD-specific evidence JSON using `references/evidence-schema.md`. Prefer `scripts/run_check.py` for local check receipts; receipts and the review taken before an evidence-only commit stay valid (cycle-time rule 2). Run `scripts/pr_gate.py` for a **fail-closed** machine-assisted gate (`--worktree` is required: it names the repository whose commits are scanned for secrets; `--secret-file FILE`, outside the repository, adds values to look for); unresolved items remain Draft. Use `python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" --repo OWNER/REPO --pr N --evidence "$REPO_ROOT/.pr-ready/N/evidence.json" --worktree "$REPO_ROOT" --wait --ready --restore-sha "$START_SHA" --restore-branch="$START_BRANCH"` as the default after push and evidence preparation. Keep this process attached to the active session, poll its output, and report progress; do not launch it as an unobserved background task or move local attestations into GitHub Actions. `--wait` pins HEAD/base/branch, fetched base policy, PR description, review/comment content, evidence and referenced local artifacts; each poll repeats the full gate and verifies all current-HEAD Actions runs have settled, including previously active attempts superseded by reruns. Green visible checks do not prove dependent jobs have registered. Any pin change or non-CI blocker stops for triage. Resolve START_SHA from the recorded starting branch tip, or use the recorded detached SHA and omit --restore-branch. Keep the evidence JSON, logs and receipts in ignored .pr-ready paths that survive restoration; a file the PR commits (for example the `target_validation.artifact` record under `docs/evidence/`) need not exist on the starting branch, because it is pinned and checked by its Git blob at the PR head. When CI settles, final PR-branch preflight → safe checkout restoration → fresh remote/pin preflight → Ready exactly once → post-action verification runs automatically. Restore failure leaves Draft; no checkout switching follows Ready. `pr_gate.py --ready` is the *only* recommended mutation step to call `gh pr ready` after passing all automated checks and explicit reviewer/acceptance attestations. Never invoke `gh pr ready` on a failing gate.
 8. Final report: PR URL/number, `READY` or `DRAFT-BLOCKED`, actual fixes/root cause, independent review result, test/CI results, final HEAD SHA, blockers/next action, the branch the checkout ended on (restored to the starting branch, or why it stayed), and any role DRIFT (role, both hashes, `header_changes`), which also goes into `assessment.rationale`. Do not claim READY if GitHub post-action verification failed.
 
 ## Quality / authority rules

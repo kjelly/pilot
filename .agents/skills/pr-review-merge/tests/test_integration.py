@@ -57,6 +57,19 @@ if a[0] == 'api' and '/git/ref/heads/' in a[-1]:
     emit({'object': {'type': 'commit', 'sha': d.get('live_base', d['view']['baseRefOid'])}})
 if a[0] == 'api' and '/pulls?' in a[-1]:
     emit(d.get('pages', []))
+if a[0] == 'api' and '/issues?' in a[-1]:
+    label = a[-1].split('labels=')[1].split('&')[0]
+    emit([[{'number': d['view']['number'], 'pull_request': {}}] if label in d.get('labels', []) else []])
+if a[:2] == ['pr', 'edit']:
+    if d.get('fail_label'):
+        persist(); print('label denied', file=sys.stderr); sys.exit(1)
+    labels = d.setdefault('labels', [])
+    if '--add-label' in a:
+        labels.append(a[a.index('--add-label') + 1])
+    if '--remove-label' in a:
+        name = a[a.index('--remove-label') + 1]
+        d['labels'] = [x for x in labels if x != name]
+    persist(); sys.exit(0)
 if a[0] == 'api' and '/compare/' in a[-1] and a[-1] not in d.get('api', {}):
     if d.get('ancestry_error'):
         persist(); print('comparison unavailable', file=sys.stderr); sys.exit(1)
@@ -146,9 +159,18 @@ class Integration(unittest.TestCase):
         d = self.state(); d.update(kwargs)
         self.fixture_file.write_text(json.dumps(d))
 
+    def conflict(self, **kwargs):
+        """HEAD lacks the live base and GitHub's test merge conflicts: the merge train cannot integrate
+        it, so the gate drafts without a review (kjelly/pilot#307)."""
+        d = self.state(); d.update(kwargs, ancestor=False)
+        d['view'].update(mergeable='CONFLICTING', mergeStateStatus='DIRTY')
+        self.fixture_file.write_text(json.dumps(d))
+
     def script(self, name, *args):
-        return subprocess.run([sys.executable, str(ROOT / 'scripts' / name), '--repo', 'acme/demo',
-                               *args], env=self.env, capture_output=True, text=True)
+        """Run a script with the secret scan replaced by a clean one: these PRs have fake SHAs that no
+        repository holds. The scan itself is tested below with a real repository (SecretScanIntegration)."""
+        return subprocess.run([sys.executable, str(ROOT / 'tests' / 'scan_stub_runner.py'), str(ROOT / 'scripts' / name),
+                               '--repo', 'acme/demo', *args], env=self.env, capture_output=True, text=True)
 
     def actor(self, execute=False):
         a = ['--pr','42','--evidence',str(self.evidence_file)]
@@ -170,16 +192,35 @@ class Integration(unittest.TestCase):
         self.assertEqual(out['outcome'],'DRY_RUN_MERGE')
         self.assertEqual(self.state()['view']['state'],'OPEN')
 
-    def test_real_merge_and_sha_guard(self):
+    def test_merge_decision_queues_for_the_train(self):
+        # The actor never merges: it saves the evidence and labels the PR; merge_train.py merges it.
         proc,out = self.actor(execute=True)
-        self.assertEqual(proc.returncode,0,proc.stderr)
-        self.assertEqual(out['outcome'],'MERGED')
-        self.assertEqual(self.state()['view']['state'],'MERGED')
-        merges = [a for a in self.state()['calls'] if a[:2]==['pr','merge']]
-        self.assertEqual(len(merges),1)
-        self.assertIn('--match-head-commit',merges[0])
-        self.assertEqual(merges[0][merges[0].index('--match-head-commit')+1],HEAD)
-        self.assertNotIn('--admin',merges[0]); self.assertNotIn('--auto',merges[0])
+        self.assertEqual(proc.returncode,0,proc.stdout + proc.stderr)
+        self.assertEqual(out['outcome'],'ENQUEUED')
+        d = self.state()
+        self.assertEqual(d['view']['state'],'OPEN')
+        self.assertEqual(d['labels'], ['merge-queue'])
+        self.assertFalse(any(a[:2]==['pr','merge'] for a in d['calls']))
+        self.assertIn('Merge train: enqueued', d['comments'][0])
+        self.assertIn(HEAD, d['comments'][0])
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import merge_train
+        from gh_runtime import Repo
+        saved = merge_train.load_entry(Repo.parse('acme/demo'), 42)
+        self.assertEqual((saved['reviewed_head'], saved['evidence']), (HEAD, evidence()))
+
+    def test_queue_label_failure_is_an_error_not_queued(self):
+        self.patch(fail_label=True)
+        proc, out = self.actor(execute=True)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertFalse(self.state().get('labels'))
+
+    def test_other_merge_methods_are_not_queued(self):
+        a = ['--pr','42','--evidence',str(self.evidence_file),'--method','squash','--execute']
+        out = json.loads(self.script('apply_decision.py', *a).stdout)
+        self.assertEqual(out['outcome'], 'ERROR')
+        self.assertIn('merge commits', out['error'])
+        self.assertFalse(self.state().get('labels'))
 
     def test_confirmed_blocker_comments_then_drafts(self):
         e = evidence(); e['verdict'] = 'BLOCK';
@@ -196,7 +237,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(calls,['comment','ready'])
 
     def test_base_mismatch_comments_then_drafts_without_review(self):
-        self.patch(live_base='c'*40)
+        self.conflict(live_base='c'*40)
         self.evidence_file.write_text('{}')
         proc, out = self.actor(execute=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -211,13 +252,13 @@ class Integration(unittest.TestCase):
         self.assertEqual(writes, ['comment', 'ready'])
 
     def test_base_mismatch_comment_failure_preserves_ready(self):
-        self.patch(live_base='c'*40, fail_comment=True)
+        self.conflict(live_base='c'*40, fail_comment=True)
         _, out = self.actor(execute=True)
         self.assertEqual(out['outcome'], 'ERROR')
         self.assertFalse(self.state()['view']['isDraft'])
 
     def test_behind_head_comments_then_drafts_without_review(self):
-        self.patch(ancestor=False)
+        self.conflict()
         self.evidence_file.write_text('{}')
         proc, out = self.actor(execute=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -232,7 +273,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(writes, ['comment', 'ready'])
 
     def test_behind_head_comment_failure_preserves_ready(self):
-        self.patch(ancestor=False, fail_comment=True)
+        self.conflict(fail_comment=True)
         _, out = self.actor(execute=True)
         self.assertEqual(out['outcome'], 'ERROR')
         self.assertFalse(self.state()['view']['isDraft'])
@@ -244,14 +285,14 @@ class Integration(unittest.TestCase):
         self.assertFalse(self.state().get('comments'))
 
     def test_base_moves_after_ancestry_gate_never_mutates(self):
-        self.patch(ancestor=False, race_on_ref=3)
+        self.conflict(race_on_ref=3)
         _, out = self.actor(execute=True)
         self.assertEqual(out['outcome'], 'ERROR')
         self.assertFalse(self.state().get('comments'))
         self.assertFalse(self.state()['view']['isDraft'])
 
     def test_head_repaired_during_comment_prevents_draft(self):
-        self.patch(ancestor=False, race_on_view=4)
+        self.conflict(race_on_view=4)
         _, out = self.actor(execute=True)
         self.assertEqual(out['outcome'], 'ERROR')
         self.assertTrue(self.state().get('comments'))
@@ -265,7 +306,7 @@ class Integration(unittest.TestCase):
         self.assertFalse(self.state().get('comments'))
 
     def test_base_moves_after_mismatch_gate_never_mutates(self):
-        self.patch(live_base='c'*40, race_on_ref=3)
+        self.conflict(live_base='c'*40, race_on_ref=3)
         _, out = self.actor(execute=True)
         self.assertEqual(out['outcome'], 'ERROR')
         self.assertFalse(self.state().get('comments'))
@@ -279,8 +320,9 @@ class Integration(unittest.TestCase):
                     d = fixture()
                     if mode == 'base_mismatch':
                         d['live_base'] = 'c'*40
-                    if mode == 'base_behind':
+                    if mode.startswith('base_'):
                         d['ancestor'] = False
+                        d['view'].update(mergeable='CONFLICTING', mergeStateStatus='DIRTY')
                     if mode == 'semantic_draft':
                         d['checks'][0]['bucket'] = 'fail'
                     d['base_name_on_view'] = {'3': name}
@@ -338,8 +380,9 @@ class Integration(unittest.TestCase):
                     d = fixture()
                     if mode == 'base_mismatch':
                         d['live_base'] = 'c'*40
-                    if mode == 'base_behind':
+                    if mode.startswith('base_'):
                         d['ancestor'] = False
+                        d['view'].update(mergeable='CONFLICTING', mergeStateStatus='DIRTY')
                     if mode == 'semantic_draft':
                         d['checks'][0]['bucket'] = 'fail'
                     d['base_name_on_view'] = {'4': name}
@@ -421,12 +464,6 @@ class Integration(unittest.TestCase):
         self.assertEqual(out['outcome'],'ERROR')
         self.assertFalse(self.state()['view']['isDraft'])
 
-    def test_merge_command_unconfirmed_not_succeeded(self):
-        self.patch(simulate_merge_unconfirmed=True)
-        proc,out=self.actor(execute=True)
-        self.assertEqual(out['outcome'],'WAITING')
-        self.assertNotEqual(self.state()['view']['state'],'MERGED')
-
     def test_branch_rules_error_fails_closed(self):
         self.patch(rules_error=True)
         proc,out=self.actor(execute=True)
@@ -435,8 +472,9 @@ class Integration(unittest.TestCase):
 
     def test_actor_lock_stays_in_the_test_state_dir(self):
         proc, out = self.actor(execute=True)
-        self.assertEqual(out['outcome'], 'MERGED', proc.stderr)
+        self.assertEqual(out['outcome'], 'ENQUEUED', proc.stderr)
         self.assertTrue(any((self.path / 'state' / 'locks').glob('*.lock')))
+        self.assertTrue(any((self.path / 'state' / 'queue').glob('*/42.json')))
 
     # kjelly/pilot PR #177's tail, as GitHub answered it: candidate 2d70670 plus the evidence-only
     # commit 1262c6a7 that records its run, against a base (main at fdb6f03e) whose

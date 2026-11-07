@@ -230,6 +230,12 @@ elif a[:2] == ["api", "graphql"]:
     field = "reviewThreads"
     print(json.dumps({"data": {"repository": {"pullRequest": {field: {
         "nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}}}))
+elif a[0] == "api" and "/git/ref/heads/" in a[-1]:
+    # The Ready gate reads the live base tip (merge train alignment and the manifest, kjelly/pilot#307).
+    print(json.dumps({"object": {"type": "commit", "sha": base}}))
+elif a[0] == "api" and "/compare/" in a[-1]:
+    left, right = a[-1].split("/compare/")[1].split("...")
+    print(json.dumps({"status": "ahead", "behind_by": 0, "merge_base_commit": {"sha": left}}))
 elif a[0] == "api" and "/contents/" in a[-1]:
     manifest = {"schema_version": 1, "required_evidence": [
         {"id": "actual-run", "kind": "target-run", "source": "AGENTS.md actual-run rule",
@@ -243,8 +249,9 @@ else:
 
     def test_pr_gate_target_check_from_the_snapshot_writes_no_bytecode(self):
         """pr_gate.py imports pr-review-merge's review_gate (which loads gh_runtime and repo_evidence)
-        only when it checks the target evidence. --help never gets there, so the test below it
-        would not notice a pr_gate that lets CPython cache those modules inside the snapshot."""
+        only when it checks the target evidence, and loads the shared secret scanner by path when it
+        scans the PR's commits. --help never gets there, so the test below it would not notice a
+        pr_gate that lets CPython cache those modules inside the snapshot."""
         r, snapshot = self.real_snapshot()
         bin_dir = r.base / "fake-bin"
         bin_dir.mkdir()
@@ -254,10 +261,13 @@ else:
         evidence.write_text(json.dumps({"schema_version": 1, "repo": "acme/repo", "pr": 7, "head_sha": "1" * 40}))
         path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
         p = self.run_script(r, snapshot, ".agents/skills/pr-ready/scripts/pr_gate.py",
-                            "--repo", "acme/repo", "--pr", "7", "--evidence", str(evidence), env={"PATH": path})
-        # Premise: the gate got as far as the base manifest, so review_gate really was loaded.
+                            "--repo", "acme/repo", "--pr", "7", "--evidence", str(evidence),
+                            "--worktree", str(r.path), env={"PATH": path})
+        # Premise: the gate got as far as the base manifest, so review_gate really was loaded, and as far
+        # as the secret scan (the fake PR's commits are not in this clone, so the scan reports it).
         self.assertEqual(2, p.returncode, p.stdout + p.stderr)
         self.assertIn("target_validation is missing", p.stdout)
+        self.assertIn("Secret scan could not be completed", p.stdout)
         self.assertEqual([], self.bytecode_dirs(snapshot), "pr_gate.py wrote bytecode into the snapshot")
         self.assertEqual([], sorted(p.relative_to(snapshot).as_posix() for p in snapshot.rglob("*.pyc")))
         rc, out = snap(r, "verify", "--snapshot", str(snapshot))

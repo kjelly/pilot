@@ -48,6 +48,10 @@ all:
 
 ### 2.1 標準情境：manager 已存在（註冊啟用）
 
+> 自 Issue #244 起，啟用 enrollment 時 manager 必須是同一份 inventory 的 host（apply 在動 agent
+> 之前先讀它的原生版本，見 `docs/verification/wazuh-fim.md` §2）；下面 2026-07-06 的單一 VM 加外部
+> manager IP 紀錄是當時的實跑輸出，現行 apply 對這種組合會 typed 拒絕。
+
 ```bash
 go run ./cmd/pilot vm-target up --name wazuh-fim \
     --ssh-user ubuntu --disk 20 --memory 2048 --vcpus 2 \

@@ -90,6 +90,14 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   user has recorded on the PR that the credential is revoked, rotated or confirmed
   dead, and how the history is handled. Draft comments name the secret and the
   commits, never the value.
+  The gate also scans for it itself: `review_gate.py` and `apply_decision.py` take
+  `--worktree "$REPO_ROOT"` and scan every commit of `baseRefOid..headRefOid` (named
+  by SHA, so it holds after the checkout is restored) with the shared
+  `_shared/scripts/secret_scan.py`. A finding is `DRAFT`, and the posted comment tells
+  Root to stop and leaves the credential and the history to the user: no scrubbing
+  commit clears it. A scan that cannot run (no `--worktree`, a PR commit that is not in
+  the clone, a scanner that does not load, an unusable `--secret-file`) is `WAITING`,
+  so nothing is merged unscanned. `git fetch` the PR head first when it is missing.
 - **Mandated actual-run evidence.** `.github/pr-evidence.json` on the base branch
   declares `docs/evidence/**` as evidence-only and requires an `actual-run` record
   for any change to playbooks, specs, contracts, inventory handling or deploy
@@ -99,8 +107,9 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   `repo_evidence.py` rules. Missing or malformed, `blocked`, `not-needed` on a PR that
   changes the manifest's `required_paths` (`playbooks/**`, `contracts/**`; a spec edit
   is the reviewer's call, since only some need a run), or `required` without a committed `docs/evidence/**` record that names
-  a tested revision covering HEAD (same SHA, or an ancestor whose delta to HEAD is
-  evidence-only) is `WAITING`, never `MERGE` (`references/evidence-contract.md`). The
+  a tested revision covering HEAD (same SHA, an ancestor whose delta to HEAD is
+  evidence-only, or a merged base that brought in only the manifest's
+  `non_execution_paths`, or a reviewed `target_reuse`) is `WAITING`, never `MERGE` (`references/evidence-contract.md`). The
   reviewer still files a blocking `P1` at the changed path when a change needs a record
   and has none: that is a confirmed violation of a hard repository rule and the only way
   this becomes `DRAFT`. Docs-, skill- or pure-Go changes proven by native-tool tests need
@@ -110,6 +119,20 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   locally and rely on the `Go test` check for the whole suite.
 - **Single-item completion.** After the selected PR is handled, stop. A later
   invocation must fetch fresh base/HEAD and obtain a new independent review.
+- **Merge train (kjelly/pilot#307).** The actor never merges. On a MERGE decision it
+  saves the evidence and adds the `merge-queue` label (`ENQUEUED`); `scripts/merge_train.py`,
+  the one consumer per repository and host, takes the oldest-labelled PR, merges the
+  live base tip into its branch when HEAD lacks it (only a clean merge that changes no
+  file the PR changed), waits for CI on that HEAD, reruns this gate and merges. A PR
+  behind main is therefore not sent back to `pr-ready` unless the merge conflicts or a
+  file changed on both sides. The consumer runs from a user timer or by hand: after a
+  `ENQUEUED` report with no timer on this host, run
+  `python3 "$SNAP/.agents/skills/pr-review-merge/scripts/merge_train.py" process --repo OWNER/REPO --worktree <dedicated clone> --pr N`
+  attached once. `--pr` keeps the invocation single-item: it handles only the selected PR,
+  and only when it is first in the queue (`NOT_AT_HEAD` otherwise; the timer takes it in
+  turn). `BUSY` means a consumer is already running. Its only write to a PR branch is
+  that base-integration merge commit. Rules, outcomes and the timer:
+  `references/merge-train.md`.
 - **Hand-off with `pr-ready`.** `pr-ready` marks a PR Ready only when every review
   thread is resolved; it may leave a reviewer-confirmed unrelated failing check, a
   `CHANGES_REQUESTED` review awaiting re-review, findings it disputed on the PR, and
@@ -136,7 +159,7 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 
 ## 2. Orchestration / context isolation
 
-1. Root inventories the selected PR number, URL, author, HEAD/Base SHA, CI, dependencies, overlap, and current state. Independently read the live tip of `baseRefName` (`main` here): it must be an ancestor of PR HEAD, and PR `baseRefOid` must match it. Metadata equality or a conflict-free PR alone does not prove alignment. A feature HEAD normally differs from main; require ancestry, not HEAD/main SHA equality. A confirmed missing ancestor or metadata mismatch requires a reasoned comment and Draft conversion for `pr-ready` to repair, even before semantic review. Confirm with fresh PR/ref reads, record HEAD/Base/live-base SHAs and the branch. Missing access, invalid responses or movement during confirmation remain WAITING. Map this PR's dependencies and shared test infrastructure; block it on unmet dependencies or unreviewed interactions with other PRs, which are read-only context. Do not start another PR in this invocation.
+1. Root inventories the selected PR number, URL, author, HEAD/Base SHA, CI, dependencies, overlap, and current state. Independently read the live tip of `baseRefName` (`main` here) and classify the PR against it (`review_gate.train_alignment`): HEAD contains it, or lacks it with a clean GitHub test merge and no file changed on both sides since the merge base (the merge train integrates it), or lacks it with a conflict or an overlap. Lagging PR `baseRefOid` metadata alone is not a problem. A confirmed conflict or overlap requires a reasoned comment and Draft conversion for `pr-ready` to repair, even before semantic review. Confirm with fresh PR/ref reads, record HEAD/Base/live-base SHAs and the branch. Missing access, invalid responses or movement during confirmation remain WAITING. Map this PR's dependencies and shared test infrastructure; block it on unmet dependencies or unreviewed interactions with other PRs, which are read-only context. Do not start another PR in this invocation.
 2. After checking out the selected PR head branch, spawn one independent `prm-reviewer` in a **fresh context for this PR**. Use `prm-dependency` if this PR's overlaps or stacked branches need separate analysis. If the runtime lacks true subagents, report `WAITING` rather than simulating independent review via one context.
 3. Each reviewer reads *actual full diff* (`gh pr diff`, and source/context for impacted modules), PR description/issues/reviews, the disputed earlier findings Root supplies with their replies, CI and tests; inspect correctness, requirements, architecture, security, concurrency, edge cases, semantic regression, migration/rollback implications, and test coverage. Fetch large diffs to local files; do not stuff raw code or logs into Root context.
 4. Reviewer must return compact typed findings (`P0`–`P4`, path/line, rationale, reproducible evidence, blocking flag; `disputed_reply_url` and `new_evidence` when it repeats a disputed finding), relevant tests/check URLs, summary, **reviewed HEAD + BASE commit SHAs**, verdict `PASS` / `BLOCK` / `NEEDS_MORE_EVIDENCE`, and explicit review scope. A reviewer's verbal `LGTM` is insufficient.
@@ -146,9 +169,9 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 
 | Decision | Conditions | GitHub action |
 |---|---|---|
-| `MERGE` | Valid independent reviewed HEAD/Base; zero P0–P2 blockers; relevant HEAD-SHA-bound tests succeed; the base manifest's required record covers HEAD (or is reasoned `not-needed`); CI all passed (or narrowly justified no-CI policy); required approvals and rules satisfied; no unresolved threads/dependencies; current mergeable and safe | `gh pr merge --match-head-commit <SHA>`; verify `MERGED` |
-| `DRAFT` | Confirmed live base tip absent from HEAD ancestry or PR Base SHA differing from that tip (independent of semantic review), confirmed blocking defect, failed CI not confirmed unrelated, failing tests, substantive review finding (a repeated disputed one only with new evidence), merge conflict or unresolved review thread | Post actionable reasons and HEAD/Base/live-base SHAs for alignment failures, then `gh pr ready --undo`; hand repair to `pr-ready` |
-| `WAITING` | Pending CI, pending required approval, `CHANGES_REQUESTED` awaiting re-review, a failing check the reviewer confirmed unrelated to the PR, a disputed finding repeated without new evidence, the mandated actual-run record missing or not covering HEAD (no reviewer finding), unknown GitHub status, evidence incomplete, stale review HEAD/Base without a confirmed live-base mismatch, movement during live confirmation, merge queue, missing access or unmet dependency | Leave Ready **unchanged**; report blocker and recommended next action |
+| `MERGE` | Valid independent review covering HEAD (the reviewed HEAD, or every change since a pure base import); zero P0–P2 blockers; relevant tests at the reviewed HEAD succeed; the base manifest's required record covers HEAD (or is reasoned `not-needed`); CI all passed (or narrowly justified no-CI policy); required approvals and rules satisfied; no unresolved threads/dependencies; current mergeable and safe | Queue for the merge train (`merge-queue` label, saved evidence; `ENQUEUED`); the train integrates the base when needed, reruns this gate, `gh pr merge --match-head-commit <SHA>` and verifies `MERGED` |
+| `DRAFT` | Confirmed live base tip absent from HEAD with a merge conflict or a file changed on both sides (independent of semantic review), confirmed blocking defect, failed CI not confirmed unrelated, failing tests, substantive review finding (a repeated disputed one only with new evidence), merge conflict, unresolved review thread or a secret in any commit of the PR (the local scan) | Post actionable reasons and HEAD/Base/live-base SHAs for alignment failures, then `gh pr ready --undo`; hand repair to `pr-ready` |
+| `WAITING` | Pending CI, HEAD behind the live base with mergeability or the changed files not known yet, pending required approval, `CHANGES_REQUESTED` awaiting re-review, a failing check the reviewer confirmed unrelated to the PR, a disputed finding repeated without new evidence, the mandated actual-run record missing or not covering HEAD (no reviewer finding), unknown GitHub status, evidence incomplete, stale review HEAD/Base without a confirmed live-base mismatch, movement during live confirmation, merge queue, missing access, unmet dependency or a secret scan that could not run | Leave Ready **unchanged**; report blocker and recommended next action |
 | `SKIP` | Already Draft, closed or merged | No action |
 
 `WAITING` is intentional: lack of evidence or a transient pending check is not proof the code is defective. **Do not automatically downgrade in these situations**. If the PR has *any confirmed* blocking defect, classify `DRAFT` even if some checks are pending.
@@ -159,10 +182,12 @@ Before taking action on semantic findings or merging, require review evidence fo
 
 ```bash
 python3 "$SNAP/.agents/skills/pr-review-merge/scripts/review_gate.py" --repo OWNER/REPO --pr 123 \
-  --evidence /safe/state/123/review.json
+  --evidence /safe/state/123/review.json --worktree "$REPO_ROOT"
 ```
 
-This command reads GitHub state and outputs structured JSON, no mutation. If the
+`--worktree` is the checkout that holds the PR's commits; add `--secret-file FILE` (outside the repository, one value per line, each 8+ bytes) to look for values you know of. Both are passed to the actor below as well.
+
+This command reads GitHub state and, for the secret scan, the local repository, and outputs structured JSON; no mutation. If the
 result is `MERGE` or `DRAFT`, first complete the shared contract's safe restore
 and verify the starting branch/SHA. Restore failure leaves the PR unchanged
 (WAITING). After restoration, rerun this live gate with the saved PR HEAD/Base
@@ -171,26 +196,26 @@ Only then run the guarded actor from the snapshot:
 
 ```bash
 python3 "$SNAP/.agents/skills/pr-review-merge/scripts/apply_decision.py" --repo OWNER/REPO --pr 123 \
-  --evidence /safe/state/123/review.json --method merge --execute
+  --evidence /safe/state/123/review.json --worktree "$REPO_ROOT" --method merge --execute
 ```
 
-Without `--execute`, the actor performs a dry run. **Run with `--execute` when the user has requested this workflow**, without asking for additional permission for every normal PR; observe session/tool permission prompts.
+Without `--execute`, the actor performs a dry run. **Run with `--execute` when the user has requested this workflow**, without asking for additional permission for every normal PR; observe session/tool permission prompts. A MERGE decision is executed as `ENQUEUED`; see the merge train above.
 
-Actor **reruns the live gate immediately before action**, never trusts a saved decision, serializes writes, and uses `--match-head-commit`. It refuses merge-queue branches (because `gh pr merge` can silently enqueue or enable auto-merge), refuses stale SHA, and never treats a successful command as proof of merged status. On Draft it posts concrete findings before converting, and verifies the remote `isDraft` afterward.
+Actor **reruns the live gate immediately before action**, never trusts a saved decision, serializes writes, and on MERGE queues the PR for the merge train instead of merging; the train merges with `--match-head-commit` after its own live gate. Both refuse GitHub merge-queue branches (because `gh pr merge` can silently enqueue or enable auto-merge), refuse stale SHA, and never treat a successful command as proof of merged or enqueued status. On Draft it posts concrete findings before converting, and verifies the remote `isDraft` afterward.
 
 Review CI with `gh pr checks --json name,state,bucket,link,workflow` plus live PR metadata, review threads (GraphQL pagination), and active base-branch rules. Unknown states **fail closed** into `WAITING`. Missing/empty CI alone is not success; require an explicit no-CI rationale and supporting test evidence.
 
 ## 5. Iteration / PR dependencies
 
 - Review and act on **only the selected PR**. Re-fetch its HEAD, Base, mergeability, CI and dependencies before action. Old evidence is invalid after any HEAD or Base change; obtain a new independent review. Do not continue to another PR after completion.
-- If a PR has verified blockers: do not silently edit it here. Comment with path/line, severity, issue rationale, test failure details and resolution steps; convert to Draft. For a confirmed base ancestry or metadata failure, the actor records HEAD/Base/live-base SHAs and directs `pr-ready` to reconcile metadata, merge the verified latest base into HEAD, rerun affected checks/CI and obtain fresh independent review before Ready. The separate `pr-ready` skill can remediate it later.
+- If a PR has verified blockers: do not silently edit it here. Comment with path/line, severity, issue rationale, test failure details and resolution steps; convert to Draft. For a confirmed conflict or overlap with the live base, the actor records HEAD/Base/live-base SHAs and directs `pr-ready` to merge the verified latest base into HEAD, rerun affected checks/CI and obtain fresh independent review before Ready. The separate `pr-ready` skill can remediate it later. The merge train's base-integration commit is the only write to a PR branch in this skill.
 - If CI/permissions are pending, report `WAITING`, leave Ready and re-check if current session permits. Do not issue a blind loop or mark the PR as merged.
-- Save the durable checkpoint for the selected PR outside the checkout. Do not create new PRs, modify PR branches, or delete branches. Do not close unrelated issues.
+- Save the durable checkpoint for the selected PR outside the checkout. Do not create new PRs, modify PR branches (other than the merge train's base-integration commit), or delete branches. Do not close unrelated issues.
 - Review steps are subject to runtime capabilities. If code execution, GitHub API, or subagents are unavailable, **do not claim completion**.
 
 ## 6. Final report (selected PR)
 
-Return `PR # / URL | MERGED / DRAFT-BLOCKED / WAITING / SKIPPED / ERROR | reviewed HEAD/Base SHA | review summary & blocking findings | CI & test evidence | GitHub action + verified remote state | next action | checkout (restored to the starting branch, or stayed and why) | role DRIFT, if any (role, hashes, `header_changes`; also in the evidence `summary`)`.
+Return `PR # / URL | ENQUEUED (merged later by the train) / MERGED / DRAFT-BLOCKED / WAITING / SKIPPED / ERROR | reviewed HEAD/Base SHA | review summary & blocking findings | CI & test evidence | GitHub action + verified remote state | next action | checkout (restored to the starting branch, or stayed and why) | role DRIFT, if any (role, hashes, `header_changes`; also in the evidence `summary`)`.
 
 Keep Root context small: include structured findings and essential citations/paths, **not full diffs or raw logs**.
 
@@ -199,7 +224,10 @@ Keep Root context small: include structured findings and essential citations/pat
 - [Review and dependency workflow](references/workflow.md)
 - [JSON evidence contract](references/evidence-contract.md)
 - [Quality gate and merge-queue safety](references/quality-gate.md)
+- [Merge train](references/merge-train.md)
 - [Platforms and repository layout](references/platforms.md)
 - `scripts/list_ready.py` — lists candidate open Ready PRs (paginated) so the user can choose one; listing is not authorization to process them
-- `scripts/review_gate.py` — live read-only decision gate
-- `scripts/apply_decision.py` — gated GitHub mutation (`--execute` required)
+- `scripts/review_gate.py` — live read-only decision gate (scans every commit of the PR for secrets with `--worktree`)
+- `scripts/apply_decision.py` — gated GitHub mutation (`--execute` required; takes the same `--worktree`/`--secret-file`); MERGE queues the PR
+- `scripts/merge_train.py` — the merge train's single consumer (`process`, `status`)
+- `../_shared/scripts/secret_scan.py` — value-free secret scanner the three gates share (rules: `../_shared/committed-secrets.md`)

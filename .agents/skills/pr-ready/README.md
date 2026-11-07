@@ -2,7 +2,7 @@
 
 這是 **Skill + 原生 subagents + fail-closed Quality Gate**，不是會獨立執行的排程 daemon。呼叫 Skill 的 Agent 需要實際具備 Git、GitHub CLI、Python 與必要的網路權限，才能執行修復、驗證、push、Ready transition。未達品質門檻時不得轉 Ready；絕不自動 merge 或繞過 branch protection。
 
-Ready 前必須包含最新 `main`：gate 獨立讀取遠端 base tip，確認它是 PR HEAD 的祖先，並核對 PR Base SHA。尚未包含時先將已確認的最新 base 合併到原 PR 分支，再跑相關驗證/CI 與新的獨立審查；沒有衝突也要檢查。讀取失敗或對齊無法確認時維持 Draft。
+Ready 前不必包含最新 `main`（kjelly/pilot#307）：gate 獨立讀取遠端 base tip，用 merge gate 的同一套判斷分類。HEAD 已包含它，或尚未包含但 GitHub 的試合併乾淨、兩邊沒有改到同一個檔案時可以 Ready，之後由 `pr-review-merge` 的 merge train 把最新 base 合併進來、等 CI 再合併。試合併衝突或兩邊改到同一檔案時，先將已確認的最新 base 合併到原 PR 分支，再跑相關驗證/CI 與新的獨立審查。GitHub 尚未算出 mergeability 時等待；讀取失敗或無法分類時維持 Draft。
 
 ## 安裝（repo 內建，不另外安裝）
 
@@ -75,6 +75,7 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
 
 - `WAITING-CI`：其他 gate 通過，保持 session 等待 CI；每 30 秒重新驗證 pins 與全部 gate。`--poll-interval` 上限 60 秒。
 - `WAIT-INTERRUPTED`：明確 `--wait-timeout` 或 SIGINT/SIGTERM 中斷；預設無 timeout。狀態保存在 `.pr-ready/N/wait-status.json`，不覆寫 Root checkpoint；`ready_invoked` 表示是否已嘗試 Ready，若為 true 必須重查遠端狀態。
+- `--worktree` 為必填：`pr_gate.py` 用 PR 的 `baseRefOid..headRefOid`（以 SHA 指定，不看目前 checkout 的 HEAD）掃描**每一個 commit** 的新增行、commit message 與路徑，是否含秘密（共用 `_shared/scripts/secret_scan.py`，規則見 `.agents/skills/_shared/committed-secrets.md`）。任何一個 commit 有發現就是 `DRAFT-BLOCKED`，沒有 override：後續 commit 把值換成 placeholder 也不能清除，必須停下來回報使用者。`--wait` 期間同一組 base/head 只掃一次。`--secret-file FILE`（須在 repo 之外，一行一個值，每個至少 8 bytes）可加入已知的秘密值；輸出只有類別、檔案與 commit，絕不含值。
 - `GATE-PASS`：門檻檢查通過，**尚未變更 PR 狀態**。
 - `READY`：GitHub 已確認從 Draft 改為 Ready、HEAD 未變。
 - `DRAFT-BLOCKED`：資料不足或至少一項品質門檻不合格（exit code 2）。

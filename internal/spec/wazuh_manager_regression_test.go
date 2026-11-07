@@ -9,7 +9,8 @@ import (
 
 // TestRegression_WazuhManagerSpec locks the local Dockerized Wazuh stack
 // contract. C1-C9 cover containers, readiness, capacity and the rule engine;
-// C10 pins the host destination; C11 checks the loaded host imfile pipeline.
+// C10 pins the host destination; C11 checks the loaded host imfile pipeline;
+// C12 is the read-only native version, registry and health oracle (Issue #244).
 // Real cross-host delivery is independently covered by wazuh-alert-delivery.md
 // and its captured-alert/oracle/native-rsyslog regression tests.
 //
@@ -22,7 +23,7 @@ func TestRegression_WazuhManagerSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -51,10 +52,16 @@ func TestRegression_WazuhManagerSpec(t *testing.T) {
 
 	// Container/functional rows must use the `sh -c '... && echo 0 || echo 1'`
 	// form (C10 keeps the native-rc `; echo $?` form like v1.0).
-	for _, id := range []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C11"} {
+	for _, id := range []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C11", "C12"} {
 		if !strings.Contains(cmd[id], "&& echo 0") || !strings.Contains(cmd[id], "|| echo 1") {
 			t.Errorf("%s must use the `... && echo 0 || echo 1` form, got %q", id, cmd[id])
 		}
+	}
+	if !strings.Contains(cmd["C12"], "pilot-wazuh-transaction central-verify") || strings.Contains(cmd["C12"], "--canary") {
+		t.Fatal("C12 must use the read-only native version, registry and readiness oracle")
+	}
+	if !NeedsBecome(s.Rows[len(s.Rows)-1]) {
+		t.Fatal("C12 must request become for the root-only coordinator")
 	}
 
 	// Container liveness must avoid docker Go-template `{{ }}` (Jinja trap):

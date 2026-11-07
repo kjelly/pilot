@@ -2,14 +2,15 @@
 
 `pr_gate.py` is a fail-closed **automated corroboration**, not a full semantic proof. The independent reviewer and orchestrator must verify all real-world assertions before signing evidence.
 
-1. **Identity:** original PR exists, open, Draft, remote head matches `head_sha` in evidence, and checkout matches if `--worktree` is supplied.
+1. **Identity:** original PR exists, open, Draft, remote head matches `head_sha` in evidence, and checkout matches (`--worktree` is required: it is also the repository the secret scan reads).
 2. **Scope:** acceptance criteria traced to code/tests, no serious design flaw, actual root cause fixed, PR description reflects latest code, no unresolved cross-PR dependencies.
 3. **Local checks:** tests, lint, and static analysis verified by recorded receipts bound to HEAD, or to an ancestor whose delta to HEAD is evidence-only under the base manifest's `evidence_only_paths` (the gate computes this and lists `receipt_reuse`); receipts cover the packages the diff touches, the whole suite is the `Go test` check. Not-applicable is allowed only with explicit and specific technical justification. Local tests must not be weakened to pass. Prefer `run_check.py` receipts, not free-text claims.
 4. **Independent review:** distinct subagent, HEAD or a gate-accepted evidence-only ancestor, zero P0/P1/P2 blocking findings, all major comments resolved: fixed and verified, or disputed with the reviewer's independent agreement and a GitHub reply recorded in `disputed_review_comments` ([review comments](review-comments.md)).
 5. **GitHub:** all required checks completed and passed for current PR head, no relevant nonrequired failures or pending checks, every review thread resolved, no merge conflict. If CI is not configured or status lookup fails, block until metadata is inspected and documented; don't infer pass from absence.
-6. **Human approvals:** not a prerequisite for Draft→Ready. GitHub `REVIEW_REQUIRED`/no approvals must not automatically block.
-7. **Transition:** `pr_gate.py ... --worktree "$REPO_ROOT" --wait --ready --restore-sha "$START_SHA" --restore-branch="$START_BRANCH"` is the default after push and evidence preparation. It waits on actual pending CI while revalidating pinned HEAD/base/branch, fetched base policy, title/body, review/comment content, evidence and local artifact hashes, then safely restores the recorded starting branch/SHA, repeats the remote/pin preflight, invokes `gh pr ready`, and verifies new state. Restoration failure prevents Ready; omit --restore-branch for a detached start. It never merges or enables auto-merge.
-8. **Pilot target evidence (Root/Reviewer check):** inspect the target-validation decision, relevant history/counterexample and actual-run artifacts per [the shared reference](../../pilot-code-review/references/pilot-history-checks.md). Required target evidence must cover the current candidate, actual task selection, effective state and relevant failure recovery. A normal-chain PASS does not prove rollback; an unavailable required run keeps Draft. This semantic gate is not implemented by `pr_gate.py`; record its evidence and limitations in the independent report and `assessment.rationale` before using `--ready`.
+6. **Secrets:** `pr_gate.py` scans every commit of `baseRefOid..headRefOid` (added lines, commit messages and paths) with the shared `_shared/scripts/secret_scan.py`; any finding is `DRAFT-BLOCKED`, even when a later commit removed the value, and nothing in the gate overrides it. The range is named by the PR's own SHAs, so it holds after the checkout moves back to the starting branch; a base or head that is not in the clone, or a scanner that does not load, also blocks. One scan runs per base/head pair during `--wait`. `--secret-file FILE` (outside the repository) adds known values. Output has the class, file and commit, never the value; rules and what to do: `.agents/skills/_shared/committed-secrets.md`.
+7. **Human approvals:** not a prerequisite for Draft→Ready. GitHub `REVIEW_REQUIRED`/no approvals must not automatically block.
+8. **Transition:** `pr_gate.py ... --worktree "$REPO_ROOT" --wait --ready --restore-sha "$START_SHA" --restore-branch="$START_BRANCH"` is the default after push and evidence preparation. It waits on actual pending CI while revalidating pinned HEAD/base/branch, fetched base policy, title/body, review/comment content, evidence and local artifact hashes, then safely restores the recorded starting branch/SHA, repeats the remote/pin preflight, invokes `gh pr ready`, and verifies new state. Restoration failure prevents Ready; omit --restore-branch for a detached start. It never merges or enables auto-merge.
+9. **Pilot target evidence (Root/Reviewer check):** inspect the target-validation decision, relevant history/counterexample and actual-run artifacts per [the shared reference](../../pilot-code-review/references/pilot-history-checks.md). Required target evidence must cover the current candidate, actual task selection, effective state and relevant failure recovery. A normal-chain PASS does not prove rollback; an unavailable required run keeps Draft. This semantic gate is not implemented by `pr_gate.py`; record its evidence and limitations in the independent report and `assessment.rationale` before using `--ready`.
 
 ## Important boundaries
 - GitHub CLI `gh pr checks --json ...` includes `bucket`; `--required` identifies required checks. Both queries are necessary. JSON may still be emitted when CLI exit status is nonzero due to checks: parse data and evaluate individual statuses. On a branch with no required checks, `--required` exits 1 with nothing on stdout and exactly `no required checks reported on the '<branch>' branch` on stderr; the gate reads that as zero required checks and still requires every other check to pass (or be a confirmed unrelated exemption). Only that exact case is tolerated: valid JSON on stdout is always parsed (a failing required check whose name contains the message stays a failure and cannot be exempted), and the message inside other output, in another case, or with any other exit status fails closed like every other failure of either query.
@@ -25,9 +26,11 @@
 
 # Live base alignment
 
-Before GATE-PASS or Ready, independently resolve the remote base tip and prove it
-is an ancestor of PR HEAD; also require PR Base SHA to equal that tip. SHA equality
-of HEAD and main is unnecessary. Use the shared merge gate's alignment verifier
-on each poll, final preflight and post-action check. Missing ancestry or metadata
-alignment keeps Draft even for conflict-free PRs. Integrate the latest verified
-base, rerun affected checks/CI and obtain fresh independent review before retrying.
+Before GATE-PASS or Ready, independently resolve the remote base tip and classify the PR with the
+merge gate's `train_alignment` (kjelly/pilot#307, `../../pr-review-merge/references/merge-train.md`).
+HEAD may lack the tip: the merge train integrates it before merging. A merge conflict or a file
+changed on both sides since the merge base keeps Draft: integrate the latest verified base, rerun
+affected checks/CI and obtain fresh independent review before retrying. Mergeability GitHub has not
+computed yet is pending. The PR Base SHA is not pinned during `--wait`, so main advancing does not
+stop it; every poll, the final preflight and the post-action check classify the live base again.
+SHA equality of HEAD and main is unnecessary.

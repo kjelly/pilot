@@ -206,12 +206,30 @@ Agent 判讀先讀 command result 或 compact summary：candidate/tree、exit co
 只修改拼字、說明文字、latest link 或 evidence metadata，且 execution-affecting file hash
 沒有改變時，可以只補 evidence-only commit，不必重跑。
 
-合入較新的 base 不會自動讓既有 actual-run 有效或失效。只有 base manifest 明確
-標為 `kind: target-run`、獨立 reviewer 對最新 HEAD/base 完成執行依賴盤點、
-且 gate 證明盤點範圍的 Git blob/mode 未變，並驗證其他差異是純 upstream 匯入
-或逐項確認不影響執行的變更，才可沿用原 candidate 的 target evidence。
-新增或改動執行依賴、無法建立完整依賴範圍時仍需重跑；不改寫 tested revision，
-也不沿用舊 review/CI。欄位與機器判定見
+合入較新的 base 後，既有 actual-run 是否仍有效，取決於 base 帶進來的檔案
+（base manifest 須標 `kind: target-run`；不改寫 tested revision，CI 一律對目前 HEAD 重跑）：
+
+- **只帶進 `non_execution_paths`**（`.github/pr-evidence.json` 宣告 target run 不會讀的檔案：
+  `.agents/**`、最上層與 `docs/` 的 Markdown（`docs/verification/**` 除外）、Go test 檔、
+  `.github/**`），且都是純 upstream 匯入、一般檔案、不在 machine record closure 的
+  files/patterns/unresolved 參考可觸及的範圍內：gate 自動沿用，不需 reviewer 盤點；
+  pr-ready 的 independent review 也沿用。local check receipt 不沿用，因為帶進來的 test
+  要對 PR 的程式碼實際跑過。
+- **帶進 closure 外的 runtime 檔**（例如其他元件的 playbook 或 spec）：獨立 reviewer
+  對最新 HEAD/base 盤點，以 `target_reuse` 證明；machine record 的 closure 含
+  unresolved/external 時，逐檔寫 `unrelated_runtime_changes` 理由。
+- **一律重跑**：closure 內或其搜尋範圍可觸及的檔案、`rerun_paths`（編譯進 pilot 的
+  `cmd/**`、`internal/**`、非 test 的 `.go`、`go.mod`/`go.sum`，以及 `images/**`、
+  `contracts/**`、`group_vars/**`、`host_vars/**`、`ansible.cfg`、`requirements.yml`、
+  共用的 playbook `tasks/`/`templates/`/`files/`）、PR 自己或衝突解決改過的執行檔案。
+
+Ready 與 merge gate 以「HEAD 已整合的 base」（HEAD 與 live main 的 merge base）判斷上面兩條，manifest 則讀 live main。
+PR 不必在 Ready 前追上 main：`pr-review-merge` 的 merge train 會在合併前把 live main 合併進 PR、
+在合併結果上跑 CI，並對該 commit 用同樣的規則重新判斷 record 是否仍涵蓋 HEAD（kjelly/pilot#307）。
+
+預設 ambient controller 的 record 不會有完整 closure（resolver 只證明 literal
+`copy`/`debug.msg`，vault 永遠是 external；`--evidence-controller=pinned` 只清掉 ambient
+那幾項），所以上面兩條是它唯一的沿用方式。欄位與機器判定見
 [共用 target evidence 規則](../.agents/skills/_shared/target-evidence-reuse.md)。
 
 ## 5. 文件內容預算
@@ -225,5 +243,7 @@ Agent 判讀先讀 command result 或 compact summary：candidate/tree、exit co
 
 機器 record 的 target reuse 由 gate 直接讀取已提交 artifact 的 JSON，驗證 candidate/tree、
 成功狀態、乾淨 checkout、閉包 blob/mode 與搜尋範圍；不需手寫 `execution_paths`。
-未解析引用、外部執行檔案、缺少 `resolution_version: 10`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受自動沿用。
+缺少 `resolution_version: 10`/`frozen: true`，或舊版沒有搜尋範圍的機器 record 不接受沿用；
+含未解析引用或外部輸入的 record 只能走 §4 的 non-execution 自動沿用，或在 manifest 項目宣告
+`rerun_paths` 時走 reviewer 逐檔審查。
 既有手寫 record 仍走完整人工依賴盤點；review/CI receipt 仍須符合目前 HEAD/base。

@@ -20,6 +20,10 @@ class GitHubError(RuntimeError):
     pass
 
 
+class CompareLimitError(GitHubError):
+    """GitHub cut a comparison's file list: nothing a retry fixes, so a person must integrate the PR."""
+
+
 @dataclass(frozen=True)
 class Repo:
     raw: str
@@ -68,7 +72,8 @@ def host_args(repo: Repo) -> list[str]:
 
 
 def pr_view(repo: Repo, number: int) -> dict[str, Any]:
-    fields = "number,url,title,body,state,isDraft,headRefOid,baseRefOid,baseRefName,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest"
+    fields = ("number,url,title,body,state,isDraft,headRefOid,headRefName,isCrossRepository,baseRefOid,"
+              "baseRefName,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,labels")
     data = gh_json(["pr", "view", str(number), "-R", repo.raw, "--json", fields])
     if not isinstance(data, dict) or data.get("number") != number:
         raise GitHubError("gh pr view returned invalid PR/number")
@@ -173,6 +178,20 @@ def is_ancestor(repo: Repo, base: str, head: str) -> bool:
     raise GitHubError("Inconsistent ancestry comparison response")
 
 
+def merge_base(repo: Repo, a: str, b: str) -> str:
+    """The merge base GitHub reports for `a...b`, independent of the compare file-list limit."""
+    if not (COMMIT_SHA.fullmatch(a) and COMMIT_SHA.fullmatch(b)):
+        raise ValueError("merge_base needs two full lowercase commit SHAs")
+    data = gh_json(["api", *host_args(repo), f"repos/{repo.owner}/{repo.name}/compare/{a}...{b}"])
+    try:
+        sha = data["merge_base_commit"]["sha"]
+    except (KeyError, TypeError) as exc:
+        raise GitHubError("Invalid compare response: no merge base") from exc
+    if not isinstance(sha, str) or not COMMIT_SHA.fullmatch(sha):
+        raise GitHubError("Invalid merge base SHA")
+    return sha
+
+
 def _not_found(cp: subprocess.CompletedProcess[str]) -> bool:
     """True only for gh's exact answer to a path or commit GitHub does not have.
 
@@ -243,8 +262,8 @@ def compare(repo: Repo, base: str, head: str) -> dict[str, Any] | None:
     except (KeyError, TypeError) as exc:
         raise GitHubError("Invalid compare response") from exc
     if len(entries) >= COMPARE_FILE_LIMIT:
-        raise GitHubError(f"GitHub lists at most {COMPARE_FILE_LIMIT} changed files for {base[:12]}...{head[:12]}; "
-                          "the full delta cannot be verified")
+        raise CompareLimitError(f"GitHub lists at most {COMPARE_FILE_LIMIT} changed files for {base[:12]}...{head[:12]}; "
+                                "the full delta cannot be verified")
     return {"status": status, "files": files, "merge_base": merge_base,
             "ancestor": status in ("ahead", "identical") and behind == 0 and merge_base.lower() == base}
 
@@ -300,3 +319,68 @@ def list_open_prs(repo: Repo) -> list[dict[str, Any]]:
     if not all(isinstance(pr, dict) for pr in prs):
         raise GitHubError("Invalid PR list response")
     return prs
+
+
+def labeled_open_prs(repo: Repo, label: str) -> list[int]:
+    """Open pull requests carrying `label` (the issues endpoint lists PRs with a `pull_request` key)."""
+    endpoint = (f"repos/{repo.owner}/{repo.name}/issues?state=open&labels={quote(label, safe='')}"
+                "&per_page=100")
+    result = gh_json(["api", *host_args(repo), "--paginate", "--slurp", endpoint])
+    if not isinstance(result, list) or not all(isinstance(page, list) for page in result):
+        raise GitHubError("gh api --paginate --slurp did not return pages")
+    numbers = []
+    for item in (entry for page in result for entry in page):
+        if not isinstance(item, dict) or type(item.get("number")) is not int:
+            raise GitHubError("Invalid issue list entry")
+        if "pull_request" in item:
+            numbers.append(item["number"])
+    return numbers
+
+
+def label_added_at(repo: Repo, number: int, label: str) -> str | None:
+    """ISO time `label` was last added to the PR (timeline `labeled` events), or None."""
+    endpoint = f"repos/{repo.owner}/{repo.name}/issues/{number}/timeline?per_page=100"
+    result = gh_json(["api", *host_args(repo), "--paginate", "--slurp", endpoint])
+    if not isinstance(result, list) or not all(isinstance(page, list) for page in result):
+        raise GitHubError("gh api --paginate --slurp did not return pages")
+    added = None
+    for event in (entry for page in result for entry in page):
+        if not isinstance(event, dict) or event.get("event") != "labeled":
+            continue
+        name = (event.get("label") or {}).get("name") if isinstance(event.get("label"), dict) else None
+        created = event.get("created_at")
+        if name == label:
+            if not isinstance(created, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", created):
+                raise GitHubError("Invalid labeled event time")
+            added = created if added is None or created > added else added
+    return added
+
+
+def edit_label(repo: Repo, number: int, label: str, *, add: bool) -> None:
+    run_gh(["pr", "edit", str(number), "-R", repo.raw, "--add-label" if add else "--remove-label", label])
+
+
+def post_comment(repo: Repo, number: int, body: str) -> None:
+    import os
+    import tempfile
+    filename = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".md", prefix="prm-",
+                                         delete=False) as tmp:
+            tmp.write(body)
+            filename = tmp.name
+        run_gh(["pr", "comment", str(number), "-R", repo.raw, "--body-file", filename])
+    finally:
+        if filename:
+            try:
+                os.unlink(filename)
+            except OSError:
+                pass
+
+
+def mark_draft(repo: Repo, number: int) -> None:
+    run_gh(["pr", "ready", str(number), "-R", repo.raw, "--undo"])
+
+
+def merge_pr(repo: Repo, number: int, head: str, method_flag: str = "--merge") -> None:
+    run_gh(["pr", "merge", str(number), "-R", repo.raw, method_flag, "--match-head-commit", head])

@@ -1,0 +1,76 @@
+---
+# Read-only: only bounded inventory identity fields enter this resolver, and the
+# raw/TLS name stays separate from the numeric transport it is bound to. The
+# caller pins the returned address, so a manager name that merely resolves in DNS
+# can never become the enrollment target.
+#
+# The two helper runs stay under no_log (their argument is the inventory evidence),
+# which would also hide WHY a binding was refused. The helper prints only a fixed
+# literal as its `error`; the task after each run shows exactly that field (and
+# nothing of the argument, the records or the raw value) when the run failed.
+- name: Reset the Wazuh endpoint inventory evidence
+  ansible.builtin.set_fact:
+    wazuh_endpoint_records: []
+
+- name: Collect only trusted inventory endpoint identity fields
+  ansible.builtin.set_fact:
+    wazuh_endpoint_records: >-
+      {{ wazuh_endpoint_records + [{'name': item,
+           'address': hostvars[item].ansible_host | default(item, true),
+           'fqdn': hostvars[item].ansible_fqdn | default('')}] }}
+  loop: "{{ wazuh_endpoint_inventory | default(groups.get('all', [])) }}"
+  no_log: true
+
+- name: Associate the raw Wazuh endpoint before transport resolution
+  ansible.builtin.script:
+    cmd: >-
+      files/wazuh-endpoint.py select {{ {'raw': wazuh_endpoint_value, 'records': wazuh_endpoint_records, 'manager': wazuh_endpoint_manager | default('')} | to_json | quote }}
+  timeout: 30
+  register: wazuh_endpoint_selection
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Refuse an endpoint the inventory does not vouch for (only the typed reason is shown)
+  ansible.builtin.fail:
+    msg: "{{ wazuh_endpoint_reason }}"
+  vars:
+    wazuh_endpoint_reason: >-
+      {{ wazuh_endpoint_selection.stdout | default('')
+         | regex_search('"error": "([^"]{1,200})"', '\1')
+         | default(['Wazuh endpoint association failed'], true) | first }}
+  when: wazuh_endpoint_selection.rc != 0
+
+- name: Resolve the selected Wazuh transport with the shared inventory-aware resolver
+  ansible.builtin.include_tasks:
+    file: resolve-hosts-alias-target.yml
+    apply:
+      timeout: 30
+  vars:
+    hosts_alias_target_host: "{{ (wazuh_endpoint_selection.stdout | from_json).transport }}"
+
+- name: Bind one canonical numeric Wazuh transport to its inventory evidence
+  ansible.builtin.script:
+    cmd: >-
+      files/wazuh-endpoint.py bind {{ {'raw': wazuh_endpoint_value, 'records': wazuh_endpoint_records, 'manager': wazuh_endpoint_manager | default(''), 'resolved': hosts_alias_resolved_ip} | to_json | quote }}
+  timeout: 30
+  register: wazuh_endpoint_binding
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Refuse a transport that is not the unique inventory manager (only the typed reason is shown)
+  ansible.builtin.fail:
+    msg: "{{ wazuh_endpoint_reason }}"
+  vars:
+    wazuh_endpoint_reason: >-
+      {{ wazuh_endpoint_binding.stdout | default('')
+         | regex_search('"error": "([^"]{1,200})"', '\1')
+         | default(['Wazuh endpoint binding failed'], true) | first }}
+  when: wazuh_endpoint_binding.rc != 0
+
+- name: Retain the single bound transport for this invocation
+  ansible.builtin.set_fact:
+    wazuh_endpoint_address: "{{ (wazuh_endpoint_binding.stdout | from_json).address }}"

@@ -66,6 +66,16 @@ jobs:
         with:
           python-version: '3.11'
 
+      # internal/spec runs the Wazuh Python harnesses (real Ansible tasks, PyYAML);
+      # TestWazuhHarnessPrerequisitesFailLoudly and TestCIProvisionsWazuhHarnessPrerequisites
+      # fail a shard that lacks them. The pin and collections follow the delivery image
+      # (cmd/pilot/cmd/ansible_core_pin_consistency_test.go).
+      - name: Install Ansible toolchain and PyYAML (Wazuh harnesses)
+        if: matrix.group == 'spec'
+        run: |
+          python3 -m pip install "ansible-core==2.19.*" pyyaml
+          ansible-galaxy collection install ansible.posix community.docker community.postgresql community.general
+
       - name: Download Go modules
         run: go mod download
 

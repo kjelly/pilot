@@ -1,0 +1,17 @@
+# Apply chain for docs/verification/freeipa-client.md A10 (the SSSD password-expiry
+# policy on gateway, directory and transport-target hosts), against
+# docs/topologies/freeipa-client-pwexpiry-a10-topology.yaml.
+#
+#   1. the Pilot Access Gateway transport chain (FreeIPA server, clients,
+#      identity fixtures, gateway scope, session store, gateway, target
+#      policy, workstation isolation), unchanged
+#   2. the Pilot Access Directory on its own host
+#
+# The SSSD policy is not set here (see the topology header): the live test
+# applies it afterwards. Passwords for the portal user are set by the live test
+# directly on FreeIPA, never written to a file.
+---
+- name: Gateway transport chain (server, clients, gateway, store, target policy)
+  ansible.builtin.import_playbook: pilot-access-transport-e2e.yml
+- name: Pilot Access Directory
+  ansible.builtin.import_playbook: ../apply/pilot-access-directory-apply.yml

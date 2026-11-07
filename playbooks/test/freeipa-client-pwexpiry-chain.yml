@@ -1,0 +1,28 @@
+# Apply chain for the freeipa-client password-expiry evidence run
+# (docs/verification/freeipa-client.md C13-C18). Order matters:
+#   1. FreeIPA server (provides the KDC/LDAP the client enrolls into)
+#   2. canonical demo user + sudo rule (the C5/C8 precondition, AGENTS.md 4.1)
+#   3. fixture accounts in four password states (C15-C17), set directly on
+#      FreeIPA with `ipa user-mod`; the roster is not involved
+#   4. freeipa-client, with
+#      -e freeipa_client_sssd_password_expiry_policy=<warn|renew|off>
+#   5. host-monitoring + login-probe on the client, the canary account, and a
+#      canary password that does not expire (A07: the probe must keep reporting
+#      stage ok under renew)
+---
+- name: Install the FreeIPA server
+  ansible.builtin.import_playbook: ../apply/freeipa-server-apply.yml
+- name: Ensure the demo user and sudo rule exist
+  ansible.builtin.import_playbook: fixtures/freeipa-client-fixtures.yml
+- name: Ensure the password-state fixture accounts exist
+  ansible.builtin.import_playbook: fixtures/freeipa-client-pwexpiry-fixtures.yml
+- name: Enroll and configure the client
+  ansible.builtin.import_playbook: ../apply/freeipa-client-apply.yml
+- name: Host monitoring (node_exporter textfile collector for the probe)
+  ansible.builtin.import_playbook: ../apply/host-monitoring-apply.yml
+- name: Login probe (key pair, daemon)
+  ansible.builtin.import_playbook: ../apply/login-probe-apply.yml
+- name: Login probe canary (IPA user, key, HBAC rule)
+  ansible.builtin.import_playbook: fixtures/login-probe-fixtures.yml
+- name: Give the canary a password that does not expire
+  ansible.builtin.import_playbook: fixtures/freeipa-client-pwexpiry-canary.yml

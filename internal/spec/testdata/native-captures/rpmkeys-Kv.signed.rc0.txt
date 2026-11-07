@@ -1,0 +1,7 @@
+good.rpm:
+    Header V3 RSA/SHA256 Signature, key ID 29111145: OK
+    Header SHA256 digest: OK
+    Header SHA1 digest: OK
+    Payload SHA256 digest: OK
+    V3 RSA/SHA256 Signature, key ID 29111145: OK
+    MD5 digest: OK
