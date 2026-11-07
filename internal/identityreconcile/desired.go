@@ -16,10 +16,14 @@ import (
 	"strings"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/store"
 )
 
-// ScopeUsersGroups is the part of the roster this engine reconciles.
-const ScopeUsersGroups = "users-groups"
+// ScopeUsersGroups is the part of the roster this engine reconciles, and the "scope" a
+// run of it records in its metadata. It is the store's constant, so that the filter of
+// `pilot runs last-success` (store.LastSuccess) and the engine cannot disagree on it
+// (spec 2026-11-06 phase 2, Q6; AGENTS.md §5.7).
+const ScopeUsersGroups = store.ScopeUsersGroups
 
 // DesiredUser is one roster user that is not state: absent, with the
 // playbook's defaults ("Normalize canonical users") filled in.
