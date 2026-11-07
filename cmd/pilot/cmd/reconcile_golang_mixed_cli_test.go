@@ -459,6 +459,39 @@ func mustAtoi(t *testing.T, s string) int {
 
 // H3's plumbing: nothing for the Go engine to write, so no entry and no write, and the playbook runs and
 // acknowledges on its own: exit 0.
+// The observation file of a run is a file in a private directory of the temporary directory (a result file of the
+// playbook, which holds the host's name and the state of the cache). The run removes it however it ends: when the
+// playbook acknowledged, when it did not, when the Go phase failed before the playbook, and when the playbook failed.
+func TestMixedRunLeavesNoObservationFileBehind(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T)
+		want  int // the exit code
+	}{
+		{"the playbook acknowledges", func(t *testing.T) {}, 0},
+		{"the playbook does not acknowledge", func(t *testing.T) { t.Setenv("P27_OBSERVE", "notacked") }, 4},
+		{"the playbook fails", func(t *testing.T) { t.Setenv("P27_IDENTITY_EXIT", "2") }, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+			e := newMixedCLIEnv(t, rosterWithNewUser())
+			tc.setup(t)
+			out, err := runReconcileCLI(t, mixedArgs()...)
+			if got := processExitCode(err); got != tc.want {
+				t.Fatalf("exit %d, want %d (%v)\n%s", got, tc.want, err, out)
+			}
+			if e.identityArgs("apply") == nil {
+				t.Fatalf("the identity playbook did not run (the test would prove nothing): %v", e.runs())
+			}
+			left, _ := filepath.Glob(filepath.Join(tmp, "pilot-auth-cache-*"))
+			if len(left) != 0 {
+				t.Fatalf("the run left its observation file's directory behind: %v", left)
+			}
+		})
+	}
+}
+
 func TestMixedRunWithNothingToWriteLeavesTheObligationToThePlaybook(t *testing.T) {
 	e := newMixedCLIEnv(t, strings.Replace(captureRoster, "%s", "/bin/sh", 1))
 	result := filepath.Join(e.dir, "result.json")
