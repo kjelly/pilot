@@ -1271,15 +1271,17 @@ def error_outcome_violations(source):
       `_pr_error`;
     * a call of `_pr_error` whose kind is not a literal registered in PR_ERROR_KINDS, or that sits inside an
       `except` handler (an exception is never a reason to count: the PR's state is);
+    * no `PR_ERROR_KINDS` registry at all;
     * `_track_errors` called from inside an `except` handler;
     * an `except` handler in `process_one` that does not end by returning or raising, so that it falls
       through to `_track_errors` with whatever it made."""
     tree = ast.parse(source)
     train = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Train')
-    kinds = next(ast.literal_eval(node.value) for node in tree.body
-                 if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'PR_ERROR_KINDS'
-                                                         for t in node.targets))
-    found = []
+    registry = [ast.literal_eval(node.value) for node in tree.body
+                if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'PR_ERROR_KINDS'
+                                                        for t in node.targets)]
+    kinds = registry[0] if registry else ()
+    found = [] if registry else ['PR_ERROR_KINDS: no registry of the errors that count against a PR']
 
     def is_error(node):
         return isinstance(node, ast.Constant) and node.value == 'ERROR'
@@ -1386,6 +1388,8 @@ class ErrorClassificationLintTests(unittest.TestCase):
                 head = 'PR_ERROR_KINDS = ("merge-unconfirmed",)\nclass Train:\n'
                 self.assertEqual(1, len(error_outcome_violations(f'{head}    def f(self, n):\n        {line}\n')))
                 self.assertEqual([], error_outcome_violations(f'{head}    def _pr_error(self, n, kind, reason):\n        {line}\n'))
+        self.assertEqual(['PR_ERROR_KINDS: no registry of the errors that count against a PR'],
+                         error_outcome_violations('class Train:\n    pass\n'))
         head = 'PR_ERROR_KINDS = ("merge-unconfirmed",)\nclass Train:\n    def f(self, n):\n'
         cases = {
             'an unregistered kind': ('        return self._pr_error(n, "disk-full", "x")\n', 1),
