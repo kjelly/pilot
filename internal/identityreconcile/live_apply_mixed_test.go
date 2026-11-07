@@ -41,6 +41,20 @@ func (a *armCtx) mixed(ws string, extra ...string) applyRun {
 	return a.collect(r, result, logAt)
 }
 
+// appendLine adds a line to a file of a workspace.
+func appendLine(t interface{ Fatal(args ...any) }, path, line string) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // serverHelperCalls counts the journal lines of the helper of the authorization cache journal (its argv names the
 // journal file) since epoch: the entry playbook and the identity playbook both run it, and nothing else on the server
 // does, so none since a point in time says neither of them ran.
@@ -317,7 +331,10 @@ func (d *applyDriver) runMixed(base func() rosterDoc, oneUser func(string, ...fu
 		if !a.fresh() || !a.warmClient() {
 			return
 		}
-		ws := lv.copyWorkspace(d.revokedRoster(base), "", map[string]string{"ipa_identity_refresh_sssd_cache": "false"})
+		// The playbook declares the switch in its own vars, which an inventory variable does not override; the vault file
+		// is handed to it with -e, and that does. The admin password goes into the plain vault file with it.
+		ws := lv.copyWorkspace(d.revokedRoster(base), lv.adminPW, nil)
+		appendLine(lv.t, filepath.Join(ws, ".vault", "main.yaml"), "ipa_identity_refresh_sssd_cache: false")
 		recv := newReceiver()
 		defer recv.srv.Close()
 		d.webhookFor(ws, recv)
@@ -409,6 +426,7 @@ func (d *applyDriver) runMixed(base func() rosterDoc, oneUser func(string, ...fu
 			return
 		}
 		a.ok(a.waitWrite("user_add", logAt, 60*time.Second), "the server did not log the user_add")
+		signalled := time.Now().Unix()
 		p.signal(syscall.SIGINT)
 		res, err := p.wait(10 * time.Minute)
 		if err != nil {
@@ -428,7 +446,11 @@ func (d *applyDriver) runMixed(base func() rosterDoc, oneUser func(string, ...fu
 		} else {
 			a.fail("no result file")
 		}
-		a.ok(!strings.Contains(res.Out, "ansible-playbook playbooks/apply/freeipa-identity-apply.yml"), "the identity playbook's apply started after the signal")
+		// Not the transcript: the transaction prints the command line it is about to run before the mixed run's hook
+		// refuses to start it, so the line is there for a playbook that never started. What the server says is the
+		// oracle: neither the entry nor the identity playbook ran the helper of the authorization cache journal after the
+		// signal.
+		a.ok(a.serverHelperCalls(signalled) == 0, "the server ran the helper of the authorization cache journal after the signal: the entry or the identity playbook started")
 		cls := a.failureClass(recv)
 		a.ok(cls == "apply_failed", "the webhook's failure class is %q, want apply_failed", cls)
 		a.fact("failure_class", cls)
