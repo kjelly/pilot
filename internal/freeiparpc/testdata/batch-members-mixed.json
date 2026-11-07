@@ -1,0 +1,99 @@
+{
+  "result": {
+    "count": 4,
+    "results": [
+      {
+        "completed": 0,
+        "failed": {
+          "member": {
+            "user": [
+              [
+                "p24cap-bm1",
+                "This entry is already a member"
+              ]
+            ],
+            "group": [],
+            "service": [],
+            "idoverrideuser": []
+          }
+        },
+        "result": {
+          "gidnumber": [
+            "1927600498"
+          ],
+          "cn": [
+            "p24cap-mg3"
+          ],
+          "member_user": [
+            "p24cap-bm1"
+          ],
+          "dn": "cn=p24cap-mg3,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        },
+        "error": null
+      },
+      {
+        "completed": 1,
+        "failed": {
+          "member": {
+            "user": [],
+            "group": [],
+            "service": [],
+            "idoverrideuser": []
+          }
+        },
+        "result": {
+          "gidnumber": [
+            "1927600498"
+          ],
+          "cn": [
+            "p24cap-mg3"
+          ],
+          "member_user": [
+            "p24cap-bm1",
+            "p24cap-bm2"
+          ],
+          "dn": "cn=p24cap-mg3,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        },
+        "error": null
+      },
+      {
+        "error": "p24cap-nogroup: group not found",
+        "error_code": 4001,
+        "error_name": "NotFound",
+        "error_kw": {
+          "reason": "p24cap-nogroup: group not found"
+        }
+      },
+      {
+        "completed": 2,
+        "failed": {
+          "member": {
+            "user": [
+              [
+                "p24cap-nobody",
+                "This entry is not a member"
+              ]
+            ],
+            "group": [],
+            "service": [],
+            "idoverrideuser": []
+          }
+        },
+        "result": {
+          "gidnumber": [
+            "1927600498"
+          ],
+          "cn": [
+            "p24cap-mg3"
+          ],
+          "dn": "cn=p24cap-mg3,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+        },
+        "error": null
+      }
+    ]
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

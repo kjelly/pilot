@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/kjelly/pilot/internal/store"
 )
@@ -146,6 +147,9 @@ func (t Transaction) RunResult(ctx context.Context) (result Result, err error) {
 			result.Outcome = OutcomeEvidenceFailed
 			return result, err
 		}
+		if errors.Is(err, ErrPartiallyApplied) {
+			return partiallyApplied("apply", err)
+		}
 		return t.failWithRollbackResult(ctx, "apply", err)
 	}
 	if err := t.runStep(ctx, "verify", t.Verify); err != nil {
@@ -158,6 +162,9 @@ func (t Transaction) RunResult(ctx context.Context) (result Result, err error) {
 			result.FailedStep = "evidence"
 			result.Outcome = OutcomeEvidenceFailed
 			return result, err
+		}
+		if errors.Is(err, ErrPartiallyApplied) {
+			return partiallyApplied("verify", err)
 		}
 		return t.failWithRollbackResult(ctx, "verify", err)
 	}
@@ -172,6 +179,9 @@ func (t Transaction) RunResult(ctx context.Context) (result Result, err error) {
 				result.FailedStep = "evidence"
 				result.Outcome = OutcomeEvidenceFailed
 				return result, err
+			}
+			if errors.Is(err, ErrPartiallyApplied) {
+				return partiallyApplied("idempotency", err)
 			}
 			return t.failWithRollbackResult(ctx, "idempotency", err)
 		}
@@ -191,6 +201,15 @@ func (t Transaction) shouldRunIdempotency() bool {
 	}
 }
 
+// partiallyApplied is the result of a step whose error says that a reconciler had
+// already committed part of its work (ErrPartiallyApplied): the outcome is
+// partial_failed and the step is named, and there is no rollback, because what the
+// reconciler committed is not something the transaction's rollback undoes, and a
+// rollback that ran would say it was.
+func partiallyApplied(step string, cause error) (Result, error) {
+	return Result{Outcome: OutcomePartialFailed, FailedStep: step}, fmt.Errorf("%s failed: %w", step, cause)
+}
+
 func (t Transaction) failWithRollbackResult(ctx context.Context, step string, cause error) (Result, error) {
 	if t.RollbackPolicy == RollbackNone || t.Rollback == nil {
 		return Result{Outcome: OutcomeFailed, FailedStep: step}, fmt.Errorf("%s failed: %w", step, cause)
@@ -200,6 +219,13 @@ func (t Transaction) failWithRollbackResult(ctx context.Context, step string, ca
 	}
 	return Result{Outcome: OutcomeRolledBack, FailedStep: step}, fmt.Errorf("%s failed: %w; rollback completed", step, cause)
 }
+
+// stepEvidenceTimeout bounds the append of a step's evidence, which runs on a
+// context detached from the run's cancellation (T2 of spec §4.4): the record of
+// what a step did is made after Ctrl-C, --timeout or a lost lock too, and an append
+// that waited on a cancelled context would fail, drop the step's own error and turn
+// the outcome into evidence_failed. It is the 5 seconds RunWriter.Finish already uses.
+const stepEvidenceTimeout = 5 * time.Second
 
 func (t Transaction) runStep(ctx context.Context, name string, fn StepFunc) error {
 	if fn == nil {
@@ -211,7 +237,11 @@ func (t Transaction) runStep(ctx context.Context, name string, fn StepFunc) erro
 		if err != nil {
 			exit = 1
 		}
-		if appendErr := t.Writer.AppendEvent(ctx, store.Event{OperationID: "step-" + name, Type: store.EventStepFinished, Step: name, Payload: map[string]any{"status": stepStatus(err)}, ExitCode: &exit}); appendErr != nil {
+		// Not ctx: see stepEvidenceTimeout. A store that is really failing still
+		// fails here, and that is evidence_failed as before.
+		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stepEvidenceTimeout)
+		defer cancel()
+		if appendErr := t.Writer.AppendEvent(actx, store.Event{OperationID: "step-" + name, Type: store.EventStepFinished, Step: name, Payload: map[string]any{"status": stepStatus(err)}, ExitCode: &exit}); appendErr != nil {
 			return fmt.Errorf("persist %s evidence: %w", name, fmt.Errorf("%w: %v", errEvidencePersistence, appendErr))
 		}
 	}
@@ -239,5 +269,13 @@ var ErrAuthorizationRequired = errors.New("delivery authorization required")
 // ErrCancelled lets interactive frontends finish an auditable transaction as
 // cancelled without relabelling an intentional refusal as a failed mutation.
 var ErrCancelled = errors.New("delivery cancelled")
+
+// ErrPartiallyApplied marks a step that failed after a reconciler had committed some
+// of its work (or may have: an outcome it could not learn): the Go identity writer
+// is the first producer (spec §6.1, D13). RunResult ends such a run as
+// OutcomePartialFailed with the step named, does not roll back, and the outcome
+// readers publish it as a failure with a partial_or_unknown consistency. A step
+// whose reconciler changed nothing fails as an ordinary error.
+var ErrPartiallyApplied = errors.New("delivery partially applied")
 
 var errEvidencePersistence = errors.New("delivery evidence persistence failed")

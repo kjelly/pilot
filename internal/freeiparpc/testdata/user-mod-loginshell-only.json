@@ -1,0 +1,48 @@
+{
+  "result": {
+    "result": {
+      "givenname": [
+        "P24x"
+      ],
+      "uidnumber": [
+        "1927600475"
+      ],
+      "loginshell": [
+        "/bin/sh"
+      ],
+      "krbprincipalname": [
+        "p24cap-u1@IPA.PILOT.INTERNAL"
+      ],
+      "uid": [
+        "p24cap-u1"
+      ],
+      "gidnumber": [
+        "1927600475"
+      ],
+      "krbcanonicalname": [
+        "p24cap-u1@IPA.PILOT.INTERNAL"
+      ],
+      "mail": [
+        "p24cap-u1@example.test"
+      ],
+      "sn": [
+        "Onex"
+      ],
+      "homedirectory": [
+        "/srv/home/p24cap-u1-2"
+      ],
+      "nsaccountlock": false,
+      "has_password": false,
+      "has_keytab": false,
+      "memberof_group": [
+        "ipausers"
+      ]
+    },
+    "value": "p24cap-u1",
+    "summary": "Modified user \"p24cap-u1\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

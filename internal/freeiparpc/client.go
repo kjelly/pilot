@@ -27,6 +27,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/kjelly/pilot/internal/livehooks"
 )
 
 // DefaultSupportedAPIVersions are the FreeIPA API versions this package was
@@ -55,6 +57,16 @@ type Config struct {
 	// ReadOnly refuses every write command, alone or in a batch, before
 	// anything is sent.
 	ReadOnly bool
+	// WriteGate decides, for each write command, whether it may be sent: it is
+	// called with the context of the call and the command's method before
+	// anything is serialized or sent, and a non-nil error refuses the command
+	// (*ErrWriteRefused; nothing leaves, Stats.Writes does not move). A batch
+	// is gated one write at a time, in order, and one refusal refuses the whole
+	// batch. New refuses a client that is neither ReadOnly nor given a
+	// WriteGate, so that no writer exists whose caller forgot to say when it may
+	// write: the identity engine's gate asks whether the run still holds the
+	// FreeIPA server's lock (internal/identityreconcile, Gate).
+	WriteGate func(ctx context.Context, method string) error
 }
 
 var fqdnRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
@@ -99,6 +111,9 @@ func New(cfg Config) (*Client, error) {
 	if cfg.DialContext == nil {
 		return nil, errors.New("freeiparpc: no dialer")
 	}
+	if !cfg.ReadOnly && cfg.WriteGate == nil {
+		return nil, errors.New("freeiparpc: a client that may write needs a WriteGate; one that does not write is ReadOnly")
+	}
 	if cfg.RequestTimeout == 0 {
 		cfg.RequestTimeout = 2 * time.Minute
 	}
@@ -128,6 +143,9 @@ func New(cfg Config) (*Client, error) {
 			if err != nil {
 				return nil, &notSentError{err}
 			}
+			// Nothing in a binary built without the identity_live_hooks tag
+			// (internal/livehooks): the live driver's way to hold an answer back.
+			raw = livehooks.WrapConn(raw)
 			hctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			tc := tls.Client(raw, tlsConfig)
@@ -202,7 +220,7 @@ func (c *Client) count(f func(*Stats)) {
 // post sends one request. Every request carries the Referer FreeIPA
 // requires for /ipa/session/*.
 func (c *Client) post(ctx context.Context, path, contentType, accept string, body []byte) (*http.Response, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(livehooks.RequestContext(ctx), http.MethodPost, c.base+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -315,6 +333,11 @@ func (c *Client) Call(ctx context.Context, cmd Command) (json.RawMessage, error)
 	if kind == write && c.cfg.ReadOnly {
 		return nil, &ErrMethodNotAllowed{Method: cmd.Method, ReadOnly: true}
 	}
+	if kind == write {
+		if err := c.gate(ctx, cmd.Method); err != nil {
+			return nil, err
+		}
+	}
 	body, err := json.Marshal(request{Method: cmd.Method, Params: cmd.params()})
 	if err != nil {
 		return nil, err
@@ -331,6 +354,15 @@ func (c *Client) Call(ctx context.Context, cmd Command) (json.RawMessage, error)
 		return nil, err
 	}
 	return res, nil
+}
+
+// gate asks the WriteGate whether method may be sent. The caller has already
+// refused a write on a read-only client, so a gate exists (New).
+func (c *Client) gate(ctx context.Context, method string) error {
+	if err := c.cfg.WriteGate(ctx, method); err != nil {
+		return &ErrWriteRefused{Method: method, Err: err}
+	}
+	return nil
 }
 
 // unknown counts and returns a write whose outcome cannot be confirmed.

@@ -1,0 +1,51 @@
+{
+  "result": {
+    "result": {
+      "sn": [
+        "Onex"
+      ],
+      "displayname": [
+        "P24 One Display 2"
+      ],
+      "loginshell": [
+        "/bin/zsh"
+      ],
+      "givenname": [
+        "P24x"
+      ],
+      "krbprincipalname": [
+        "p24cap-u1@IPA.PILOT.INTERNAL"
+      ],
+      "uid": [
+        "p24cap-u1"
+      ],
+      "homedirectory": [
+        "/srv/home/p24cap-u1-2"
+      ],
+      "mail": [
+        "p24cap-u1@example.test"
+      ],
+      "gidnumber": [
+        "1927600475"
+      ],
+      "uidnumber": [
+        "1927600475"
+      ],
+      "krbcanonicalname": [
+        "p24cap-u1@IPA.PILOT.INTERNAL"
+      ],
+      "nsaccountlock": false,
+      "has_password": false,
+      "has_keytab": false,
+      "memberof_group": [
+        "ipausers"
+      ]
+    },
+    "value": "p24cap-u1",
+    "summary": "Modified user \"p24cap-u1\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

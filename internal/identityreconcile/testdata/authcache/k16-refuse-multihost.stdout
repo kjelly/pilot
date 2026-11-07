@@ -1,0 +1,73 @@
+
+PLAY [FreeIPA identity authorization-cache entry (prepare or probe)] ***********
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+ok: [client-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+ok: [client-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: prod requires recent staging attestation] **************************
+skipping: [client-1]
+skipping: [ipa-1]
+
+TASK [Gate: this entry is never a preview] *************************************
+ok: [client-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: this entry takes no --tags and no --skip-tags] *********************
+ok: [client-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: exactly one host] **************************************************
+[ERROR]: Task failed: Action failed: freeipa-identity-auth-cache.yml is for exactly one host (the one whose /etc/ipa lock the caller holds), got 2: ["client-1", "ipa-1"].
+Origin: <repo>/playbooks/apply/freeipa-identity-auth-cache.yml:114:7
+
+112       tags: [always]
+113
+114     - name: "Gate: exactly one host"
+          ^ column 7
+
+fatal: [client-1]: FAILED! => {
+    "assertion": "(ansible_play_hosts_all | length) == 1",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "freeipa-identity-auth-cache.yml is for exactly one host (the one whose /etc/ipa lock the caller holds), got 2: [\"client-1\", \"ipa-1\"]."
+}
+fatal: [ipa-1]: FAILED! => {
+    "assertion": "(ansible_play_hosts_all | length) == 1",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "freeipa-identity-auth-cache.yml is for exactly one host (the one whose /etc/ipa lock the caller holds), got 2: [\"client-1\", \"ipa-1\"]."
+}
+
+PLAY RECAP *********************************************************************
+client-1                    : ok=4    changed=0    unreachable=0    failed=1    skipped=1    rescued=0    ignored=0   
+ipa-1                  : ok=4    changed=0    unreachable=0    failed=1    skipped=1    rescued=0    ignored=0   
+

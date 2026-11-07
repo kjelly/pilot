@@ -63,10 +63,10 @@ func writeReconcileTestRoster(t *testing.T) string {
 }
 
 func TestReconcileOnce_RequiresRosterAndInventory(t *testing.T) {
-	if _, _, err := ReconcileOnce(context.Background(), ReconcileOptions{Inventory: "inv.yml"}); err == nil {
+	if _, _, err := ReconcileOnce(context.Background(), ReconcileOptions{Lock: testLock(t), Inventory: "inv.yml"}); err == nil {
 		t.Fatal("expected an error when RosterFile is empty")
 	}
-	if _, _, err := ReconcileOnce(context.Background(), ReconcileOptions{RosterFile: "roster.yaml"}); err == nil {
+	if _, _, err := ReconcileOnce(context.Background(), ReconcileOptions{Lock: testLock(t), RosterFile: "roster.yaml"}); err == nil {
 		t.Fatal("expected an error when Inventory is empty")
 	}
 }
@@ -77,6 +77,7 @@ func TestReconcileOnce_InvokesConfiguredPlaybookAndInventory(t *testing.T) {
 	now := time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC)
 
 	plan, result, err := ReconcileOnce(context.Background(), ReconcileOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath,
 		Inventory:  "inv.yml",
 		Playbook:   "playbooks/apply/freeipa-identity-apply.yml",
@@ -107,6 +108,7 @@ func TestReconcileOnce_ReportsPlaybookFailure(t *testing.T) {
 	rosterPath := writeReconcileTestRoster(t)
 	runner := &fakeRunner{exitCode: 1}
 	_, result, err := ReconcileOnce(context.Background(), ReconcileOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath,
 		Inventory:  "inv.yml",
 		Now:        time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC),
@@ -156,6 +158,7 @@ func TestReconcileOnce_RefusesWhenSoDConflictExists(t *testing.T) {
 	runner := &fakeRunner{exitCode: 0}
 
 	_, _, err := ReconcileOnce(context.Background(), ReconcileOptions{
+		Lock:       testLock(t),
 		RosterFile: path,
 		Inventory:  "inv.yml",
 		Now:        time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC),
@@ -399,6 +402,7 @@ func TestReconcileOnce_AuthPolicyPruneAcrossTwoRuns(t *testing.T) {
 	}
 	runner := &fakeRunner{exitCode: 0}
 	plan, _, err := ReconcileOnce(context.Background(), ReconcileOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: runner, StateDir: stateDir,
 	})
 	if err != nil {
@@ -423,6 +427,7 @@ func TestReconcileOnce_AuthPolicyPruneAcrossTwoRuns(t *testing.T) {
 		t.Fatalf("rewrite roster: %v", err)
 	}
 	plan2, _, err := ReconcileOnce(context.Background(), ReconcileOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: runner, StateDir: stateDir,
 	})
 	if err != nil {

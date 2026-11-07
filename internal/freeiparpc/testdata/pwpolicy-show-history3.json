@@ -1,0 +1,31 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "top",
+        "nscontainer",
+        "krbpwdpolicy",
+        "ipapwdpolicy"
+      ],
+      "passwordgracelimit": [
+        "-1"
+      ],
+      "cn": [
+        "p24cap-pgh"
+      ],
+      "krbpwdhistorylength": [
+        "3"
+      ],
+      "cospriority": [
+        "3"
+      ],
+      "dn": "cn=p24cap-pgh,cn=IPA.PILOT.INTERNAL,cn=kerberos,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p24cap-pgh",
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -75,8 +75,10 @@ func (s *editAgentSession) View() string { return viewContent(s.router.View()) }
 // editRunResult is what a session's Run reports besides its error.
 type editRunResult struct {
 	// Warnings are the rosters a vault save left for the operator to
-	// update by hand, as text without any password. Every front-end
-	// reports them: --actions on stderr, a plan or apply in its result.
+	// update by hand, as text without any password, and, under a plan, the
+	// steps it did not take because they act outside the workspace's files
+	// (editRouterModel.planSkipped). Every front-end reports them: --actions
+	// on stderr, a plan or apply in its result.
 	Warnings []string
 }
 
@@ -96,5 +98,6 @@ func (s *editAgentSession) Run(scenario editScenario) (editRunResult, error) {
 		return editRunResult{}, err
 	}
 	err := s.driver.run(&s.router, scenario)
-	return editRunResult{Warnings: append([]string(nil), s.router.rosterSyncWarnings...)}, err
+	warnings := append([]string(nil), s.router.rosterSyncWarnings...)
+	return editRunResult{Warnings: append(warnings, s.router.planWarnings...)}, err
 }

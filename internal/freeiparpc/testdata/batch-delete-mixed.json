@@ -1,0 +1,47 @@
+{
+  "result": {
+    "count": 4,
+    "results": [
+      {
+        "result": {
+          "failed": []
+        },
+        "value": [
+          "p24cap-bu1"
+        ],
+        "summary": "Deleted user \"p24cap-bu1\"",
+        "error": null
+      },
+      {
+        "error": "p24cap-nobody: user not found",
+        "error_code": 4001,
+        "error_name": "NotFound",
+        "error_kw": {
+          "reason": "p24cap-nobody: user not found"
+        }
+      },
+      {
+        "result": {
+          "failed": []
+        },
+        "value": [
+          "p24cap-bgd"
+        ],
+        "summary": "Deleted group \"p24cap-bgd\"",
+        "error": null
+      },
+      {
+        "error": "p24cap-nogroup: group not found",
+        "error_code": 4001,
+        "error_name": "NotFound",
+        "error_kw": {
+          "reason": "p24cap-nogroup: group not found"
+        }
+      }
+    ]
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

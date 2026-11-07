@@ -81,8 +81,22 @@ type editRouterModel struct {
 	transaction bool
 	// writeRefused is the last roster write refused as busy
 	// (rosterBusyBanner): shown as a banner at the terminal, it fails the
-	// automation driver's step (takeWriteRefused).
+	// automation driver's step (takeStepFailure).
 	writeRefused error
+	// actionFailed is the last failure of a screen action that does more than
+	// write a roster file (break-glass activation and deactivation: the
+	// identity lock, ansible-playbook, local state), recorded where the
+	// banner is built (failedAction). The banner is for the operator at the
+	// terminal; an automation step that ended in it did not do what it was
+	// asked, so the driver fails the step with this error (takeStepFailure),
+	// and a scenario, --actions and an MCP apply cannot report as done what
+	// the screen shows failed (AGENTS.md §5.8).
+	actionFailed error
+	// planWarnings are the steps of a plan that a plan cannot take: a screen
+	// action that acts outside the workspace's files (planSkipped). The plan
+	// does not run them and says so, since an MCP caller sees no banner; the
+	// apply runs them, and fails the step if they fail (actionFailed).
+	planWarnings []string
 	// rosterSyncWarnings are the vault save's roster lines that need the
 	// operator (rosterSyncLine.manual), which a plan or apply returns as
 	// warnings: an MCP caller sees no banner.
@@ -94,11 +108,41 @@ type editRouterModel struct {
 	err  error
 }
 
-// takeWriteRefused returns and clears r.writeRefused.
-func (r *editRouterModel) takeWriteRefused() error {
+// takeStepFailure returns and clears what the screens recorded as the failure
+// of the step that just ran: a roster write refused as busy (writeRefused), or
+// a screen action that ended in a failure banner (actionFailed). The write
+// refusal comes first when both are set.
+func (r *editRouterModel) takeStepFailure() error {
 	err := r.writeRefused
-	r.writeRefused = nil
+	if err == nil {
+		err = r.actionFailed
+	}
+	r.writeRefused, r.actionFailed = nil, nil
 	return err
+}
+
+// planSkipped is what a screen action that acts outside the workspace's files
+// does under a plan instead of acting (r.planSource is set): break-glass
+// activation runs the identity apply playbook on the FreeIPA server and writes
+// local state, which a plan's scratch copy of the workspace can neither preview
+// nor contain. The plan reports the step as not taken (planWarnings) rather
+// than as done or as failed: a failed plan could never be applied, and an apply
+// is where the step runs and where it can fail. It returns the banner.
+func (r *editRouterModel) planSkipped(action, name string) string {
+	msg := fmt.Sprintf("plan 沒有執行 %s %s：它會對 FreeIPA 執行 ansible-playbook 並寫入本機狀態，plan 的暫存副本預覽不了；apply 才會執行，也可能失敗", action, name)
+	r.planWarnings = append(r.planWarnings, msg)
+	return "⚠️  " + msg
+}
+
+// failedAction is the one way a screen action reports that it failed: it
+// records err, prefixed with what the action was doing, for the automation
+// driver (actionFailed), and returns the banner that shows the operator err
+// itself. A screen that builds a "❌" banner any other way leaves an
+// automation step reporting success for an action that did not happen;
+// TestRegression_FailureBannersAreRecordedForTheDriver locks the spelling.
+func (r *editRouterModel) failedAction(doing string, err error) string {
+	r.actionFailed = fmt.Errorf("%s: %w", doing, err)
+	return "❌ " + err.Error()
 }
 
 // uiFactory returns r's injected Factory, defaulting to the Huh v2

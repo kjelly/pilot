@@ -2,7 +2,11 @@ package delivery
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/kjelly/pilot/internal/store"
@@ -182,5 +186,157 @@ func TestRunResultReportsFailedStep(t *testing.T) {
 				t.Fatalf("Run err presence = %v, RunResult err presence = %v", err2 != nil, err != nil)
 			}
 		})
+	}
+}
+
+// A step whose error says a reconciler had already committed part of its work ends
+// the run as partial_failed with that step named, whichever step it is, and is not
+// rolled back (spec §6.1, D13). The same error without the sentinel is an ordinary
+// failure that the rollback policy handles, so the rows below also show that the
+// sentinel is what changes the outcome.
+func TestTransactionPartiallyAppliedIsPartialFailedAndNeverRolledBack(t *testing.T) {
+	committed := fmt.Errorf("2 operations were applied, then one failed: %w", ErrPartiallyApplied)
+	for _, tc := range []struct {
+		step     string
+		err      error
+		want     Outcome
+		wantStep string
+	}{
+		{"apply", committed, OutcomePartialFailed, "apply"},
+		{"verify", committed, OutcomePartialFailed, "verify"},
+		{"idempotency", committed, OutcomePartialFailed, "idempotency"},
+		// The control: the same failures without the sentinel are rolled back.
+		{"apply", errors.New("bad"), OutcomeRolledBack, "apply"},
+		{"verify", errors.New("bad"), OutcomeRolledBack, "verify"},
+		{"idempotency", errors.New("bad"), OutcomeRolledBack, "idempotency"},
+	} {
+		t.Run(tc.step+"/"+string(tc.want), func(t *testing.T) {
+			var calls []string
+			step := func(name string, err error) StepFunc {
+				return func(context.Context) error { calls = append(calls, name); return err }
+			}
+			tx := Transaction{
+				Writer:   &fakeWriter{},
+				Apply:    step("apply", nil),
+				Verify:   step("verify", nil),
+				Rollback: step("rollback", nil), RollbackPolicy: RollbackPlaybook,
+				Idempotency: step("idempotency", nil), IdempotencyPolicy: IdempotencyAlways,
+			}
+			switch tc.step {
+			case "apply":
+				tx.Apply = step("apply", tc.err)
+			case "verify":
+				tx.Verify = step("verify", tc.err)
+			case "idempotency":
+				tx.Idempotency = step("idempotency", tc.err)
+			}
+			res, err := tx.RunResult(context.Background())
+			if res.Outcome != tc.want || res.FailedStep != tc.wantStep || err == nil {
+				t.Fatalf("result = %+v, err = %v; want %s at %s", res, err, tc.want, tc.wantStep)
+			}
+			if tc.want == OutcomePartialFailed {
+				if !errors.Is(err, ErrPartiallyApplied) {
+					t.Errorf("err = %v does not wrap ErrPartiallyApplied", err)
+				}
+				if slices.Contains(calls, "rollback") {
+					t.Errorf("a partially applied run was rolled back: %v", calls)
+				}
+			} else if !slices.Contains(calls, "rollback") {
+				t.Errorf("an ordinary failure was not rolled back: %v", calls)
+			}
+			if w := tx.Writer.(*fakeWriter); w.finish.Outcome != string(tc.want) || w.finish.ExitCode != 1 {
+				t.Errorf("the run's terminal record = %+v, want %s with exit code 1", w.finish, tc.want)
+			}
+		})
+	}
+}
+
+// ctxCheckingWriter fails an append on a cancelled context the way the real
+// store does (RunWriter.appendEvent takes its connection with ctx), so a step
+// evidence write that still uses the run's context shows here.
+type ctxCheckingWriter struct {
+	events []store.Event
+}
+
+func (w *ctxCheckingWriter) AppendEvent(ctx context.Context, event store.Event) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	w.events = append(w.events, event)
+	return nil
+}
+func (w *ctxCheckingWriter) Finish(context.Context, store.RunFinished) error { return nil }
+
+// T2 of spec §4.4: the evidence of a step is written after the run's context was
+// cancelled (Ctrl-C, --timeout, a lost lock): the step's own error and outcome
+// survive, and the step_finished event is in the record. Before this, the append
+// failed on the cancelled context, the step's error was dropped and the run ended
+// as evidence_failed.
+func TestTransactionStepEvidenceIsWrittenAfterTheContextWasCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &ctxCheckingWriter{}
+	cause := fmt.Errorf("interrupted after one operation: %w", ErrPartiallyApplied)
+	res, err := (Transaction{
+		Writer: w,
+		Apply:  func(context.Context) error { cancel(); return cause },
+	}).RunResult(ctx)
+	if res.Outcome != OutcomePartialFailed || res.FailedStep != "apply" || !errors.Is(err, ErrPartiallyApplied) {
+		t.Fatalf("result = %+v, err = %v; want partial_failed at apply", res, err)
+	}
+	if len(w.events) != 1 || w.events[0].Step != "apply" || *w.events[0].ExitCode != 1 {
+		t.Fatalf("the step evidence of the cancelled step was not recorded: %+v", w.events)
+	}
+}
+
+// A store that really fails is still evidence_failed with the cancellation
+// detached: the class rule moves the append off the cancelled context, it does not
+// hide a failing store (spec §4.4, last bullet).
+func TestTransactionStepEvidenceStillFailsClosedWhenTheStoreFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	res, err := (Transaction{
+		Writer: &fakeWriter{err: errors.New("sqlite down")},
+		Apply:  func(context.Context) error { cancel(); return errors.New("apply failed") },
+	}).RunResult(ctx)
+	if res.Outcome != OutcomeEvidenceFailed || err == nil {
+		t.Fatalf("result = %+v, err = %v; want evidence_failed", res, err)
+	}
+}
+
+// The same, through the real delivery store: a cancelled context does not make the
+// store refuse the step event, and the run's terminal row says partial_failed.
+func TestTransactionStepEvidenceReachesTheRealStoreAfterCancellation(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "history.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w, err := store.StartRun(ctx, st, store.RunStarted{Stage: "sandbox", Component: "freeipa-identity", Playbook: "none", Inventory: "inventory.yml", Hosts: []string{"ipa-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := (Transaction{
+		Writer: w,
+		Apply:  func(context.Context) error { cancel(); return fmt.Errorf("cut off: %w", ErrPartiallyApplied) },
+	}).RunResult(ctx)
+	if res.Outcome != OutcomePartialFailed || err == nil {
+		t.Fatalf("result = %+v, err = %v", res, err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var steps int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM delivery_events WHERE run_id=? AND type=? AND step='apply'`, w.RunID(), store.EventStepFinished).Scan(&steps); err != nil || steps != 1 {
+		t.Fatalf("step_finished events for apply = %d, %v; want 1", steps, err)
+	}
+	var outcome string
+	if err := db.QueryRow(`SELECT outcome FROM delivery_runs WHERE run_id=?`, w.RunID()).Scan(&outcome); err != nil || outcome != string(OutcomePartialFailed) {
+		t.Fatalf("terminal outcome = %q, %v; want partial_failed", outcome, err)
 	}
 }

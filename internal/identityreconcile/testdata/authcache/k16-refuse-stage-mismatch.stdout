@@ -1,0 +1,28 @@
+
+PLAY [FreeIPA identity authorization-cache entry (prepare or probe)] ***********
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+[ERROR]: Task failed: Action failed: stage=staging 與 ipa-1 的 inventory 環境 group 不一致 (group_names: ['ungrouped'])。
+Origin: <repo>/playbooks/apply/freeipa-identity-auth-cache.yml:72:7
+
+70       tags: [always]
+71
+72     - name: "Gate: stage must match this host's inventory environment group"
+         ^ column 7
+
+fatal: [ipa-1]: FAILED! => {
+    "assertion": "not (stage in ['staging', 'prod'] and stage not in group_names)",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "stage=staging 與 ipa-1 的 inventory 環境 group 不一致 (group_names: ['ungrouped'])。"
+}
+
+PLAY RECAP *********************************************************************
+ipa-1                  : ok=1    changed=0    unreachable=0    failed=1    skipped=0    rescued=0    ignored=0   
+

@@ -1,0 +1,80 @@
+
+TASK [Print sudo reference inspection for external tooling (read-only)] ********
+skipping: [ipa-1]
+
+TASK [Gate: no unknown/unproven service principal remains before deleting an absent host] ***
+skipping: [ipa-1]
+
+TASK [Gate: no residual hostgroup/netgroup membership before deleting an absent host] ***
+skipping: [ipa-1]
+
+TASK [Check the current DNS A record value for each absent host's owner (surgical delete step 1)] ***
+skipping: [ipa-1]
+
+TASK [Gate: refuse to delete an absent host's DNS record if the live value is foreign/ambiguous (spec.md §16.5)] ***
+skipping: [ipa-1]
+
+TASK [Remove only the Pilot-owned A record value for each absent host (spec.md §16.5, INV-14 — never a broad cascade)] ***
+skipping: [ipa-1]
+
+TASK [Delete the FreeIPA host object for each roster host marked absent (spec.md §16.3 step 5)] ***
+skipping: [ipa-1]
+
+TASK [Verify the FreeIPA host object is absent after deletion (spec.md §16.3 step 6)] ***
+skipping: [ipa-1]
+
+TASK [Verify retired hosts no longer have the roster-owned DNS A value] ********
+skipping: [ipa-1]
+
+TASK [Discharge authorized retired-host SSH obligations after verified cleanup] ***
+ok: [ipa-1]
+
+TASK [Settle legacy authorization cache recovery] ******************************
+ok: [ipa-1]
+
+TASK [Report deferred authorization cache refresh] *****************************
+skipping: [ipa-1]
+
+TASK [Resolve the enrolled clients for the sudo full refresh] ******************
+ok: [ipa-1]
+
+TASK [Refresh SSSD caches on enrolled FreeIPA clients] *************************
+skipping: [ipa-1] => (item=client-1) 
+skipping: [ipa-1]
+
+TASK [Gate: every enrolled client finished a sudo full refresh] ****************
+skipping: [ipa-1]
+
+TASK [Acknowledge legacy authorization cache recovery] *************************
+ok: [ipa-1]
+
+TASK [Read current SSH obligations after propagation and retirement] ***********
+ok: [ipa-1]
+
+TASK [Gate: every SSH key cache pair converged] ********************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Read the host's FQDN for the authorization cache observation] ************
+ok: [ipa-1]
+
+TASK [Record what this run did about the authorization cache (observation for pilot)] ***
+ok: [ipa-1 -> localhost]
+
+TASK [Destroy the private Kerberos cache] **************************************
+included: <repo>/playbooks/apply/tasks/freeipa-private-ccache-close.yml for ipa-1
+
+TASK [Private Kerberos cache — destroy the tickets in it] **********************
+ok: [ipa-1]
+
+TASK [Private Kerberos cache — remove the cache file] **************************
+ok: [ipa-1]
+
+TASK [Private Kerberos cache — forget it] **************************************
+ok: [ipa-1]
+
+PLAY RECAP *********************************************************************
+ipa-1                      : ok=100  changed=0    unreachable=0    failed=0    skipped=140  rescued=0    ignored=0   
+

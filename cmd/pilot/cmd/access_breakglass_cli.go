@@ -60,7 +60,19 @@ group.
 
 --duration MUST NOT exceed the grant's own activation.max_duration;
 --reason/--ticket are required unless the grant's activation explicitly
-sets require_reason/require_ticket to false.`,
+sets require_reason/require_ticket to false.
+
+Like every run of the identity apply playbook, it takes the FreeIPA server's
+/etc/ipa lock first and waits up to 30 minutes for another pilot run to give it
+back (a full identity run takes about that long): during an incident, expect to
+wait for one that is in progress.
+
+` + identityLockHelp + `
+
+If the lock is lost while the playbook runs, the command fails with a lost-lock
+error even when the playbook exited 0, and the activation is not recorded: the
+rule may already be enabled in FreeIPA. Run activate again (the apply is
+idempotent) or deactivate to take the rule away.`,
 	Args: cobra.ExactArgs(2),
 	RunE: runAccessBreakglassActivateCmd,
 }
@@ -68,8 +80,18 @@ sets require_reason/require_ticket to false.`,
 var accessBreakglassDeactivateCmd = &cobra.Command{
 	Use:   "deactivate <roster-file> <name>",
 	Short: "End a breakglass grant's active authorization early",
-	Args:  cobra.ExactArgs(2),
-	RunE:  runAccessBreakglassDeactivateCmd,
+	Long: `pilot access breakglass deactivate prunes the grant's managed HBAC rule and
+marks its activation as ended in local state.
+
+Like activate, it takes the FreeIPA server's /etc/ipa lock around the playbook.
+
+` + identityLockHelp + `
+
+If the lock is lost while the playbook runs, the command fails with a lost-lock
+error even when the playbook exited 0, and the activation is not marked ended:
+the rule may already be gone from FreeIPA. Run deactivate again.`,
+	Args: cobra.ExactArgs(2),
+	RunE: runAccessBreakglassDeactivateCmd,
 }
 
 var accessBreakglassStatusCmd = &cobra.Command{
@@ -141,6 +163,12 @@ func runAccessBreakglassActivateCmd(cmd *cobra.Command, args []string) error {
 	if _, err := webhookReadiness(workspaceDir); err != nil {
 		return err
 	}
+	// Refused before the playbook or any ssh when the inventory cannot give the
+	// lock (see checkIdentityLockTarget).
+	lock, err := identityLockFor(cmd.Context(), identityLockRequest{Inventory: accessBreakglassActivateInventory, Wait: identityLockWaitDefault, Progress: cmd.ErrOrStderr()})
+	if err != nil {
+		return err
+	}
 	workflowID := newWorkflowID()
 	startedAt := time.Now()
 
@@ -156,6 +184,7 @@ func runAccessBreakglassActivateCmd(cmd *cobra.Command, args []string) error {
 		Playbook:          accessBreakglassActivatePlaybook,
 		VaultPasswordFile: accessBreakglassActivateVaultPasswordFile,
 		Now:               startedAt,
+		Lock:              lock,
 	})
 	out := cmd.OutOrStdout()
 	if activateErr == nil {
@@ -205,6 +234,12 @@ func runAccessBreakglassDeactivateCmd(cmd *cobra.Command, args []string) error {
 	if _, err := webhookReadiness(workspaceDir); err != nil {
 		return err
 	}
+	// Refused before the playbook or any ssh when the inventory cannot give the
+	// lock (see checkIdentityLockTarget).
+	lock, err := identityLockFor(cmd.Context(), identityLockRequest{Inventory: accessBreakglassDeactivateInventory, Wait: identityLockWaitDefault, Progress: cmd.ErrOrStderr()})
+	if err != nil {
+		return err
+	}
 	workflowID := newWorkflowID()
 	startedAt := time.Now()
 
@@ -216,6 +251,7 @@ func runAccessBreakglassDeactivateCmd(cmd *cobra.Command, args []string) error {
 		Playbook:          accessBreakglassDeactivatePlaybook,
 		VaultPasswordFile: accessBreakglassDeactivateVaultPasswordFile,
 		Now:               startedAt,
+		Lock:              lock,
 	})
 	out := cmd.OutOrStdout()
 	if deactivateErr == nil {

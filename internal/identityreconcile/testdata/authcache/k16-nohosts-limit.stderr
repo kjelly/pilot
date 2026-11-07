@@ -1,0 +1,4 @@
+  ✗ playbooks/apply/freeipa-identity-auth-cache.yml (syntax check failed (exit=1): [WARNING]: Could not match supplied host pattern, ignoring: no-such-host
+[ERROR]: Specified inventory, host pattern and/or --limit leaves us with no hosts to target.)
+syntax check failed (exit=1): [WARNING]: Could not match supplied host pattern, ignoring: no-such-host
+[ERROR]: Specified inventory, host pattern and/or --limit leaves us with no hosts to target.

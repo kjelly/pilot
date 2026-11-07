@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"github.com/kjelly/pilot/internal/freeiparpc"
@@ -55,10 +56,25 @@ func resetReconcileFlags() {
 // tree, in the workspace and data directory the test set up.
 func runReconcileCLI(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	return runReconcileCLIContext(t, context.Background(), args...)
+}
+
+// runReconcileCLIContext is runReconcileCLI under ctx: the context the command's signal context
+// is derived from, so cancelling it is the first Ctrl-C.
+//
+// ExecuteContext stores ctx on the ROOT command, and cobra hands the root's context to whatever
+// subcommand runs next while that subcommand's own is nil, for the rest of the process: a test that
+// cancelled ctx left every later test of the package that runs any command (the topology tests, in
+// CI's order) with "context canceled". resetReconcileFlags clears the reconcile command's, which is
+// not where the cancelled one lives; the root's is put back to what it was.
+func runReconcileCLIContext(t *testing.T, ctx context.Context, args ...string) (string, error) {
+	t.Helper()
 	before := dataDir
+	rootContext := rootCmd.Context()
 	resetReconcileFlags()
 	t.Cleanup(func() {
 		resetReconcileFlags()
+		rootCmd.SetContext(rootContext)
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
@@ -70,7 +86,7 @@ func runReconcileCLI(t *testing.T, args ...string) (string, error) {
 	rootCmd.SetArgs(append([]string{"reconcile"}, args...))
 	rootCmd.SetOut(&out)
 	rootCmd.SetErr(&out)
-	err := rootCmd.ExecuteContext(context.Background())
+	err := rootCmd.ExecuteContext(ctx)
 	return out.String(), err
 }
 
@@ -211,9 +227,14 @@ func TestReconcileGolangFlagMatrix(t *testing.T) {
 		gate string
 		want string
 	}{
-		{name: "golang without --preview-only", args: []string{"--engine", "golang", "--component", "freeipa-identity"}, gate: "engine-preview-only,entry-engine-flags", want: "目前只提供預覽"},
-		{name: "golang with --preview-only and --force", args: previewArgs("--force"), gate: "engine-preview-only", want: "目前只提供預覽"},
-		{name: "golang with --force only", args: []string{"--engine", "golang", "--force", "--component", "freeipa-identity"}, gate: "engine-preview-only", want: "目前只提供預覽"},
+		{name: "golang without --preview-only or --force", args: []string{"--engine", "golang", "--component", "freeipa-identity"}, gate: "engine-preview-only,entry-engine-flags", want: "不支援互動"},
+		{name: "golang with --preview-only and --force", args: previewArgs("--force", "--scope", "users-groups"), gate: "ansible-force-and-preview-only", want: "--force 不能與 --preview-only 同時使用"},
+		{name: "golang with --force and no --scope", args: []string{"--engine", "golang", "--force", "--component", "freeipa-identity"}, gate: "engine-scope-required", want: "需要 --scope"},
+		{name: "golang with an unknown --scope", args: []string{"--engine", "golang", "--force", "--scope", "everything", "--component", "freeipa-identity"}, gate: "engine-scope-value", want: "--scope 只能是"},
+		{name: "--scope without golang", args: []string{"--preview-only", "--component", "freeipa-identity", "--scope", "users-groups"}, gate: "engine-scope", want: "--scope 只能與 --engine golang"},
+		{name: "--result-out without golang", args: []string{"--force", "--component", "freeipa-identity", "--result-out", "r.json"}, gate: "engine-result-out", want: "--result-out 只能與 --engine golang"},
+		{name: "--result-out of a preview", args: previewArgs("--result-out", "r.json"), gate: "engine-result-out-needs-force", want: "只能與 --force"},
+		{name: "--plan-out of an apply", args: []string{"--engine", "golang", "--force", "--scope", "users-groups", "--component", "freeipa-identity", "--plan-out", "p.json"}, gate: "engine-plan-out-with-force", want: "--result-out"},
 		{name: "golang without --component", args: []string{"--engine", "golang", "--preview-only"}, gate: "engine-component", want: "只處理 --component freeipa-identity"},
 		{name: "golang with another component", args: []string{"--engine", "golang", "--preview-only", "--component", "dns"}, gate: "engine-component", want: "只處理 --component freeipa-identity"},
 		{name: "golang with two components", args: previewArgs("--component", "dns"), gate: "engine-component", want: "只處理 --component freeipa-identity"},
@@ -261,24 +282,24 @@ func TestReconcileGolangPlanOutIsCheckedFirst(t *testing.T) {
 		// plan returns the --plan-out argument, given the workspace.
 		plan func(t *testing.T, dir string) string
 	}{
-		{name: "the file exists", gate: "plan-out-exists", want: "已存在；不覆寫", plan: func(t *testing.T, dir string) string {
+		{name: "the file exists", gate: "output-exists,preview-plan-out", want: "已存在；不覆寫", plan: func(t *testing.T, dir string) string {
 			path := filepath.Join(dir, "p.json")
 			if err := os.WriteFile(path, []byte("keep"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			return path
 		}},
-		{name: "the file is a dangling symlink", gate: "plan-out-exists", want: "已存在；不覆寫", plan: func(t *testing.T, dir string) string {
+		{name: "the file is a dangling symlink", gate: "output-exists", want: "已存在；不覆寫", plan: func(t *testing.T, dir string) string {
 			path := filepath.Join(dir, "p.json")
 			if err := os.Symlink(filepath.Join(dir, "nowhere"), path); err != nil {
 				t.Fatal(err)
 			}
 			return path
 		}},
-		{name: "its directory does not exist", gate: "plan-out-dir", want: "上層目錄", plan: func(t *testing.T, dir string) string {
+		{name: "its directory does not exist", gate: "output-dir", want: "上層目錄", plan: func(t *testing.T, dir string) string {
 			return filepath.Join(dir, "missing", "p.json")
 		}},
-		{name: "its directory is a file", gate: "plan-out-dir", want: "不存在或不是目錄", plan: func(t *testing.T, dir string) string {
+		{name: "its directory is a file", gate: "output-dir", want: "不存在或不是目錄", plan: func(t *testing.T, dir string) string {
 			parent := filepath.Join(dir, "afile")
 			if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
 				t.Fatal(err)
@@ -325,7 +346,7 @@ func TestReconcileGolangWorkspaceFailures(t *testing.T) {
 			writePrivateFile(t, blocker, "a file where the data directory would go")
 			dataDir = filepath.Join(blocker, "data")
 		}},
-		{name: "ansible-inventory fails", gate: "ansible-inventory", want: "ansible-inventory --list", setup: func(t *testing.T, _ string) {
+		{name: "ansible-inventory fails", gate: "ansible-inventory,preview-preflight", want: "ansible-inventory --list", setup: func(t *testing.T, _ string) {
 			fakeTool(t, "ansible-inventory", "echo '[ERROR]: synthetic inventory failure' >&2\nexit 1")
 		}},
 		{name: "a plaintext secret in group_vars is refused before ansible-inventory runs", gate: "ansible-inventory", want: "ipa_admin_password", setup: func(t *testing.T, dir string) {
@@ -387,6 +408,117 @@ func TestReconcileGolangWorkspaceFailures(t *testing.T) {
 	}
 }
 
+// Issue #273, spec §2.2 step 4: a password, ssh_keys or membership that is not
+// a mapping, null included (and the other wrong types the roster validator
+// lets through), used to be read as "not declared", which for a group is an
+// authoritative group with no members and, once the engine writes, the removal
+// of every direct member. The playbook's gate fails on null as well. A null
+// inside those mappings (membership.authoritative, ssh_keys.values, ...) is
+// refused too: the playbook reads it as false, as a failure or as unmanaged.
+// So is a null user or group scalar (`enabled: ~` is user-disable in the
+// playbook, enabled in the Go engine) and a null `users` or `groups` list.
+// Each row is a roster that passes inventory.ValidateRoster, so the refusal is
+// the adapter's (gate roster-adapter): exit 1 with the field and the roster
+// object named, nothing dialed, nothing sent to FreeIPA, no plan, and no value
+// in the error.
+func TestReconcileGolangRefusesWrongTypedRosterValues(t *testing.T) {
+	const sentinel = "pw-sentinel-not-a-real-secret"
+	base := strings.Replace(captureRoster, "%s", "/bin/sh", 1)
+	withUserField := func(user, field string) string {
+		return strings.Replace(base, "{name: "+user+", ", "{name: "+user+", "+field+", ", 1)
+	}
+	withGroup := func(membership string) string {
+		return base + "groups:\n  - {name: team-a, category: team, membership: " + membership + "}\n"
+	}
+	for _, tc := range []struct {
+		name, roster, gate, want string
+	}{
+		{name: "password is a string", roster: withUserField("p1-nopw", `password: "`+sentinel+`"`), gate: "roster-adapter",
+			want: "users[2] (p1-nopw): password must be a mapping, not string"},
+		{name: "password.initial is a number", roster: withUserField("p1-nopw", "password: {initial: 7}"), gate: "roster-adapter",
+			want: "users[2] (p1-nopw): password: initial must be a string, not int"},
+		{name: "ssh_keys is a list", roster: withUserField("p1-keys", `ssh_keys: ["`+sentinel+`"]`), gate: "roster-adapter",
+			want: "users[0] (p1-keys): ssh_keys must be a mapping, not []interface {}"},
+		{name: "ssh_keys.authoritative is a string", roster: withUserField("p1-keys", `ssh_keys: {authoritative: "no"}`), gate: "roster-adapter",
+			want: "users[0] (p1-keys): ssh_keys: authoritative must be true or false"},
+		{name: "membership is a list of members", roster: withGroup("[p1-self]"), gate: "roster-adapter",
+			want: "groups[0] (team-a): membership must be a mapping, not []interface {}"},
+		{name: "membership is a string", roster: withGroup(`"p1-self"`), gate: "roster-adapter",
+			want: "groups[0] (team-a): membership must be a mapping, not string"},
+		{name: "membership is an empty stanza (null)", roster: base + "groups:\n  - name: team-a\n    category: team\n    membership:\n", gate: "roster-adapter",
+			want: "groups[0] (team-a): membership must be a mapping, not null"},
+		{name: "membership is ~ (null)", roster: withGroup("~"), gate: "roster-adapter",
+			want: "groups[0] (team-a): membership must be a mapping, not null"},
+		{name: "enabled is null", roster: withUserField("p1-nopw", "enabled: ~"), gate: "roster-adapter",
+			want: "users[2] (p1-nopw): enabled must be true or false, not null (leave it out, or give a value)"},
+		{name: "users is null", roster: "schema_version: 3\nusers:\n", gate: "roster-adapter",
+			want: "users must be a list, not null (leave it out, or write [])"},
+		{name: "membership.authoritative is null", roster: withGroup("{authoritative: ~, users: [p1-self]}"), gate: "roster-adapter",
+			want: "groups[0] (team-a): membership: authoritative must be true or false, not null"},
+		{name: "ssh_keys.values is null", roster: withUserField("p1-keys", "ssh_keys: {values: ~}"), gate: "roster-adapter",
+			want: "users[0] (p1-keys): ssh_keys: values must be a list, not null"},
+		{name: "password is null", roster: withUserField("p1-nopw", "password: ~"), gate: "roster-adapter",
+			want: "users[2] (p1-nopw): password must be a mapping, not null"},
+		{name: "ssh_keys is null", roster: withUserField("p1-keys", "ssh_keys: ~"), gate: "roster-adapter",
+			want: "users[0] (p1-keys): ssh_keys must be a mapping, not null"},
+		{name: "users is a string", roster: "schema_version: 3\nusers: " + sentinel + "\n", gate: "roster-adapter",
+			want: "users must be a list, not string"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Logf("gate: %s", tc.gate)
+			f := newFakeIPA(t, "p1-self")
+			targets := withFakeDialer(t, f)
+			dir := golangWorkspace(t, tc.roster, nil)
+			plan := filepath.Join(dir, "p.json")
+			out, err := runReconcileCLI(t, previewArgs("--plan-out", plan)...)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || processExitCode(err) != 1 {
+				t.Fatalf("err = %v (exit %d), want %q and exit 1\n%s", err, processExitCode(err), tc.want, out)
+			}
+			if len(*targets) != 0 {
+				t.Fatalf("built a tunnel: %+v", *targets)
+			}
+			if paths, methods := f.requests(); len(paths)+len(methods) != 0 {
+				t.Fatalf("sent %v %v to FreeIPA", paths, methods)
+			}
+			assertNoLogin(t, f)
+			noPlan(t, plan)
+			if strings.Contains(out, "唯讀預覽（不寫入 FreeIPA）") || strings.Contains(out, "plan JSON：") {
+				t.Fatalf("a refused roster printed a preview:\n%s", out)
+			}
+			assertNoSecretAnywhere(t, err, out, plan)
+			if strings.Contains(err.Error(), sentinel) || strings.Contains(out, sentinel) {
+				t.Fatalf("the refusal shows the value it refused: %v", err)
+			}
+		})
+	}
+}
+
+// The other side of the rows above: a null uid, gid, display_name or email is
+// "not managed", the same as leaving the key out (the playbook leaves the
+// argument out for both, and the roster editor writes a null for a blank id),
+// so the preview still runs and plans nothing for them.
+func TestReconcileGolangPreviewReadsANullIdAsNotManaged(t *testing.T) {
+	f := newFakeIPA(t, "p1-self")
+	withFakeDialer(t, f)
+	roster := strings.Replace(captureRoster, "%s", "/bin/sh", 1)
+	roster = strings.Replace(roster, "{name: p1-nokeys, ", "{name: p1-nokeys, uid: ~, gid: ~, email: ~, ", 1)
+	roster = strings.Replace(roster, "display_name: P1 NoKeys, ", "display_name: ~, ", 1)
+	if !strings.Contains(roster, "uid: ~, gid: ~, email: ~") || !strings.Contains(roster, "display_name: ~") {
+		t.Fatalf("the roster was not changed:\n%s", roster)
+	}
+	golangWorkspace(t, roster, nil)
+	out, err := runGolangPreview(t)
+	if err != nil {
+		t.Fatalf("preview: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "計畫：沒有任何寫入") {
+		t.Fatalf("a null id or display name planned a change:\n%s", out)
+	}
+	if _, methods := f.requests(); slices.Contains(methods, "user_add") || slices.Contains(methods, "user_mod") {
+		t.Fatalf("a write was sent: %v", methods)
+	}
+}
+
 // withRosterServer is the capture roster declaring freeipa.server as the given
 // YAML value.
 func withRosterServer(value string) string {
@@ -427,7 +559,7 @@ func TestReconcileGolangSessionAndObserveFailures(t *testing.T) {
 		paths   []string // the request paths in order, when nothing is answered as JSON-RPC (nil: none)
 		methods []string // the JSON-RPC methods answered, in order, ending with the logout when there was a session
 	}{
-		{name: "the FQDN cannot be read", gate: "fqdn-read",
+		{name: "the FQDN cannot be read", gate: "fqdn-read,preview-connect",
 			fault: func() { golangDialerFaults.fqdnErr = errors.New("synthetic hostname -f failure") },
 			want:  []string{"讀取 ipa-1 的 FQDN", "synthetic hostname -f failure"}},
 		{name: "the IPA CA cannot be read", gate: "ca-read",
@@ -541,27 +673,27 @@ func TestReconcileGolangPlanOutcomes(t *testing.T) {
 		gate string
 		run  func(t *testing.T)
 	}{
-		{name: "a plan file that appears mid-run is kept", gate: "plan-write,plan-open", run: func(t *testing.T) {
+		{name: "the plan file is created before anything is read and removed when no plan is written", gate: "client-new", run: func(t *testing.T) {
 			f := newFakeIPA(t, "p1-self")
 			withFakeDialer(t, f)
 			dir := golangWorkspace(t, strings.Replace(captureRoster, "%s", "/bin/sh", 1), nil)
 			plan := filepath.Join(dir, "p.json")
 			prev := newGolangIPAClient
 			t.Cleanup(func() { newGolangIPAClient = prev })
+			existedWhenTheClientWasBuilt := false
 			newGolangIPAClient = func(cfg freeiparpc.Config) (*freeiparpc.Client, error) {
-				writePrivateFile(t, plan, "keep")
-				return prev(cfg)
+				info, serr := os.Stat(plan)
+				existedWhenTheClientWasBuilt = serr == nil && info.Mode().Perm() == 0o600 && info.Size() == 0
+				return nil, errors.New("the client could not be built")
 			}
 			out, err := runReconcileCLI(t, previewArgs("--plan-out", plan)...)
-			if err == nil || !strings.Contains(err.Error(), "--plan-out:") || processExitCode(err) != 1 {
+			if err == nil || !strings.Contains(err.Error(), "the client could not be built") || processExitCode(err) != 1 {
 				t.Fatalf("err = %v (exit %d)\n%s", err, processExitCode(err), out)
 			}
-			if data, _ := os.ReadFile(plan); string(data) != "keep" {
-				t.Fatalf("the plan replaced a file that appeared mid-run: %q", data)
+			if !existedWhenTheClientWasBuilt {
+				t.Fatal("the --plan-out file was not there, empty and 0600, when the run went on to connect: it is created before anything is read")
 			}
-			if strings.Contains(out, "plan JSON：") {
-				t.Fatalf("announced a plan file it did not write:\n%s", out)
-			}
+			noPlan(t, plan)
 			assertNoSecretAnywhere(t, err, out, plan)
 		}},
 		{name: "a client that sent a write has no plan to show", gate: "writes-guard", run: func(t *testing.T) {
@@ -572,6 +704,10 @@ func TestReconcileGolangPlanOutcomes(t *testing.T) {
 			t.Cleanup(func() { newGolangIPAClient = prev })
 			newGolangIPAClient = func(cfg freeiparpc.Config) (*freeiparpc.Client, error) {
 				cfg.ReadOnly = false
+				// A client that may write has a gate (freeiparpc.New): this test
+				// is about the preview's own count of writes, so the gate lets
+				// the one write the test sends through.
+				cfg.WriteGate = func(context.Context, string) error { return nil }
 				c, err := prev(cfg)
 				if err != nil {
 					return nil, err
@@ -729,5 +865,55 @@ func waitForPID(t *testing.T, path string, within time.Duration) int {
 		if time.Now().After(deadline) {
 			t.Fatalf("%s did not appear within %s", path, within)
 		}
+	}
+}
+
+// A run through runReconcileCLIContext under a cancelled context (the first Ctrl-C of
+// TestTerminalSinksSurviveCancel) leaves nothing cancelled behind on the root command: the next
+// test that runs any command through it gets a live context. CI found it the hard way: every
+// TestTopologyUpFresh* test, which runs later in the package, failed with "context canceled"
+// (AGENTS.md §5.6, the package-state hazard of cobra's root command). The probe is a command of
+// the real tree that reports the state of the context it was handed.
+func TestACancelledReconcileRunLeavesNoCancelledContextOnTheRootCommand(t *testing.T) {
+	var seen []error
+	t.Cleanup(func() {
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+	})
+	// A command that has not run yet gets the root's context; one that has keeps the one it was
+	// given, so each probe is a new command, as each test of the package meets a command that has
+	// not run before it.
+	probeRun := func() {
+		t.Helper()
+		probe := &cobra.Command{Use: "context-probe", Hidden: true, RunE: func(cmd *cobra.Command, _ []string) error {
+			seen = append(seen, cmd.Context().Err())
+			return nil
+		}}
+		rootCmd.AddCommand(probe)
+		defer rootCmd.RemoveCommand(probe)
+		var out bytes.Buffer
+		rootCmd.SetArgs([]string{"context-probe"})
+		rootCmd.SetOut(&out)
+		rootCmd.SetErr(&out)
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("the probe: %v\n%s", err, out.String())
+		}
+	}
+	probeRun()
+	if len(seen) != 1 || seen[0] != nil {
+		t.Fatalf("the probe before: context error %v", seen)
+	}
+
+	// The cancelled run is a subtest so that its cleanups have run when it returns.
+	t.Run("a run under a cancelled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _ = runReconcileCLIContext(t, ctx, "--engine", "no-such-engine", "--component", "freeipa-identity", "--preview-only")
+	})
+
+	probeRun()
+	if len(seen) != 2 || seen[1] != nil {
+		t.Fatalf("the probe after a run under a cancelled context saw %v: the root command kept the cancelled context for every later test", seen[1:])
 	}
 }

@@ -86,8 +86,8 @@ func (d *automationDriver) run(r *editRouterModel, scenario editScenario) error 
 			d.beforeStep()
 		}
 		err := d.runStep(r, step)
-		if refused := r.takeWriteRefused(); err == nil && refused != nil {
-			err = refused
+		if failed := r.takeStepFailure(); err == nil && failed != nil {
+			err = failed
 		}
 		if recErr := d.recorderOrNoop().RecordActionResult(step, err); recErr != nil && err == nil {
 			err = fmt.Errorf("record action result: %w", recErr)
@@ -672,9 +672,10 @@ func (d *automationDriver) send(r *editRouterModel, msg tea.KeyPressMsg) error {
 	if r.err != nil {
 		return r.err
 	}
-	// A roster write refused as busy keeps the terminal session open, but
-	// a scenario must not go on as if it had been written.
-	if err := r.takeWriteRefused(); err != nil {
+	// A roster write refused as busy, or a screen action that failed, keeps
+	// the terminal session open with a banner, but a scenario must not go on
+	// as if it had been written or done.
+	if err := r.takeStepFailure(); err != nil {
 		return err
 	}
 	if err := textInputRejectionError(r); err != nil {
@@ -702,9 +703,10 @@ func (d *automationDriver) sendRedacted(r *editRouterModel, msg tea.KeyPressMsg,
 	if r.err != nil {
 		return r.err
 	}
-	// A roster write refused as busy keeps the terminal session open, but
-	// a scenario must not go on as if it had been written.
-	if err := r.takeWriteRefused(); err != nil {
+	// A roster write refused as busy, or a screen action that failed, keeps
+	// the terminal session open with a banner, but a scenario must not go on
+	// as if it had been written or done.
+	if err := r.takeStepFailure(); err != nil {
 		return err
 	}
 	if err := textInputRejectionError(r); err != nil {

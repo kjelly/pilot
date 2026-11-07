@@ -145,7 +145,6 @@ type BatchItem struct {
 // succeeds or fails on its own, in order. A batch with any write is a write.
 func (c *Client) Batch(ctx context.Context, cmds []Command) ([]BatchItem, error) {
 	reads, writes := 0, 0
-	items := make([]map[string]any, 0, len(cmds))
 	for _, cmd := range cmds {
 		k, ok := allowlist[cmd.Method]
 		if !ok {
@@ -159,6 +158,18 @@ func (c *Client) Batch(ctx context.Context, cmds []Command) ([]BatchItem, error)
 		} else {
 			reads++
 		}
+	}
+	// Every write of the batch is gated before anything is built or sent: one
+	// refusal refuses all of it.
+	for _, cmd := range cmds {
+		if allowlist[cmd.Method] == write {
+			if err := c.gate(ctx, cmd.Method); err != nil {
+				return nil, err
+			}
+		}
+	}
+	items := make([]map[string]any, 0, len(cmds))
+	for _, cmd := range cmds {
 		items = append(items, map[string]any{"method": cmd.Method, "params": cmd.params()})
 	}
 	body, err := json.Marshal(request{Method: "batch", Params: [2]any{items, map[string]any{"version": apiVersion}}})

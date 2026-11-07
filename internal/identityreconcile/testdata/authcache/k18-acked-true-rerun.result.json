@@ -1,0 +1,1 @@
+{"schema": "pilot.identity-auth-cache/v1", "action": "observe", "host": "ipa-1", "fqdn": "ipa1.ipa.pilot.internal", "prepared": true, "dirty": false, "refreshed": false, "acked": true}

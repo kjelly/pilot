@@ -1,0 +1,18 @@
+{
+  "result": {
+    "result": {
+      "cn": [
+        "p24cap-ge2"
+      ],
+      "gidnumber": [
+        "1927600519"
+      ]
+    },
+    "value": "p24cap-ge2",
+    "summary": "Modified group \"p24cap-ge2\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

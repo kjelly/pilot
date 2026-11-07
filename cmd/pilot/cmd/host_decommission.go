@@ -32,6 +32,7 @@ import (
 	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/decommission"
 	"github.com/kjelly/pilot/internal/decommission/providers"
+	"github.com/kjelly/pilot/internal/identitylock"
 	"github.com/kjelly/pilot/internal/inventory"
 )
 
@@ -81,15 +82,41 @@ var hostDecommissionShowCmd = &cobra.Command{
 var hostDecommissionApplyCmd = &cobra.Command{
 	Use:   "apply",
 	Short: "Apply a previously planned host decommission (spec.md §10.3). Only a zero-blocker plan can execute — any component with no registered decommission provider still blocks",
-	Args:  cobra.NoArgs,
-	RunE:  runHostDecommissionApplyCmd,
+	Long: `pilot host decommission apply runs the steps of a persisted plan. A plan with a
+FreeIPA client has a last, central step that runs the identity apply playbook,
+and the whole run holds the FreeIPA server's /etc/ipa lock: it is taken once,
+after the approval is recorded and before the first step (the client's
+uninstall), waiting up to 30 minutes for another pilot run to give it back, and
+given back when the run ends. A lock that is busy, a wait that runs out, an
+interrupt during the wait or a refusal therefore leaves the client, the roster
+and the server as they were, with the approval kept: run apply again or
+'pilot host decommission resume' with the same plan once the lock is free.
+
+` + identityLockHelp + `
+
+For apply that check is made before the approval is recorded and before the
+client is uninstalled. 'pilot host decommission plan' prints the same refusal as
+a warning on stderr; it does not block the plan.`,
+	Args: cobra.NoArgs,
+	RunE: runHostDecommissionApplyCmd,
 }
 
 var hostDecommissionResumeCmd = &cobra.Command{
 	Use:   "resume",
 	Short: "Resume a host decommission after a failure/interruption (spec.md §10.4)",
-	Args:  cobra.NoArgs,
-	RunE:  runHostDecommissionResumeCmd,
+	Long: `pilot host decommission resume continues an interrupted apply. A plan with a
+FreeIPA client holds the FreeIPA server's /etc/ipa lock for the whole run, taken
+before its first step (waiting up to 30 minutes for another pilot run to give it
+back) and given back when the run ends, so a lock it cannot get changes nothing:
+resume it again later.
+
+` + identityLockHelp + `
+
+For resume that check is made before any step. A plan whose converge step already
+ran is checked all the same: an inventory that stopped being lockable since is
+refused, not skipped.`,
+	Args: cobra.NoArgs,
+	RunE: runHostDecommissionResumeCmd,
 }
 
 func init() {
@@ -178,6 +205,15 @@ func runHostDecommissionPlanCmd(cmd *cobra.Command, _ []string) error {
 	if !hostDecommissionPlanJSON {
 		printHostDecommissionStageNeeds(out, dir, plan)
 	}
+	// A plan that apply would refuse is said so now, on stderr (the JSON on
+	// stdout is untouched). It is a warning and not a blocker on purpose: a
+	// blocker is part of what the plan hash and the freshness re-derivation
+	// compare, and this one depends on connection variables of the inventory
+	// that are no part of the plan's recorded external state, so it would turn
+	// a change of those into plan_stale and make a plan nobody can apply look
+	// like a plan that is merely out of date. apply and resume refuse it
+	// themselves, before their first step (runHostDecommissionApply).
+	warnIfDecommissionIsUnlockable(cmd.Context(), cmd.ErrOrStderr(), dir, plan)
 
 	// Exit behavior per spec.md §10.1: a successful, unblocked plan is
 	// success (nil); a valid-but-blocked plan is a non-zero structured
@@ -440,10 +476,31 @@ func runHostDecommissionResumeCmd(cmd *cobra.Command, _ []string) error {
 // decommission flow — edit_tui_decommission.go). It records the human
 // approval (apply's --confirm-host having just matched IS the human
 // confirmation spec.md §10.3 requirement 6 asks for), gates on it via
-// decommission.RequireApproval, then calls decommission.Finalize — all
+// decommission.RequireApproval, then calls decommission.Apply — all
 // domain logic. Already-completed plans record no new approval (nothing
-// left to confirm) and go straight to Finalize, which recognizes the
+// left to confirm) and go straight to Apply, which recognizes the
 // replay and returns already_completed without touching approval state.
+//
+// A plan with the freeipa-identity converge step holds the FreeIPA server's
+// /etc/ipa lock for the whole of Apply, not for that step. D1 of
+// docs/superpowers/specs/2026-11-06-freeipa-go-reconcile-phase2-spec.md takes the
+// lock after the confirmation and before the first thing that changes anything,
+// and the first change a decommission makes is the client's uninstall, many steps
+// before the converge: a lock taken only at the converge (as it was) that is busy,
+// runs out of time or is interrupted had already uninstalled the client and
+// tombstoned the roster entry (found live, the E41 row of that spec). So the lock
+// is taken once, after the confirmation (the approval) and before the first
+// step, and a refusal, a busy lock, a wait that runs out or a cancel changes
+// nothing: the approval is kept, and apply again or resume carries on with the
+// same plan. Apply's context is bound to it (Held.Bind), so a lock that is lost
+// stops the run before its next step and kills the playbook that is running; the
+// converge step finds the lock in that context (identitylock.Require) and takes
+// none of its own. The freshness re-derivation at the start of Apply runs under
+// the lock too: it reads state no other pilot run can change until this one ends,
+// at the price of waiting for the lock before an out-of-date plan is reported as
+// such. This is about when the lock is taken; it does not change what a half-done
+// decommission needs in order to be resumable (see issue #303: a workspace without
+// ipa_client_fqdn cannot finish after the uninstall, with or without this lock).
 func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan *decommission.Plan, dir string, catalog contract.Catalog, reason string, auth decommission.StageAuthorization) (*decommission.FinalizeResult, error) {
 	now := time.Now().UTC()
 	if plan.Status != decommission.PlanStatusCompleted {
@@ -452,6 +509,41 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 		if err := checkHostDecommissionStage(dir, plan, auth); err != nil {
 			return nil, err
 		}
+	}
+
+	// The SAME provider registry `plan` used must be rebuilt here — the
+	// freshness re-derivation inside Apply/Finalize re-runs PlanHost
+	// against it, and a plan that was executable because a provider WAS
+	// registered would otherwise stale-reject as soon as that provider
+	// vanished from freshness's view (spec.md §28/INV-3). It is built before
+	// the approval is recorded, so that what refuses a run does so before it
+	// leaves anything behind, and it regenerates inventory.yml, which the lock
+	// precheck below reads.
+	provs, err := buildHostDecommissionProviders(dir, plan.Host.Name, catalog, os.Stderr, auth)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only a plan that is not completed and runs the converge step takes the
+	// lock: an already completed plan replays its receipt and runs nothing, and a
+	// plan without the step never runs the identity apply playbook.
+	needsLock := plan.Status != decommission.PlanStatusCompleted && planHasIdentityConverge(plan)
+	var acquire identitylock.Acquirer
+	if needsLock {
+		// Before the first step, and before the approval: an inventory the lock
+		// cannot be taken through is refused before the run leaves anything
+		// behind. identityLockFor makes that check (no ssh) and builds the
+		// Acquirer, which is called once, below.
+		lockRequest, requestErr := hostDecommissionLockRequest(ctx, dir)
+		if requestErr != nil {
+			return nil, requestErr
+		}
+		acquire, err = identityLockFor(ctx, lockRequest)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if plan.Status != decommission.PlanStatusCompleted {
 		if err := ds.RecordApproval(plan.ID, plan.PlanHash, decommissionActor(), "approve", reason, now); err != nil {
 			return nil, fmt.Errorf("record approval: %w", err)
 		}
@@ -460,17 +552,20 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 		}
 	}
 
-	// The SAME provider registry `plan` used must be rebuilt here — the
-	// freshness re-derivation inside Apply/Finalize re-runs PlanHost
-	// against it, and a plan that was executable because a provider WAS
-	// registered would otherwise stale-reject as soon as that provider
-	// vanished from freshness's view (spec.md §28/INV-3).
-	provs, err := buildHostDecommissionProviders(dir, plan.Host.Name, catalog, os.Stderr, auth)
-	if err != nil {
-		return nil, err
+	var held *identitylock.Held
+	if needsLock {
+		// After the confirmation, before anything is executed (D1).
+		held, err = acquire(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("host decommission %s was not started: the FreeIPA identity lock could not be taken, so no step ran and the client, the roster and the server are as they were; the approval is kept, so `pilot host decommission resume --id %s` (or apply again) carries on with this plan once the lock is free: %w", plan.ID, plan.ID, err)
+		}
+		defer func() { _ = held.Release() }()
+		bound, cancel := held.Bind(ctx)
+		defer cancel()
+		ctx = bound
 	}
 
-	return decommission.Apply(ctx, decommission.ApplyInput{
+	result, err := decommission.Apply(ctx, decommission.ApplyInput{
 		Plan: plan,
 		PlanInputForFreshness: decommission.PlanInput{
 			WorkspaceDir: dir, HostName: plan.Host.Name, Catalog: catalog, Providers: provs,
@@ -488,6 +583,56 @@ func runHostDecommissionApply(ctx context.Context, ds *decommission.Store, plan 
 		StartedAt:      now,
 		Store:          ds,
 	})
+	return decommissionRunEnd(held, plan.ID, result, err)
+}
+
+// lockLostAfterCompletionError is what a run ends with when decommission.Apply
+// finished and recorded the receipt, and the identity lock turned out to have
+// been lost while the run went on. It wraps identitylock.ErrLockLost (so
+// errors.Is works and the command still exits non-zero: the run did not hold
+// the lock to its end, which is what the lock is for) but does not repeat that
+// error's own text, "FreeIPA may be partially reconciled; rerun": here the
+// decommission is finished, and saying it may be partial, or telling the
+// operator to rerun it, would be false.
+type lockLostAfterCompletionError struct {
+	planID string
+	host   string
+	lost   error // wraps identitylock.ErrLockLost
+}
+
+func (e *lockLostAfterCompletionError) Error() string {
+	return fmt.Sprintf("host decommission %s completed: its receipt is recorded, and `pilot host decommission apply` again replays it without running anything. "+
+		"But the FreeIPA identity lock on %s was lost while the run was going, so the part of the run after the loss was not protected from a concurrent identity run: "+
+		"an overlapping run may have left the clients' authorization caches unrefreshed, so a client can keep the decommissioned host's authorization until its SSSD cache expires. "+
+		"This is reported as a failure because the run did not hold the lock to its end", e.planID, e.host)
+}
+
+func (e *lockLostAfterCompletionError) Unwrap() error { return e.lost }
+
+// decommissionRunEnd is what runHostDecommissionApply returns once
+// decommission.Apply has returned while the run held the identity lock (held is
+// nil when it took none). Whatever Apply ended with, a run whose lock was lost did
+// not run under it (see accessgrants.applyPlan), and what the loss cancelled
+// would otherwise be reported as a bare "context canceled". The text of the
+// failure says what is true of this run: a run Apply did not finish may be
+// partial, and one whose receipt is recorded is finished and replays its receipt
+// (lockLostAfterCompletionError). The result goes back with that error so a
+// caller (the TUI) can tell the host is gone from hosts.yml.
+func decommissionRunEnd(held *identitylock.Held, planID string, result *decommission.FinalizeResult, err error) (*decommission.FinalizeResult, error) {
+	if held == nil {
+		return result, err
+	}
+	lostErr := held.Check()
+	if lostErr == nil {
+		return result, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("host decommission %s stopped: %w (the run ended with: %v)", planID, lostErr, err)
+	}
+	if result != nil && result.Status == "completed" && result.Receipt != nil {
+		return result, &lockLostAfterCompletionError{planID: planID, host: held.Host, lost: lostErr}
+	}
+	return nil, fmt.Errorf("host decommission %s: %w", planID, lostErr)
 }
 
 // buildHostDecommissionProviders constructs the live decommission
@@ -597,6 +742,10 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 		ExtraArgs:             extraArgs,
 		ClientStageArgs:       hostStage,
 		ServerStageArgs:       scope.ArgsFunc(scope.RoleHosts(stageRoleFreeIPAServer)),
+		// No lock here: the converge runs freeipa-identity-apply.yml under the
+		// FreeIPA server's /etc/ipa lock, but the run's owner takes it before the
+		// first step (runHostDecommissionApply) and the step reads it from its
+		// context. plan builds this registry too and never locks.
 	})
 
 	// Wazuh agent (spec.md §37 Phase 4, HD14) — registered unconditionally,
@@ -699,6 +848,67 @@ func buildHostDecommissionProviders(dir, hostName string, catalog contract.Catal
 	}
 
 	return result, nil
+}
+
+// hostDecommissionLockRequest is the lock request of a decommission run: the
+// workspace's generated inventory (dir's inventory.yml is the one
+// buildHostDecommissionProviders generated), how long to wait and where to say
+// so (the default 30 minutes and stderr, unless ctx says otherwise: the TUI
+// does not wait, see pushDecommissionExecute) and the workspace's Ansible
+// runtime (the decommission runner has its own). The lock of apply and resume
+// (identityLockFor) and the warning of plan (precheckHostDecommissionIdentityLock)
+// are both made from it, so they ask the same question.
+func hostDecommissionLockRequest(ctx context.Context, dir string) (identityLockRequest, error) {
+	runtime, err := prepareDeployAnsibleRuntime(resolvePilotDataDir())
+	if err != nil {
+		return identityLockRequest{}, fmt.Errorf("prepare ansible runtime for host decommission: %w", err)
+	}
+	return identityLockRequest{Inventory: filepath.Join(dir, "inventory.yml"), Wait: identityLockWaitFrom(ctx), Progress: identityLockProgressFrom(ctx), Runtime: &runtime}, nil
+}
+
+// planHasIdentityConverge reports whether a plan runs the central
+// freeipa-identity-apply.yml converge step: the one step of a decommission that
+// needs the FreeIPA server's /etc/ipa lock, and the reason the whole run holds it
+// (runHostDecommissionApply).
+func planHasIdentityConverge(plan *decommission.Plan) bool {
+	for _, component := range plan.Components {
+		for _, step := range component.Steps {
+			if step.Provider == providers.FreeIPAClientProviderID && step.Action == providers.ActionFreeIPAIdentityApplyConverge {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// precheckHostDecommissionIdentityLock is what `plan` asks (it takes no lock):
+// whether apply and resume would refuse a plan with an identity converge step
+// because the inventory its lock would be taken through cannot give it
+// (checkIdentityLockTarget). A plan without that step is not asked. apply and
+// resume make the same check through identityLockFor, in
+// runHostDecommissionApply, and then take the lock.
+func precheckHostDecommissionIdentityLock(ctx context.Context, dir string, plan *decommission.Plan) error {
+	if !planHasIdentityConverge(plan) {
+		return nil
+	}
+	req, err := hostDecommissionLockRequest(ctx, dir)
+	if err != nil {
+		return err
+	}
+	return checkIdentityLockTarget(ctx, req)
+}
+
+// warnIfDecommissionIsUnlockable tells the operator, after `plan`, that apply
+// and resume will refuse a plan whose converge step needs a lock the
+// inventory cannot give (precheckHostDecommissionIdentityLock). A blocked plan
+// cannot be applied anyway and says nothing.
+func warnIfDecommissionIsUnlockable(ctx context.Context, w io.Writer, dir string, plan *decommission.Plan) {
+	if plan.Blocked() {
+		return
+	}
+	if err := precheckHostDecommissionIdentityLock(ctx, dir, plan); err != nil {
+		fmt.Fprintf(w, "⚠️  apply／resume 會拒絕這份計畫(它的 freeipa-identity 收斂步驟需要 FreeIPA server 的 /etc/ipa 鎖，而這份 inventory 取不到它；plan 不改動任何東西，所以只是警告)：%v\n", err)
+	}
 }
 
 // hostDecommissionFreeIPAExtraArgs passes only FILE REFERENCES to Ansible;

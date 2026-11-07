@@ -1,0 +1,12 @@
+{
+  "result": null,
+  "error": {
+    "code": 4002,
+    "message": "group with name \"pilot-internal-history-g-88383f9deed45993b176acce0ba9e906e0a05259ca24bc8b8234baadb3cf6b65\" already exists",
+    "data": {},
+    "name": "DuplicateEntry"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

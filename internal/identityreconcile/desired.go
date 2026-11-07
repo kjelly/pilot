@@ -11,14 +11,25 @@ package identityreconcile
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/store"
 )
 
-// ScopeUsersGroups is the part of the roster this engine reconciles.
-const ScopeUsersGroups = "users-groups"
+// ScopeUsersGroups is the part of the roster this engine reconciles, and the "scope" a
+// run of it records in its metadata. It is the store's constant, so that the filter of
+// `pilot runs last-success` (store.LastSuccess) and the engine cannot disagree on it
+// (spec 2026-11-06 phase 2, Q6; AGENTS.md §5.7).
+const ScopeUsersGroups = store.ScopeUsersGroups
+
+// ScopeFull is the mixed run (`--scope full`, spec 2026-11-06 phase 2 section 8.3): the Go
+// engine writes the users and groups, and the identity playbook, told to skip those two
+// sections, does the rest. It is the "scope" such a run records in its metadata and in its
+// result file.
+const ScopeFull = "full"
 
 // DesiredUser is one roster user that is not state: absent, with the
 // playbook's defaults ("Normalize canonical users") filled in.
@@ -38,6 +49,15 @@ type DesiredUser struct {
 	// itself is never loaded: a plan does not carry passwords.
 	HasInitialPassword bool
 	PreserveExisting   bool // password.preserve_existing, default true
+	// PasswordForm is how Ansible reads password.initial: a literal the engine
+	// can set, or something it cannot (a template, an inline !vault value, a
+	// value that may not be a string). It is read from the roster's bytes,
+	// because the decoded roster has lost it (WithPasswordForms), and only
+	// matters when a password operation is planned. PasswordFormRead is false
+	// until it was read; a password operation of a user whose form was never
+	// read is blocked, not sent.
+	PasswordForm     inventory.PasswordForm
+	PasswordFormRead bool
 
 	// SSHKeys is the normalized ssh_keys.values; nil when not declared
 	// (unmanaged). An empty, non-nil slice clears every key.
@@ -80,7 +100,10 @@ var inScopeSections = map[string]bool{"schema_version": true, "freeipa": true, "
 
 // FromRoster builds the desired state from a roster that already passed
 // inventory.ValidateRoster. It rejects what the playbook would read
-// through Ansible's own coercions (spec §5.1): Go does not repeat them.
+// through Ansible's own coercions (spec §5.1): Go does not repeat them. A
+// value of the wrong type is refused with its field and object, never read
+// as "not declared": inventory.ValidateRoster reads such a value as absent
+// (asMap returns nil) and lets the roster through.
 func FromRoster(root map[string]any) (Desired, error) {
 	var d Desired
 	rawVersion, ok := root["schema_version"]
@@ -107,7 +130,13 @@ func FromRoster(root map[string]any) (Desired, error) {
 	if err != nil {
 		return d, fmt.Errorf("freeipa.%w", err)
 	}
-	if p, present := admin["principal"]; present && p != nil {
+	if p, present := admin["principal"]; present {
+		// A null principal is refused like the other nulls: the playbook's
+		// `principal | default('admin')` keeps None, and kinit then asks for
+		// `None@REALM`, where Go would log in as admin.
+		if p == nil {
+			return d, fmt.Errorf("freeipa.admin.%w", nullKeyError("principal", "a string"))
+		}
 		s, ok := p.(string)
 		if !ok || s == "" {
 			return d, fmt.Errorf("freeipa.admin.principal must be a string")
@@ -115,37 +144,47 @@ func FromRoster(root map[string]any) (Desired, error) {
 		d.Principal = s
 	}
 
-	for i, raw := range listOf(root["users"]) {
-		u, _ := raw.(map[string]any)
-		name, _ := u["name"].(string)
-		where := fmt.Sprintf("users[%d] (%s)", i, name)
-		state, err := stringOr(u, "state", "present")
+	users, err := rosterEntries(root, "users")
+	if err != nil {
+		return d, err
+	}
+	for i, e := range users {
+		where := fmt.Sprintf("users[%d] (%s)", i, e.name)
+		state, err := stringOr(e.fields, "state", "present")
 		if err != nil {
 			return d, fmt.Errorf("%s: %w", where, err)
 		}
 		if state == "absent" {
-			d.AbsentUsers = append(d.AbsentUsers, name)
+			if err := refuseWrongShapes(e.fields, "password", "ssh_keys"); err != nil {
+				return d, fmt.Errorf("%s: %w", where, err)
+			}
+			d.AbsentUsers = append(d.AbsentUsers, e.name)
 			continue
 		}
-		du, err := desiredUser(u, name, state)
+		du, err := desiredUser(e.fields, e.name, state)
 		if err != nil {
 			return d, fmt.Errorf("%s: %w", where, err)
 		}
 		d.Users = append(d.Users, du)
 	}
-	for i, raw := range listOf(root["groups"]) {
-		g, _ := raw.(map[string]any)
-		name, _ := g["name"].(string)
-		where := fmt.Sprintf("groups[%d] (%s)", i, name)
-		state, err := stringOr(g, "state", "present")
+	groups, err := rosterEntries(root, "groups")
+	if err != nil {
+		return d, err
+	}
+	for i, e := range groups {
+		where := fmt.Sprintf("groups[%d] (%s)", i, e.name)
+		state, err := stringOr(e.fields, "state", "present")
 		if err != nil {
 			return d, fmt.Errorf("%s: %w", where, err)
 		}
 		if state == "absent" {
-			d.AbsentGroups = append(d.AbsentGroups, name)
+			if err := refuseWrongShapes(e.fields, "membership"); err != nil {
+				return d, fmt.Errorf("%s: %w", where, err)
+			}
+			d.AbsentGroups = append(d.AbsentGroups, e.name)
 			continue
 		}
-		dg, err := desiredGroup(g, name)
+		dg, err := desiredGroup(e.fields, e.name)
 		if err != nil {
 			return d, fmt.Errorf("%s: %w", where, err)
 		}
@@ -156,8 +195,8 @@ func FromRoster(root map[string]any) (Desired, error) {
 			d.NotInScope = append(d.NotInScope, section)
 		}
 	}
-	for _, u := range listOf(root["users"]) {
-		if m, ok := u.(map[string]any); ok && m["authentication"] != nil {
+	for _, e := range users {
+		if e.fields["authentication"] != nil {
 			d.NotInScope = append(d.NotInScope, "users[].authentication")
 			break
 		}
@@ -166,63 +205,146 @@ func FromRoster(root map[string]any) (Desired, error) {
 	return d, nil
 }
 
+// FromRosterWithForms is FromRoster for a roster whose plaintext bytes are at
+// hand, which is every roster the engine reads: it also records how Ansible reads
+// each user's password.initial (WithPasswordForms), so that the plan made from it
+// knows which password operations it can send. The preview and the writer both
+// build their Desired through it, so they judge a roster's passwords alike.
+func FromRosterWithForms(root map[string]any, rosterData []byte) (Desired, error) {
+	d, err := FromRoster(root)
+	if err != nil {
+		return d, err
+	}
+	return d.WithPasswordForms(rosterData)
+}
+
+// WithPasswordForms records, for every user, how Ansible reads password.initial
+// in rosterData, the plaintext bytes the roster was decoded from. The decoded
+// map has lost the tags and quoting that decide it (spec §7.8), and one
+// classifier judges it for every consumer (inventory.RosterUserPasswords). It
+// returns a copy; d is not changed. A roster whose users cannot be read again
+// from the bytes is an error: no user is then trusted to have a password the
+// engine can set.
+func (d Desired) WithPasswordForms(rosterData []byte) (Desired, error) {
+	forms, err := inventory.RosterUserPasswords(rosterData)
+	if err != nil {
+		return d, err
+	}
+	users := slices.Clone(d.Users)
+	for i := range users {
+		p, ok := forms[users[i].Name]
+		if !ok {
+			return d, fmt.Errorf("the user %q is not in the roster bytes the passwords were read from", users[i].Name)
+		}
+		users[i].PasswordForm, users[i].PasswordFormRead = p.Form, true
+	}
+	d.Users = users
+	return d, nil
+}
+
 func desiredUser(u map[string]any, name, state string) (DesiredUser, error) {
 	du := DesiredUser{Name: name, PreserveExisting: true}
 	var err error
-	if du.First, err = stringOr(u, "first", name); err != nil {
+	// first, last and home_directory are refused when empty, as when null: the
+	// server refuses them (RequirementError for givenname and sn,
+	// ObjectclassViolation for homedirectory; captured, K21), and an engine that
+	// writes would find that out in the middle of a stage (Q8).
+	if du.First, err = nonEmptyStringOr(u, "first", name); err != nil {
 		return du, err
 	}
-	if du.Last, err = stringOr(u, "last", name); err != nil {
+	if du.Last, err = nonEmptyStringOr(u, "last", name); err != nil {
 		return du, err
 	}
-	if du.DisplayName, err = optionalString(u, "display_name"); err != nil {
+	if du.DisplayName, err = unmanagedString(u, "display_name"); err != nil {
 		return du, err
 	}
-	if du.Email, err = optionalString(u, "email"); err != nil {
+	if du.Email, err = unmanagedString(u, "email"); err != nil {
 		return du, err
 	}
-	if du.UID, err = optionalID(u, "uid"); err != nil {
+	if du.UID, err = unmanagedID(u, "uid"); err != nil {
 		return du, err
 	}
-	if du.GID, err = optionalID(u, "gid"); err != nil {
+	if du.GID, err = unmanagedID(u, "gid"); err != nil {
 		return du, err
 	}
 	if du.Shell, err = stringOr(u, "login_shell", "/bin/bash"); err != nil {
 		return du, err
 	}
-	if du.Home, err = stringOr(u, "home_directory", "/home/"+name); err != nil {
+	if du.Home, err = nonEmptyStringOr(u, "home_directory", "/home/"+name); err != nil {
 		return du, err
 	}
 	if du.Enabled, err = boolOr(u, "enabled", state != "disabled"); err != nil {
 		return du, err
 	}
-	if pw, ok := u["password"].(map[string]any); ok {
-		du.HasInitialPassword = pw["initial"] != nil
-		if du.PreserveExisting, err = boolOr(pw, "preserve_existing", true); err != nil {
-			return du, fmt.Errorf("password: %w", err)
-		}
-		if _, err = boolOr(pw, "force_change", false); err != nil {
-			return du, fmt.Errorf("password: %w", err)
-		}
+	// password, ssh_keys and (below) membership are refused when they are
+	// present and not mappings, null included, not read as undeclared: for
+	// membership that reading is "an authoritative group with no members",
+	// which a writing engine turns into removing every direct member. The
+	// message names the type, never the value: a password written as a string
+	// must not reach an error.
+	pw, err := declaredMapping(u, "password")
+	if err != nil {
+		return du, err
 	}
-	if keys, ok := u["ssh_keys"].(map[string]any); ok {
-		if values, present := keys["values"]; present && values != nil {
-			list, ok := values.([]any)
-			if !ok {
-				return du, fmt.Errorf("ssh_keys.values must be a list")
-			}
-			du.SSHKeys = []string{}
-			for _, k := range list {
-				s, _ := k.(string)
-				norm, err := NormalizeSSHKey(s)
-				if err != nil {
-					du.SSHKeysInvalid++
-					continue
-				}
-				du.SSHKeys = appendUnique(du.SSHKeys, norm)
-			}
-			sort.Strings(du.SSHKeys)
+	if initial, present := pw["initial"]; present && initial != nil {
+		// The value is never loaded (a plan carries no password), but its
+		// type is checked: a number, boolean or list is not a password, and
+		// a Go engine that writes must not guess how Ansible would turn it
+		// into one (spec §5.1: Go does not repeat Ansible's coercions).
+		if _, ok := initial.(string); !ok {
+			return du, fmt.Errorf("password: initial must be a string, not %T (quote the password so it stays a string)", initial)
 		}
+		du.HasInitialPassword = true
+	}
+	// A null inside these mappings is refused where Go would otherwise take
+	// its own default for it (boolOr, nameList, ssh_keys.values below): the
+	// playbook reads a null there as false, as a failure or as unmanaged, not
+	// as the default. password.initial is the exception: a null initial is no
+	// password in both engines.
+	if du.PreserveExisting, err = boolOr(pw, "preserve_existing", true); err != nil {
+		return du, fmt.Errorf("password: %w", err)
+	}
+	if _, err = boolOr(pw, "force_change", false); err != nil {
+		return du, fmt.Errorf("password: %w", err)
+	}
+	keys, err := declaredMapping(u, "ssh_keys")
+	if err != nil {
+		return du, err
+	}
+	// inventory.ValidateRoster refuses a literal false, but its
+	// boolFieldDefault answers the default for any value that is not a bool,
+	// so a string passes it; the playbook runs `| bool` on the value.
+	authoritative, err := boolOr(keys, "authoritative", true)
+	if err != nil {
+		return du, fmt.Errorf("ssh_keys: %w", err)
+	}
+	if !authoritative {
+		return du, fmt.Errorf("ssh_keys: authoritative must be true: the declared keys replace the live set")
+	}
+	if values, present := keys["values"]; present {
+		if values == nil {
+			// Both engines leave the keys alone for a null (unmanaged, as if
+			// absent), while `values: []` clears them: a stanza left empty
+			// must not stand for either.
+			return du, fmt.Errorf("ssh_keys: values must be a list, not null (leave it out, or write [] to clear every key)")
+		}
+		list, ok := values.([]any)
+		if !ok {
+			return du, fmt.Errorf("ssh_keys.values must be a list")
+		}
+		du.SSHKeys = []string{}
+		for _, k := range list {
+			// A value that is not a string is not a key: it is counted as
+			// an invalid one and the plan blocks on it, not dropped.
+			s, _ := k.(string)
+			norm, err := NormalizeSSHKey(s)
+			if err != nil {
+				du.SSHKeysInvalid++
+				continue
+			}
+			du.SSHKeys = appendUnique(du.SSHKeys, norm)
+		}
+		sort.Strings(du.SSHKeys)
 	}
 	return du, nil
 }
@@ -233,13 +355,16 @@ func desiredGroup(g map[string]any, name string) (DesiredGroup, error) {
 	if dg.Description, err = stringOr(g, "description", name); err != nil {
 		return dg, err
 	}
-	if dg.GID, err = optionalID(g, "gid"); err != nil {
+	if dg.GID, err = unmanagedID(g, "gid"); err != nil {
 		return dg, err
 	}
 	if dg.Type, err = stringOr(g, "type", "posix"); err != nil {
 		return dg, err
 	}
-	m, _ := g["membership"].(map[string]any)
+	m, err := declaredMapping(g, "membership")
+	if err != nil {
+		return dg, err
+	}
 	if dg.Authoritative, err = boolOr(m, "authoritative", true); err != nil {
 		return dg, fmt.Errorf("membership: %w", err)
 	}
@@ -252,11 +377,15 @@ func desiredGroup(g map[string]any, name string) (DesiredGroup, error) {
 	return dg, nil
 }
 
-// nameList reads a list of names, lower-cased as FreeIPA stores them.
+// nameList reads a list of names, lower-cased as FreeIPA stores them. Absent
+// is not declared; null is an error, not "not declared".
 func nameList(m map[string]any, key string) ([]string, bool, error) {
 	raw, present := m[key]
-	if !present || raw == nil {
+	if !present {
 		return nil, false, nil
+	}
+	if raw == nil {
+		return nil, true, nullKeyError(key, "a list")
 	}
 	list, ok := raw.([]any)
 	if !ok {
@@ -274,10 +403,28 @@ func nameList(m map[string]any, key string) ([]string, bool, error) {
 	return out, true, nil
 }
 
+// A scalar of a roster object is read by one of two kinds of helper, and a
+// new key has to pick one, because they answer an explicit null differently:
+//
+//   - stringOr and boolOr give a key Go's own default when it is absent, and
+//     refuse a null (nullKeyError), as they do any other wrong type: the
+//     playbook does not read a null as that default (it is false, "None", a
+//     missing argument, or a failed gate), so taking the default would
+//     reconcile something the Ansible engine does not.
+//   - unmanagedString and unmanagedID read a key Go does not manage when it
+//     is not declared. Absent and null are both "not managed" (nil): the
+//     playbook leaves the argument out for both (`is none`), and the roster
+//     editor writes a null for a blank integer field.
+//
+// optionalMapping (the login sections) and declaredMapping (password,
+// ssh_keys, membership) do the same for mappings.
 func stringOr(m map[string]any, key, def string) (string, error) {
 	v, present := m[key]
-	if !present || v == nil {
+	if !present {
 		return def, nil
+	}
+	if v == nil {
+		return "", nullKeyError(key, "a string")
 	}
 	s, ok := v.(string)
 	if !ok {
@@ -286,7 +433,24 @@ func stringOr(m map[string]any, key, def string) (string, error) {
 	return s, nil
 }
 
-func optionalString(m map[string]any, key string) (*string, error) {
+// nonEmptyStringOr is stringOr for a key the server refuses to leave empty:
+// an empty string is refused like a null, with the operator told to leave the
+// key out or give a value (spec Q8, decision (a): the roster adapter refuses
+// "" for first, last and home_directory before any read or write).
+func nonEmptyStringOr(m map[string]any, key, def string) (string, error) {
+	s, err := stringOr(m, key, def)
+	if err != nil {
+		return "", err
+	}
+	if _, present := m[key]; present && s == "" {
+		return "", fmt.Errorf("%s must not be empty: FreeIPA refuses an empty value for it (leave it out for the default, or give a value)", key)
+	}
+	return s, nil
+}
+
+// unmanagedString is a string key that is not managed when it is absent or
+// null (see stringOr).
+func unmanagedString(m map[string]any, key string) (*string, error) {
 	v, present := m[key]
 	if !present || v == nil {
 		return nil, nil
@@ -298,10 +462,18 @@ func optionalString(m map[string]any, key string) (*string, error) {
 	return &s, nil
 }
 
+// nullKeyError is the refusal of a key written without a value.
+func nullKeyError(key, want string) error {
+	return fmt.Errorf("%s must be %s, not null (leave it out, or give a value)", key, want)
+}
+
 func boolOr(m map[string]any, key string, def bool) (bool, error) {
 	v, present := m[key]
-	if !present || v == nil {
+	if !present {
 		return def, nil
+	}
+	if v == nil {
+		return false, nullKeyError(key, "true or false")
 	}
 	b, ok := v.(bool)
 	if !ok {
@@ -310,7 +482,9 @@ func boolOr(m map[string]any, key string, def bool) (bool, error) {
 	return b, nil
 }
 
-func optionalID(m map[string]any, key string) (*int64, error) {
+// unmanagedID is a numeric id key that is not managed when it is absent or
+// null (see stringOr).
+func unmanagedID(m map[string]any, key string) (*int64, error) {
 	v, present := m[key]
 	if !present || v == nil {
 		return nil, nil
@@ -343,9 +517,44 @@ func wholeNumber(v any) (int64, bool) {
 	return 0, false
 }
 
-func listOf(v any) []any {
-	l, _ := v.([]any)
-	return l
+// rosterEntry is one element of the roster's users or groups list: a mapping
+// with a string name.
+type rosterEntry struct {
+	fields map[string]any
+	name   string
+}
+
+// rosterEntries is root[key] (users or groups) as its entries: absent is an
+// empty list; null, any other type, an element that is not a mapping and a
+// name that is not a string are errors, not an object skipped or read with an
+// empty name. inventory.ValidateRoster refuses the elements
+// first (a name that does not match its pattern), but not a list of another
+// type, and this must not depend on what the validator happens to refuse.
+func rosterEntries(root map[string]any, key string) ([]rosterEntry, error) {
+	raw, present := root[key]
+	if !present {
+		return nil, nil
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("%s must be a list, not null (leave it out, or write [])", key)
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a list, not %T", key, raw)
+	}
+	out := make([]rosterEntry, 0, len(list))
+	for i, item := range list {
+		fields, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d] must be a mapping, not %T", key, i, item)
+		}
+		name, ok := fields["name"].(string)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d]: name must be a string, not %T", key, i, fields["name"])
+		}
+		out = append(out, rosterEntry{fields: fields, name: name})
+	}
+	return out, nil
 }
 
 func empty(v any) bool {
@@ -367,6 +576,43 @@ func appendUnique(list []string, s string) []string {
 		}
 	}
 	return append(list, s)
+}
+
+// refuseWrongShapes applies declaredMapping to the keys the playbook's gates
+// call `.keys()` on for every entry of the list, a `state: absent` one too
+// (the gates loop over all of them), and drops the result: only the shape of
+// an entry that is not reconciled is checked, nothing inside it is read.
+func refuseWrongShapes(fields map[string]any, keys ...string) error {
+	for _, k := range keys {
+		if _, err := declaredMapping(fields, k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// declaredMapping is parent[key] as a mapping: absent is an empty one, null
+// and any other type are errors. Unlike optionalMapping (which the login
+// sections use, absent and null alike), a null here is refused because the
+// playbook's gate on password, ssh_keys and membership,
+// `(item.X | default({})).keys()`, fails on it (default() replaces an
+// undefined value, not None; ansible-core 2.19.2): reading it as "not
+// declared" would let a stanza left empty (`membership:`) act as an
+// authoritative group with no members while the Ansible engine refuses the
+// roster.
+func declaredMapping(parent map[string]any, key string) (map[string]any, error) {
+	raw, present := parent[key]
+	if !present {
+		return nil, nil
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("%s must be a mapping, not null (leave it out, or write {})", key)
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a mapping, not %T", key, raw)
+	}
+	return m, nil
 }
 
 // optionalMapping is parent[key] as a mapping: absent and null are an empty

@@ -1,0 +1,29 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "top",
+        "groupofnames",
+        "nestedgroup",
+        "ipausergroup",
+        "ipaobject"
+      ],
+      "ipauniqueid": [
+        "9ba5085e-d9ef-11f1-af2a-5254001b059e"
+      ],
+      "description": [
+        "pilot.group-history/v1 name=p24cap-gmk"
+      ],
+      "cn": [
+        "pilot-internal-history-g-88383f9deed45993b176acce0ba9e906e0a05259ca24bc8b8234baadb3cf6b65"
+      ],
+      "dn": "cn=pilot-internal-history-g-88383f9deed45993b176acce0ba9e906e0a05259ca24bc8b8234baadb3cf6b65,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "pilot-internal-history-g-88383f9deed45993b176acce0ba9e906e0a05259ca24bc8b8234baadb3cf6b65",
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

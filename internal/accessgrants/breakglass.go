@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kjelly/pilot/internal/identitylock"
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/statefile"
 )
@@ -69,6 +70,10 @@ type ActivateOptions struct {
 	VaultPasswordFile string
 	Now               time.Time
 	Runner            playbookRunner
+
+	// Lock takes the FreeIPA server's /etc/ipa lock around the apply. Required:
+	// nil is an error before anything is read or run (see ReconcileOptions.Lock).
+	Lock identitylock.Acquirer
 }
 
 // Activate looks up the named kind: breakglass grant, enforces its
@@ -83,6 +88,9 @@ type ActivateOptions struct {
 func Activate(ctx context.Context, opts ActivateOptions) (Activation, error) {
 	if opts.RosterFile == "" || opts.Inventory == "" || opts.StateDir == "" || opts.Name == "" {
 		return Activation{}, fmt.Errorf("accessgrants: roster file, inventory, state dir, and name are all required")
+	}
+	if opts.Lock == nil {
+		return Activation{}, fmt.Errorf("accessgrants: %w", identitylock.ErrNoLock)
 	}
 	now := opts.Now
 	if now.IsZero() {
@@ -123,7 +131,7 @@ func Activate(ctx context.Context, opts ActivateOptions) (Activation, error) {
 		playbook = DefaultPlaybook
 	}
 	runner := resolveRunner(opts.Runner)
-	if _, err := applyPlan(ctx, opts.RosterFile, playbook, opts.Inventory, opts.VaultPasswordFile, runner, Plan{HBACRules: []inventory.CompiledHBACRule{rule}}); err != nil {
+	if _, err := applyPlan(ctx, opts.RosterFile, playbook, opts.Inventory, opts.VaultPasswordFile, runner, opts.Lock, Plan{HBACRules: []inventory.CompiledHBACRule{rule}}); err != nil {
 		return Activation{}, err
 	}
 
@@ -137,7 +145,7 @@ func Activate(ctx context.Context, opts ActivateOptions) (Activation, error) {
 	}
 	store, err := openActivationStore(opts.StateDir)
 	if err != nil {
-		return Activation{}, err
+		return Activation{}, fmt.Errorf("accessgrants: activation applied to FreeIPA but recording state failed: %w", err)
 	}
 	if err := store.Mutate(func(activations []Activation) ([]Activation, error) {
 		return append(activations, record), nil
@@ -158,6 +166,10 @@ type DeactivateOptions struct {
 	VaultPasswordFile string
 	Now               time.Time
 	Runner            playbookRunner
+
+	// Lock takes the FreeIPA server's /etc/ipa lock around the apply. Required
+	// (see ReconcileOptions.Lock).
+	Lock identitylock.Acquirer
 }
 
 // Deactivate marks every currently-active activation for name as
@@ -167,6 +179,9 @@ type DeactivateOptions struct {
 func Deactivate(ctx context.Context, opts DeactivateOptions) error {
 	if opts.RosterFile == "" || opts.Inventory == "" || opts.StateDir == "" || opts.Name == "" {
 		return fmt.Errorf("accessgrants: roster file, inventory, state dir, and name are all required")
+	}
+	if opts.Lock == nil {
+		return fmt.Errorf("accessgrants: %w", identitylock.ErrNoLock)
 	}
 	now := opts.Now
 	if now.IsZero() {
@@ -187,15 +202,17 @@ func Deactivate(ctx context.Context, opts DeactivateOptions) error {
 		playbook = DefaultPlaybook
 	}
 	runner := resolveRunner(opts.Runner)
-	if _, err := applyPlan(ctx, opts.RosterFile, playbook, opts.Inventory, opts.VaultPasswordFile, runner, Plan{HBACRules: []inventory.CompiledHBACRule{rule}}); err != nil {
+	if _, err := applyPlan(ctx, opts.RosterFile, playbook, opts.Inventory, opts.VaultPasswordFile, runner, opts.Lock, Plan{HBACRules: []inventory.CompiledHBACRule{rule}}); err != nil {
 		return err
 	}
 
+	// The rule is already pruned from FreeIPA here, so a failure from now on is
+	// not "nothing happened": say which half is missing, as Activate does.
 	store, err := openActivationStore(opts.StateDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("accessgrants: deactivation applied to FreeIPA but recording state failed: %w", err)
 	}
-	return store.Mutate(func(activations []Activation) ([]Activation, error) {
+	if err := store.Mutate(func(activations []Activation) ([]Activation, error) {
 		for i, a := range activations {
 			if a.Name == opts.Name && a.IsActive(now) {
 				activations[i].Deactivated = true
@@ -203,7 +220,10 @@ func Deactivate(ctx context.Context, opts DeactivateOptions) error {
 			}
 		}
 		return activations, nil
-	})
+	}); err != nil {
+		return fmt.Errorf("accessgrants: deactivation applied to FreeIPA but recording state failed: %w", err)
+	}
+	return nil
 }
 
 // Status returns every recorded activation for name (or all names when

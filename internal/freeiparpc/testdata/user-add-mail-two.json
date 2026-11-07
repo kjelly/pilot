@@ -1,0 +1,82 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "top",
+        "person",
+        "organizationalperson",
+        "inetorgperson",
+        "inetuser",
+        "posixaccount",
+        "krbprincipalaux",
+        "krbticketpolicyaux",
+        "ipaobject",
+        "ipasshuser",
+        "ipaSshGroupOfPubKeys",
+        "mepOriginEntry",
+        "ipantuserattrs"
+      ],
+      "sn": [
+        "Three"
+      ],
+      "displayname": [
+        "P24 Three"
+      ],
+      "gecos": [
+        "P24 Three"
+      ],
+      "loginshell": [
+        "/bin/sh"
+      ],
+      "givenname": [
+        "P24"
+      ],
+      "krbprincipalname": [
+        "p24cap-u3@IPA.PILOT.INTERNAL"
+      ],
+      "uid": [
+        "p24cap-u3"
+      ],
+      "ipauniqueid": [
+        "8b4d6e9c-d9ef-11f1-af2a-5254001b059e"
+      ],
+      "initials": [
+        "PT"
+      ],
+      "homedirectory": [
+        "/home/p24cap-u3"
+      ],
+      "cn": [
+        "P24 Three"
+      ],
+      "mail": [
+        "p24cap-u3-a@example.test",
+        "p24cap-u3-b@example.test"
+      ],
+      "gidnumber": [
+        "1927600477"
+      ],
+      "uidnumber": [
+        "1927600477"
+      ],
+      "krbcanonicalname": [
+        "p24cap-u3@IPA.PILOT.INTERNAL"
+      ],
+      "mepmanagedentry": [
+        "cn=p24cap-u3,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      ],
+      "has_password": false,
+      "has_keytab": false,
+      "memberof_group": [
+        "ipausers"
+      ],
+      "dn": "uid=p24cap-u3,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p24cap-u3",
+    "summary": "Added user \"p24cap-u3\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

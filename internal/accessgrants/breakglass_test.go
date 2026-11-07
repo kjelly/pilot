@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -51,6 +52,7 @@ func TestActivate_AppliesRuleAndRecordsState(t *testing.T) {
 	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 
 	activation, err := Activate(context.Background(), ActivateOptions{
+		Lock:        testLock(t),
 		RosterFile:  rosterPath,
 		Inventory:   "inv.yml",
 		StateDir:    stateDir,
@@ -90,6 +92,7 @@ func TestActivate_AppliesRuleAndRecordsState(t *testing.T) {
 func TestActivate_RejectsDurationExceedingMaxDuration(t *testing.T) {
 	rosterPath := writeBreakglassTestRoster(t)
 	_, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath,
 		Inventory:  "inv.yml",
 		StateDir:   t.TempDir(),
@@ -107,6 +110,7 @@ func TestActivate_RejectsDurationExceedingMaxDuration(t *testing.T) {
 func TestActivate_RequiresReasonAndTicketByDefault(t *testing.T) {
 	rosterPath := writeBreakglassTestRoster(t)
 	if _, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: t.TempDir(),
 		Name: "infra-emergency", Duration: 30 * time.Minute, Ticket: "y",
 		Runner: &fakeRunner{exitCode: 0},
@@ -114,6 +118,7 @@ func TestActivate_RequiresReasonAndTicketByDefault(t *testing.T) {
 		t.Fatal("expected an error when --reason is omitted")
 	}
 	if _, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: t.TempDir(),
 		Name: "infra-emergency", Duration: 30 * time.Minute, Reason: "x",
 		Runner: &fakeRunner{exitCode: 0},
@@ -137,6 +142,7 @@ account_policies:
 	}
 
 	_, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: path, Inventory: "inv.yml", StateDir: t.TempDir(),
 		Name: "infra-emergency", Duration: 30 * time.Minute, Reason: "x", Ticket: "y",
 		Now: time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC), Runner: &fakeRunner{exitCode: 0},
@@ -149,6 +155,7 @@ account_policies:
 func TestActivate_RejectsNonBreakglassGrant(t *testing.T) {
 	rosterPath := writeReconcileTestRoster(t) // has a temporary_grant named vendor-project-x
 	_, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: t.TempDir(),
 		Name: "vendor-project-x", Duration: 30 * time.Minute, Reason: "x", Ticket: "y",
 		Runner: &fakeRunner{exitCode: 0},
@@ -164,6 +171,7 @@ func TestDeactivate_MarksActiveActivationInactiveAndAppliesPrune(t *testing.T) {
 	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
 
 	if _, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: stateDir,
 		Name: "infra-emergency", Duration: 45 * time.Minute, Reason: "x", Ticket: "y",
 		Now: now, Runner: &fakeRunner{exitCode: 0},
@@ -173,6 +181,7 @@ func TestDeactivate_MarksActiveActivationInactiveAndAppliesPrune(t *testing.T) {
 
 	deactivateRunner := &fakeRunner{exitCode: 0}
 	if err := Deactivate(context.Background(), DeactivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: stateDir,
 		Name: "infra-emergency", Now: now.Add(5 * time.Minute), Runner: deactivateRunner,
 	}); err != nil {
@@ -198,6 +207,7 @@ func TestDeactivate_NoOpWhenNothingActive(t *testing.T) {
 	rosterPath := writeBreakglassTestRoster(t)
 	stateDir := t.TempDir()
 	if err := Deactivate(context.Background(), DeactivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: stateDir,
 		Name: "infra-emergency", Runner: &fakeRunner{exitCode: 0},
 	}); err != nil {
@@ -212,6 +222,7 @@ func TestStatus_MostRecentFirst(t *testing.T) {
 
 	for i, d := range []time.Duration{0, time.Hour, 2 * time.Hour} {
 		if _, err := Activate(context.Background(), ActivateOptions{
+			Lock:       testLock(t),
 			RosterFile: rosterPath, Inventory: "inv.yml", StateDir: stateDir,
 			Name: "infra-emergency", Duration: 10 * time.Minute, Reason: "x", Ticket: "y",
 			Now: base.Add(d), Runner: &fakeRunner{exitCode: 0},
@@ -226,5 +237,49 @@ func TestStatus_MostRecentFirst(t *testing.T) {
 	}
 	if len(statuses) != 3 || !statuses[0].ActivatedAt.Equal(base.Add(2*time.Hour)) {
 		t.Fatalf("expected most-recent-first ordering, got: %+v", statuses)
+	}
+}
+
+// An activation or a deactivation can fail after the playbook has already
+// changed FreeIPA: the rule is applied (or pruned) and the state file cannot be
+// written. The error must say which half is missing, so that the caller never
+// reports "not activated" for access that is in effect (the step wording of
+// pilot edit relies on it). A directory where the state file belongs is a real
+// failure of the write that works for root as well.
+func TestActivateAndDeactivate_FailingToRecordSaysFreeIPAWasChanged(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, roster, stateDir string, runner *fakeRunner) error
+		want string
+	}{
+		{"activate", func(t *testing.T, roster, stateDir string, runner *fakeRunner) error {
+			_, err := Activate(context.Background(), ActivateOptions{
+				Lock: testLock(t), RosterFile: roster, Inventory: "inv.yml", StateDir: stateDir,
+				Name: "infra-emergency", Duration: 45 * time.Minute, Reason: "x", Ticket: "y", Now: now, Runner: runner,
+			})
+			return err
+		}, "activation applied to FreeIPA but recording state failed"},
+		{"deactivate", func(t *testing.T, roster, stateDir string, runner *fakeRunner) error {
+			return Deactivate(context.Background(), DeactivateOptions{
+				Lock: testLock(t), RosterFile: roster, Inventory: "inv.yml", StateDir: stateDir,
+				Name: "infra-emergency", Now: now, Runner: runner,
+			})
+		}, "deactivation applied to FreeIPA but recording state failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(stateDir, activationStateFilename), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runner := &fakeRunner{exitCode: 0}
+			err := tc.run(t, writeBreakglassTestRoster(t), stateDir, runner)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+			if runner.lastArgs == nil {
+				t.Fatal("the playbook did not run: the case does not exercise a failure after the apply")
+			}
+		})
 	}
 }

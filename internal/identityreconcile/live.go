@@ -9,7 +9,12 @@ import (
 // LiveUser is one FreeIPA user as user_find --all reports it (captured:
 // internal/freeiparpc/testdata/user-find-states.json).
 type LiveUser struct {
-	Name          string // uid, lower case
+	Name string // uid, lower case
+	// UniqueID is ipauniqueid, the entry's identity for as long as it exists: a
+	// user deleted and added again has another one (captured, spec §9 point 3).
+	// The writer's delete and disable checks compare it to know the user it
+	// read is still the user it planned for. "" when the answer has none.
+	UniqueID      string
 	First         string // givenname
 	Last          string // sn
 	DisplayName   string
@@ -22,9 +27,13 @@ type LiveUser struct {
 	LastPwdChange string // krblastpwdchange, "" when absent
 	PwdExpiration string // krbpasswordexpiration, "" when absent
 	SSHKeys       []string
-	SSHKeysBad    int      // live keys that do not normalize
-	MemberOf      []string // memberof_group: transitive, never direct
-	Preserved     bool
+	SSHKeysBad    int // live keys that do not normalize
+	// MemberOf is memberof_group as the read that produced the user gives it:
+	// transitive from user_find --all, direct only from user_show (captured,
+	// P2-4 fact "K19 a user_show lists the groups the user is directly in").
+	// Observe reads with user_find, so what the planner sees is transitive.
+	MemberOf  []string
+	Preserved bool
 }
 
 // Group types as the planner compares them.
@@ -37,7 +46,9 @@ const (
 // LiveGroup is one FreeIPA group as group_find --all reports it (captured:
 // group-find-states.json, group-find-nested.json).
 type LiveGroup struct {
-	Name         string // cn, lower case
+	Name string // cn, lower case
+	// UniqueID is ipauniqueid; see LiveUser.UniqueID.
+	UniqueID     string
 	Description  []string
 	GIDNumber    string
 	Type         string
@@ -76,6 +87,9 @@ func parseUser(e map[string]any) (LiveUser, error) {
 		return u, err
 	}
 	u.Name = strings.ToLower(name)
+	if u.UniqueID, err = single(e, "ipauniqueid", false); err != nil {
+		return u, fmt.Errorf("%s: %w", u.Name, err)
+	}
 	for _, f := range []struct {
 		key string
 		dst *string
@@ -126,32 +140,46 @@ func parseUser(e map[string]any) (LiveUser, error) {
 func ParseGroups(entries []map[string]any) ([]LiveGroup, error) {
 	out := make([]LiveGroup, 0, len(entries))
 	for i, e := range entries {
-		var g LiveGroup
-		name, err := single(e, "cn", true)
+		g, err := parseGroup(e)
 		if err != nil {
 			return nil, fmt.Errorf("group_find entry %d: %w", i, err)
-		}
-		g.Name = strings.ToLower(name)
-		if g.Description, err = strs(e, "description"); err != nil {
-			return nil, fmt.Errorf("group %s: %w", g.Name, err)
-		}
-		if g.GIDNumber, err = single(e, "gidnumber", false); err != nil {
-			return nil, fmt.Errorf("group %s: %w", g.Name, err)
-		}
-		classes, err := strs(e, "objectclass")
-		if err != nil || len(classes) == 0 {
-			return nil, fmt.Errorf("group %s: objectclass missing (find without all: true?)", g.Name)
-		}
-		g.Type = groupType(classes)
-		if g.MemberUsers, err = lowerList(e, "member_user"); err != nil {
-			return nil, fmt.Errorf("group %s: %w", g.Name, err)
-		}
-		if g.MemberGroups, err = lowerList(e, "member_group"); err != nil {
-			return nil, fmt.Errorf("group %s: %w", g.Name, err)
 		}
 		out = append(out, g)
 	}
 	return out, nil
+}
+
+// parseGroup decodes one group entry as group_find --all and group_show --all
+// give it (captured: both carry objectclass, ipauniqueid and the direct
+// member_user and member_group).
+func parseGroup(e map[string]any) (LiveGroup, error) {
+	var g LiveGroup
+	name, err := single(e, "cn", true)
+	if err != nil {
+		return g, err
+	}
+	g.Name = strings.ToLower(name)
+	if g.UniqueID, err = single(e, "ipauniqueid", false); err != nil {
+		return g, fmt.Errorf("group %s: %w", g.Name, err)
+	}
+	if g.Description, err = strs(e, "description"); err != nil {
+		return g, fmt.Errorf("group %s: %w", g.Name, err)
+	}
+	if g.GIDNumber, err = single(e, "gidnumber", false); err != nil {
+		return g, fmt.Errorf("group %s: %w", g.Name, err)
+	}
+	classes, err := strs(e, "objectclass")
+	if err != nil || len(classes) == 0 {
+		return g, fmt.Errorf("group %s: objectclass missing (find without all: true?)", g.Name)
+	}
+	g.Type = groupType(classes)
+	if g.MemberUsers, err = lowerList(e, "member_user"); err != nil {
+		return g, fmt.Errorf("group %s: %w", g.Name, err)
+	}
+	if g.MemberGroups, err = lowerList(e, "member_group"); err != nil {
+		return g, fmt.Errorf("group %s: %w", g.Name, err)
+	}
+	return g, nil
 }
 
 func groupType(classes []string) string {

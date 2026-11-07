@@ -1,0 +1,45 @@
+group-find --pkey-only --sizelimit=0 --timelimit=0
+group-add team-a --desc=Team A
+group-add team-b --desc=Team B
+group-mod team-a --desc=Team A
+group-mod team-b --desc=Team B
+group-mod team-old --desc=Changed description
+group-show pilot-internal-history-g-96c2886c51d1dfb4901d9feccff66213ce3e27406282ff6f602a4258a33dacec --all --raw --no-members
+group-add pilot-internal-history-g-96c2886c51d1dfb4901d9feccff66213ce3e27406282ff6f602a4258a33dacec --nonposix --desc=pilot.group-history/v1 name=team-a
+group-show pilot-internal-history-g-96c2886c51d1dfb4901d9feccff66213ce3e27406282ff6f602a4258a33dacec --all --raw --no-members
+group-show pilot-internal-history-g-e618ceaa77728baaf382c3c58980d1ef1e75003e83dc2fe322caeea1abcc70d3 --all --raw --no-members
+group-add pilot-internal-history-g-e618ceaa77728baaf382c3c58980d1ef1e75003e83dc2fe322caeea1abcc70d3 --nonposix --desc=pilot.group-history/v1 name=team-b
+group-show pilot-internal-history-g-e618ceaa77728baaf382c3c58980d1ef1e75003e83dc2fe322caeea1abcc70d3 --all --raw --no-members
+group-show pilot-internal-history-g-310ffe00d7c9d3fad2d719dd7a2912b4d61211df0bbaa3c00f70e7938500c08c --all --raw --no-members
+group-add pilot-internal-history-g-310ffe00d7c9d3fad2d719dd7a2912b4d61211df0bbaa3c00f70e7938500c08c --nonposix --desc=pilot.group-history/v1 name=team-old
+group-show pilot-internal-history-g-310ffe00d7c9d3fad2d719dd7a2912b4d61211df0bbaa3c00f70e7938500c08c --all --raw --no-members
+user-find --pkey-only --sizelimit=0 --timelimit=0
+user-find --disabled=True --pkey-only --sizelimit=0 --timelimit=0
+user-add u1 --first=User --last=One
+user-add u3 --first=User --last=Three
+user-mod u1 --first=User --last=One
+user-mod u2 --first=User --last=Two
+user-mod u3 --first=User --last=Three
+user-mod u1 --sshpubkey=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEngineTestKeyOne u1
+user-mod u2 --sshpubkey=
+user-mod u3 --sshpubkey=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEngineTestKeyThree u3
+group-show team-a --all
+group-show team-b --all
+group-show team-old --all
+group-remove-member team-old --users=u2
+group-add-member team-a --users=u1
+group-add-member team-a --users=u2
+group-add-member team-b --users=u1
+group-add-member team-old --users=u1
+group-add-member team-b --groups=team-a
+user-enable u1
+user-disable u2
+user-enable u3
+user-del gone
+group-show team-retired
+group-show pilot-internal-history-g-28ad6b4916e1e8e2afc4f1c82be482987309b555c922c50ed62ad041e3066b48 --all --raw --no-members
+group-add pilot-internal-history-g-28ad6b4916e1e8e2afc4f1c82be482987309b555c922c50ed62ad041e3066b48 --nonposix --desc=pilot.group-history/v1 name=team-retired
+group-show pilot-internal-history-g-28ad6b4916e1e8e2afc4f1c82be482987309b555c922c50ed62ad041e3066b48 --all --raw --no-members
+group-del team-retired
+--- passwords reached
+u1

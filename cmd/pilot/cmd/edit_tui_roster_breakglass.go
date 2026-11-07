@@ -122,6 +122,23 @@ func pushBreakglassDetail(r *editRouterModel, dir, path, name, banner string) te
 	})
 }
 
+// breakglassActivationFailed and breakglassDeactivationFailed prefix what an
+// automation step reports when accessgrants.Activate or Deactivate returned an
+// error. They say that the operation failed and leave what happened to the
+// cause, because the operation can fail after it did part of its work: the
+// playbook ran and the rule is in FreeIPA but the activation could not be
+// recorded (Activate), the rule was pruned but the record was not updated
+// (Deactivate), or the lock was lost after the playbook exited 0 (both). A
+// "was not activated" there would tell an operator that no emergency access is
+// in effect while it is.
+func breakglassActivationFailed(name string) string {
+	return fmt.Sprintf("break-glass %s: activation failed", name)
+}
+
+func breakglassDeactivationFailed(name string) string {
+	return fmt.Sprintf("break-glass %s: deactivation failed", name)
+}
+
 func pushBreakglassActivateDuration(r *editRouterModel, dir, path, name string) tea.Cmd {
 	spec := tui.InputSpec{ScreenID: "roster.breakglass.activate.duration", Title: "啟用時長 --duration（例如 45m、1h；不可超過 activation.max_duration）", Validate: func(v string) error {
 		if !inventory.ValidAccessDuration(strings.TrimSpace(v)) {
@@ -157,9 +174,19 @@ func pushBreakglassActivateTicket(r *editRouterModel, dir, path, name, duration,
 			return pushBreakglassDetail(r, dir, path, name, "")
 		}
 		ticket := strings.TrimSpace(m.Value())
+		doing := breakglassActivationFailed(name)
+		if r.planSource != "" {
+			return pushBreakglassDetail(r, dir, path, name, r.planSkipped("activate_breakglass", name))
+		}
 		parsed, err := inventory.ParseAccessDuration(duration)
 		if err != nil {
-			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
+			return pushBreakglassDetail(r, dir, path, name, r.failedAction(doing, err))
+		}
+		// Refused here, before anything is read or run, when the inventory
+		// cannot give the lock (see checkIdentityLockTarget).
+		lock, err := tuiIdentityLockFor(context.Background(), accessGovernanceInventoryPath(dir))
+		if err != nil {
+			return pushBreakglassDetail(r, dir, path, name, r.failedAction(doing, err))
 		}
 		activation, err := accessgrants.Activate(context.Background(), accessgrants.ActivateOptions{
 			RosterFile:  path,
@@ -171,9 +198,10 @@ func pushBreakglassActivateTicket(r *editRouterModel, dir, path, name, duration,
 			Ticket:      ticket,
 			ActivatedBy: activatedByCurrentUser(),
 			Now:         time.Now(),
+			Lock:        lock,
 		})
 		if err != nil {
-			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
+			return pushBreakglassDetail(r, dir, path, name, r.failedAction(doing, err))
 		}
 		return pushBreakglassDetail(r, dir, path, name, fmt.Sprintf("✅ 已啟用，到期時間 %s", activation.ExpiresAt.Format(time.RFC3339)))
 	})
@@ -190,14 +218,23 @@ func pushBreakglassDeactivateConfirm(r *editRouterModel, dir, path, name string)
 		if m.Canceled() || m.Selected() == 1 {
 			return pushBreakglassDetail(r, dir, path, name, "")
 		}
+		doing := breakglassDeactivationFailed(name)
+		if r.planSource != "" {
+			return pushBreakglassDetail(r, dir, path, name, r.planSkipped("deactivate_breakglass", name))
+		}
+		lock, err := tuiIdentityLockFor(context.Background(), accessGovernanceInventoryPath(dir))
+		if err != nil {
+			return pushBreakglassDetail(r, dir, path, name, r.failedAction(doing, err))
+		}
 		if err := accessgrants.Deactivate(context.Background(), accessgrants.DeactivateOptions{
 			RosterFile: path,
 			Inventory:  accessGovernanceInventoryPath(dir),
 			StateDir:   resolveStateDir(accessStateFiles...),
 			Name:       name,
 			Now:        time.Now(),
+			Lock:       lock,
 		}); err != nil {
-			return pushBreakglassDetail(r, dir, path, name, "❌ "+err.Error())
+			return pushBreakglassDetail(r, dir, path, name, r.failedAction(doing, err))
 		}
 		return pushBreakglassDetail(r, dir, path, name, "✅ 已停用")
 	})

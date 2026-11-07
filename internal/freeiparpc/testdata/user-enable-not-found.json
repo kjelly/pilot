@@ -1,0 +1,14 @@
+{
+  "result": null,
+  "error": {
+    "code": 4001,
+    "message": "no such entry",
+    "data": {
+      "reason": "no such entry"
+    },
+    "name": "NotFound"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -398,7 +398,7 @@ func TestRepairManaged_SkipsReconcileWhenNoDrift(t *testing.T) {
 
 	before, plan, result, err := RepairManaged(context.Background(),
 		DriftProbeOptions{RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: driftRunner},
-		ReconcileOptions{RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: &fakeRunner{exitCode: 0}},
+		ReconcileOptions{Lock: testLock(t), RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: &fakeRunner{exitCode: 0}},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -419,7 +419,7 @@ func TestRepairManaged_InvokesReconcileWhenDriftFound(t *testing.T) {
 
 	before, plan, result, err := RepairManaged(context.Background(),
 		DriftProbeOptions{RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: driftRunner},
-		ReconcileOptions{RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: reconcileRunner},
+		ReconcileOptions{Lock: testLock(t), RosterFile: rosterPath, Inventory: "inv.yml", Now: now, Runner: reconcileRunner},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

@@ -1,0 +1,14 @@
+{
+  "result": null,
+  "error": {
+    "code": 4001,
+    "message": "p24cap-ux: user not found",
+    "data": {
+      "reason": "p24cap-ux: user not found"
+    },
+    "name": "NotFound"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

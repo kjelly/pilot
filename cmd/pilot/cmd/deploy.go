@@ -32,10 +32,12 @@ import (
 	"github.com/kjelly/pilot/internal/childproc"
 	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/identitylock"
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/outbound"
 	"github.com/kjelly/pilot/internal/spec"
 	"github.com/kjelly/pilot/internal/sshcontrol"
+	"github.com/kjelly/pilot/internal/sshdial"
 	"github.com/kjelly/pilot/internal/store"
 	"github.com/kjelly/pilot/internal/tools"
 )
@@ -206,7 +208,9 @@ var deployCmd = &cobra.Command{
 (--check --diff)，最後才真正執行 ansible-playbook，過程全程印出真實輸出。
 
 這是 DELIVERY.md 手動組指令的替代路徑，行為完全一致(同一套 stage/confirm
-gate、同一份 Playbook 對照表)——熟悉 Ansible 的人仍可以照 DELIVERY.md 手動執行。`,
+gate、同一份 Playbook 對照表)——熟悉 Ansible 的人仍可以照 DELIVERY.md 手動執行。
+
+` + identityLockDeployHelp,
 	RunE: runDeploy,
 }
 
@@ -1357,6 +1361,37 @@ type deploymentTransactionOptions struct {
 	// PLAY RECAP. Set for dependency runs: Pilot chose their hosts and
 	// target_group, and the consumer relies on each provider host.
 	RequireEveryAppliedHost bool
+	// IdentityLock takes the FreeIPA server's /etc/ipa lock. Required when the
+	// playbook is the identity apply playbook, and refused as nil before
+	// anything runs, previews included (it is only an acquirer: a preview never
+	// calls it): this function is the funnel of every deploy and reconcile run
+	// of that playbook, and a new caller that builds its own options must not
+	// be able to leave the lock out (identity_lock_funnel_test.go). The apply
+	// step calls it after every confirmation and before PrepareApply, and the
+	// lock is held until the transaction has ended, covering verify, the
+	// idempotency re-apply and rollback. Ignored for every other playbook: a
+	// component that is not the identity playbook never locks.
+	IdentityLock identitylock.Acquirer
+	// Mixed is set for the identity transaction of a mixed run (`pilot reconcile --engine golang
+	// --scope full`, spec 2026-11-06 phase 2 section 8.3) and nothing else: the Go writer's work
+	// is its PrepareApply, and it wraps the steps and the runs of the playbook (mixedTransaction).
+	// Ignored for any other playbook.
+	Mixed mixedTransaction
+}
+
+// playbookRun runs the transaction's playbook once, with extra arguments after its own.
+type playbookRun func(ctx context.Context, extraArgs []string) (*ansible.Result, error)
+
+// mixedTransaction is the hook of the mixed run into executeDeploymentTransaction. It exists only
+// for the identity playbook, and the one place that decides which transaction gets one is
+// executeRecordedDeploymentCore, from a marker on the context that only the command sets.
+type mixedTransaction interface {
+	// WrapStep wraps one step of the transaction: "preview", "apply", "verify" or "idempotency".
+	// inner may be nil for a step the transaction does not have.
+	WrapStep(step string, inner delivery.StepFunc) delivery.StepFunc
+	// RunPlaybook runs the playbook for a step ("preview", "apply" or "idempotency") through run,
+	// which it may hand arguments, and returns what the command returned.
+	RunPlaybook(ctx context.Context, step string, run playbookRun) (*ansible.Result, error)
 }
 
 // deploymentRuntimeRaceOptions carries what executeDeploymentTransaction's
@@ -1379,6 +1414,43 @@ type deploymentRuntimeRaceOptions struct {
 // outcome preserves the historical exit-0 cancellation contract while still
 // finalizing an evidence run when one was started.
 func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, out io.Writer, playbook, inv, limit, tags string, extraVars []string, vault vaultInput, options deploymentTransactionOptions) error {
+	identity := identitylock.IsApplyPlaybook(playbook)
+	if identity && options.IdentityLock == nil {
+		return fmt.Errorf("deploy %s: %w", playbook, identitylock.ErrNoLock)
+	}
+	mixed := options.Mixed
+	if !identity {
+		mixed = nil
+	}
+	// held is the lock the apply step takes once everything has been confirmed.
+	// Every later step runs under it and it is given back when the transaction
+	// has ended (the deferred Release is after RunResult has returned).
+	var held *identitylock.Held
+	defer func() {
+		if held != nil {
+			_ = held.Release()
+		}
+	}()
+	// commandCtx is the context a playbook run gets: bound to the lock when the
+	// transaction holds one, so that losing it kills the playbook. The context
+	// RunResult and the step evidence use is never bound: a step whose
+	// evidence could not be written would turn `failed` into `evidence_failed`
+	// and hide that the lock was lost.
+	commandCtx := func(ctx context.Context) (context.Context, context.CancelFunc) {
+		if held == nil {
+			return ctx, func() {}
+		}
+		return held.Bind(ctx)
+	}
+	// lockLost is non-nil once a step that ran a command under the lock finds
+	// it gone. Checked after the command, whatever its exit status was: killed
+	// by the loss, it says nothing; exited 0, it did not run under the lock.
+	lockLost := func() error {
+		if held == nil {
+			return nil
+		}
+		return held.Check()
+	}
 	baseArgs := []string{playbook, "-i", inv}
 	if limit != "" {
 		baseArgs = append(baseArgs, "--limit", limit)
@@ -1400,7 +1472,11 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		dryRunFirst = confirmDeployment(promptExecutionPreview, "要先預覽(--check --diff)再決定要不要真的套用嗎？", true)
 	}
 
-	runOnce := func(check, confirm bool) (*ansible.Result, error) {
+	// announce prints the command about to run and asks its confirmation, and
+	// returns the argv. It is split from execute so that the apply step can take
+	// the identity lock after this last prompt and before the command: nobody
+	// holds the lock while a question waits for an answer.
+	announce := func(check, confirm bool) ([]string, error) {
 		mode := "套用"
 		args := baseArgs
 		if check {
@@ -1417,17 +1493,45 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		if confirm && options.Authorization == nil && !confirmDeployment(questionID, question, true) {
 			return nil, delivery.ErrCancelled
 		}
-		if !check && options.RuntimeRace.ResultPath != "" {
-			env := resultCallbackEnv(options.RuntimeRace.CallbackPluginsDir, options.RuntimeRace.ResultPath)
-			return runner.RunWithExtraEnv(ctx, env, args...)
+		return args, nil
+	}
+	// runPlaybook runs the playbook once with args. The mixed run's hook adds to the command what
+	// it needs (the file the playbook's observation is written to) and reads what the run left.
+	runPlaybook := func(ctx context.Context, step string, args []string, raceCallback bool) (*ansible.Result, error) {
+		run := func(ctx context.Context, extra []string) (*ansible.Result, error) {
+			all := args
+			if len(extra) > 0 {
+				all = append(append([]string{}, args...), extra...)
+			}
+			if raceCallback {
+				env := resultCallbackEnv(options.RuntimeRace.CallbackPluginsDir, options.RuntimeRace.ResultPath)
+				return runner.RunWithExtraEnv(ctx, env, all...)
+			}
+			return runner.Run(ctx, all...)
 		}
-		return runner.Run(ctx, args...)
+		if mixed != nil {
+			return mixed.RunPlaybook(ctx, step, run)
+		}
+		return run(ctx, nil)
+	}
+	execute := func(ctx context.Context, check bool, args []string) (*ansible.Result, error) {
+		if check {
+			return runPlaybook(ctx, "preview", args, false)
+		}
+		return runPlaybook(ctx, "apply", args, options.RuntimeRace.ResultPath != "")
+	}
+	runOnce := func(ctx context.Context, check, confirm bool) (*ansible.Result, error) {
+		args, err := announce(check, confirm)
+		if err != nil {
+			return nil, err
+		}
+		return execute(ctx, check, args)
 	}
 
 	preview := delivery.StepFunc(nil)
 	if dryRunFirst {
 		preview = func(ctx context.Context) error {
-			res, err := runOnce(true, true)
+			res, err := runOnce(ctx, true, true)
 			if err != nil {
 				return err
 			}
@@ -1458,12 +1562,32 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 		} else if !confirmDeployment(promptExecutionConfirmApply, "確定要執行正式套用指令嗎？", true) {
 			return delivery.ErrCancelled
 		}
+		args, err := announce(false, dryRunFirst)
+		if err != nil {
+			return err
+		}
+		if identity {
+			// After every prompt and before the first thing that changes FreeIPA
+			// (PrepareApply, then the playbook): see IdentityLock.
+			acquired, err := options.IdentityLock(ctx)
+			if err != nil {
+				return fmt.Errorf("❌ 無法取得 FreeIPA identity 鎖，沒有執行 %s：%w", playbook, err)
+			}
+			held = acquired
+			ctx = held.Attach(ctx)
+			fmt.Fprintf(out, "🔒 已取得 FreeIPA server %s 的 %s 鎖，執行期間持有\n", held.Host, sshdial.DefaultLockPath)
+		}
 		if options.PrepareApply != nil {
 			if err := options.PrepareApply(ctx); err != nil {
 				return err
 			}
 		}
-		res, err := runOnce(false, dryRunFirst)
+		runCtx, cancel := commandCtx(ctx)
+		defer cancel()
+		res, err := execute(runCtx, false, args)
+		if lost := lockLost(); lost != nil {
+			return fmt.Errorf("❌ 套用被中止：%w", lost)
+		}
 		if err != nil {
 			return err
 		}
@@ -1494,7 +1618,12 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 	if options.Idempotency == delivery.IdempotencyAlways || options.Idempotency == delivery.IdempotencyStageGTEStaging {
 		idempotency = func(ctx context.Context) error {
 			fmt.Fprintln(out, "▶ 冪等性檢查：重新套用相同 playbook")
-			res, err := runner.Run(ctx, baseArgs...)
+			runCtx, cancel := commandCtx(ctx)
+			defer cancel()
+			res, err := runPlaybook(runCtx, "idempotency", baseArgs, false)
+			if lost := lockLost(); lost != nil {
+				return fmt.Errorf("冪等性檢查被中止：%w", lost)
+			}
 			if err != nil {
 				return fmt.Errorf("執行冪等性檢查失敗: %w", err)
 			}
@@ -1512,9 +1641,54 @@ func executeDeploymentTransaction(ctx context.Context, runner *ansible.Runner, o
 			return nil
 		}
 	}
+	verify, rollback := options.Verify, options.Rollback
+	if identity && verify != nil {
+		inner := verify
+		verify = func(ctx context.Context) error {
+			err := inner(ctx)
+			// Read-only, so not cancelled by the loss; but what it read was not
+			// read under the lock, so its result is void.
+			if lost := lockLost(); lost != nil {
+				return fmt.Errorf("驗證結果作廢：%w", lost)
+			}
+			return err
+		}
+	}
+	if identity && rollback != nil {
+		inner := rollback
+		rollback = func(ctx context.Context) error {
+			if held == nil {
+				// The apply step failed before it had the lock (it was busy, or
+				// refused): nothing ran, so there is nothing to roll back, and a
+				// rollback playbook must not run without the lock.
+				return fmt.Errorf("rollback not run: %w", identitylock.ErrNoLock)
+			}
+			runCtx, cancel := commandCtx(ctx)
+			defer cancel()
+			err := inner(runCtx)
+			if lost := lockLost(); lost != nil {
+				return fmt.Errorf("rollback 被中止：%w", lost)
+			}
+			return err
+		}
+	}
+	if mixed != nil {
+		// The mixed run's steps: the Go plan before the preview, the Go phase's failure shaped as a
+		// partial application, the playbook's observation consumed by the verification, the Go plan
+		// held to zero operations after the re-apply (spec section 8.3). Each wrapper sees the
+		// step's own error and returns it, changed only to say that the Go writer had committed.
+		if preview != nil {
+			preview = mixed.WrapStep("preview", preview)
+		}
+		apply = mixed.WrapStep("apply", apply)
+		verify = mixed.WrapStep("verify", verify)
+		if idempotency != nil {
+			idempotency = mixed.WrapStep("idempotency", idempotency)
+		}
+	}
 	txn := delivery.Transaction{
-		Preflight: options.Preflight, Preview: preview, Apply: apply, Verify: options.Verify,
-		Idempotency: idempotency, Rollback: options.Rollback,
+		Preflight: options.Preflight, Preview: preview, Apply: apply, Verify: verify,
+		Idempotency: idempotency, Rollback: rollback,
 		Stage: options.Stage, IdempotencyPolicy: options.Idempotency, RollbackPolicy: options.RollbackPolicy,
 	}
 	if options.Writer != nil {
@@ -1660,6 +1834,60 @@ func promptReconcileExecutionAuthorization(plannedPlaybooks int) (*deploymentAut
 	return &deploymentAuthorization{Preflight: preflight, Preview: preview}, nil
 }
 
+// precheckIdentityDeploy is the no-ssh half of the identity lock for a deploy
+// or a reconcile run: when playbook is the identity apply playbook, the
+// freeipa-server host the run would lock must be one the lock can be taken
+// through (checkIdentityLockTarget). Any other playbook is not asked.
+//
+// The hosts are the candidates of the resolved scope (--limit and target_group
+// honored) before availability dropped any: the host the apply step locks is
+// one of them, and the contract's exactly-one cardinality fails a run with
+// more at its own preflight anyway, only later.
+func precheckIdentityDeploy(ctx context.Context, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string) error {
+	if !identitylock.IsApplyPlaybook(playbook) {
+		return nil
+	}
+	applied, _, scope, _, _, err := resolveDeploymentScope(ctx, catalog, components, inv, limit, extraVars, false)
+	if err != nil {
+		return err
+	}
+	// Non-nil even when empty: none resolved is "0 hosts", refused, not "resolve
+	// the group again".
+	hosts := append([]string{}, deploymentCandidateHosts(applied, scope)...)
+	return checkIdentityLockTarget(ctx, identityLockRequest{Inventory: inv, Hosts: hosts})
+}
+
+// precheckIdentityBatch runs precheckIdentityDeploy for every request of a
+// reconcile or deploy batch that is the identity playbook, before the batch
+// shows its plan and asks the operator to authorize it.
+func precheckIdentityBatch(ctx context.Context, requests []catalogDeploymentRequest) error {
+	for _, request := range requests {
+		if !identitylock.IsApplyPlaybook(request.playbook) {
+			continue
+		}
+		root, err := resolveContractRoot("")
+		if err != nil {
+			return err
+		}
+		loader, err := contract.NewLoader(root)
+		if err != nil {
+			return err
+		}
+		catalog, err := loader.LoadDefaultCatalog()
+		if err != nil {
+			return fmt.Errorf("load contract catalog before deployment: %w", err)
+		}
+		components, err := componentsForPlaybook(ctx, catalog, request.playbook, request.inv, request.limit, request.tags, request.componentHints)
+		if err != nil {
+			return err
+		}
+		if err := precheckIdentityDeploy(ctx, catalog, components, request.playbook, request.inv, request.limit, request.extraVars); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // executeRecordedDeploymentWithAuthorizationResult (design spec §28.3's
 // pattern) aggregates the approved apply dependency chain's
 // ComponentDeliveryResults with the
@@ -1681,6 +1909,15 @@ func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runne
 		return DeploymentExecutionResult{}, fmt.Errorf("load contract catalog before deployment: %w", err)
 	}
 	components, err := componentsForPlaybook(ctx, catalog, playbook, inv, limit, tags, componentHints)
+	if err != nil {
+		return DeploymentExecutionResult{}, err
+	}
+	// First, before the plan is shown or confirmed, before preflight, the
+	// freeipa-server dependency, any preview and any ssh: the identity playbook
+	// runs under the server's /etc/ipa lock, and an inventory the lock cannot be
+	// taken through is refused here instead of after all of that. --preview-only
+	// gets the same answer --force would (see checkIdentityLockTarget).
+	err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars)
 	if err != nil {
 		return DeploymentExecutionResult{}, err
 	}
@@ -1895,6 +2132,10 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	if err != nil {
 		return err
 	}
+	// The --limit the run was asked for: the mixed run's Go phase resolves the one FreeIPA server it
+	// writes with it, as the preflight of the users-groups scope does, and checks that it is the
+	// host this transaction locks. limit itself is widened below.
+	requestedLimit := limit
 	applied, selected, scope, hosts, dependencyExpandedLimit, err := resolveDeploymentScope(ctx, catalog, components, inv, limit, extraVars, playbook == "playbooks/site.yml")
 	if err != nil {
 		return err
@@ -1987,17 +2228,40 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 	}
 	extraVars = append(extraVars, deferredHostsExtraVar)
 
+	// The mixed run of `pilot reconcile --engine golang --scope full`: the one identity transaction
+	// the command's marker on the context asks for, and no other (the dependency chain's
+	// freeipa-server run, or any other playbook, never sees it). The Go engine writes the users and
+	// groups before the playbook, which is told to skip them.
+	var mixed *mixedStep
+	if identitylock.IsApplyPlaybook(playbook) {
+		if mixedRun := mixedIdentityRunFrom(ctx); mixedRun != nil {
+			mixed, err = mixedRun.begin(inv, requestedLimit, stage)
+			if err != nil {
+				return err
+			}
+			defer mixed.close()
+			extraVars = append(extraVars, mixed.extraVars()...)
+		}
+	}
+
 	st, err := openSpecStore()
 	if err != nil {
 		return fmt.Errorf("open deployment evidence store: %w", err)
 	}
+	metadata := deploymentMetadata(root, playbook, components, extraVars, vault, tags, execScope.Deferred)
+	if mixed != nil {
+		mixed.addMetadata(metadata)
+	}
 	writer, err := store.StartRun(ctx, st, store.RunStarted{
 		Stage: stage, Component: components[0], Components: components, Playbook: playbook,
-		Inventory: inv, Hosts: hosts, Metadata: deploymentMetadata(root, playbook, components, extraVars, vault, tags, execScope.Deferred),
+		Inventory: inv, Hosts: hosts, Metadata: metadata,
 	})
 	if err != nil {
 		_ = st.Close()
 		return fmt.Errorf("start deployment evidence run: %w", err)
+	}
+	if mixed != nil {
+		mixed.bind(writer)
 	}
 	writer.StartHeartbeat(ctx, 10*time.Second)
 	fmt.Fprintf(out, "ℹ️  deployment run: %s\n", writer.RunID())
@@ -2046,14 +2310,41 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 		}
 	}
 
+	// The FreeIPA identity playbook runs under the server's /etc/ipa lock, taken
+	// by the apply step after every confirmation (executeDeploymentTransaction).
+	// This is where the host it locks is known: the included hosts of the
+	// freeipa-server role this run was resolved to, which already honor
+	// --limit, target_group and availability.
+	appliedHosts := deploymentAppliedHosts(applied, scope, execScope.Included)
+	var identityLock identitylock.Acquirer
+	if identitylock.IsApplyPlaybook(playbook) {
+		identityLock = newIdentityLock(identityLockRequest{
+			// Non-nil even when empty: none resolved is "0 hosts", refused, not
+			// "resolve the group again".
+			Inventory: inv, Hosts: append([]string{}, appliedHosts...),
+			Wait: identityLockWaitFrom(ctx), Progress: identityLockProgressFrom(ctx),
+		})
+	}
+
 	var txnResult delivery.Result
-	err = executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, deploymentTransactionOptions{
+	transaction := deploymentTransactionOptions{
 		Writer: writer, Preflight: preflight, Verify: verify, Rollback: rollback,
 		Stage: stage, Idempotency: delivery.IdempotencyStageGTEStaging, RollbackPolicy: rollbackPolicy,
 		RuntimeRace: runtimeRace, Authorization: authorization, ResultOut: &txnResult,
-		AppliedHosts:            deploymentAppliedHosts(applied, scope, execScope.Included),
+		AppliedHosts:            appliedHosts,
 		RequireEveryAppliedHost: requireEveryHost,
-	})
+		IdentityLock:            identityLock,
+	}
+	if mixed != nil {
+		// The Go writer runs as PrepareApply, under the lock the apply step has taken and before the
+		// playbook, which it does not let start when the Go phase did not apply and verify its plan.
+		transaction.PrepareApply = mixed.PrepareApply
+		transaction.Mixed = mixed
+	}
+	err = executeDeploymentTransaction(ctx, runner, out, playbook, inv, limit, tags, extraVars, vault, transaction)
+	if mixed != nil {
+		mixed.finished(txnResult, writer.RunID())
+	}
 	if resultOut != nil {
 		*resultOut = ComponentDeliveryResult{ComponentIDs: components, RunID: writer.RunID(), Outcome: txnResult.Outcome, FailedStep: txnResult.FailedStep}
 	}
@@ -3055,13 +3346,37 @@ func contractIDs(contracts []contract.Contract) []string {
 	return ids
 }
 
+// extraVarKeys are the variable names one -e argument sets, for the run's metadata: the key of
+// a `key=value` argument, or the top-level keys of a JSON object (`{"key": value}`: the form that
+// carries a value Ansible's `key=value` would cut at a blank, such as the path of a file the
+// mixed run's playbook writes). Never a value. Cutting a JSON object at its first `=` took a
+// piece of a path for the key, or lost the argument. An @file argument, or a `{` argument that
+// is not a JSON object, names nothing here, as before.
+func extraVarKeys(extra string) []string {
+	if trimmed := strings.TrimSpace(extra); strings.HasPrefix(trimmed, "{") {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(trimmed), &object); err != nil {
+			return nil
+		}
+		keys := make([]string, 0, len(object))
+		for key := range object {
+			if key != "" {
+				keys = append(keys, key)
+			}
+		}
+		return keys
+	}
+	key, _, found := strings.Cut(extra, "=")
+	if found && key != "" {
+		return []string{key}
+	}
+	return nil
+}
+
 func deploymentMetadata(root, playbook string, components, extraVars []string, vault vaultInput, tags string, deferred []delivery.DeferredHost) map[string]any {
 	keys := make([]string, 0, len(extraVars))
 	for _, extra := range extraVars {
-		key, _, found := strings.Cut(extra, "=")
-		if found && key != "" {
-			keys = append(keys, key)
-		}
+		keys = append(keys, extraVarKeys(extra)...)
 	}
 	sort.Strings(keys)
 	metadata := map[string]any{
@@ -3938,6 +4253,13 @@ func executeCatalogBatch(ctx context.Context, runner *ansible.Runner, out io.Wri
 	// Outbound webhook readiness (INV-3): an invalid integrations.yaml or
 	// unready store fails the whole reconcile before any mutation.
 	if _, err := webhookReadiness(requests[0].workspaceDir); err != nil {
+		return err
+	}
+	// Before anything is planned or asked: a request for the identity playbook
+	// whose lock the inventory cannot give is refused before the operator is
+	// shown a plan to authorize (see checkIdentityLockTarget).
+	err := precheckIdentityBatch(ctx, requests)
+	if err != nil {
 		return err
 	}
 	plans := make([]reconcileExecutionPlan, len(requests))

@@ -1,0 +1,37 @@
+
+PLAY [FreeIPA identity authorization-cache entry (prepare or probe)] ***********
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: prod requires recent staging attestation] **************************
+skipping: [ipa-1]
+
+TASK [Gate: this entry is never a preview] *************************************
+[ERROR]: Task failed: Action failed: freeipa-identity-auth-cache.yml does not run in check mode: it records or reads the authorization-cache obligation, and a preview would do neither.
+Origin: <repo>/playbooks/apply/freeipa-identity-auth-cache.yml:93:7
+
+91     # The entry changes the journal (prepare) or reads it for a decision; a
+92     # preview of either would be a run that did neither.
+93     - name: "Gate: this entry is never a preview"
+         ^ column 7
+
+fatal: [ipa-1]: FAILED! => {
+    "assertion": "not ansible_check_mode",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "freeipa-identity-auth-cache.yml does not run in check mode: it records or reads the authorization-cache obligation, and a preview would do neither."
+}
+
+PLAY RECAP *********************************************************************
+ipa-1                  : ok=2    changed=0    unreachable=0    failed=1    skipped=1    rescued=0    ignored=0   
+

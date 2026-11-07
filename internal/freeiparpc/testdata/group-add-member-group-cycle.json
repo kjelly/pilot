@@ -1,0 +1,35 @@
+{
+  "result": {
+    "completed": 1,
+    "failed": {
+      "member": {
+        "user": [],
+        "group": [],
+        "service": [],
+        "idoverrideuser": []
+      }
+    },
+    "result": {
+      "gidnumber": [
+        "1927600503"
+      ],
+      "cn": [
+        "p24cap-cg2"
+      ],
+      "member_group": [
+        "p24cap-cg1"
+      ],
+      "memberof_group": [
+        "p24cap-cg1"
+      ],
+      "memberindirect_group": [
+        "p24cap-cg2"
+      ],
+      "dn": "cn=p24cap-cg2,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    }
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

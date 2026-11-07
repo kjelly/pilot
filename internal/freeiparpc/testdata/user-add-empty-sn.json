@@ -1,0 +1,14 @@
+{
+  "result": null,
+  "error": {
+    "code": 3007,
+    "message": "'sn' is required",
+    "data": {
+      "name": "sn"
+    },
+    "name": "RequirementError"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -22,12 +22,13 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/ansible"
+	"github.com/kjelly/pilot/internal/identitylock"
 	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // DefaultPlaybook is the apply playbook ReconcileOnce invokes when
 // ReconcileOptions.Playbook is unset.
-const DefaultPlaybook = "playbooks/apply/freeipa-identity-apply.yml"
+const DefaultPlaybook = identitylock.ApplyPlaybook
 
 // playbookRunner is the seam ReconcileOnce runs through — satisfied by
 // *ansible.Runner in production, and by a fake in tests that have no real
@@ -65,6 +66,13 @@ type ReconcileOptions struct {
 	// Runner overrides the ansible.Runner used to apply the plan. nil
 	// selects a production ansible.NewRunner().
 	Runner playbookRunner
+
+	// Lock takes the FreeIPA server's /etc/ipa lock for the length of the
+	// apply (identitylock). Required: nil is an error before anything runs,
+	// so a caller cannot forget it. The lock is taken in applyPlan, right
+	// before the playbook, after the roster checks and the capability probe,
+	// and given back when the playbook has ended.
+	Lock identitylock.Acquirer
 }
 
 func (o ReconcileOptions) runner() playbookRunner {
@@ -374,6 +382,9 @@ func ReconcileOnce(ctx context.Context, opts ReconcileOptions) (Plan, *ansible.R
 	if opts.Inventory == "" {
 		return Plan{}, nil, fmt.Errorf("accessgrants: inventory is required")
 	}
+	if opts.Lock == nil {
+		return Plan{}, nil, fmt.Errorf("accessgrants: %w", identitylock.ErrNoLock)
+	}
 	now := opts.Now
 	if now.IsZero() {
 		now = time.Now()
@@ -424,7 +435,7 @@ func ReconcileOnce(ctx context.Context, opts ReconcileOptions) (Plan, *ansible.R
 		}
 	}
 
-	result, err := applyPlan(ctx, opts.RosterFile, playbook, opts.Inventory, opts.VaultPasswordFile, opts.runner(), plan)
+	result, err := applyPlan(ctx, opts.RosterFile, playbook, opts.Inventory, opts.VaultPasswordFile, opts.runner(), opts.Lock, plan)
 	if err == nil && opts.StateDir != "" {
 		if serr := recordAuthPolicyState(opts.StateDir, desiredAuthPolicyHosts); serr != nil {
 			return plan, result, fmt.Errorf("accessgrants: reconcile applied but recording auth-policy state failed: %w", serr)
@@ -454,9 +465,21 @@ func ReconcileOnce(ctx context.Context, opts ReconcileOptions) (Plan, *ansible.R
 	return plan, result, err
 }
 
-// applyPlan is ReconcileOnce's and ApplyAdHocHBACRule's shared "turn a Plan
-// into extra-vars and invoke ansible-playbook" tail.
-func applyPlan(ctx context.Context, rosterFile, playbook, inventoryPath, vaultPasswordFile string, runner playbookRunner, plan Plan) (*ansible.Result, error) {
+// applyPlan is ReconcileOnce's, Activate's and Deactivate's shared "turn a
+// Plan into extra-vars and invoke ansible-playbook" tail, and the funnel of
+// every run of the identity apply playbook that starts here: it takes the
+// FreeIPA server's /etc/ipa lock (lock, never nil) before the playbook and
+// holds it until the playbook has ended. The lock is unconditional: --playbook
+// can name another playbook, and the answer to "does this one need the lock"
+// is not the caller's to give (cmd/pilot/cmd/identity_lock_funnel_test.go).
+//
+// A lock that is lost while the playbook runs cancels it, and the result is
+// ErrLockLost even when the playbook exited 0: a run interleaved with
+// another's, so what it left in FreeIPA is not a clean reconcile.
+func applyPlan(ctx context.Context, rosterFile, playbook, inventoryPath, vaultPasswordFile string, runner playbookRunner, lock identitylock.Acquirer, plan Plan) (*ansible.Result, error) {
+	if lock == nil {
+		return nil, fmt.Errorf("accessgrants: %w", identitylock.ErrNoLock)
+	}
 	// freeipa_roster_file MUST be absolute: the apply playbook's own
 	// `include_vars` resolves a relative path against the playbook file's
 	// own directory, not this process's cwd (documented in
@@ -490,7 +513,20 @@ func applyPlan(ctx context.Context, rosterFile, playbook, inventoryPath, vaultPa
 	if vaultPasswordFile != "" {
 		args = append(args, "--vault-password-file", vaultPasswordFile)
 	}
-	result, runErr := runner.Run(ctx, args...)
+	held, err := lock(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("accessgrants: take the FreeIPA identity lock: %w", err)
+	}
+	defer func() { _ = held.Release() }()
+	runCtx, cancel := held.Bind(ctx)
+	defer cancel()
+	result, runErr := runner.Run(runCtx, args...)
+	// Before the run's own outcome: a playbook the lock's loss killed fails
+	// with an exit status that says nothing, and one that exited 0 did not
+	// run under the lock.
+	if lostErr := held.Check(); lostErr != nil {
+		return result, fmt.Errorf("accessgrants: apply playbook %s: %w", playbook, lostErr)
+	}
 	if runErr != nil {
 		return result, fmt.Errorf("accessgrants: ansible-playbook did not run: %w", runErr)
 	}
