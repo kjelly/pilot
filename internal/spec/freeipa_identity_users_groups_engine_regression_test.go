@@ -841,6 +841,123 @@ func TestRegression_IdentityUsersGroupsEngineRuntime(t *testing.T) {
 	}
 }
 
+// The gate's own behaviour, with real Ansible: the static lint above only looks for the strings of its conditions, and a
+// gate whose conditions are present but never fail (a `that` item that is always true) passes it. The gate task of the
+// playbook is run alone, in a play of its own with a task after it, over the values the mixed run and an operator can
+// give: it passes for the unset variable, for `ansible` with or without the observation file and for `go` with it, and it
+// refuses `go` without the file (absent or empty), a value that is neither word, a different case and the empty string,
+// before the task after it.
+func TestRegression_IdentityUsersGroupsEngineGateRuntime(t *testing.T) {
+	const outVar = "pilot_identity_auth_cache_output"
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
+			t.Fatalf("required ansible-playbook not installed: %v", err)
+		}
+		t.Skipf("ansible-playbook not installed: %v", err)
+	}
+	var gate map[string]any
+	pre, _ := identityPlays(t, identityApplyPath)[0]["pre_tasks"].([]any)
+	for _, raw := range pre {
+		if task, ok := raw.(map[string]any); ok && taskName(task) == engineGateTask {
+			gate = task
+		}
+	}
+	if gate == nil {
+		t.Fatalf("no %q in pre_tasks", engineGateTask)
+	}
+	const after = "A task after the gate"
+	run := func(t *testing.T, vars map[string]any) (rc int, gateStatus string, reached bool, msg string) {
+		t.Helper()
+		body, err := yaml.Marshal([]map[string]any{{
+			"name": "the engine gate", "hosts": "localhost", "connection": "local", "gather_facts": false, "vars": vars,
+			"tasks": []any{gate, map[string]any{"name": after, "ansible.builtin.debug": map[string]any{"msg": "reached"}}},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		pb := filepath.Join(dir, "gate.yml")
+		if err := os.WriteFile(pb, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("ansible-playbook", "-i", "localhost,", pb)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False",
+			"ANSIBLE_INVENTORY_UNPARSED_WARNING=False", "ANSIBLE_PYTHON_INTERPRETER=/usr/bin/python3")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, runErr := cmd.Output()
+		if ee, ok := runErr.(*exec.ExitError); ok {
+			rc = ee.ExitCode()
+		} else if runErr != nil {
+			t.Fatalf("ansible-playbook did not run: %v", runErr)
+		}
+		var cb struct {
+			Plays []struct {
+				Tasks []struct {
+					Task  struct{ Name string } `json:"task"`
+					Hosts map[string]struct {
+						Failed bool `json:"failed"`
+						Msg    any  `json:"msg"`
+					} `json:"hosts"`
+				} `json:"tasks"`
+			} `json:"plays"`
+		}
+		if err := json.Unmarshal(out, &cb); err != nil {
+			t.Fatalf("parse the JSON callback output: %v\n%s%s", err, out, stderr.String())
+		}
+		gateStatus = "not run"
+		for _, p := range cb.Plays {
+			for _, task := range p.Tasks {
+				for _, h := range task.Hosts {
+					switch task.Task.Name {
+					case engineGateTask:
+						gateStatus = "ok"
+						if h.Failed {
+							gateStatus = "failed"
+							msg, _ = h.Msg.(string)
+						}
+					case after:
+						reached = true
+					}
+				}
+			}
+		}
+		return rc, gateStatus, reached, msg
+	}
+	for _, tc := range []struct {
+		name   string
+		vars   map[string]any
+		refuse bool
+	}{
+		{"unset", nil, false},
+		{"ansible without the file", map[string]any{engineVar: "ansible"}, false},
+		{"ansible with the file", map[string]any{engineVar: "ansible", outVar: "/tmp/pilot-observation.json"}, false},
+		{"go with the file", map[string]any{engineVar: "go", outVar: "/tmp/pilot-observation.json"}, false},
+		{"go without the file", map[string]any{engineVar: "go"}, true},
+		{"go with an empty path", map[string]any{engineVar: "go", outVar: ""}, true},
+		{"a value that is neither word", map[string]any{engineVar: "rust", outVar: "/tmp/pilot-observation.json"}, true},
+		{"the other case", map[string]any{engineVar: "Go", outVar: "/tmp/pilot-observation.json"}, true},
+		{"the empty string", map[string]any{engineVar: "", outVar: "/tmp/pilot-observation.json"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rc, status, reached, msg := run(t, tc.vars)
+			if tc.refuse {
+				if rc == 0 || status != "failed" || reached {
+					t.Fatalf("the gate let it through: rc=%d gate=%s, the task after it ran=%v", rc, status, reached)
+				}
+				if !strings.Contains(msg, engineVar) {
+					t.Errorf("the refusal does not say what to fix: %q", msg)
+				}
+				return
+			}
+			if rc != 0 || status != "ok" || !reached {
+				t.Fatalf("the gate refused a run it must allow: rc=%d gate=%s msg=%q, the task after it ran=%v", rc, status, msg, reached)
+			}
+		})
+	}
+}
+
 func tail(s string, n int) string {
 	if len(s) > n {
 		return s[len(s)-n:]
