@@ -131,8 +131,18 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   attached once. `--pr` keeps the invocation single-item: it handles only the selected PR,
   and only when it is first in the queue (`NOT_AT_HEAD` otherwise; the timer takes it in
   turn). `BUSY` means a consumer is already running. Its only write to a PR branch is
-  that base-integration merge commit. Rules, outcomes and the timer:
-  `references/merge-train.md`.
+  that base-integration merge commit. The actor reports `ENQUEUED` when the PR itself
+  shows the label (read again for up to 25 s while GitHub catches up), never from the
+  issues listing, and a failure of its "enqueued" comment after the label is only a
+  warning; the train removes the label once the merge reads back as `MERGED`.
+  Exit codes of `merge_train.py process`: 0 = nothing failed (a lock another actor holds
+  is `WAITING`); 1 = a PR ended in `ERROR`, which is only a merge or a Draft that GitHub
+  accepted and the PR does not show; 2 = `INFRA`, an infrastructure failure (GitHub or
+  `gh`, git, a git command past its time limit, an unusable state or lock directory,
+  anything unexpected). `INFRA` names the PR and the error, counts nothing against the
+  PR and leaves it enqueued with its saved review; a persistent one stops the PRs behind
+  it until the cause is fixed or a person removes the label. Rules, outcomes, the site
+  table that tells the two apart and the timer: `references/merge-train.md`.
 - **Hand-off with `pr-ready`.** `pr-ready` marks a PR Ready only when every review
   thread is resolved; it may leave a reviewer-confirmed unrelated failing check, a
   `CHANGES_REQUESTED` review awaiting re-review, findings it disputed on the PR, and

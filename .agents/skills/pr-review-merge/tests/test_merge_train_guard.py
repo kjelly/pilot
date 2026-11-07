@@ -27,7 +27,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import merge_train  # noqa: E402
 import review_gate  # noqa: E402
-from gh_runtime import GitHubError  # noqa: E402
+from gh_runtime import MutationLockHeld  # noqa: E402
 from scan_stub import CleanScan  # noqa: E402
 from test_merge_train import PASS, PENDING, REPO, DeliveryTests, git  # noqa: E402
 
@@ -43,7 +43,7 @@ class Lock:
 
     `held` is true while it is taken. `at` maps the n-th take (1-based) to an action run just before the
     lock is granted: the moment between a decision made before the lock and the guarded read. From the
-    `busy_from`-th take on the lock is held by someone else (the actor's own error, as `apply_decision`
+    `busy_from`-th take on the lock is held by someone else (`MutationLockHeld`, as `apply_decision`
     raises it). `outside` is true while an armed action runs: those writes are another person's."""
 
     def __init__(self):
@@ -61,7 +61,7 @@ class Lock:
     def _take(self):
         self.takes += 1
         if self.busy_from is not None and self.takes >= self.busy_from:
-            raise GitHubError('Another pr-review-merge actor is modifying this repository')
+            raise MutationLockHeld('Another pr-review-merge actor is modifying this repository')
         if self.takes in self.at:
             self.fired.append(self.takes)
             self.outside = True
@@ -472,7 +472,7 @@ class DequeueRaceTests(GuardHarness):
     def failing_merge(self):
         self.queue()
         merge_train.save_entry(REPO, 42, dict(merge_train.load_entry(REPO, 42), errors=2))
-        self.gh.merge_pr = lambda repo, number, head: (_ for _ in ()).throw(GitHubError('merge refused'))
+        self.gh.merge_unconfirmed.add(42)       # accepted by GitHub, never shown: the PR's own error
         self.arm()
 
     def test_t1_withdrawal_before_a_person_dequeue_writes_nothing(self):
@@ -514,7 +514,8 @@ class DequeueRaceTests(GuardHarness):
         self.assertEqual([1], lock.fired)
         self.assertEqual('MERGED', self.only(out)['outcome'], out)
         self.assertNotIn(LEFT_QUEUE, ''.join(self.comments_since()))
-        self.assertNotIn('label-', self.tail())
+        # Merged on the new entry; the label comes off once, after the merge, as housekeeping (no dequeue).
+        self.assertEqual(['merge', 'label-'], self.tail())
 
     def test_t1_a_head_moved_dequeue_is_for_the_entry_it_saw(self):
         for name, change, expect in (('enqueued again at the new HEAD', 'reenqueue', 'MERGED'),
@@ -528,7 +529,8 @@ class DequeueRaceTests(GuardHarness):
                 self.assertEqual([1], lock.fired)
                 self.assertEqual(expect, self.only(out)['outcome'], out)
                 self.assertNotIn(LEFT_QUEUE, ''.join(self.comments_since()))
-                self.assertNotIn('label-', self.tail())
+                # Merged on the new entry: the label comes off once, after the merge. Withdrawn: nothing at all.
+                self.assertEqual(['merge', 'label-'] if change == 'reenqueue' else [], self.tail())
 
     def test_t1_withdrawal_before_a_stale_review_dequeue_writes_nothing(self):
         self.stale_review()
@@ -543,12 +545,16 @@ class DequeueRaceTests(GuardHarness):
         _, out, lock = self.run_train(self.locked(t3=self.withdraw))
         self.assertEqual([3], lock.fired, 'merge, count, dequeue')
         self.assertEqual('ERROR', self.only(out)['outcome'], out)
-        self.assertQuiet('no "failed in 3 runs" comment on a PR that was withdrawn')
+        # The merge GitHub accepted and the PR never showed is the only write; no "failed in 3 runs" comment
+        # and no label write for a PR that was withdrawn.
+        self.assertEqual(['merge'], self.tail(), 'no "failed in 3 runs" comment on a PR that was withdrawn')
+        self.assertEqual([], self.comments_since())
         self.assertNotIn(42, self.gh.labels)
         self.assertEqual(3, merge_train.load_entry(REPO, 42)['errors'], 'counted; the withdrawn PR is not in the queue')
         _, out, _ = self.run_train()
         self.assertEqual([], out['results'], 'a withdrawn PR is not listed, so nothing more is done to it')
-        self.assertQuiet()
+        self.assertEqual(['merge'], self.tail())
+        self.assertEqual([], self.comments_since())
 
 
 class MergeRaceTests(GuardHarness):
@@ -626,12 +632,14 @@ class MergeRaceTests(GuardHarness):
         moved = {}
         self.before_write('merge_pr', lambda: moved.update(head=self.push_to_pr()))
         _, out, _ = self.run_train()
-        self.assertEqual('ERROR', self.only(out)['outcome'], out)
-        self.assertIn('Head branch was modified', self.only(out)['reason'])
+        # GitHub refuses the merge. The PR shows why (its HEAD moved), so the run looks at it again and the
+        # new HEAD, which was never gated, takes it out of the queue: the PR's own verdict, not an error.
+        self.assertEqual('DEQUEUED', self.only(out)['outcome'], out)
+        self.assertIn('HEAD changed since it was enqueued', self.only(out)['reason'])
         self.assertEqual('OPEN', self.gh.prs[42]['state'])
-        entry = merge_train.load_entry(REPO, 42)
-        self.assertEqual(1, entry['errors'], 'an unconfirmed merge stays enqueued and counted')
-        self.assertIn(42, self.gh.labels)
+        self.assertEqual(moved['head'], self.gh.head(42))
+        self.assertNotIn(42, self.gh.labels)
+        self.assertIsNone(merge_train.load_entry(REPO, 42))
 
 
 class IntegrateRaceTests(GuardHarness):
@@ -764,7 +772,7 @@ class ErrorCountRaceTests(GuardHarness):
 
     def failing_merge(self):
         self.queue()
-        self.gh.merge_pr = lambda repo, number, head: (_ for _ in ()).throw(GitHubError('merge refused'))
+        self.gh.merge_unconfirmed.add(42)       # accepted by GitHub, never shown: the PR's own error
         self.arm()
 
     def test_t1_an_error_is_not_counted_against_an_entry_enqueued_since(self):
@@ -849,13 +857,13 @@ class LockDisciplineTests(GuardHarness):
         elif name == 'three errors':
             self.queue()
             merge_train.save_entry(REPO, 42, dict(merge_train.load_entry(REPO, 42), errors=2))
-            self.gh.merge_pr = lambda repo, number, head: (_ for _ in ()).throw(GitHubError('merge refused'))
+            self.gh.merge_unconfirmed.add(42)
 
     EXPECT = {
         'draft (overlap)': {'post_comment', 'mark_draft', 'edit_label', 'drop_entry'},
         'dequeue (a person must act)': {'post_comment', 'edit_label', 'drop_entry'},
         'dequeue (the HEAD moved)': {'post_comment', 'edit_label', 'drop_entry'},
-        'integrate and merge': {'push', 'save_entry', 'merge_pr', 'drop_entry'},
+        'integrate and merge': {'push', 'save_entry', 'merge_pr', 'drop_entry', 'edit_label'},
         'withdrawn': {'drop_entry'},
         'closed': {'drop_entry'},
         'three errors': {'save_entry', 'post_comment', 'edit_label', 'drop_entry'},

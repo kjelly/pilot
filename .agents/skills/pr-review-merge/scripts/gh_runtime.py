@@ -24,6 +24,21 @@ class CompareLimitError(GitHubError):
     """GitHub cut a comparison's file list: nothing a retry fixes, so a person must integrate the PR."""
 
 
+class MutationLockError(RuntimeError):
+    """The repository mutation lock (`apply_decision.repo_mutation_lock`) could not be taken. Nothing was
+    written. Deliberately not a `GitHubError`: it says nothing about GitHub, and the two causes below are
+    told apart by type, never by message."""
+
+
+class MutationLockHeld(MutationLockError):
+    """Another pr-review-merge actor holds the lock right now: wait, and try again on the next run."""
+
+
+class MutationLockUnavailable(MutationLockError):
+    """The lock cannot be used at all (its directory or file cannot be created, opened or locked): an
+    infrastructure failure that waiting does not fix."""
+
+
 @dataclass(frozen=True)
 class Repo:
     raw: str
