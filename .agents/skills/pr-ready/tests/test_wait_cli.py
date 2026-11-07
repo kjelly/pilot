@@ -91,6 +91,13 @@ elif args[0] == "api" and "/git/ref/heads/" in args[-1]:
     print(json.dumps({"object": {"type": "commit", "sha": plan.get("live_base", plan.get("pr", {}).get("baseRefOid", base))}}))
 elif args[0] == "api" and "/compare/" in args[-1]:
     base, head = args[-1].split("/compare/")[1].split("...")
+    # plan["compares"] answers per side: "LIVE...HEAD" (the PR side) and "HEAD...LIVE" (the base side).
+    live = plan.get("live_base", plan.get("pr", {}).get("baseRefOid", os.environ.get("FAKE_GH_BASE", sha)))
+    head_sha = plan.get("pr", {}).get("headRefOid", sha)
+    key = base.replace(live, "LIVE").replace(head_sha, "HEAD") + "..." + head.replace(live, "LIVE").replace(head_sha, "HEAD")
+    if key in plan.get("compares", {}):
+        print(json.dumps(plan["compares"][key]))
+        sys.exit(0)
     print(json.dumps(plan.get("ancestry", {"status": "identical" if base == head else "ahead",
         "behind_by": 0, "merge_base_commit": {"sha": base}})))
 elif args[0] == "api" and "/contents/" in args[-1]:
@@ -191,11 +198,36 @@ class WaitCLITests(unittest.TestCase):
         self.assertFalse((t / "ready").exists())
         return events
 
-    def test_main_advances_before_final_ready_preflight(self):
+    BEHIND = {"status": "diverged", "behind_by": 1, "merge_base_commit": {"sha": "e" * 40}}
+
+    def behind(self, pr_files, base_files, **kwargs):
+        side = lambda files: dict(self.BEHIND, files=[{"filename": f} for f in files])
+        return plan(PASS, LINT, live_base='d' * 40, ancestry=self.BEHIND,
+                    compares={"LIVE...HEAD": side(pr_files), "HEAD...LIVE": side(base_files)}, **kwargs)
+
+    def test_main_advancing_during_the_wait_does_not_block_ready(self):
+        # kjelly/pilot#307: the merge train integrates the live base; Ready only needs it to be able to.
         with tempfile.TemporaryDirectory() as tmp:
             t = Path(tmp)
-            self.assert_blocked(t, [plan(PASS, LINT), plan(PASS, LINT, live_base='d' * 40)],
-                                'differs from live main')
+            proc, events, _ = self.run_gate(t, [plan(PENDING, LINT), self.behind(["pkg/a.go"], ["docs/x.md"])])
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
+
+    def test_main_advancing_into_a_conflict_or_overlap_blocks_ready(self):
+        for case, extra, needle in (
+                ("overlap", {}, "both sides changed pkg/a.go"),
+                ("conflict", {"pr": {"mergeable": "CONFLICTING"}}, "merge conflict")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                self.assert_blocked(t, [plan(PASS, LINT), self.behind(["pkg/a.go"], ["pkg/a.go"], **extra)], needle)
+
+    def test_unknown_mergeability_waits_instead_of_blocking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            proc, events, _ = self.run_gate(t, [plan(PASS, LINT, pr={"mergeable": "UNKNOWN"}), plan(PASS, LINT)])
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
+            self.assertIn("mergeability not computed yet", " ".join(events[0]["pending_checks"]))
 
     def test_pending_to_pass_runs_ready_exactly_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -371,7 +403,8 @@ class WaitCLITests(unittest.TestCase):
                 self.assert_blocked(Path(tmp), [first, plan(PASS)], needle)
 
     def test_changed_remote_identity_or_description_blocks(self):
-        cases = [("headRefOid", "f" * 40), ("headRefName", "other"), ("baseRefOid", "b" * 40),
+        # baseRefOid is not pinned (kjelly/pilot#307): GitHub moves it when main advances.
+        cases = [("headRefOid", "f" * 40), ("headRefName", "other"),
                  ("baseRefName", "other"), ("body", "Edited description"), ("title", "Edited title"),
                  ("state", "CLOSED"), ("isDraft", False)]
         for key, value in cases:
@@ -425,7 +458,7 @@ class WaitCLITests(unittest.TestCase):
 
     def test_final_preflight_rechecks_all_pins(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assert_blocked(Path(tmp), [plan(PASS), plan(PASS, pr={"baseRefOid": "b" * 40})], "baseRefOid")
+            self.assert_blocked(Path(tmp), [plan(PASS), plan(PASS, pr={"headRefName": "other"})], "headRefName")
 
     def test_post_action_race_never_reports_validated_ready(self):
         with tempfile.TemporaryDirectory() as tmp:

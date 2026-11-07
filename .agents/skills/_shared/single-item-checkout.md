@@ -138,7 +138,11 @@ candidate evidence run, and the only place revert or mutation negative controls 
 
 `issue-to-pr` creates one PR from its dedicated branch. `pr-ready` pushes only to the
 existing PR's original head and never creates a replacement. `pr-review-merge` does
-not edit or publish a new PR; retain its gated merge/Draft/WAITING behavior. Preserve
+not edit or publish a new PR; retain its gated queue/Draft/WAITING behavior. Its merge
+train (`pr-review-merge/scripts/merge_train.py`, kjelly/pilot#307) is the one exception
+to "no PR branch writes": it pushes a single commit that merges the live base tip into a
+enqueued PR's original head, only when Git's merge is clean and every file it changes
+equals the base, never forced, and from its own clone (no item checkout). Preserve
 all existing claim, independent review, evidence, CI and permission gates. Checkpoint
 and report the selected item, the branch and the exact SHA it ended on. Do not switch
 to or process another item; the only branch change after the item is the restore step.

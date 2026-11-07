@@ -41,7 +41,9 @@ if args[:2] == ["pr", "view"]:
     print(json.dumps({"number": 7, "url": "https://github.com/acme/repo/pull/7",
         "headRefOid": sha, "headRefName": "fix-one", "baseRefOid": bases[min(call, len(bases) - 1)],
         "baseRefName": "main", "state": "OPEN",
-        "isDraft": not (state / "ready").exists(), "mergeable": "MERGEABLE", "reviewDecision": "REVIEW_REQUIRED"}))
+        "isDraft": not (state / "ready").exists(),
+        "mergeable": "CONFLICTING" if (state / "conflict").exists() else "MERGEABLE",
+        "reviewDecision": "REVIEW_REQUIRED"}))
 elif args[:2] == ["pr", "checks"] and "--required" in args and (state / "checks_error").exists():
     print("HTTP 502: Bad Gateway", file=sys.stderr)
     sys.exit(1)
@@ -234,20 +236,29 @@ class CLIMockTests(unittest.TestCase):
             self.assertIn("target_validation is missing", " ".join(json.loads(blocked.stdout)["errors"]))
             self.assertFalse((t / "ready").exists())
 
-    def test_latest_base_must_be_an_ancestor_before_ready(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            t = Path(tmp)
-            repo, _, evidence, env = self.make_pr(t)
-            (t / "ancestry.json").write_text(json.dumps({"status": "diverged", "behind_by": 1,
-                "merge_base_commit": {"sha": FORK}}))
-            blocked = self.gate(repo, evidence, env, "--ready")
-            self.assertEqual(2, blocked.returncode, blocked.stdout)
-            self.assertIn("does not include live main", " ".join(json.loads(blocked.stdout)["errors"]))
-            self.assertFalse((t / "ready").exists())
-            (t / "ancestry.json").unlink()
-            passed = self.gate(repo, evidence, env, "--ready")
-            self.assertEqual(0, passed.returncode, passed.stdout)
-            self.assertTrue((t / "ready").exists())
+    def test_behind_the_live_base_is_ready_only_when_the_train_can_integrate_it(self):
+        # kjelly/pilot#307: Ready needs a clean test merge and no file changed on both sides, not ancestry.
+        for case, base_files, conflict, needle in (("overlap", ["pkg/a.go"], False, "both sides changed pkg/a.go"),
+                                                   ("conflict", ["docs/x.md"], True, "merge conflict"),
+                                                   ("train", ["docs/x.md"], False, None)):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                repo, sha, evidence, env = self.make_pr(t)
+                live = self.base_sha
+                (t / "api.json").write_text(json.dumps({
+                    f"compare/{live}...{sha}": compare("diverged", 1, FORK, ["pkg/a.go"]),
+                    f"compare/{sha}...{live}": compare("diverged", 1, FORK, base_files)}))
+                if conflict:
+                    (t / "conflict").touch()
+                proc = self.gate(repo, evidence, env, "--ready")
+                if needle is None:
+                    self.assertEqual(0, proc.returncode, proc.stdout)
+                    self.assertTrue((t / "ready").exists())
+                    continue
+                self.assertEqual(2, proc.returncode, proc.stdout)
+                self.assertIn(needle, " ".join(json.loads(proc.stdout)["errors"]))
+                self.assertIn("does not include live main", " ".join(json.loads(proc.stdout)["errors"]))
+                self.assertFalse((t / "ready").exists())
 
     def test_unavailable_base_or_ancestry_keeps_draft(self):
         for flag in ("ref_error", "ancestry_error"):
@@ -418,7 +429,8 @@ class CLIMockTests(unittest.TestCase):
             evidence["target_validation"] = self.reuse_record(sha)
             blocked = self.gate(repo, evidence, env, "--ready")
             self.assertEqual(2, blocked.returncode, blocked.stdout)
-            self.assertIn("PR base metadata is stale", " ".join(json.loads(blocked.stdout)["errors"]))
+            # The attestation names the PR's old base; HEAD's integrated base is the live tip.
+            self.assertIn("does not match current base", " ".join(json.loads(blocked.stdout)["errors"]))
             self.assertFalse((t / "ready").exists())
 
     def test_missing_base_sha_blocks(self):
@@ -428,8 +440,7 @@ class CLIMockTests(unittest.TestCase):
             (t / "bases.json").write_text(json.dumps(["not-a-sha"]))
             blocked = self.gate(repo, evidence, env, "--ready")
             self.assertEqual(2, blocked.returncode, blocked.stdout)
-            self.assertIn("Current HEAD/base SHA unavailable for target evidence validation",
-                          json.loads(blocked.stdout)["errors"])
+            self.assertIn("Base alignment verification unavailable", " ".join(json.loads(blocked.stdout)["errors"]))
             self.assertFalse((t / "ready").exists())
 
     def test_missing_verifier_fails_closed(self):

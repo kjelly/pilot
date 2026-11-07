@@ -26,9 +26,11 @@
 
 # Live base alignment
 
-Before GATE-PASS or Ready, independently resolve the remote base tip and prove it
-is an ancestor of PR HEAD; also require PR Base SHA to equal that tip. SHA equality
-of HEAD and main is unnecessary. Use the shared merge gate's alignment verifier
-on each poll, final preflight and post-action check. Missing ancestry or metadata
-alignment keeps Draft even for conflict-free PRs. Integrate the latest verified
-base, rerun affected checks/CI and obtain fresh independent review before retrying.
+Before GATE-PASS or Ready, independently resolve the remote base tip and classify the PR with the
+merge gate's `train_alignment` (kjelly/pilot#307, `../../pr-review-merge/references/merge-train.md`).
+HEAD may lack the tip: the merge train integrates it before merging. A merge conflict or a file
+changed on both sides since the merge base keeps Draft: integrate the latest verified base, rerun
+affected checks/CI and obtain fresh independent review before retrying. Mergeability GitHub has not
+computed yet is pending. The PR Base SHA is not pinned during `--wait`, so main advancing does not
+stop it; every poll, the final preflight and the post-action check classify the live base again.
+SHA equality of HEAD and main is unnecessary.

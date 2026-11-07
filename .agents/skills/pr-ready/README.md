@@ -2,7 +2,7 @@
 
 這是 **Skill + 原生 subagents + fail-closed Quality Gate**，不是會獨立執行的排程 daemon。呼叫 Skill 的 Agent 需要實際具備 Git、GitHub CLI、Python 與必要的網路權限，才能執行修復、驗證、push、Ready transition。未達品質門檻時不得轉 Ready；絕不自動 merge 或繞過 branch protection。
 
-Ready 前必須包含最新 `main`：gate 獨立讀取遠端 base tip，確認它是 PR HEAD 的祖先，並核對 PR Base SHA。尚未包含時先將已確認的最新 base 合併到原 PR 分支，再跑相關驗證/CI 與新的獨立審查；沒有衝突也要檢查。讀取失敗或對齊無法確認時維持 Draft。
+Ready 前不必包含最新 `main`（kjelly/pilot#307）：gate 獨立讀取遠端 base tip，用 merge gate 的同一套判斷分類。HEAD 已包含它，或尚未包含但 GitHub 的試合併乾淨、兩邊沒有改到同一個檔案時可以 Ready，之後由 `pr-review-merge` 的 merge train 把最新 base 合併進來、等 CI 再合併。試合併衝突或兩邊改到同一檔案時，先將已確認的最新 base 合併到原 PR 分支，再跑相關驗證/CI 與新的獨立審查。GitHub 尚未算出 mergeability 時等待；讀取失敗或無法分類時維持 Draft。
 
 ## 安裝（repo 內建，不另外安裝）
 

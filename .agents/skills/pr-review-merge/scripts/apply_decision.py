@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Serial, guarded PR actor. --execute is required for mutations."""
+"""Serial, guarded PR actor. --execute is required for mutations.
+
+DRAFT posts the reasons and converts the PR to Draft. MERGE queues the PR for the merge train
+(`merge_train.py`, kjelly/pilot#307): the train is the only merger, so a merge never races another
+PR's CI on an aligned HEAD.
+"""
 from __future__ import annotations
 import argparse
 import json
@@ -15,7 +20,7 @@ from typing import Any, Sequence
 # Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
 # counts any added file and would STOP every later step. Set before the first sibling import.
 sys.dont_write_bytecode = True
-from gh_runtime import GitHubError, Repo, branch_head, pr_view, run_gh
+from gh_runtime import GitHubError, Repo, branch_head, labeled_open_prs, pr_view, run_gh
 from review_gate import evaluate, load_evidence, resolve_repo
 
 
@@ -139,19 +144,19 @@ def _perform_locked(repo: Repo, number: int, evidence: dict[str, Any], method: s
                 out["outcome"] = "ERROR"
                 out["error"] = "Draft conversion command returned success but remote Draft state was not confirmed"
         else:
-            method_flag = {"squash": "--squash", "merge": "--merge", "rebase": "--rebase"}[method]
-            # This method must be allowed by the repository, never fallback blindly.
-            run_gh(["pr", "merge", str(number), "-R", repo.raw, method_flag,
-                    "--match-head-commit", gate["head_sha"]])
-            after = pr_view(repo, number)
+            if method != "merge":
+                raise GitHubError("The merge train merges with merge commits; --method squash/rebase is not enqueued")
+            import merge_train
+            enqueued = merge_train.enqueue(repo, number, evidence, gate)
             out["executed"] = True
-            out["verified_remote_state"] = after.get("state")
-            if after.get("state") == "MERGED":
-                out["outcome"] = "MERGED"
+            out["enqueued"] = enqueued
+            labelled = number in labeled_open_prs(repo, merge_train.QUEUE_LABEL)
+            out["verified_remote_state"] = "ENQUEUED" if labelled else None
+            if labelled:
+                out["outcome"] = "ENQUEUED"
             else:
-                # Usually unexpected merge queue/race: never report success without MERGED.
-                out["outcome"] = "WAITING"
-                out["error"] = "Merge command finished but PR is not confirmed MERGED. Check queue/auto-merge status immediately."
+                out["outcome"] = "ERROR"
+                out["error"] = "Queue label command returned success but the PR is not listed with it"
     except (GitHubError, ValueError) as exc:
         out["outcome"] = "ERROR"
         out["error"] = str(exc)
@@ -171,7 +176,8 @@ def main() -> int:
                              "appear in no commit, message or path of the PR. Repeatable. Values are never printed.")
     # Project default: this repository merges with merge commits (upstream default is squash).
     parser.add_argument("--method", choices=["squash", "merge", "rebase"], default="merge")
-    parser.add_argument("--execute", action="store_true", help="Actually post comments, convert Draft, or merge")
+    parser.add_argument("--execute", action="store_true",
+                        help="Actually post comments and convert to Draft, or queue for the merge train")
     args = parser.parse_args()
     try:
         if args.pr <= 0:
@@ -179,7 +185,8 @@ def main() -> int:
         result = perform(resolve_repo(args.repo), args.pr, load_evidence(args.evidence), args.method, args.execute,
                          worktree=args.worktree, secret_files=args.secret_file)
         print(json.dumps(result, indent=2, ensure_ascii=False))
-        return 0 if result["outcome"] in ("MERGED", "DRAFT-BLOCKED", "SKIP", "DRY_RUN_MERGE", "DRY_RUN_DRAFT") else 1
+        return 0 if result["outcome"] in ("ENQUEUED", "MERGED", "DRAFT-BLOCKED", "SKIP", "DRY_RUN_MERGE",
+                                          "DRY_RUN_DRAFT") else 1
     except (GitHubError, ValueError) as exc:
         print(json.dumps({"outcome": "ERROR", "error": str(exc)}, ensure_ascii=False))
         return 2
