@@ -677,6 +677,29 @@ class IntegrateRaceTests(GuardHarness):
         self.assertNotEqual(ids['old'], ids['new'])
 
 
+    def test_t1_the_train_commit_is_recorded_on_the_entry_as_the_lock_found_it(self):
+        # Same enqueue (same entry id), but the saved entry changed after the train read it.
+        self.queue()
+        self.advance_main()
+        self.arm()
+        seen = {}
+
+        def peek(number, poll):
+            if poll == 0:
+                entry = merge_train.load_entry(REPO, 42)
+                seen.update(errors=entry['errors'], last_error=entry.get('last_error'), commits=entry['train_commits'])
+        self.gh.on_checks = peek
+
+        def edit_entry():
+            entry = merge_train.load_entry(REPO, 42)
+            merge_train.save_entry(REPO, 42, dict(entry, errors=1, last_error='earlier run'))
+        train = self.train(mutation_lock=self.locked(t1=edit_entry))
+        out = train.run()
+        self.assertEqual('MERGED', self.only(out)['outcome'], out)
+        self.assertEqual({'errors': 1, 'last_error': 'earlier run', 'commits': [self.gh.head(42)]}, seen,
+                         'the train commit went onto the entry as saved, not onto the copy read before the lock')
+
+
 class CiWaitTests(GuardHarness):
     """The CI wait stops at the first poll that shows the PR is no longer one the train may act on."""
 
@@ -879,7 +902,9 @@ ENTRY_WRITES = {'save_entry', 'drop_entry'}
 def guard_violations(source):
     """Every write inside `class Train` that is not lexically inside `with self._guard(...)`, every
     `_guard` nested in another (the lock is not reentrant), and every use of `self._locked()` outside
-    `_guard` itself. A function or lambda defined inside a guarded block is not guarded (it may run later)."""
+    `_guard` itself. A function or lambda defined inside a guarded block is not guarded (it may run later).
+    The lint is lexical: it knows the spellings the class uses (the four client writes, `save_entry`,
+    `drop_entry`, `self.git("push", ...)`); a new write method must be added to CLIENT_WRITES."""
     tree = ast.parse(source)
     train = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Train')
     found = []

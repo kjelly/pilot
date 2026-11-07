@@ -2,8 +2,9 @@
 """Merge train: the single consumer of the `merge-queue` label (kjelly/pilot#307).
 
 Enqueue (`apply_decision.py --execute` on a MERGE gate): the gate-checked review evidence is saved
-in the train's state directory, with the HEAD the review covers (`reviewed_head`) and the HEAD the
-gate saw (`enqueued_head`), and the PR gets the `merge-queue` label.
+in the train's state directory, with the HEAD the review covers (`reviewed_head`), the HEAD the
+gate saw (`enqueued_head`) and an `entry_id` that names this enqueue, and the PR gets the
+`merge-queue` label.
 
 Process (this script; one consumer per repository and host, from a timer or by hand): take the PR
 whose label was added first. The PR's HEAD must be the enqueued HEAD or a commit this train pushed
@@ -70,8 +71,9 @@ class TrainError(RuntimeError):
 
 
 class LockBusy(RuntimeError):
-    """The repository mutation lock could not be taken (another actor holds it). Nothing was written;
-    the PR stays enqueued and the failure is not counted against it."""
+    """The repository mutation lock could not be taken: another actor holds it, or its directory is
+    unusable (the message says which). Nothing was written; the PR stays enqueued and the failure is
+    not counted against it."""
 
 
 class _Signal:
