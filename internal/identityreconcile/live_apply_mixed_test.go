@@ -116,9 +116,17 @@ func changedTasks(out string, names []string) (changed []string, seen int) {
 	return changed, seen
 }
 
-// revoked is the roster of A6: the revocations the client's authorization follows (a removal from the sudo
-// role group, a disabling, a user and a group deleted).
+// revokedRoster is the roster of A6, the revocations the client's authorization follows (a removal from the sudo
+// role group, a disabling, a user and a group deleted), without the grant that still names the deleted user: the
+// identity playbook's grant task adds every user a rule names and fails on one that does not exist, and in a mixed run
+// the Go phase has deleted the user before the playbook starts. (The Ansible engine meets the same task on the run
+// after the deletion, which is what H2 and the dev runs of H1 showed; H6 is the arm that keeps the grant.)
 func (d *applyDriver) revokedRoster(base func() rosterDoc) rosterDoc {
+	return d.mutate(d.revokedKeepingGrants(base), func(r rosterDoc) { dropGrantTo(r, "p26-ssh", "p26-dan") })
+}
+
+// revokedKeepingGrants is A6's roster as it is: dan is absent and the HBAC rule p26-ssh still names him.
+func (d *applyDriver) revokedKeepingGrants(base func() rosterDoc) rosterDoc {
 	return d.mutate(base(), func(r rosterDoc) {
 		setMembers(r, "role-p26")
 		find(r, "users", "p26-ben")["state"] = "disabled"
@@ -126,6 +134,26 @@ func (d *applyDriver) revokedRoster(base func() rosterDoc) rosterDoc {
 		find(r, "groups", "data-p26")["state"] = "absent"
 		setMembers(r, "team-p26", "p26-ann", "p26-ben")
 	})
+}
+
+// dropGrantTo removes user from the subjects of the HBAC rule.
+func dropGrantTo(r rosterDoc, rule, user string) {
+	for _, raw := range r["hbac"].(map[string]any)["rules"].([]any) {
+		m := raw.(map[string]any)
+		if m["name"] != rule {
+			continue
+		}
+		subjects := m["subjects"].(map[string]any)
+		var kept []any
+		for _, u := range subjects["users"].([]any) {
+			if u != user {
+				kept = append(kept, u)
+			}
+		}
+		subjects["users"] = kept
+		return
+	}
+	panic("no rule " + rule)
 }
 
 var revocationWrites = map[string]int{"group_del": 1, "group_remove_member": 2, "user_del": 1, "user_disable": 1}
@@ -335,6 +363,32 @@ func (d *applyDriver) runMixed(base func() rosterDoc, oneUser func(string, ...fu
 		a.ok(strings.Contains(a.serverHas("ipa user-show p26-n5 2>&1"), "User login: p26-n5"), "the Go engine's write is not on the server")
 		a.pending(true)
 		a.ok(a.lockFree(30*time.Second), "the lock is not free after the run")
+	})
+
+	// H6: the Go engine deletes a user that a grant of the roster still names; the playbook's grant task fails on the
+	// deleted user. The run is partial_failed at the apply, exit 1, the revocations stay and the obligation stays owed
+	// (the entry recorded it); the roster without the grant then settles it with nothing left for the Go engine to write.
+	d.arm("H6 a grant that names the deleted user fails the playbook, and the corrected roster settles it", func(a *armCtx) {
+		if !a.fresh() || !a.warmClient() {
+			return
+		}
+		ws := lv.copyWorkspace(d.revokedKeepingGrants(base), "", nil)
+		r := a.mixed(ws)
+		a.exit(r, 1)
+		if r.HasDoc {
+			a.ok(r.Doc.Outcome == "partial_failed" && r.Doc.FailedStep == "apply" && r.Doc.Verdict == VerdictPartial && r.Doc.Playbook != nil && r.Doc.Playbook.Ran &&
+				r.Doc.Playbook.Observation == nil && r.Doc.Committed() && r.Doc.Authorization.Owed,
+				"the result file: outcome %q step %q verdict %q playbook %+v committed %v authorization %+v", r.Doc.Outcome, r.Doc.FailedStep, r.Doc.Verdict, r.Doc.Playbook, r.Doc.Committed(), r.Doc.Authorization)
+		}
+		a.serverRevoked()
+		a.clientStillAllows()
+		a.pending(true)
+		fixed := lv.copyWorkspace(d.revokedRoster(base), "", nil)
+		r2 := a.mixed(fixed)
+		a.exit(r2, 0)
+		a.ok(r2.WriteN == r2.Writes["user_mod"], "the mixed run after the correction wrote: %v", r2.Writes)
+		a.clientDenies()
+		a.pending(false)
 	})
 
 	// A17(iii): SIGINT in the Go phase of the mixed run, with a write sent and its answer unread: the write is unknown and
