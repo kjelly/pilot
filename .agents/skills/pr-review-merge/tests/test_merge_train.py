@@ -48,7 +48,7 @@ class FakeGitHub:
 
     def __init__(self, origin):
         self.origin = origin
-        self.prs = {}          # number -> {'branch', 'state', 'isDraft', 'base', 'cross', 'mergeable'}
+        self.prs = {}          # number -> {'branch', 'state', 'isDraft', 'base', 'base_name', 'cross', 'mergeable'}
         self.labels = {}       # number -> time the queue label was added
         self.checks = {}       # number -> list of check lists, one per poll (the last repeats)
         self.comments = []
@@ -78,7 +78,8 @@ class FakeGitHub:
         git(self.origin, 'update-ref', f'refs/pull/{number}/head', self.pull_ref.get(number, head))
         return {'number': number, 'url': f'https://github.com/acme/demo/pull/{number}', 'state': pr['state'],
                 'isDraft': pr['isDraft'], 'headRefOid': head, 'headRefName': pr['branch'],
-                'isCrossRepository': pr.get('cross', False), 'baseRefOid': pr['base'], 'baseRefName': 'main',
+                'isCrossRepository': pr.get('cross', False), 'baseRefOid': pr['base'],
+                'baseRefName': pr.get('base_name', 'main'),
                 'mergeable': pr.get('mergeable', 'MERGEABLE'),
                 'mergeStateStatus': pr.get('merge_state') or (
                     'DIRTY' if pr.get('mergeable') == 'CONFLICTING' else 'CLEAN'),
@@ -325,7 +326,8 @@ class TrainTests(TrainHarness):
                 out = self.train().run()
                 self.assertEqual(['DRAFTED'], [r['outcome'] for r in out['results']], out)
                 self.assertEqual(self.reviewed, self.gh.head(42), 'nothing was pushed')
-                self.assertEqual(['comment', 'label-', 'draft'], [w[0] for w in self.gh.writes[2:]])
+                # Draft first, then the label: a PR that was not converted keeps its place in the queue.
+                self.assertEqual(['comment', 'draft', 'label-'], [w[0] for w in self.gh.writes[2:]])
                 body = self.gh.comments[-1][1]
                 self.assertIn('Draft required', body)
                 self.assertIn('pr-ready', body)
@@ -460,6 +462,9 @@ class TrainTests(TrainHarness):
         out = self.train().run()
         self.assertEqual('ERROR', out['results'][0]['outcome'])
         self.assertIn('not confirmed MERGED', out['results'][0]['reason'])
+        # Only a verified MERGED forgets the PR: an unconfirmed merge stays enqueued, and counted.
+        self.assertEqual(1, merge_train.load_entry(REPO, 42)['errors'])
+        self.assertIn(42, self.gh.labels)
 
     def test_queue_order_is_the_label_time_and_a_stop_keeps_the_rest_queued(self):
         self.gh.prs[43] = {'branch': 'other', 'state': 'OPEN', 'isDraft': False, 'base': self.fork}
@@ -683,12 +688,15 @@ class BindingTests(DeliveryTests):
         self.queue()
         path = merge_train.entry_path(REPO, 42)
         entry = json.loads(path.read_text())
-        for field in ('enqueued_head', 'train_commits'):
+        for field in ('enqueued_head', 'train_commits', 'entry_id'):
             broken = {k: v for k, v in entry.items() if k != field}
             path.write_text(json.dumps(broken))
             self.assertIsNone(merge_train.load_entry(REPO, 42), field)
         path.write_text(json.dumps(dict(entry, train_commits=['not-a-sha'])))
         self.assertIsNone(merge_train.load_entry(REPO, 42))
+        for bad_id in ('', 'abc', 42, 'g' * 32):
+            path.write_text(json.dumps(dict(entry, entry_id=bad_id)))
+            self.assertIsNone(merge_train.load_entry(REPO, 42), bad_id)
 
 
 class FetchTests(DeliveryTests):
