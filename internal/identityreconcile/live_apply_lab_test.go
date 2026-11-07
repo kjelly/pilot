@@ -366,10 +366,15 @@ func (lv *labEnv) writesSince(offset int64) (map[string]int, error) {
 	if err != nil {
 		return nil, err
 	}
+	return countWriteLines(lines), nil
+}
+
+// countWriteLines counts the write commands of server log lines, by method. A batched write is
+// logged twice: once as "batch: <method>(...)" for the command and once as the outer
+// "batch(<method>(...))" session line; only the command line counts.
+func countWriteLines(lines []string) map[string]int {
 	out := map[string]int{}
 	for _, l := range lines {
-		// A batched write is logged twice: once as "batch: <method>(...)" for the command and once as
-		// the outer "batch(<method>(...))" session line. Count the command line only.
 		if strings.Contains(l, "batch(") {
 			continue
 		}
@@ -377,7 +382,7 @@ func (lv *labEnv) writesSince(offset int64) (map[string]int, error) {
 			out[m[1]]++
 		}
 	}
-	return out, nil
+	return out
 }
 
 // ---- external writes: the drift and the mid-run changes of the arms ----
