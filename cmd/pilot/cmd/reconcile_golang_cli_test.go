@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"github.com/kjelly/pilot/internal/freeiparpc"
@@ -60,12 +61,20 @@ func runReconcileCLI(t *testing.T, args ...string) (string, error) {
 
 // runReconcileCLIContext is runReconcileCLI under ctx: the context the command's signal context
 // is derived from, so cancelling it is the first Ctrl-C.
+//
+// ExecuteContext stores ctx on the ROOT command, and cobra hands the root's context to whatever
+// subcommand runs next while that subcommand's own is nil, for the rest of the process: a test that
+// cancelled ctx left every later test of the package that runs any command (the topology tests, in
+// CI's order) with "context canceled". resetReconcileFlags clears the reconcile command's, which is
+// not where the cancelled one lives; the root's is put back to what it was.
 func runReconcileCLIContext(t *testing.T, ctx context.Context, args ...string) (string, error) {
 	t.Helper()
 	before := dataDir
+	rootContext := rootCmd.Context()
 	resetReconcileFlags()
 	t.Cleanup(func() {
 		resetReconcileFlags()
+		rootCmd.SetContext(rootContext)
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(nil)
 		rootCmd.SetErr(nil)
@@ -858,5 +867,55 @@ func waitForPID(t *testing.T, path string, within time.Duration) int {
 		if time.Now().After(deadline) {
 			t.Fatalf("%s did not appear within %s", path, within)
 		}
+	}
+}
+
+// A run through runReconcileCLIContext under a cancelled context (the first Ctrl-C of
+// TestTerminalSinksSurviveCancel) leaves nothing cancelled behind on the root command: the next
+// test that runs any command through it gets a live context. CI found it the hard way: every
+// TestTopologyUpFresh* test, which runs later in the package, failed with "context canceled"
+// (AGENTS.md §5.6, the package-state hazard of cobra's root command). The probe is a command of
+// the real tree that reports the state of the context it was handed.
+func TestACancelledReconcileRunLeavesNoCancelledContextOnTheRootCommand(t *testing.T) {
+	var seen []error
+	t.Cleanup(func() {
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+	})
+	// A command that has not run yet gets the root's context; one that has keeps the one it was
+	// given, so each probe is a new command, as each test of the package meets a command that has
+	// not run before it.
+	probeRun := func() {
+		t.Helper()
+		probe := &cobra.Command{Use: "context-probe", Hidden: true, RunE: func(cmd *cobra.Command, _ []string) error {
+			seen = append(seen, cmd.Context().Err())
+			return nil
+		}}
+		rootCmd.AddCommand(probe)
+		defer rootCmd.RemoveCommand(probe)
+		var out bytes.Buffer
+		rootCmd.SetArgs([]string{"context-probe"})
+		rootCmd.SetOut(&out)
+		rootCmd.SetErr(&out)
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("the probe: %v\n%s", err, out.String())
+		}
+	}
+	probeRun()
+	if len(seen) != 1 || seen[0] != nil {
+		t.Fatalf("the probe before: context error %v", seen)
+	}
+
+	// The cancelled run is a subtest so that its cleanups have run when it returns.
+	t.Run("a run under a cancelled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _ = runReconcileCLIContext(t, ctx, "--engine", "no-such-engine", "--component", "freeipa-identity", "--preview-only")
+	})
+
+	probeRun()
+	if len(seen) != 2 || seen[1] != nil {
+		t.Fatalf("the probe after a run under a cancelled context saw %v: the root command kept the cancelled context for every later test", seen[1:])
 	}
 }
