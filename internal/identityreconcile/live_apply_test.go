@@ -475,6 +475,11 @@ func find(r rosterDoc, list, name string) map[string]any {
 }
 
 func setMembers(r rosterDoc, groupName string, users ...string) {
+	if users == nil {
+		// An empty list, not a nil one: a roster copied through JSON (mutate of a mutated roster) would carry a null,
+		// which the adapter refuses ("users must be a list, not null").
+		users = []string{}
+	}
 	g := find(r, "groups", groupName)
 	g["membership"].(map[string]any)["users"] = users
 }
