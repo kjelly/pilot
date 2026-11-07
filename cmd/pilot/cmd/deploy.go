@@ -3253,13 +3253,37 @@ func contractIDs(contracts []contract.Contract) []string {
 	return ids
 }
 
+// extraVarKeys are the variable names one -e argument sets, for the run's metadata: the key of
+// a `key=value` argument, or the top-level keys of a JSON object (`{"key": value}`: the form that
+// carries a value Ansible's `key=value` would cut at a blank, such as the path of a file the
+// mixed run's playbook writes). Never a value. Cutting a JSON object at its first `=` took a
+// piece of a path for the key, or lost the argument. An @file argument, or a `{` argument that
+// is not a JSON object, names nothing here, as before.
+func extraVarKeys(extra string) []string {
+	if trimmed := strings.TrimSpace(extra); strings.HasPrefix(trimmed, "{") {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(trimmed), &object); err != nil {
+			return nil
+		}
+		keys := make([]string, 0, len(object))
+		for key := range object {
+			if key != "" {
+				keys = append(keys, key)
+			}
+		}
+		return keys
+	}
+	key, _, found := strings.Cut(extra, "=")
+	if found && key != "" {
+		return []string{key}
+	}
+	return nil
+}
+
 func deploymentMetadata(root, playbook string, components, extraVars []string, vault vaultInput, tags string, deferred []delivery.DeferredHost) map[string]any {
 	keys := make([]string, 0, len(extraVars))
 	for _, extra := range extraVars {
-		key, _, found := strings.Cut(extra, "=")
-		if found && key != "" {
-			keys = append(keys, key)
-		}
+		keys = append(keys, extraVarKeys(extra)...)
 	}
 	sort.Strings(keys)
 	metadata := map[string]any{

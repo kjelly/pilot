@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -138,5 +139,50 @@ func TestDeploymentMetadata_RecordsBecomePasswordPrompted(t *testing.T) {
 	metadataOff := deploymentMetadata(root, "playbooks/apply/docker-apply.yml", []string{"docker"}, nil, vaultInput{}, "", nil)
 	if _, ok := metadataOff["become_password_prompted"]; ok {
 		t.Fatalf("metadata = %+v, want no become_password_prompted key when not requested", metadataOff)
+	}
+}
+
+// The mixed run's extra variables (spec §8.3): the engine variable as `key=value`, and the observation file as
+// a JSON object, whose path holds `=` and blanks. The metadata of the run records the names of the variables
+// and never a value. The JSON object used to be cut at its first `=`: a piece of the path became a key (or,
+// without an `=` in it, the argument was lost).
+func TestDeploymentMetadataRecordsTheKeysOfJSONObjectExtraVars(t *testing.T) {
+	root := t.TempDir()
+	const path = "/tmp/pilot dir=with equals/pilot-auth-cache 1/result.json"
+	object, err := json.Marshal(map[string]string{"pilot_identity_auth_cache_output": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		extra []string
+		want  []string
+	}{
+		{"the mixed run's variables", []string{"stage=sandbox", "pilot_identity_users_groups_engine=go", string(object)}, []string{"pilot_identity_auth_cache_output", "pilot_identity_users_groups_engine", "stage"}},
+		{"an object without an equals sign in it", []string{`{"a_key": "no equals here"}`}, []string{"a_key"}},
+		{"two keys, nested values are not keys", []string{`{"outer": {"inner": 1}, "list": [1, 2]}`}, []string{"list", "outer"}},
+		{"surrounding blanks", []string{"  " + string(object) + "  "}, []string{"pilot_identity_auth_cache_output"}},
+		{"a { argument that is not an object names nothing", []string{`{"broken": `, `{not json=1}`}, []string{}},
+		{"an array is not an object", []string{`[1, 2]`}, []string{}},
+		{"key=value and @file as before", []string{"target_group=freeipa-server", "@vars.yml", "=novalue", "empty="}, []string{"empty", "target_group"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := deploymentMetadata(root, "playbooks/apply/freeipa-identity-apply.yml", []string{"freeipa-identity"}, tc.extra, vaultInput{}, "", nil)
+			got, _ := metadata["extra_var_keys"].([]string)
+			if len(got) != len(tc.want) {
+				t.Fatalf("extra_var_keys = %q, want %q", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("extra_var_keys = %q, want %q", got, tc.want)
+				}
+			}
+			encoded, _ := json.Marshal(metadata)
+			for _, leak := range []string{"pilot dir", "with equals", "pilot-auth-cache", "result.json", "no equals here"} {
+				if strings.Contains(string(encoded), leak) {
+					t.Fatalf("the metadata holds a piece of a value (%q): %s", leak, encoded)
+				}
+			}
+		})
 	}
 }
