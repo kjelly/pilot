@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -424,19 +425,34 @@ func TestAuthCacheOutput(t *testing.T) {
 		t.Fatalf("path %q is not absolute: the playbook refuses a relative one", out.path)
 	}
 
-	// A run writes; the next one starts from an empty file, a new file.
+	// A run writes; the next one starts from an empty file, a new file: a process that kept the
+	// old one open (an ansible-playbook that outlived its run) writes into a file that is no
+	// longer the result's. Whether it is a new file is not read from inode numbers: a file
+	// system may hand a freed inode number to the next file at once (CI's does), and that says
+	// nothing about the invariant. What is asserted is what the invariant is for: the write
+	// through the old descriptor does not reach the path.
 	if err := os.WriteFile(out.path, []byte(`{"stale": true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.Stat(out.path)
+	old, err := os.OpenFile(out.path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = old.Close() }()
 	if err := out.reset(); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := out.read(); err != nil || len(got) != 0 {
 		t.Fatalf("after reset: %q, %v", got, err)
 	}
-	if after, _ := os.Stat(out.path); os.SameFile(before, after) {
-		t.Fatal("reset reused the file: a process that kept it open could still write into the next run's result")
+	if _, err := old.WriteString(`{"late": true}`); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := out.read(); err != nil || len(got) != 0 {
+		t.Fatalf("reset reused the file: a process that kept it open wrote into the next run's result: %q, %v", got, err)
+	}
+	if fi, err := old.Stat(); err != nil || fi.Sys().(*syscall.Stat_t).Nlink != 0 {
+		t.Fatalf("the old file is still linked after reset: %v, %v", fi, err)
 	}
 
 	// A symlink put in its place is replaced, not followed; a directory too is replaced.
@@ -526,17 +542,27 @@ func TestAuthCacheOutputRunResetsBeforeEveryRun(t *testing.T) {
 	if err := os.WriteFile(out.path, staleAndPlausible, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	stale, _ := os.Stat(out.path)
-	var sawEmpty, sawNewFile bool
-	_, err := out.Run(context.Background(), authCacheWant(), func(_ context.Context, vars string) (int, error) {
-		info, serr := os.Stat(out.path)
-		data, _ := os.ReadFile(out.path)
-		sawEmpty = serr == nil && len(data) == 0
-		sawNewFile = serr == nil && !os.SameFile(stale, info)
+	// The earlier run's process kept its descriptor open: after Run's reset it can still write, and
+	// what it writes must not be what this run reads (not decided from inode numbers, which a file
+	// system may reuse at once: see TestAuthCacheOutput).
+	stale, err := os.OpenFile(out.path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stale.Close() }()
+	var sawEmpty, lateWriteReached bool
+	_, err = out.Run(context.Background(), authCacheWant(), func(_ context.Context, vars string) (int, error) {
+		data, rerr := os.ReadFile(out.path)
+		sawEmpty = rerr == nil && len(data) == 0
+		if _, werr := stale.Write(staleAndPlausible); werr != nil {
+			return 0, werr
+		}
+		data, rerr = os.ReadFile(out.path)
+		lateWriteReached = rerr != nil || len(data) != 0
 		return 0, nil // ansible-playbook exits 0 and writes nothing (no host matched)
 	})
-	if !sawEmpty || !sawNewFile {
-		t.Fatalf("the playbook found the file empty: %v, a new file: %v; the earlier run's result was still there", sawEmpty, sawNewFile)
+	if !sawEmpty || lateWriteReached {
+		t.Fatalf("the playbook found the file empty: %v, and the earlier process's late write reached it: %v; the earlier run's result was still there", sawEmpty, lateWriteReached)
 	}
 	if !errors.Is(err, ErrAuthCacheResult) || !strings.Contains(err.Error(), "the result file is empty") {
 		t.Fatalf("err = %v: a run that wrote nothing must read as an entry failure, not as the earlier run's result", err)
