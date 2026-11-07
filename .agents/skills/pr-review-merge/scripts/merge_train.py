@@ -23,14 +23,27 @@ change, a disputed finding, a failing check the reviewer confirmed unrelated, a 
 not clean for another reason, a comparison GitHub cut) dequeue it: Ready, with the reasons in a
 comment, and the run goes on with the next PR. Transient states (CI that is pending, a base that
 keeps moving, mergeability GitHub has not computed, an API or infrastructure failure, a secret scan
-that could not run) leave it enqueued and stop this run. A PR that ends in ERROR on three runs in a
-row leaves the queue with a comment, so one persistent error cannot hold up the others.
+that could not run) leave it enqueued and stop this run.
+
+An infrastructure failure is never the PR's verdict (kjelly/pilot#310). Anything that is not one of the
+outcomes above (a GitHub or git failure, a git command that timed out, an unreadable state directory, a
+lock directory that cannot be used, an unexpected exception) stops the run with status INFRA and exit
+code 2, naming the PR and the error: nothing is counted against it, it is not dequeued, drafted or
+merged, and it stays enqueued with its saved review. `ERROR` is only what the PR itself caused (`Train._pr_error`): a merge or
+a Draft conversion that GitHub accepted but that the PR does not show after reading it again. An ERROR
+on three runs in a row leaves the queue with a comment, so one persistent error cannot hold up the
+others. A lock another actor holds is not a failure at all: WAITING, exit 0.
 
 Every write (a comment, the label, Draft, the merge, the push, and the saved entry) is made through
 `Train._guard`: under the repository mutation lock it reads the saved entry, the PR and the base tip
 again and writes only while they are what the decision was derived from. Otherwise it writes nothing
 and the run looks at the PR again (`RETRY`). `tests/test_merge_train_guard.py` checks this for every
-write in the class.
+write in the class. After the merge is read back as MERGED the saved entry is dropped and the label is
+removed, both inside that guard and neither able to change the outcome.
+
+Every git command has a time limit (`--fetch-timeout`, `--push-timeout`, `--git-timeout`) and runs in
+its own process group: on expiry the group gets SIGTERM (git removes its lock files), then SIGKILL.
+A stalled network call therefore holds neither the consumer lock nor the mutation lock for longer.
 
 The consumer never touches a working tree: it fetches into private refs (`refs/merge-train/*`),
 builds the merge commit with `git merge-tree`/`git commit-tree` and pushes the commit object. Use a
@@ -44,6 +57,7 @@ import fcntl
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -57,23 +71,44 @@ from typing import Any, Callable, Sequence
 # Running from the skill snapshot must not add __pycache__ there (see apply_decision.py).
 sys.dont_write_bytecode = True
 import gh_runtime  # noqa: E402
-from gh_runtime import GitHubError, Repo  # noqa: E402
+from gh_runtime import GitHubError, MutationLockHeld, Repo  # noqa: E402
 import review_gate  # noqa: E402
 
 QUEUE_LABEL = "merge-queue"
 SCHEMA = "pilot-merge-train/v1"
 SHA_LEN = 40
 MAX_ERRORS = 3
+# Time limits of one git command, in seconds (the CLI flags override them): a network read, a network
+# write (it runs while the repository mutation lock is held), and everything local. After the limit the
+# command's process group gets SIGTERM, and SIGKILL after GIT_KILL_GRACE more.
+FETCH_TIMEOUT = 300.0
+PUSH_TIMEOUT = 120.0
+GIT_TIMEOUT = 120.0
+GIT_KILL_GRACE = 30.0
+# A merge or a Draft conversion that was accepted but is not shown after reading the PR again (3 reads,
+# 2 s apart, under the lock) is the only thing that counts against a PR. Anything else is infrastructure.
+PR_ERROR_KINDS = ("merge-unconfirmed", "draft-unconfirmed")
+CONFIRM_TRIES = 3
+CONFIRM_INTERVAL = 2.0
 
 
 class TrainError(RuntimeError):
     """A git or state failure that stops this run without touching the PR."""
 
 
-class LockBusy(RuntimeError):
-    """The repository mutation lock could not be taken: another actor holds it, or its directory is
-    unusable (the message says which). Nothing was written; the PR stays enqueued and the failure is
-    not counted against it."""
+class GitTimeout(TrainError):
+    """A git command ran past its time limit and its process group was ended. An infrastructure failure:
+    nothing is counted against the PR."""
+
+
+class RunStopped(Exception):
+    """An infrastructure failure ended this run while it was on PR `number`: `kind` is the exception's
+    type name, `cause` the exception itself. Raised by `Train.process_one`, turned by `Train.run` into
+    the INFRA status; never counted against a PR."""
+
+    def __init__(self, number: int, cause: BaseException) -> None:
+        super().__init__(f"#{number}: {type(cause).__name__}: {cause}")
+        self.number, self.cause, self.kind = number, cause, type(cause).__name__
 
 
 class _Signal:
@@ -127,9 +162,13 @@ def save_entry(repo: Repo, number: int, record: dict[str, Any]) -> None:
 
 
 def load_entry(repo: Repo, number: int) -> dict[str, Any] | None:
+    """The saved entry, or None when there is none this train can trust: no file, text that is not JSON,
+    or a record that is not this schema's. A file that cannot be read for any other reason (permission,
+    I/O, a state directory that is not one) raises `OSError`: that is the host's failure, not "no
+    evidence", and a PR must never lose its saved review for it."""
     try:
         record = json.loads(entry_path(repo, number).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (FileNotFoundError, ValueError):
         return None
     if not isinstance(record, dict) or record.get("schema") != SCHEMA or record.get("pr") != number or \
             not isinstance(record.get("repo"), str) or record["repo"].lower() != repo.raw.lower() or \
@@ -180,15 +219,21 @@ def enqueue(repo: Repo, number: int, evidence: dict[str, Any], gate: dict[str, A
               "alignment": gate.get("alignment"), "evidence": evidence}
     save_entry(repo, number, record)
     client.edit_label(repo, number, QUEUE_LABEL, add=True)
+    out = {"outcome": "ENQUEUED", "pr": number, "reviewed_head": reviewed, "enqueued_head": gate["head_sha"]}
     at_enqueue = "" if reviewed == gate["head_sha"] else f"HEAD when enqueued: `{gate['head_sha']}`  \n"
-    client.post_comment(repo, number, (
-        "## Merge train: enqueued\n\n"
-        f"Reviewed HEAD: `{reviewed}`  \n{at_enqueue}Live base: `{gate.get('live_base_sha')}`\n\n"
-        + ("The train will merge the live base into this branch first (clean merge, no file changed on "
-           "both sides), wait for CI on that HEAD and merge.\n\n" if gate.get("needs_alignment") else
-           "The train will wait for CI on this HEAD and merge.\n\n")
-        + "Removing the `merge-queue` label takes the PR out of the queue.\n"))
-    return {"outcome": "ENQUEUED", "pr": number, "reviewed_head": reviewed, "enqueued_head": gate["head_sha"]}
+    try:
+        client.post_comment(repo, number, (
+            "## Merge train: enqueued\n\n"
+            f"Reviewed HEAD: `{reviewed}`  \n{at_enqueue}Live base: `{gate.get('live_base_sha')}`\n\n"
+            + ("The train will merge the live base into this branch first (clean merge, no file changed on "
+               "both sides), wait for CI on that HEAD and merge.\n\n" if gate.get("needs_alignment") else
+               "The train will wait for CI on this HEAD and merge.\n\n")
+            + "Removing the `merge-queue` label takes the PR out of the queue.\n"))
+    except GitHubError as exc:
+        # The PR is enqueued: the evidence is saved and the label is on. The comment only tells people,
+        # so its failure is reported to the caller (`comment_error`), not raised.
+        out["comment_error"] = str(exc)
+    return out
 
 
 @contextmanager
@@ -309,14 +354,73 @@ class Train:
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic
     mutation_lock: Callable[[Repo], Any] | None = None
+    fetch_timeout: float = FETCH_TIMEOUT
+    push_timeout: float = PUSH_TIMEOUT
+    git_timeout: float = GIT_TIMEOUT
+    git_kill_grace: float = GIT_KILL_GRACE
+    confirm_tries: int = CONFIRM_TRIES
+    confirm_interval: float = CONFIRM_INTERVAL
     log: list[str] = field(default_factory=list)
 
     # -- git (objects and private refs only; never the working tree) --------------------------
-    def git(self, *args: str, ok: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess[str]:
-        proc = subprocess.run(["git", "-C", str(self.worktree), *args], capture_output=True, text=True)
+    def git(self, *args: str, ok: tuple[int, ...] = (0,),
+            timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        """Run one git command in the consumer's clone, at most `timeout` seconds (`git_timeout` when not
+        given). A command that outlives it is ended with its whole process group (`GitTimeout`)."""
+        limit = self.git_timeout if timeout is None else timeout
+        proc = self._run_git(args, limit)
         if proc.returncode not in ok:
             raise TrainError(f"git {' '.join(args[:2])} failed ({proc.returncode}): {proc.stderr.strip()[:300]}")
         return proc
+
+    def _run_git(self, args: tuple[str, ...], limit: float) -> subprocess.CompletedProcess[str]:
+        # Its own session: no terminal to prompt on, and one process group to signal, so that what git
+        # started (ssh, the remote helper, a hook) ends with it. GIT_TERMINAL_PROMPT=0 makes a credential
+        # prompt fail instead of waiting for a person who is not there.
+        child = subprocess.Popen(["git", "-C", str(self.worktree), *args], stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, start_new_session=True,
+                                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        try:
+            out, err = child.communicate(timeout=limit)
+        except subprocess.TimeoutExpired:
+            ended = self._end_group(child)
+            raise GitTimeout(f"git {args[0]} did not finish within {limit:g} s and was ended ({ended})") from None
+        except BaseException:
+            self._end_group(child)  # an interrupt must not leave git running in a session of its own
+            raise
+        return subprocess.CompletedProcess(child.args, child.returncode, out, err)
+
+    def _end_group(self, child: "subprocess.Popen[str]") -> str:
+        """End `child` and everything it started: SIGTERM to its process group first (git removes its own
+        lock and temporary files on it), SIGKILL after `git_kill_grace` seconds. Returns how it ended.
+
+        Only our own group is signalled (it exists because `_run_git` made the child a session leader),
+        and only while the leader has not been reaped: a reaped leader's id may be anyone's by now."""
+        def signal_group(number: int) -> None:
+            if child.returncode is None:
+                try:
+                    os.killpg(child.pid, number)
+                except ProcessLookupError:
+                    pass
+        signal_group(signal.SIGTERM)
+        try:
+            child.communicate(timeout=self.git_kill_grace)
+            return "SIGTERM"
+        except subprocess.TimeoutExpired:
+            pass
+        signal_group(signal.SIGKILL)
+        try:
+            child.communicate(timeout=self.git_kill_grace)
+        except subprocess.TimeoutExpired:
+            # Something left the group and still holds the pipes: give up on its output.
+            for pipe in (child.stdout, child.stderr):
+                if pipe is not None:
+                    pipe.close()
+            try:
+                child.wait(timeout=self.git_kill_grace)
+            except subprocess.TimeoutExpired:
+                pass
+        return "SIGTERM, then SIGKILL"
 
     def fetch(self, number: int, base: str) -> tuple[str, str]:
         """Bring the PR head and the base branch into private refs; (fetched PR head, fetched base tip).
@@ -324,7 +428,7 @@ class Train:
         commits (the secret scan needs them) nor the live base (the merge needs it)."""
         self.git("fetch", "--no-tags", "--quiet", "origin",
                  f"+refs/pull/{number}/head:refs/merge-train/pr/{number}",
-                 f"+refs/heads/{base}:refs/merge-train/base/{base}")
+                 f"+refs/heads/{base}:refs/merge-train/base/{base}", timeout=self.fetch_timeout)
         return (self.git("rev-parse", f"refs/merge-train/pr/{number}").stdout.strip(),
                 self.git("rev-parse", f"refs/merge-train/base/{base}").stdout.strip())
 
@@ -340,8 +444,10 @@ class Train:
         saved entry): take the repository mutation lock, then read the saved entry, the PR and the base
         tip again. The caller writes only while the yielded `Held` is true, that is, while all of
         `observed` still holds; otherwise it writes nothing and returns RETRY, and the run looks at the PR
-        again from the top. A lock that cannot be taken raises `LockBusy` (the PR stays enqueued, nothing
-        is counted against it).
+        again from the top. A lock another actor holds raises `MutationLockHeld` (the run waits: the PR
+        stays enqueued, nothing is counted against it); a lock that cannot be used raises
+        `MutationLockUnavailable` (an infrastructure failure). Only taking the lock is translated: what the
+        body raises reaches the caller as it is.
 
         GitHub has no compare-and-swap for a comment, a label or Draft: a change after this read and before
         the write cannot be seen. The merge (`--match-head-commit`) and the push (never forced) are the two
@@ -349,10 +455,7 @@ class Train:
         holds the guard calls `held.recheck()`, never another guarded method."""
         held = Held(self, number, observed)
         with ExitStack() as stack:
-            try:
-                stack.enter_context(self._locked())
-            except GitHubError as exc:
-                raise LockBusy(str(exc)) from exc
+            stack.enter_context(self._locked())
             if not held.recheck():
                 self.log.append(f"#{number}: {action} refused, {CHANGED[held.reason]}; nothing was written")
             yield held
@@ -371,38 +474,71 @@ class Train:
         processes that PR alone, and only when it is first in the queue; otherwise NOT_AT_HEAD and
         the timer's consumer takes it in turn. The run stops at a WAITING or ERROR (transient: the
         PRs behind keep their place); a PR that leaves the queue (MERGED, DRAFTED, DEQUEUED, SKIP)
-        does not stop it."""
-        order = self.order()
+        does not stop it. An infrastructure failure stops it too, with status INFRA: see `_stopped`."""
+        results: list[dict[str, Any]] = []
+        try:
+            order = self.order()
+        except Exception as exc:  # GitHub, `gh` or the network: nothing was done yet
+            return self._stopped(None, exc, results)
         if only is not None:
             if not order or order[0] != only:
                 return {"status": "NOT_AT_HEAD", "pr": only, "queue": order, "results": []}
             order, once = [only], True
-        results: list[dict[str, Any]] = []
         for number in order:
-            result = self.process_one(number)
+            try:
+                result = self.process_one(number)
+            except RunStopped as stop:
+                return self._stopped(stop.number, stop.cause, results)
             results.append(result)
             if result["outcome"] in ("WAITING", "ERROR") or once:
                 break
         return {"status": "DONE", "results": results}
 
+    def _stopped(self, number: int | None, cause: BaseException, results: list[dict[str, Any]]) -> dict[str, Any]:
+        """The result of a run that an infrastructure failure ended: status INFRA (exit code 2), the PR it
+        was on, the error and what the run had done before it. Nothing was counted against the PR, it was
+        not dequeued, drafted or merged by the failure, and it stays enqueued with its saved review."""
+        where = "before the first PR" if number is None else f"on #{number}"
+        self.log.append(f"infrastructure failure {where}: {type(cause).__name__}: {cause}")
+        return {"status": "INFRA", "pr": number, "error_kind": type(cause).__name__, "error": str(cause)[:1500],
+                "message": f"The run stopped {where} because of an infrastructure failure. It was not counted "
+                           "against the PR, which stays enqueued with its saved review.",
+                "results": results}
+
     # -- one PR -----------------------------------------------------------------------------
     def process_one(self, number: int) -> dict[str, Any]:
+        """The result for one PR. A lock another actor holds is WAITING. Any other exception is an
+        infrastructure failure and raises `RunStopped`: it is never counted against the PR, because
+        nothing about the PR caused it (a result that counts is made by `_pr_error` and by nothing else;
+        `tests/test_merge_train_infra.py` lints this)."""
         attempt = _Attempt()
         try:
             result = self._process(number, attempt)
-        except LockBusy as exc:
+        except MutationLockHeld as exc:
             # Another actor holds the lock: the train wrote nothing, so there is nothing to count.
             self.log.append(f"#{number}: the repository mutation lock is not available: {exc}")
             return self.waiting(number, f"the repository mutation lock is not available ({exc}); nothing was "
                                 "written and it stays enqueued")
-        except (GitHubError, TrainError, ValueError, KeyError) as exc:
-            result = {"pr": number, "outcome": "ERROR", "reason": str(exc)}
-        return self._track_errors(number, result, attempt)
+        except Exception as exc:
+            raise RunStopped(number, exc) from exc
+        try:
+            return self._track_errors(number, result, attempt)
+        except Exception as exc:
+            raise RunStopped(number, exc) from exc
+
+    def _pr_error(self, number: int, kind: str, reason: str) -> dict[str, Any]:
+        """The only way to make an ERROR result, and so the only thing `_track_errors` counts: something
+        the PR caused. `kind` is one of PR_ERROR_KINDS."""
+        if kind not in PR_ERROR_KINDS:
+            raise TrainError(f"{kind!r} is not a registered PR-caused error")
+        return {"pr": number, "outcome": "ERROR", "kind": kind, "reason": reason}
 
     def _track_errors(self, number: int, result: dict[str, Any], attempt: _Attempt) -> dict[str, Any]:
         """Count consecutive ERROR runs in the entry; the `max_errors`-th takes the PR out of the queue,
         so an error nobody fixes cannot stop the PRs behind it for ever. The count belongs to the entry
         the run acted on: an entry enqueued since is not touched."""
+        if result["outcome"] == "ERROR" and result.get("kind") not in PR_ERROR_KINDS:
+            raise TrainError(f"an ERROR result of no registered kind: {result.get('reason')}")
         saved = load_entry(self.repo, number)
         if saved is None or saved["entry_id"] != attempt.entry_id:
             return result
@@ -419,7 +555,7 @@ class Train:
                     if failed:
                         held.entry["last_error"] = reason[:500]
                     save_entry(self.repo, number, held.entry)
-        except LockBusy:
+        except MutationLockHeld:
             return result  # not counted: the lock was busy, not the PR's fault
         if not held or not failed or errors < self.max_errors:
             return result
@@ -428,7 +564,7 @@ class Train:
                                 f"so it left the queue and the PRs behind it can merge. Last error: "
                                 f"{reason[:500]}. Fix the cause and run `pr-review-merge` again.",
                                 Observation(attempt.entry_id))
-        except (GitHubError, ValueError, KeyError, LockBusy):
+        except (GitHubError, MutationLockHeld):
             return result  # the comment or label write failed too: it stays enqueued and counted
         return result if left is RETRY else left
 
@@ -600,6 +736,7 @@ class Train:
                 return self.to_draft(number, entry, view, align, [
                     f"The merge of live {base} SHA {live} into {head} changes {path} differently from "
                     f"{base}; the merge train only integrates pure base imports. Use pr-ready."])
+        failed_push: TrainError | None = None
         with self._guard(number, Observation(entry["entry_id"], head=head, base_name=base, live_base=live),
                          "push") as held:
             if held:
@@ -607,26 +744,47 @@ class Train:
                 # finds a HEAD the train built; a commit that never lands is harmless in the list. It goes
                 # on the entry as the lock found it, never on a copy read before.
                 recorded = held.entry
-                recorded["train_commits"] = [*recorded["train_commits"], commit]
+                if commit not in recorded["train_commits"]:
+                    recorded["train_commits"] = [*recorded["train_commits"], commit]
                 save_entry(self.repo, number, recorded)
                 try:
                     # Never forced: a PR branch that moved since the re-read above rejects this push.
-                    self.git("push", "--quiet", "origin", f"{commit}:refs/heads/{branch}")
-                except TrainError:
-                    recorded["train_commits"] = [c for c in recorded["train_commits"] if c != commit]
-                    save_entry(self.repo, number, recorded)
-                    if self.client.pr_view(self.repo, number).get("headRefOid") != head:
-                        self.log.append(f"#{number}: the PR branch moved during the push; nothing was overwritten")
-                        return None
-                    raise
+                    self.git("push", "--quiet", "origin", f"{commit}:refs/heads/{branch}",
+                             timeout=self.push_timeout)
+                except TrainError as exc:
+                    # Rejected, failed or timed out: the push may still have landed. The commit stays
+                    # recorded, and the branch itself says which it was, below, outside the lock.
+                    failed_push = exc
         if not held:
             return RETRY
+        if failed_push is not None:
+            tip = self._remote_tip(branch, failed_push)
+            if tip == commit:
+                self.log.append(f"#{number}: git push reported a failure ({failed_push}), but {branch} is at "
+                                f"{commit[:12]}: the push landed")
+            elif tip == head:
+                raise failed_push  # not pushed: the host or the remote failed, never the PR
+            else:
+                self.log.append(f"#{number}: the PR branch moved during the push; nothing was overwritten")
+                return None
         self.log.append(f"#{number}: pushed {commit[:12]} (merge of {base} {live[:12]})")
         for _ in range(int(max(1, 120 / max(self.poll, 1)))):
             if self.client.pr_view(self.repo, number).get("headRefOid") == commit:
                 return None
             self.sleep(min(self.poll, 5))
         return self.waiting(number, f"GitHub has not shown the pushed merge commit {commit[:12]} yet")
+
+    def _remote_tip(self, branch: str, failed_push: TrainError) -> str | None:
+        """The commit `branch` points to on `origin` right now (None: no such branch), read from the remote
+        itself and not from GitHub's API, after a push that did not report success. When the remote cannot
+        be read either, the push error is the one to report."""
+        try:
+            listing = self.git("ls-remote", "origin", f"refs/heads/{branch}", timeout=self.fetch_timeout)
+        except TrainError as exc:
+            self.log.append(f"the branch {branch} could not be read after the failed push: {exc}")
+            raise failed_push from exc
+        words = listing.stdout.split()
+        return words[0] if words else None
 
     def wait_ci(self, number: int, head: str, base: str, live: str) -> str:
         start = self.monotonic()
@@ -706,17 +864,78 @@ class Train:
         return result
 
     # -- actions ----------------------------------------------------------------------------
+    def _confirmed(self, number: int, shows: Callable[[dict[str, Any]], bool]) -> tuple[bool, dict[str, Any]]:
+        """Read the PR until `shows(view)`: at most `confirm_tries` reads, `confirm_interval` seconds apart
+        (GitHub's reads lag its writes). Returns (shown, the last view). A read that fails is read again;
+        when the last read failed the failure is raised (it is infrastructure: nothing was learnt about the
+        PR), and only a last read that succeeded and does not show the write means "not shown"."""
+        view: dict[str, Any] = {}
+        error: GitHubError | None = None
+        for attempt in range(self.confirm_tries):
+            if attempt:
+                self.sleep(self.confirm_interval)
+            try:
+                view, error = self.client.pr_view(self.repo, number), None
+            except GitHubError as exc:
+                error = exc
+                continue
+            if shows(view):
+                return True, view
+        if error is not None:
+            raise error
+        return False, view
+
     def merge(self, number: int, entry: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any] | _Signal:
-        """Merge exactly the HEAD the gate approved, only while it is still bound by the saved entry."""
+        """Merge exactly the HEAD the gate approved, only while it is still bound by the saved entry.
+
+        The merge is confirmed by reading the PR as MERGED (read again while GitHub lags). Only then the
+        saved entry is dropped and the label removed, still under the guard: that housekeeping never
+        changes the outcome of a merge that happened. When `gh pr merge` fails, the PR says what happened
+        (a client that timed out may have merged): MERGED means it did; a PR that changed, or one whose
+        merge state is no longer CLEAN, is looked at again (the gate decides what that means); a failure
+        that left the PR as it was is infrastructure, raised as it is."""
         observed = Observation(entry["entry_id"], head=gate["head_sha"], base_name=gate["base_name"],
                                live_base=gate["live_base_sha"])
-        merged = False
+        merged, refused = False, None
+        warnings: list[str] = []
         with self._guard(number, observed, "merge") as held:
             if held:
-                self.client.merge_pr(self.repo, number, gate["head_sha"])
-                merged = self.client.pr_view(self.repo, number).get("state") == "MERGED"
+                try:
+                    self.client.merge_pr(self.repo, number, gate["head_sha"])
+                except GitHubError:
+                    held.recheck()
+                    if held.view.get("state") == "MERGED" and held.view.get("headRefOid") == gate["head_sha"]:
+                        merged = True  # it landed; the client's report did not
+                    elif not held:
+                        refused = RETRY
+                        self.log.append(f"#{number}: the merge failed and the PR changed since "
+                                        f"({CHANGED[held.reason]}); looking at it again")
+                    elif held.view.get("mergeStateStatus") != "CLEAN":
+                        refused = RETRY
+                        self.log.append(f"#{number}: the merge failed and the merge state is "
+                                        f"{held.view.get('mergeStateStatus')!r}; the gate decides next")
+                    else:
+                        raise
+                else:
+                    merged, _ = self._confirmed(number, lambda view: view.get("state") == "MERGED")
                 if merged:
-                    drop_entry(self.repo, number)  # only once MERGED is verified: an unconfirmed merge stays enqueued
+                    # Verified MERGED: an unconfirmed merge stays enqueued. What is left is housekeeping.
+                    self.log.append(f"#{number}: merged {gate['head_sha'][:12]}")
+                    try:
+                        drop_entry(self.repo, number)
+                    except OSError as exc:
+                        warnings.append(f"the saved entry could not be removed: {exc}")
+                    try:
+                        self.client.edit_label(self.repo, number, QUEUE_LABEL, add=False)
+                    except GitHubError as exc:
+                        warnings.append(f"the `{QUEUE_LABEL}` label could not be removed: {exc}")
+        for warning in warnings:
+            self.log.append(f"#{number}: merged, but {warning}")
+        if merged:
+            return {"pr": number, "outcome": "MERGED", "head_sha": gate["head_sha"],
+                    **({"warnings": warnings} if warnings else {})}
+        if refused is not None:
+            return refused
         if not held:
             if held.reason == "entry-replaced":
                 return RETRY
@@ -726,10 +945,8 @@ class Train:
                 return self._closed(number, entry, held.view.get("state"))
             return self.waiting(number, "PR state/HEAD/base changed immediately before the merge "
                                 f"({CHANGED[held.reason]})")
-        if not merged:
-            return {"pr": number, "outcome": "ERROR",
-                    "reason": "Merge command finished but the PR is not confirmed MERGED"}
-        return {"pr": number, "outcome": "MERGED", "head_sha": gate["head_sha"]}
+        return self._pr_error(number, "merge-unconfirmed",
+                              "Merge command finished but the PR is not confirmed MERGED")
 
     def to_draft(self, number: int, entry: dict[str, Any], view: dict[str, Any], align: dict[str, Any],
                  reasons: list[str], *, gate: dict[str, Any] | None = None) -> dict[str, Any] | _Signal:
@@ -751,8 +968,7 @@ class Train:
                 self.client.post_comment(self.repo, number, comment_text(result))
                 if held.recheck():
                     self.client.mark_draft(self.repo, number)
-                    after = self.client.pr_view(self.repo, number)
-                    drafted = after.get("isDraft") is True
+                    drafted, after = self._confirmed(number, lambda view: view.get("isDraft") is True)
                     if after.get("headRefOid") != head:
                         self.log.append(f"#{number}: the PR HEAD moved to {str(after.get('headRefOid'))[:12]} while "
                                         "it was converted to Draft (GitHub cannot refuse that); the Draft stands")
@@ -771,7 +987,7 @@ class Train:
         if not held:
             return RETRY
         if not drafted:
-            return {"pr": number, "outcome": "ERROR", "reason": "Draft conversion was not confirmed"}
+            return self._pr_error(number, "draft-unconfirmed", "Draft conversion was not confirmed")
         return {"pr": number, "outcome": "DRAFTED", "reasons": reasons}
 
     def dequeue(self, number: int, reason: str, observed: Observation, *,
@@ -806,10 +1022,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     process.add_argument("--max-align", type=int, default=3)
     process.add_argument("--ci-timeout", type=float, default=5400.0)
     process.add_argument("--poll", type=float, default=30.0)
+    process.add_argument("--fetch-timeout", type=float, default=FETCH_TIMEOUT, metavar="SECONDS",
+                         help="Longest a `git fetch` (or `git ls-remote`) may take before it is ended")
+    process.add_argument("--push-timeout", type=float, default=PUSH_TIMEOUT, metavar="SECONDS",
+                         help="Longest a `git push` may take before it is ended; it runs under the mutation lock")
+    process.add_argument("--git-timeout", type=float, default=GIT_TIMEOUT, metavar="SECONDS",
+                         help="Longest any other (local) git command may take")
     status = sub.add_parser("status", help="Show the queue order")
     status.add_argument("--repo", required=True)
     args = parser.parse_args(argv)
     repo = Repo.parse(args.repo)
+    train: Train | None = None
     try:
         if args.command == "status":
             train = Train(repo, Path("."))
@@ -822,13 +1045,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(json.dumps({"status": "BUSY", "message": "another merge-train consumer is running"}))
                 return 0
             train = Train(repo, args.worktree, secret_files=args.secret_file, max_align=args.max_align,
-                          ci_timeout=args.ci_timeout, poll=args.poll)
+                          ci_timeout=args.ci_timeout, poll=args.poll, fetch_timeout=args.fetch_timeout,
+                          push_timeout=args.push_timeout, git_timeout=args.git_timeout)
             out = train.run(once=args.once, only=args.pr)
             out["log"] = train.log
             print(json.dumps(out, indent=2, ensure_ascii=False))
+            if out["status"] == "INFRA":
+                return 2
             return 0 if all(r["outcome"] != "ERROR" for r in out["results"]) else 1
-    except (GitHubError, TrainError, ValueError, OSError) as exc:
-        print(json.dumps({"status": "ERROR", "error": str(exc)}, ensure_ascii=False))
+    except Exception as exc:
+        # Exit code 1 means "a PR ended in ERROR". An exception nobody classified (a lock directory that
+        # cannot be used, a state directory, a KeyError from a response that changed shape) is never that:
+        # it stops the run with the same status as every other infrastructure failure.
+        print(json.dumps({"status": "INFRA", "pr": None, "error_kind": type(exc).__name__, "error": str(exc),
+                          "log": train.log if train is not None else []}, ensure_ascii=False))
         return 2
 
 

@@ -56,14 +56,25 @@ class FakeGitHub:
         self.on_checks = None  # callback(number, poll) to move things between polls
         self.polls = {}
         self.merge_confirms = True
+        self.merge_unconfirmed = set()   # PR numbers whose merge GitHub accepts but never shows (merge_confirms, per PR)
         self.failing = {}      # method name -> exception raised by it (an outage of that one call)
         self.fail_from = {}    # method name -> first call (1-based) that fails; absent: every call
         self.counts = {}
+        self.calls = []        # every call that went through outage(), in order (a census of one run)
+        # GitHub's reads lag its writes: after the write named here, the next N reads of what it changed
+        # still show the old state. 'label_view' (pr_view's labels after a label change), 'listing' (the
+        # issues listing after a label is added), 'merged' (pr_view's state after a merge), 'draft'
+        # (pr_view's isDraft after mark_draft). A huge N is a read that never catches up.
+        self.lag = {}
+        self.stale = {}        # lag kind -> reads still stale
+        self.label_before = {}  # number -> whether the label was on before the last label change
+        self.listing_stale = {}  # number -> issues-listing reads that still leave the PR out
         self.pull_ref = {}     # number -> commit refs/pull/<n>/head shows (GitHub lags the branch)
         self.manifest = None   # text of .github/pr-evidence.json at every revision, or None (absent)
         self.rules = []
 
     def outage(self, name):
+        self.calls.append(name)
         self.counts[name] = self.counts.get(name, 0) + 1
         if name in self.failing and self.counts[name] >= self.fail_from.get(name, 1):
             raise self.failing[name]
@@ -72,21 +83,38 @@ class FakeGitHub:
     def head(self, number):
         return git(self.origin, 'rev-parse', 'refs/heads/' + self.prs[number]['branch'])
 
+    def lagging(self, kind):
+        """True (and one stale read used up) while a read of `kind` still shows the state before its write."""
+        if self.stale.get(kind, 0) > 0:
+            self.stale[kind] -= 1
+            return True
+        return False
+
     def pr_view(self, repo, number):
+        self.outage('pr_view')
         pr = self.prs[number]
         head = self.head(number)
         git(self.origin, 'update-ref', f'refs/pull/{number}/head', self.pull_ref.get(number, head))
-        return {'number': number, 'url': f'https://github.com/acme/demo/pull/{number}', 'state': pr['state'],
-                'isDraft': pr['isDraft'], 'headRefOid': head, 'headRefName': pr['branch'],
+        labelled = number in self.labels
+        if self.lagging('label_view'):
+            labelled = self.label_before.get(number, labelled)
+        state, draft = pr['state'], pr['isDraft']
+        if state == 'MERGED' and self.lagging('merged'):
+            state = 'OPEN'
+        if draft and self.lagging('draft'):
+            draft = False
+        return {'number': number, 'url': f'https://github.com/acme/demo/pull/{number}', 'state': state,
+                'isDraft': draft, 'headRefOid': head, 'headRefName': pr['branch'],
                 'isCrossRepository': pr.get('cross', False), 'baseRefOid': pr['base'],
                 'baseRefName': pr.get('base_name', 'main'),
                 'mergeable': pr.get('mergeable', 'MERGEABLE'),
                 'mergeStateStatus': pr.get('merge_state') or (
                     'DIRTY' if pr.get('mergeable') == 'CONFLICTING' else 'CLEAN'),
                 'reviewDecision': pr.get('review', ''), 'autoMergeRequest': None,
-                'labels': [{'name': 'merge-queue'}] if number in self.labels else []}
+                'labels': [{'name': 'merge-queue'}] if labelled else []}
 
     def branch_head(self, repo, name):
+        self.outage('branch_head')
         return git(self.origin, 'rev-parse', 'refs/heads/' + name)
 
     def is_ancestor(self, repo, base, head):
@@ -94,6 +122,7 @@ class FakeGitHub:
         return subprocess.run(['git', '-C', str(self.origin), 'merge-base', '--is-ancestor', base, head]).returncode == 0
 
     def merge_base(self, repo, a, b):
+        self.outage('merge_base')
         return git(self.origin, 'merge-base', a, b)
 
     def compare(self, repo, base, head):
@@ -119,9 +148,11 @@ class FakeGitHub:
         return None  # no .github/pr-evidence.json (the default): no target record is required
 
     def commit_tree(self, repo, revision):
+        self.outage('commit_tree')
         return git(self.origin, 'rev-parse', revision + '^{tree}')
 
     def pr_checks(self, repo, number):
+        self.outage('pr_checks')
         poll = self.polls.get(number, 0)
         self.polls[number] = poll + 1
         if self.on_checks:
@@ -134,37 +165,57 @@ class FakeGitHub:
         return 0
 
     def branch_rules(self, repo, branch):
+        self.outage('branch_rules')
         return self.rules
 
     # queue
     def labeled_open_prs(self, repo, label):
-        return [n for n in self.labels if self.prs[n]['state'] == 'OPEN']
+        self.outage('labeled_open_prs')
+        listed = []
+        for n in self.labels:
+            if self.prs[n]['state'] != 'OPEN':
+                continue
+            if self.listing_stale.get(n, 0) > 0:
+                self.listing_stale[n] -= 1
+                continue
+            listed.append(n)
+        return listed
 
     def label_added_at(self, repo, number, label):
+        self.outage('label_added_at')
         return self.labels.get(number)
 
     # writes
     def edit_label(self, repo, number, label, *, add):
+        self.outage('edit_label')
         self.writes.append(('label+' if add else 'label-', number))
+        self.label_before[number] = number in self.labels
+        self.stale['label_view'] = self.lag.get('label_view', 0)
         if add:
             self.labels[number] = '2026-11-06T00:00:00Z'
+            self.listing_stale[number] = self.lag.get('listing', 0)
         else:
             self.labels.pop(number, None)
 
     def post_comment(self, repo, number, body):
+        self.outage('post_comment')
         self.writes.append(('comment', number))
         self.comments.append((number, body))
 
     def mark_draft(self, repo, number):
+        self.outage('mark_draft')
         self.writes.append(('draft', number))
         self.prs[number]['isDraft'] = True
+        self.stale['draft'] = self.lag.get('draft', 0)
 
     def merge_pr(self, repo, number, head):
+        self.outage('merge_pr')
         self.writes.append(('merge', number, head))
         if self.head(number) != head:
             raise GitHubError('Head branch was modified')
-        if self.merge_confirms:
+        if self.merge_confirms and number not in self.merge_unconfirmed:
             self.prs[number]['state'] = 'MERGED'
+            self.stale['merged'] = self.lag.get('merged', 0)
 
 
 class TrainHarness(unittest.TestCase):
@@ -660,11 +711,16 @@ class BindingTests(DeliveryTests):
             return real(*args, **kw)
         train.git = refuse_push
         out = train.run()
-        self.assertEqual('ERROR', out['results'][0]['outcome'], out)
+        # A push that failed and did not land is the host's or the remote's failure, never the PR's: the
+        # run stops (INFRA), nothing is counted, and the commit stays recorded (it may have landed; a
+        # commit that never does is harmless in the list).
+        self.assertEqual(('INFRA', 'TrainError'), (out['status'], out['error_kind']), out)
+        self.assertEqual(42, out['pr'])
         entry = merge_train.load_entry(REPO, 42)
-        self.assertEqual([], entry['train_commits'], 'a commit that never landed is not kept')
-        self.assertEqual(1, entry['errors'])
+        self.assertEqual(1, len(entry['train_commits']))
+        self.assertEqual(0, entry['errors'])
         self.assertEqual(self.reviewed, self.gh.head(42))
+        self.assertIn(42, self.gh.labels)
 
     def test_enqueue_records_both_heads_and_the_comment_names_the_reviewed_one(self):
         later = self.push_to_pr()
@@ -791,13 +847,18 @@ class LabelTests(DeliveryTests):
         self.assertWithdrawn(out)
         self.assertEqual(([], self.reviewed), (pushes, self.gh.head(42)))
 
-    def test_a_view_without_labels_is_an_error_not_a_withdrawal(self):
+    def test_a_view_without_labels_is_a_failure_not_a_withdrawal(self):
         self.queue()
         real = self.gh.pr_view
         self.gh.pr_view = lambda repo, number: {k: v for k, v in real(repo, number).items() if k != 'labels'}
         out = self.train().run()
-        self.assertEqual('ERROR', out['results'][0]['outcome'], out)
-        self.assertIsNotNone(merge_train.load_entry(REPO, 42))
+        # Not a withdrawal (that would drop the entry), and not the PR's fault either: the run stops.
+        self.assertEqual(('INFRA', 'GitHubError', []), (out['status'], out['error_kind'], out['results']), out)
+        self.assertIn("did not report the PR's labels", out['error'])
+        saved = merge_train.load_entry(REPO, 42)
+        self.assertEqual(0, saved['errors'])
+        self.assertIn(42, self.gh.labels)
+        self.assertEqual([('label+', 42), ('comment', 42)], self.gh.writes)
 
 
 class LockedRecheckTests(DeliveryTests):
@@ -1117,13 +1178,7 @@ class HeadOfLineTests(DeliveryTests):
 
     def test_errors_are_counted_and_the_third_in_a_row_leaves_the_queue(self):
         self.arrange_two()
-        refused = GitHubError('gh pr merge 42 failed (1): merge refused')
-
-        def refuse(repo, number, head):
-            if number == 42:
-                raise refused
-            self.gh.__class__.merge_pr(self.gh, repo, number, head)
-        self.gh.merge_pr = refuse
+        self.gh.merge_unconfirmed.add(42)       # GitHub accepts the merge, and the PR never shows it
         for attempt in (1, 2):
             out = self.train().run()
             self.assertEqual([(42, 'ERROR')], [(r['pr'], r['outcome']) for r in out['results']], out)
@@ -1131,13 +1186,13 @@ class HeadOfLineTests(DeliveryTests):
         out = self.train().run()
         self.assertEqual([(42, 'DEQUEUED'), (43, 'MERGED')], [(r['pr'], r['outcome']) for r in out['results']], out)
         self.assertIn('3 runs in a row', out['results'][0]['reason'])
-        self.assertIn('merge refused', [c for c in self.gh.comments if c[0] == 42][-1][1])
+        self.assertIn('not confirmed MERGED', [c for c in self.gh.comments if c[0] == 42][-1][1])
         self.assertNotIn(42, self.gh.labels)
         self.assertFalse(self.gh.prs[42]['isDraft'])
 
     def test_a_run_that_is_not_an_error_resets_the_count(self):
         self.arrange_two()
-        self.gh.merge_pr = lambda repo, number, head: (_ for _ in ()).throw(GitHubError('merge refused'))
+        self.gh.merge_unconfirmed.add(42)
         self.assertEqual('ERROR', self.train().run()['results'][0]['outcome'])
         self.assertEqual('ERROR', self.train().run()['results'][0]['outcome'])
         self.assertEqual(2, merge_train.load_entry(REPO, 42)['errors'])
@@ -1152,7 +1207,7 @@ class HeadOfLineTests(DeliveryTests):
 
     def test_a_failing_dequeue_does_not_hide_the_error(self):
         self.queue()
-        self.gh.merge_pr = lambda repo, number, head: (_ for _ in ()).throw(GitHubError('merge refused'))
+        self.gh.merge_unconfirmed.add(42)
         entry = merge_train.load_entry(REPO, 42)
         merge_train.save_entry(REPO, 42, dict(entry, errors=2))
         self.gh.post_comment = lambda repo, number, body: (_ for _ in ()).throw(GitHubError('comment denied'))
