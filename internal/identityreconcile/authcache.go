@@ -35,6 +35,16 @@ const AuthCacheSchema = "pilot.identity-auth-cache/v1"
 // and neither defines it, so a run that was not handed one writes nothing.
 const AuthCacheOutputVar = "pilot_identity_auth_cache_output"
 
+// UsersGroupsEngineVar is the Ansible variable with which a mixed run (`pilot reconcile --engine golang
+// --scope full`) tells the identity playbook that the Go engine owns the users and groups (value "go",
+// EngineName), so that the tasks of those two sections are skipped (spec 2026-11-06 phase 2 §8.4, D29). It
+// is an `-e` variable only: never a contract input or an inventory variable, which a lint enforces.
+const UsersGroupsEngineVar = "pilot_identity_users_groups_engine"
+
+// UsersGroupsEngineGo is the value of UsersGroupsEngineVar the mixed run passes: the playbook
+// accepts "ansible" (the default) and this, and refuses any other.
+const UsersGroupsEngineGo = "go"
+
 // AuthCacheActionVar is the Ansible variable that selects the entry's mode.
 const AuthCacheActionVar = "pilot_identity_auth_cache_action"
 

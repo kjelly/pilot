@@ -25,6 +25,12 @@ import (
 // (spec 2026-11-06 phase 2, Q6; AGENTS.md §5.7).
 const ScopeUsersGroups = store.ScopeUsersGroups
 
+// ScopeFull is the mixed run (`--scope full`, spec 2026-11-06 phase 2 section 8.3): the Go
+// engine writes the users and groups, and the identity playbook, told to skip those two
+// sections, does the rest. It is the "scope" such a run records in its metadata and in its
+// result file.
+const ScopeFull = "full"
+
 // DesiredUser is one roster user that is not state: absent, with the
 // playbook's defaults ("Normalize canonical users") filled in.
 type DesiredUser struct {

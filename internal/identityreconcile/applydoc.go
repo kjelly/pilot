@@ -28,9 +28,10 @@ const (
 	VerdictFailed = "failed"
 )
 
-// ObligationDoc is what the run found of the authorization cache obligation: no
-// playbook ran to settle it, so it is owed whenever the entry ran or the probe found
-// it so. It is the identity.auth_cache event, in the file.
+// ObligationDoc is what the run found of the authorization cache obligation. In the
+// users-groups scope no playbook ran to settle it, so it is owed whenever the entry ran or
+// the probe found it so; in the mixed scope it is owed unless the identity playbook's
+// observation says it acknowledged it. It is the identity.auth_cache event, in the file.
 type ObligationDoc struct {
 	Owed   bool   `json:"owed"`
 	Source string `json:"source,omitempty"`
@@ -38,9 +39,32 @@ type ObligationDoc struct {
 	EntryRan bool `json:"entry_ran"`
 	// ProbePending is what the probe of an idle run found (absent when it did not run).
 	ProbePending *bool `json:"probe_pending,omitempty"`
-	// ObservedAcked is always false for this scope: it runs no playbook that settles
-	// and acknowledges (spec §6.2).
+	// ObservedAcked: the identity playbook's observation of the run said it acknowledged
+	// the obligation. Always false in the users-groups scope, which runs no playbook that
+	// settles and acknowledges (spec §6.2).
 	ObservedAcked bool `json:"observed_acked"`
+}
+
+// ObservationDoc is the identity playbook's own account of a mixed run's authorization cache
+// work (the "observe" result file, spec §5.5), as the run accepted it.
+type ObservationDoc struct {
+	Prepared  bool  `json:"prepared"`
+	Dirty     *bool `json:"dirty"`
+	Refreshed bool  `json:"refreshed"`
+	Acked     bool  `json:"acked"`
+}
+
+// PlaybookReport is what the identity playbook did in a mixed run, after the Go writer.
+type PlaybookReport struct {
+	// Ran: the playbook was started. A run the Go phase ended before that (a blocked plan, a failed
+	// write, a verification that did not pass) never starts it (spec §7.6).
+	Ran bool `json:"ran"`
+	// Observation is what its observe task wrote, when the file was accepted.
+	Observation *ObservationDoc `json:"observation,omitempty"`
+	// ObservationError says why no observation was accepted, for a playbook that ran: an empty
+	// file (no host matched, a skipped task, a tag selection without the settle) reads as
+	// "not settled", never as "nothing owed".
+	ObservationError string `json:"observation_error,omitempty"`
 }
 
 // ApplyDocument is the result file: the plans, what became of each operation, the
@@ -62,6 +86,8 @@ type ApplyDocument struct {
 	Server          Server        `json:"server"`
 	DesiredRevision string        `json:"desired_revision"`
 	Authorization   ObligationDoc `json:"authorization_cache"`
+	// Playbook is the mixed scope's account of the identity playbook; absent in users-groups.
+	Playbook *PlaybookReport `json:"playbook,omitempty"`
 	Result
 	Stats Stats `json:"stats"`
 }
@@ -83,15 +109,44 @@ type ApplyDocumentInput struct {
 	ExitCode   int
 	Err        error
 	Stats      Stats
+	// Scope is ScopeFull for a mixed run; empty is ScopeUsersGroups.
+	Scope string
+	// Playbook is the mixed run's account of the identity playbook (nil for users-groups).
+	Playbook *PlaybookReport
+}
+
+// fullObligation is the authorization cache obligation after a mixed run: the identity
+// playbook settles it (its own settle, its refresh of the enrolled clients and its
+// acknowledgement), so it is owed unless the observation of the run says it acknowledged
+// (spec §6.2): no observation, an unacknowledged one and a playbook that never ran all leave
+// it owed, from this run when the entry ran in it.
+func fullObligation(res Result, pb *PlaybookReport) Obligation {
+	if pb != nil && pb.Observation != nil && pb.Observation.Acked {
+		return Obligation{}
+	}
+	if res.Entry.Ran {
+		return Obligation{Owed: true, Source: ObligationThisRun}
+	}
+	if pb != nil && pb.Ran {
+		return Obligation{Owed: true, Source: ObligationPreviousRun}
+	}
+	// The Go phase stopped the run before the playbook and before any entry: nothing this run did
+	// put the obligation there, and none was read.
+	return Obligation{}
 }
 
 // NewApplyDocument builds the result file of a run that was observed (Result.Observed).
 func NewApplyDocument(in ApplyDocumentInput) ApplyDocument {
 	ob := in.Result.Obligation()
+	scope := ScopeUsersGroups
+	if in.Scope == ScopeFull {
+		scope = ScopeFull
+		ob = fullObligation(in.Result, in.Playbook)
+	}
 	doc := ApplyDocument{
 		Schema:          ApplyDocumentSchema,
 		Engine:          Engine{Name: EngineName, PilotRevision: in.Revision},
-		Scope:           ScopeUsersGroups,
+		Scope:           scope,
 		Stage:           in.Stage,
 		RunID:           in.RunID,
 		Outcome:         in.Outcome,
@@ -103,8 +158,12 @@ func NewApplyDocument(in ApplyDocumentInput) ApplyDocument {
 		Authorization: ObligationDoc{
 			Owed: ob.Owed, Source: ob.Source, EntryRan: in.Result.Entry.Ran, ProbePending: in.Result.Entry.Pending,
 		},
-		Result: in.Result,
-		Stats:  in.Stats,
+		Playbook: in.Playbook,
+		Result:   in.Result,
+		Stats:    in.Stats,
+	}
+	if in.Playbook != nil && in.Playbook.Observation != nil {
+		doc.Authorization.ObservedAcked = in.Playbook.Observation.Acked
 	}
 	if in.Err != nil {
 		doc.Error = in.Err.Error()
