@@ -296,7 +296,7 @@ not consume the `--max-align` retries, and the next run (the next timer tick) st
 | Where | What fails | What the train does |
 |---|---|---|
 | any `gh` read or write | GitHub, `gh`, the network, a response of an unexpected shape (75 s limit) | INFRA. The gate's own reads (checks, threads, branch rules, review coverage, target record) stay WAITING, as before |
-| `git fetch`, `git ls-remote` | failed or past `--fetch-timeout` | INFRA (`TrainError`, `GitTimeout`). A stale `refs/merge-train/*.lock` file fails every fetch: the message names it, remove it by hand |
+| `git fetch`, `git ls-remote` | failed or past `--fetch-timeout` | INFRA (`TrainError`, `GitTimeout`). A stale ref lock left by a killed fetch (`<bare clone>/refs/merge-train/<base or pr>/<name>.lock`) fails every fetch that has to update that ref, and git does not name the file: the error is `git fetch --no-tags failed (1): error: fetching ref refs/merge-train/base/main failed: reference already exists` (git 2.53). With no consumer running, remove that `.lock` file by hand; the next run fetches normally |
 | `git push` | failed or past `--push-timeout` | the commit stays in `train_commits`; `git ls-remote` outside the lock decides: landed, go on; not pushed, INFRA; the branch moved, look again |
 | local git (`merge-tree`, `commit-tree`, `diff`, `ls-tree`, `rev-parse`) | failed or past `--git-timeout`; a missing commit identity fails `commit-tree` | INFRA |
 | saved entry | no file, not JSON, another schema | no saved evidence: leaves the queue with a comment, as before |
