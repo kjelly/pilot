@@ -49,8 +49,8 @@ func TestValidateReconcileEngineFlags(t *testing.T) {
 		{name: "golang without a mode", engine: "golang", components: identity, wantErr: "不支援互動"},
 		{name: "golang force without a scope", engine: "golang", force: true, components: identity, wantErr: "需要 --scope"},
 		{name: "golang with an unknown scope", engine: "golang", force: true, components: identity, scope: "all", wantErr: "--scope 只能是"},
-		{name: "golang with the mixed scope, not yet", engine: "golang", force: true, components: identity, scope: "full", wantErr: "還沒有提供"},
-		{name: "golang preview of the mixed scope, not yet", engine: "golang", preview: true, components: identity, scope: "full", wantErr: "還沒有提供"},
+		{name: "golang apply, mixed scope", engine: "golang", force: true, components: identity, scope: "full", resultOut: "r.json"},
+		{name: "golang preview of the mixed scope", engine: "golang", preview: true, components: identity, scope: "full", planOut: "p.json"},
 		{name: "golang other component", engine: "golang", preview: true, components: []string{"dns"}, wantErr: "只處理 --component freeipa-identity"},
 		{name: "golang two components", engine: "golang", preview: true, components: []string{"freeipa-identity", "dns"}, wantErr: "只處理"},
 		{name: "golang no component", engine: "golang", preview: true, wantErr: "只處理"},
@@ -60,6 +60,8 @@ func TestValidateReconcileEngineFlags(t *testing.T) {
 		{name: "result-out without golang", engine: "ansible", force: true, components: identity, resultOut: "r.json", wantErr: "--result-out 只能與"},
 		{name: "result-out of a preview", engine: "golang", preview: true, components: identity, resultOut: "r.json", wantErr: "只能與 --force"},
 		{name: "plan-out of an apply", engine: "golang", force: true, components: identity, scope: "users-groups", planOut: "p.json", wantErr: "--result-out"},
+		{name: "plan-out of a mixed apply", engine: "golang", force: true, components: identity, scope: "full", planOut: "p.json", wantErr: "--result-out"},
+		{name: "result-out of a mixed preview", engine: "golang", preview: true, components: identity, scope: "full", resultOut: "r.json", wantErr: "只能與 --force"},
 	} {
 		err := validateReconcileEngineFlags(tc.engine, tc.preview, tc.force, tc.components, tc.actions, tc.planOut, tc.scope, tc.resultOut)
 		if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
