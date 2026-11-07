@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kjelly/pilot/internal/ansible"
 	"github.com/kjelly/pilot/internal/delivery"
 	"github.com/kjelly/pilot/internal/freeiparpc"
 	"github.com/kjelly/pilot/internal/identitylock"
@@ -381,7 +382,17 @@ func runGoAuthCacheEntry(ctx context.Context, held *identitylock.Held, root stri
 	command.Dir = root
 	var tail boundedTail
 	command.Stdout, command.Stderr = &tail, &tail
-	runErr := command.Run()
+	// Every Ansible command holds the controller's Ansible log until it is done, so that the log's
+	// maintenance (pilot mcp serve runs tools concurrently) does not rewrite or rotate it under the
+	// playbook (TestAnsibleCommandsHoldTheLog). A hold that cannot be taken in time is a run that did
+	// not start, and reads as one.
+	var runErr error
+	if release, holdErr := ansible.HoldCommandLog(bound, command); holdErr != nil {
+		runErr = holdErr
+	} else {
+		runErr = command.Run()
+		release()
+	}
 	if cause := context.Cause(bound); errors.Is(cause, identitylock.ErrLockLost) {
 		return 0, fmt.Errorf("ansible-playbook was stopped: %w", cause)
 	}
