@@ -243,6 +243,21 @@ class Integration(unittest.TestCase):
         from gh_runtime import Repo
         self.assertIsNotNone(merge_train.load_entry(Repo.parse('acme/demo'), 42), 'the saved evidence is kept')
 
+    def test_a_state_directory_that_cannot_hold_the_entry_is_a_structured_error_not_a_traceback(self):
+        # The saved entry is written first, under the real lock. When that fails (a full disk, a queue
+        # directory that is a file) the command must still print its JSON and exit 2.
+        state = Path(self.env['PRM_STATE_DIR'])
+        state.mkdir(parents=True)
+        (state / 'queue').write_text('not a directory')
+        proc = self.script('apply_decision.py', '--pr', '42', '--evidence', str(self.evidence_file), '--execute')
+        self.assertNotIn('Traceback', proc.stderr)
+        self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+        out = json.loads(proc.stdout)
+        self.assertEqual(('ERROR', 'NotADirectoryError'), (out['outcome'], out['error_kind']), out)
+        self.assertIn('queue', out['error'])
+        self.assertFalse(self.state().get('labels'), 'nothing was labelled')
+        self.assertFalse(self.state().get('comments'))
+
     def test_other_merge_methods_are_not_queued(self):
         a = ['--pr','42','--evidence',str(self.evidence_file),'--method','squash','--execute']
         out = json.loads(self.script('apply_decision.py', *a).stdout)

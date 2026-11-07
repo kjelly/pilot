@@ -20,6 +20,7 @@ The fake GitHub is the real-Git one of test_merge_train.py; `outage()` makes any
 import ast
 import contextlib
 import errno
+import fcntl
 import functools
 import io
 import json
@@ -58,6 +59,22 @@ class NoLock:
 
 def outcomes(out):
     return [(r['pr'], r['outcome']) for r in out['results']]
+
+
+@contextlib.contextmanager
+def flock_fails(error, *, lock='mutation'):
+    """`fcntl.flock` raises `error` when a lock is taken (never when it is released): the mutation lock
+    (`<key>.lock`) or the consumer lock (`<key>.train.lock`); the other one keeps working."""
+    real = fcntl.flock
+    mine = (lambda name: name.endswith('.train.lock')) if lock == 'consumer' else \
+        (lambda name: name.endswith('.lock') and not name.endswith('.train.lock'))
+
+    def flock(handle, operation):
+        if operation & fcntl.LOCK_UN or not mine(str(handle.name)):
+            return real(handle, operation)
+        raise error
+    with mock.patch.object(fcntl, 'flock', flock):
+        yield
 
 
 # -- 1. the actor ------------------------------------------------------------------------------------------
@@ -253,6 +270,60 @@ class ActorReadAfterWriteTests(ActorHarness):
         self.assertEqual(errno.ENOSPC, raised.exception.errno)
         with apply_decision.repo_mutation_lock(REPO):   # and the lock was released
             pass
+
+
+class ActorCliTests(ActorHarness):
+    """`apply_decision.main`: whatever goes wrong, a structured ERROR on stdout and exit code 2, never a
+    traceback. (Exit code 1 is what a PR the gate refuses ends with.)"""
+
+    def main(self, *extra):
+        evidence = self.t / 'evidence.json'
+        evidence.write_text(json.dumps(self.evidence()))
+        argv = ['apply_decision.py', '--repo', 'acme/demo', '--pr', '42', '--evidence', str(evidence),
+                '--worktree', str(self.consumer), '--execute', *extra]
+        stdout = io.StringIO()
+        with mock.patch.object(sys, 'argv', argv), contextlib.redirect_stdout(stdout):
+            code = apply_decision.main()
+        return code, json.loads(stdout.getvalue())
+
+    def assertErrorExit(self, code, report, kind, within=None):
+        self.assertEqual((2, 'ERROR', kind), (code, report['outcome'], report['error_kind']), report)
+        if within is not None:
+            self.assertIn(within, report['error'])
+        self.assertEqual([], self.gh.writes, 'nothing reached GitHub')
+        with apply_decision.repo_mutation_lock(REPO):   # and the lock was released
+            pass
+
+    def test_a_failure_to_save_the_entry_under_the_real_lock_is_a_structured_error(self):
+        # On d8b89f25 this was a structured ERROR with exit 2 (worded as a lock failure); the typed lock
+        # errors are not GitHubErrors, and the handler that caught only those let an OSError out as a traceback.
+        for exc in (OSError(errno.ENOSPC, 'No space left on device'), KeyError('evidence'),
+                    TypeError("'NoneType' object is not subscriptable")):
+            with self.subTest(exc=type(exc).__name__):
+                self.setUp()
+                with mock.patch.object(merge_train, 'save_entry', side_effect=exc):
+                    code, report = self.main()
+                within = 'No space left on device' if isinstance(exc, OSError) else None
+                self.assertErrorExit(code, report, type(exc).__name__, within)
+                self.assertNotIn('Cannot acquire', report['error'])
+                self.assertNotIn(42, self.gh.labels)
+
+    def test_the_failures_the_actor_expects_keep_their_shape(self):
+        code, report = self.main('--pr', '0')       # argparse keeps the last --pr
+        self.assertErrorExit(code, report, 'ValueError', 'PR number must be positive')
+        # A GitHub failure while enqueueing is reported by the actor itself: its result, exit code 1.
+        self.gh.failing['edit_label'] = GitHubError('gh pr edit failed (1): HTTP 403')
+        code, report = self.main()
+        self.assertEqual((1, 'ERROR'), (code, report['outcome']), report)
+        self.assertIn('HTTP 403', report['error'])
+
+    def test_a_lock_another_actor_holds_and_one_that_cannot_be_used_are_told_apart(self):
+        with apply_decision.repo_mutation_lock(REPO):
+            code, report = self.main()
+        self.assertErrorExit(code, report, 'MutationLockHeld', 'Another pr-review-merge actor')
+        with flock_fails(OSError(errno.ENOLCK, 'No locks available')):
+            code, report = self.main()
+        self.assertErrorExit(code, report, 'MutationLockUnavailable', 'Cannot acquire GitHub mutation lock')
 
 
 # -- 2. the label after the merge ------------------------------------------------------------------------------
@@ -590,6 +661,31 @@ class GitTimeoutTests(GitHarness):
         out, took = self.bounded(self.train(git_kill_grace=20).run)
         self.assertLess(took, 8, 'it ended on SIGTERM; nothing waited for the grace')
         self.assertIn('(SIGTERM)', out['error'])
+
+    def test_an_interrupt_ends_git_and_its_group_and_is_neither_swallowed_nor_counted(self):
+        # Ctrl-C on an attended run reaches only Python (git has a session of its own): the group must be
+        # ended before the interrupt goes on, or git keeps running with nobody to read it.
+        self.queue()
+        self.mode(fetch='hang')
+        real, interrupted = subprocess.Popen.communicate, []
+
+        def communicate(popen, *args, **kwargs):
+            if not interrupted and str(self.consumer) in popen.args and 'fetch' in popen.args:
+                interrupted.append(popen.pid)
+                deadline = time.monotonic() + 10
+                while not (self.gitdir / 'fetch.child').exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)       # git is running, with its SIGTERM handler installed
+                raise KeyboardInterrupt
+            return real(popen, *args, **kwargs)
+        with mock.patch.object(subprocess.Popen, 'communicate', communicate):
+            with self.assertRaises(KeyboardInterrupt):
+                self.train().run()
+        self.assertEqual(1, len(interrupted))
+        self.assertTrue((self.gitdir / 'fetch.term').exists(), 'it was ended with SIGTERM first')
+        self.assertGone('fetch.leader')
+        self.assertGone('fetch.child')
+        self.assertLocksFree()
+        self.assertStillEnqueued()       # not counted, not dequeued: an interrupt is nobody's verdict
 
     def test_git_runs_in_a_session_of_its_own_and_never_prompts(self):
         self.queue()
@@ -1043,6 +1139,63 @@ class LockAndExitCodeTests(CliHarness):
         self.assertEqual([(42, 'MERGED')], outcomes(report), 'partial results are printed')
         self.assertEqual(('INFRA', 43), (report['status'], report['pr']))
         self.assertUntouched(43)
+
+
+class LockFailureTests(CliHarness):
+    """Only "someone else holds it" (EWOULDBLOCK) is a wait. A lock that cannot be taken for any other reason
+    (ENOLCK on a filesystem without locks, EIO, EBADF) would be WAITING with exit 0 for ever if it were
+    classed with it: nobody would see that nothing merges."""
+
+    UNUSABLE = (errno.ENOLCK, errno.EIO, errno.EBADF)
+
+    def test_the_mutation_lock_tells_held_from_unusable_by_the_error_of_flock(self):
+        for number in self.UNUSABLE:
+            with self.subTest(errno=errno.errorcode[number]):
+                with flock_fails(OSError(number, os.strerror(number))):
+                    with self.assertRaises(MutationLockUnavailable) as raised:
+                        with apply_decision.repo_mutation_lock(REPO):
+                            self.fail('the lock was granted')
+                self.assertIn('Cannot acquire GitHub mutation lock', str(raised.exception))
+                self.assertIn(os.strerror(number), str(raised.exception))
+        for number in (errno.EWOULDBLOCK, errno.EAGAIN):
+            with self.subTest(errno=errno.errorcode[number]):
+                with flock_fails(BlockingIOError(number, os.strerror(number))):
+                    with self.assertRaises(MutationLockHeld):
+                        with apply_decision.repo_mutation_lock(REPO):
+                            self.fail('the lock was granted')
+        with apply_decision.repo_mutation_lock(REPO):     # nothing was left held
+            pass
+
+    def test_the_train_stops_on_a_mutation_lock_that_cannot_be_used_and_waits_on_one_that_is_held(self):
+        self.queue()
+        for number in self.UNUSABLE:
+            with self.subTest(errno=errno.errorcode[number]):
+                with flock_fails(OSError(number, os.strerror(number))):
+                    out = self.train(mutation_lock=None).run()           # process_one
+                    code, report = self.cli()                            # and the command line
+                self.assertInfra(out, kind='MutationLockUnavailable', within=os.strerror(number))
+                self.assertEqual((2, 'INFRA', 'MutationLockUnavailable'),
+                                 (code, report['status'], report['error_kind']), report)
+                self.assertUntouched()
+        with flock_fails(BlockingIOError(errno.EWOULDBLOCK, 'Resource temporarily unavailable')):
+            out = self.train(mutation_lock=None).run()
+            code, report = self.cli()
+        self.assertEqual([(42, 'WAITING')], outcomes(out), out)
+        self.assertEqual((0, [(42, 'WAITING')]), (code, outcomes(report)), report)
+        self.assertUntouched()
+
+    def test_a_consumer_lock_that_cannot_be_taken_is_infrastructure_and_one_that_is_held_is_busy(self):
+        self.queue()
+        for number in self.UNUSABLE:
+            with self.subTest(errno=errno.errorcode[number]):
+                with flock_fails(OSError(number, os.strerror(number)), lock='consumer'):
+                    code, report = self.cli()
+                self.assertEqual((2, 'INFRA'), (code, report['status']), report)
+                self.assertIn(os.strerror(number), report['error'])
+                self.assertUntouched()
+        with flock_fails(BlockingIOError(errno.EWOULDBLOCK, 'Resource temporarily unavailable'), lock='consumer'):
+            code, report = self.cli()
+        self.assertEqual((0, 'BUSY'), (code, report['status']), report)
 
 
 class Plan:

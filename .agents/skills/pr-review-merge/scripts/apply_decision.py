@@ -27,8 +27,7 @@ from typing import Any, Callable, Sequence
 # Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
 # counts any added file and would STOP every later step. Set before the first sibling import.
 sys.dont_write_bytecode = True
-from gh_runtime import (GitHubError, MutationLockError, MutationLockHeld, MutationLockUnavailable, Repo,
-                        branch_head, pr_view, run_gh)
+from gh_runtime import GitHubError, MutationLockHeld, MutationLockUnavailable, Repo, branch_head, pr_view, run_gh
 from review_gate import evaluate, load_evidence, resolve_repo
 
 # A write is read back from the PR at most READ_TRIES times, READ_INTERVAL seconds apart: 25 s at most.
@@ -248,8 +247,13 @@ def main() -> int:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["outcome"] in ("ENQUEUED", "MERGED", "DRAFT-BLOCKED", "SKIP", "DRY_RUN_MERGE",
                                           "DRY_RUN_DRAFT") else 1
-    except (GitHubError, MutationLockError, ValueError) as exc:
-        print(json.dumps({"outcome": "ERROR", "error": str(exc)}, ensure_ascii=False))
+    except Exception as exc:
+        # GitHubError, MutationLockError and ValueError are the failures this script expects; anything else
+        # (the saved entry cannot be written, a response of an unexpected shape) is the same kind of result:
+        # a structured ERROR on stdout and exit code 2, never a traceback with exit code 1, which is what a
+        # PR the gate would not let through ends with. `MutationLockError` is no GitHubError on purpose.
+        print(json.dumps({"outcome": "ERROR", "error_kind": type(exc).__name__, "error": str(exc)},
+                         ensure_ascii=False))
         return 2
 
 
