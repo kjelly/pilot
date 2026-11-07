@@ -224,8 +224,8 @@ func TestPerfCountScriptReadsTheRealLogShapes(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := strings.Join([]string{
-		`[Sat Nov 07 09:43:03.750687 2026] [:warn] [pid 2971:tid 3022] [client 192.168.122.3:46320] failed to set perms (3140) on file (/run/ipa/ccaches/x)!, referer: https://ipa1/ipa/xml`,
-		`[Sat Nov 07 09:43:04.022152 2026] [wsgi:error] [pid 1224:tid 1615] [remote 192.168.122.3:46320] ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hostgroup_find/1(None, sizelimit=0, version='2.257', pkey_only=True): SUCCESS`,
+		`[Sat Nov 07 09:43:03.750687 2026] [:warn] [pid 2971:tid 3022] [client 203.0.113.3:46320] failed to set perms (3140) on file (/run/ipa/ccaches/x)!, referer: https://ipa1/ipa/xml`,
+		`[Sat Nov 07 09:43:04.022152 2026] [wsgi:error] [pid 1224:tid 1615] [remote 203.0.113.3:46320] ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hostgroup_find/1(None, sizelimit=0, version='2.257', pkey_only=True): SUCCESS`,
 		`[Sat Nov 07 09:55:12.100000 2026] [wsgi:error] [pid 1225:tid 1609] [remote 127.0.0.1:45072] ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: user_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS`,
 		`[Sat Nov 07 09:55:14.801652 2026] [wsgi:error] [pid 1225:tid 1609] [remote 127.0.0.1:45072] ipa: INFO: admin@IPA.PILOT.INTERNAL: batch: user_add('p28perf-u0001', givenname='P28', sn='Perf0001', homedirectory='/home/p28perf-u0001', loginshell='/bin/bash', mail='p28perf-u0001@ipa.pilot.internal', version='2.257'): SUCCESS`,
 		`[Sat Nov 07 09:55:14.900000 2026] [wsgi:error] [pid 1225:tid 1609] [remote 127.0.0.1:45072] ipa: INFO: admin@IPA.PILOT.INTERNAL: batch: user_add('p28perf-u0002', givenname='P28', sn='Perf0002', homedirectory='/home/p28perf-u0002', loginshell='/bin/bash', mail='p28perf-u0002@ipa.pilot.internal', version='2.257'): SUCCESS`,
@@ -236,23 +236,23 @@ func TestPerfCountScriptReadsTheRealLogShapes(t *testing.T) {
 		`[Sat Nov 07 09:55:29.000000 2026] [wsgi:error] [pid 1226:tid 1612] [remote 127.0.0.1:45072] ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: session_logout(version='2.257'): SUCCESS`,
 	}, "\n") + "\n"
 	access := strings.Join([]string{
-		`192.168.122.3 - - [07/Nov/2026:09:43:02 +0000] "POST /ipa/session/login_password HTTP/1.1" 200 79`,
-		`192.168.122.3 - admin@IPA.PILOT.INTERNAL [07/Nov/2026:09:43:03 +0000] "POST /ipa/session/json HTTP/1.1" 200 264`,
-		`192.168.122.3 - admin@IPA.PILOT.INTERNAL [07/Nov/2026:09:43:04 +0000] "POST /ipa/session/json HTTP/1.1" 200 334`,
-		`192.168.122.3 - admin@IPA.PILOT.INTERNAL [07/Nov/2026:09:43:04 +0000] "GET /ipa/ui/ HTTP/1.1" 200 167`,
+		`203.0.113.3 - - [07/Nov/2026:09:43:02 +0000] "POST /ipa/session/login_password HTTP/1.1" 200 79`,
+		`203.0.113.3 - admin@IPA.PILOT.INTERNAL [07/Nov/2026:09:43:03 +0000] "POST /ipa/session/json HTTP/1.1" 200 264`,
+		`203.0.113.3 - admin@IPA.PILOT.INTERNAL [07/Nov/2026:09:43:04 +0000] "POST /ipa/session/json HTTP/1.1" 200 334`,
+		`203.0.113.3 - admin@IPA.PILOT.INTERNAL [07/Nov/2026:09:43:04 +0000] "GET /ipa/ui/ HTTP/1.1" 200 167`,
 	}, "\n") + "\n"
 	secure := strings.Join([]string{
-		`Nov  7 09:44:41 ipa1 sshd-session[7968]: Connection from 192.168.122.1 port 39162 on 192.168.122.3 port 22 rdomain ""`,
+		`Nov  7 09:44:41 ipa1 sshd-session[7968]: Connection from 203.0.113.1 port 39162 on 203.0.113.3 port 22 rdomain ""`,
 		`Nov  7 09:44:41 ipa1 sshd-session[7968]: Accepted key ED25519 SHA256:abc found at /root/.ssh/authorized_keys:1`,
-		`Nov  7 09:44:41 ipa1 sshd-session[7968]: Accepted publickey for root from 192.168.122.1 port 39162 ssh2: ED25519 SHA256:abc`,
-		`Nov  7 09:44:41 ipa1 sshd-session[7971]: Starting session: command for root from 192.168.122.1 port 39162 id 0`,
-		`Nov  7 09:44:41 ipa1 sshd-session[7971]: Close session: user root from 192.168.122.1 port 39162 id 0`,
-		`Nov  7 09:44:41 ipa1 sshd-session[7971]: Starting session: command for root from 192.168.122.1 port 39162 id 0`,
-		`Nov  7 09:44:41 ipa1 sshd-session[7971]: Starting session: command for root from 192.168.122.1 port 39162 id 0`,
-		`Nov  7 09:44:42 ipa1 sshd-session[8053]: Accepted publickey for root from 192.168.122.1 port 47476 ssh2: ED25519 SHA256:abc`,
-		`Nov  7 09:44:42 ipa1 sshd-session[8056]: Starting session: command for root from 192.168.122.1 port 47476 id 0`,
-		`Nov  7 09:44:43 ipa1 sshd-session[8060]: Accepted publickey for root from 192.168.122.1 port 47480 ssh2: ED25519 SHA256:abc`,
-		`Nov  7 09:44:43 ipa1 sshd-session[8061]: Starting session: command for root from 192.168.122.1 port 47480 id 0`,
+		`Nov  7 09:44:41 ipa1 sshd-session[7968]: Accepted publickey for root from 203.0.113.1 port 39162 ssh2: ED25519 SHA256:abc`,
+		`Nov  7 09:44:41 ipa1 sshd-session[7971]: Starting session: command for root from 203.0.113.1 port 39162 id 0`,
+		`Nov  7 09:44:41 ipa1 sshd-session[7971]: Close session: user root from 203.0.113.1 port 39162 id 0`,
+		`Nov  7 09:44:41 ipa1 sshd-session[7971]: Starting session: command for root from 203.0.113.1 port 39162 id 0`,
+		`Nov  7 09:44:41 ipa1 sshd-session[7971]: Starting session: command for root from 203.0.113.1 port 39162 id 0`,
+		`Nov  7 09:44:42 ipa1 sshd-session[8053]: Accepted publickey for root from 203.0.113.1 port 47476 ssh2: ED25519 SHA256:abc`,
+		`Nov  7 09:44:42 ipa1 sshd-session[8056]: Starting session: command for root from 203.0.113.1 port 47476 id 0`,
+		`Nov  7 09:44:43 ipa1 sshd-session[8060]: Accepted publickey for root from 203.0.113.1 port 47480 ssh2: ED25519 SHA256:abc`,
+		`Nov  7 09:44:43 ipa1 sshd-session[8061]: Starting session: command for root from 203.0.113.1 port 47480 id 0`,
 	}, "\n") + "\n"
 	for name, content := range map[string]string{"httpd/error_log": api, "httpd/access_log": access, "secure": secure} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
@@ -263,7 +263,7 @@ func TestPerfCountScriptReadsTheRealLogShapes(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("bash", "-s", "--", fmt.Sprint(e), fmt.Sprint(a), fmt.Sprint(s))
 		cmd.Stdin = strings.NewReader(perfCountScript)
-		cmd.Env = append(os.Environ(), "P28_LOG="+dir, "SSH_CONNECTION=192.168.122.1 "+own+" 192.168.122.3 22")
+		cmd.Env = append(os.Environ(), "P28_LOG="+dir, "SSH_CONNECTION=203.0.113.1 "+own+" 203.0.113.3 22")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("the script: %v\n%s", err, out)
@@ -546,10 +546,10 @@ func TestPerfParseProfileTasks(t *testing.T) {
 // FreeIPA refuses a host address in a documentation range ("cannot use IANA reserved IP address", seen when the first wide
 // mixed run failed in host-add) and wants a reverse zone for it: the wide roster's addresses are in the client's own /24.
 func TestPerfWideHostsStayInTheClientsSubnet(t *testing.T) {
-	if got := perfHostIP("192.168.122.17", 5); got != "192.168.122.205" {
-		t.Errorf("perfHostIP = %q, want 192.168.122.205", got)
+	if got := perfHostIP("198.51.100.17", 5); got != "198.51.100.205" {
+		t.Errorf("perfHostIP = %q, want 198.51.100.205", got)
 	}
-	roster, _ := perfRoster(perfSpec{Users: 10, Groups: 10, Wide: true}, "client.ipa.pilot.internal", "192.168.122.17")
+	roster, _ := perfRoster(perfSpec{Users: 10, Groups: 10, Wide: true}, "client.ipa.pilot.internal", "198.51.100.17")
 	hosts := roster["hosts"].([]any)
 	if len(hosts) != 21 {
 		t.Fatalf("the wide roster holds %d hosts, want the client and twenty", len(hosts))
@@ -557,7 +557,7 @@ func TestPerfWideHostsStayInTheClientsSubnet(t *testing.T) {
 	seen := map[string]bool{}
 	for _, h := range hosts[1:] {
 		ip := h.(map[string]any)["ip_address"].(string)
-		if !strings.HasPrefix(ip, "192.168.122.") || seen[ip] {
+		if !strings.HasPrefix(ip, "198.51.100.") || seen[ip] {
 			t.Errorf("address %q is outside the client's /24 or repeated", ip)
 		}
 		seen[ip] = true

@@ -185,7 +185,7 @@ func perfRoster(sp perfSpec, clientFQDN, clientIP string) (rosterDoc, perfShape)
 func perfHostIP(clientIP string, i int) string {
 	parts := strings.Split(clientIP, ".")
 	if len(parts) != 4 {
-		return fmt.Sprintf("192.168.122.%d", 200+i)
+		return fmt.Sprintf("198.51.100.%d", 200+i)
 	}
 	return fmt.Sprintf("%s.%s.%s.%d", parts[0], parts[1], parts[2], 200+i)
 }
