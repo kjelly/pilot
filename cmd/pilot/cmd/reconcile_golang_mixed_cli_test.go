@@ -350,7 +350,7 @@ func TestMixedRunNeverStartsThePlaybookAfterAGoPhaseThatFailed(t *testing.T) {
 			if entry := slices.Contains(e.runs(), "freeipa-identity-auth-cache.yml apply"); entry != tc.wantEntry {
 				t.Fatalf("the entry ran = %v, want %v: %v", entry, tc.wantEntry, e.runs())
 			}
-			if got := e.a.writeMethods(); !slices.Equal(got, tc.wantWrites) && !(len(got) == 0 && len(tc.wantWrites) == 0) {
+			if got := e.a.writeMethods(); !slices.Equal(got, tc.wantWrites) && (len(got) != 0 || len(tc.wantWrites) != 0) {
 				t.Fatalf("writes %v, want %v", got, tc.wantWrites)
 			}
 			if tc.wantExit == 3 && len(readEvents(t, e.events)) != 0 {

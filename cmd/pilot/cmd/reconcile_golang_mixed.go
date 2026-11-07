@@ -162,9 +162,9 @@ func mixedApplyError(res *identityreconcile.Result, err error) error {
 	case res != nil && res.Committed():
 		return fmt.Errorf("%w: Go 階段沒有完成，identity playbook 沒有執行：%w", delivery.ErrPartiallyApplied, err)
 	case res != nil && res.Entry.Ran:
-		return fmt.Errorf("Go 階段沒有完成，identity playbook 沒有執行：%w (入口已執行，授權快取義務已記錄；多一次刷新，無害)", err)
+		return fmt.Errorf("mixed run 的 Go 階段沒有完成，identity playbook 沒有執行：%w (入口已執行，授權快取義務已記錄；多一次刷新，無害)", err)
 	}
-	return fmt.Errorf("Go 階段沒有完成，identity playbook 沒有執行：%w", err)
+	return fmt.Errorf("mixed run 的 Go 階段沒有完成，identity playbook 沒有執行：%w", err)
 }
 
 // PrepareApply is the Go writer's phase of the apply step: the transaction's lock is in ctx.
@@ -192,7 +192,7 @@ func runMixedGoPhase(ctx context.Context, held *identitylock.Held, s *mixedStep)
 		return mixedApplyError(nil, err)
 	}
 	if prep.host != held.Host {
-		return mixedApplyError(nil, fmt.Errorf("Go engine 要寫的 FreeIPA server 是 %s，但這一輪的鎖在 %s：不寫入", prep.host, held.Host))
+		return mixedApplyError(nil, fmt.Errorf("mixed run：Go engine 要寫的 FreeIPA server 是 %s，但這一輪的鎖在 %s：不寫入", prep.host, held.Host))
 	}
 	s.prep, s.host = prep, prep.host
 	dialer := newGolangDialer(prep.target)

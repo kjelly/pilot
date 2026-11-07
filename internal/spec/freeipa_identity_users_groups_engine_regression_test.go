@@ -196,8 +196,8 @@ func engineGuardProblems(plays []map[string]any) []string {
 			gate = task
 		}
 	}
-	switch {
-	case gate == nil:
+	switch gate {
+	case nil:
 		problems = append(problems, fmt.Sprintf("pre_tasks has no %q: a bad value of %s would be taken for `ansible`, and `go` without the observation file would skip users and groups with nobody to write them", engineGateTask, engineVar))
 	default:
 		tags, _ := gate["tags"].([]any)
