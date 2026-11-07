@@ -529,8 +529,12 @@ func TestMixedRunRecordsEverythingAfterTheFirstCtrlC(t *testing.T) {
 		name     string
 		cut      func(t *testing.T, e *mixedCLIEnv, cancel context.CancelFunc)
 		wantPlay bool // the playbook was started
+		// wantUnknown: the write in flight when the context ended is recorded as unknown (the request was cut), and the
+		// read after the writes resolved it. A Go engine that ran on a context the signal did not reach would have the
+		// answer, as success, and the lock being given back is the only thing that would stop it writing more.
+		wantUnknown bool
 	}{
-		{name: "in the Go phase, while a write is in flight", cut: func(t *testing.T, e *mixedCLIEnv, cancel context.CancelFunc) {
+		{name: "in the Go phase, while a write is in flight", wantUnknown: true, cut: func(t *testing.T, e *mixedCLIEnv, cancel context.CancelFunc) {
 			prev := e.a.onWrite
 			e.a.onWrite = func(m []string) {
 				prev(m)
@@ -583,6 +587,15 @@ func TestMixedRunRecordsEverythingAfterTheFirstCtrlC(t *testing.T) {
 			doc := readApplyDoc(t, result)
 			if doc.Verdict != identityreconcile.VerdictPartial || doc.FailedStep != "apply" || !doc.Committed() || doc.Playbook == nil || doc.Playbook.Ran != tc.wantPlay {
 				t.Fatalf("result file: verdict %q step %q committed %v playbook %+v", doc.Verdict, doc.FailedStep, doc.Committed(), doc.Playbook)
+			}
+			unknown := 0
+			for _, op := range doc.Ops {
+				if op.Outcome == identityreconcile.OutcomeUnknown {
+					unknown++
+				}
+			}
+			if tc.wantUnknown && unknown != 1 {
+				t.Errorf("%d operations are recorded as unknown, want the one that was in flight when the context ended: %+v", unknown, doc.Ops)
 			}
 			if got := outboxResults(t); len(got) != 1 || got[0] != "failure" || capture.count() != 1 {
 				t.Fatalf("the outbox holds %v and %d deliveries, want one failure\n%s", got, capture.count(), out)
