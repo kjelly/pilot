@@ -2,9 +2,11 @@ package spec
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -31,14 +33,17 @@ import (
 // configuration takes effect and appears in many playbooks.
 //
 // What the lint can and cannot see. It reads text: a non-comment line that names
-// sss_cache or sssctl cache-expire/cache-remove, a shell rm/unlink/truncate/shred
-// of /var/lib/sss/{db,mc}, and a file-module task with path + state: absent on
-// those directories. Prose does not count: a Python docstring and a YAML task
-// name: are skipped, so an allowlisted file whose real call is gone is reported
-// as stale even when its documentation still mentions the tool. It does not see
-// find -delete, mv, os.remove/shutil.rmtree, an argv split across lines or list
-// items, dest:/name: aliases, a path built from a variable or loop item, or the
-// second document of a multi-document YAML file. Those need a reviewer
+// sss_cache or sssctl cache-expire/cache-remove (as a command line or inside a
+// one-line argv list), a shell rm/unlink/truncate/shred of /var/lib/sss/{db,mc},
+// and a file-module task with path + state: absent on those directories. Prose
+// does not count: a Python docstring (a triple-quoted string that is a statement
+// by itself, see pythonProseLines) and a YAML task name: are skipped, so an
+// allowlisted file whose real call is gone is reported as stale even when its
+// documentation still mentions the tool. A triple-quoted string that is assigned,
+// passed to a call or formatted is code, and so is every line of it. It does not
+// see find -delete, mv, os.remove/shutil.rmtree, an argv split across lines or
+// list items, dest:/name: aliases, a path built from a variable or loop item, or
+// the second document of a multi-document YAML file. Those need a reviewer
 // (.agents/skills/pilot-code-review/references/pilot-history-checks.md).
 var sssdCacheClearAllowlist = map[string]string{
 	"apply/files/freeipa-sssd-sudo-refresh.py":       "#214 helper: expires the client's rules, restarts SSSD and waits, bounded, for the client's own sudoLastFullRefreshTime to move; clients that do not finish are reported as PARTIAL",
@@ -50,8 +55,10 @@ var (
 	// reSSSCache matches the sss_cache tool as a word, in any argv or shell form.
 	reSSSCache = regexp.MustCompile(`\bsss_cache\b`)
 	// reSSSCtlCache matches sssctl's equivalents of sss_cache -E and of deleting
-	// the cache databases.
-	reSSSCtlCache = regexp.MustCompile(`\bsssctl\s+cache-(expire|remove)\b`)
+	// the cache databases, as a command line (`sssctl cache-expire -E`) and as the
+	// first items of a one-line argv list (`[sssctl, cache-expire]`,
+	// `["sssctl", "cache-expire"]`). An argv split across lines is not matched.
+	reSSSCtlCache = regexp.MustCompile(`\bsssctl[\s,"'\[\]]+cache-(expire|remove)\b`)
 	// reRemoveSSSState matches shell commands that delete SSSD's databases or
 	// memory-mapped caches. Reading them (ldbsearch) is not a mutation.
 	reRemoveSSSState = regexp.MustCompile(`\b(rm|unlink|truncate|shred)\b[^\n]*/var/lib/sss/(db|mc)\b`)
@@ -134,6 +141,11 @@ func TestSSSDCacheClearDetector(t *testing.T) {
 		{"sssctl cache-expire", "a.yml", "- name: t\n  ansible.builtin.command: sssctl cache-expire -E\n", 1},
 		{"sssctl cache-remove", "a.yml", "- name: t\n  ansible.builtin.shell: sssctl cache-remove -o -p\n", 1},
 		{"sssctl status is not a clear", "a.yml", "- name: t\n  ansible.builtin.command: sssctl domain-status ipa.example\n", 0},
+		{"sssctl cache-expire as a yaml argv list", "a.yml", "- name: t\n  ansible.builtin.command:\n    argv: [sssctl, cache-expire, -E]\n", 1},
+		{"sssctl cache-remove as a yaml argv list", "a.yml", "- name: t\n  ansible.builtin.command:\n    argv: [\"sssctl\", \"cache-remove\", \"-o\"]\n", 1},
+		{"sssctl cache-expire as a python argv list", "files/h.py", "import subprocess\nsubprocess.run([\"sssctl\", \"cache-expire\", \"-E\"])\n", 1},
+		{"sssctl config-check as a yaml argv list is not a clear", "a.yml", "- name: t\n  ansible.builtin.command:\n    argv: [sssctl, config-check]\n", 0},
+		{"sssctl domain-status as a python argv list is not a clear", "files/h.py", "import subprocess\nsubprocess.run([\"sssctl\", \"domain-status\", \"ipa.example\"])\n", 0},
 		{"yaml task name that mentions the tool is prose", "a.yml", "- name: \"flush with sss_cache -E after reconciliation\"\n  ansible.builtin.debug:\n    msg: ok\n", 0},
 		{"yaml task name does not hide the real call", "a.yml", "- name: \"flush with sss_cache -E\"\n  ansible.builtin.command:\n    argv: [sss_cache, -E]\n", 1},
 		{"python module docstring is prose", "files/h.py", "\"\"\"Runs sss_cache -E on the host.\n\nsss_cache only expires held rules.\n\"\"\"\nprint('x')\n", 0},
@@ -141,6 +153,27 @@ func TestSSSDCacheClearDetector(t *testing.T) {
 		{"python docstring does not hide the real call", "files/h.py", "\"\"\"Mentions sss_cache.\"\"\"\nimport subprocess\nsubprocess.run([\"sss_cache\", \"-E\"])\n", 1},
 		{"python triple-quoted shell script is code", "files/h.py", "import subprocess\nsubprocess.run(\"\"\"\nsss_cache -E\n\"\"\", shell=True)\n", 1},
 		{"python assigned triple-quoted string is code", "files/h.py", "CMD = \"\"\"sss_cache -E\n\"\"\"\n", 1},
+
+		// The delimiter that closes a string that is not a docstring must not look
+		// like the start of one: it used to hide every line up to the next
+		// triple quote, so a real call after it was never scanned.
+		{"call after an assigned multi-line string", "files/h.py", "X = \"\"\"\nhello\n\"\"\"\nimport subprocess\nsubprocess.run([\"sss_cache\", \"-E\"])\n", 1},
+		{"call after an assigned multi-line string, single quotes", "files/h.py", "X = '''\nhello\n'''\nimport subprocess\nsubprocess.run([\"sss_cache\", \"-E\"])\n", 1},
+		{"call after a multi-line string argument closed by shell=True", "files/h.py", "import subprocess\nsubprocess.run(\"\"\"\necho hi\n\"\"\", shell=True)\nsubprocess.run([\"sss_cache\", \"-E\"])\n", 1},
+		{"call after a multi-line string argument closed by shell=True, single quotes", "files/h.py", "import subprocess\nsubprocess.run('''\necho hi\n''', shell=True)\nsubprocess.run([\"sss_cache\", \"-E\"])\n", 1},
+		{"call after a multi-line string with a method call", "files/h.py", "import subprocess\nTEXT = \"\"\"\nhello {}\n\"\"\".format(1)\nsubprocess.run([\"sss_cache\", \"-E\"])\n", 1},
+		{"string argument on its own continuation line is code", "files/h.py", "import subprocess\nsubprocess.run(\n    \"\"\"sss_cache -E\"\"\",\n    shell=True,\n)\n", 1},
+		{"string argument on its own continuation line is code, single quotes", "files/h.py", "import subprocess\nsubprocess.run(\n    '''sss_cache -E''',\n    shell=True,\n)\n", 1},
+		{"string argument on its own continuation line, nothing after it, is code", "files/h.py", "import subprocess\nsubprocess.run(\n    \"\"\"sss_cache -E\"\"\"\n)\n", 1},
+		{"string in a list literal is code", "files/h.py", "CMDS = [\n    \"\"\"sss_cache -E\"\"\",\n]\n", 1},
+		{"string in a list literal, nothing after it, is code", "files/h.py", "CMDS = [\n    \"\"\"sss_cache -E\"\"\"\n]\n", 1},
+		{"string joined to the previous line by a backslash is code", "files/h.py", "CMD = \"echo \" + \\\n    \"\"\"sss_cache -E\"\"\"\n", 1},
+		{"f-string statement is code", "files/h.py", "f\"\"\"sss_cache {1}\"\"\"\n", 1},
+		{"triple quotes inside a single-quoted string do not open a docstring", "files/h.py", "X = '\"\"\"'\nimport subprocess\nsubprocess.run([\"sss_cache\", \"-E\"])\n", 1},
+		{"a docstring followed by more code", "files/h.py", "\"\"\"Mentions\nsss_cache here.\n\"\"\"\nimport subprocess\nsubprocess.run([\"sss_cache\", \"-E\"])\n", 1},
+		{"a function docstring that mentions the tool, then the real call", "files/h.py", "import subprocess\n\ndef flush():\n    \"\"\"Expire everything with sss_cache -E.\n\n    sss_cache only expires held rules.\n    \"\"\"\n    subprocess.run([\"sss_cache\", \"-E\"], check=False)\n", 1},
+		{"a docstring with an apostrophe and a trailing comment is prose", "files/h.py", "def f():\n    '''Don't call sss_cache.'''  # sss_cache\n    return 1\n", 0},
+		{"a raw docstring is prose", "files/h.py", "def f():\n    r\"\"\"Uses sss_cache \\n literally.\"\"\"\n    return 1\n", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -152,6 +185,148 @@ func TestSSSDCacheClearDetector(t *testing.T) {
 				t.Fatalf("got %d hits %v, want %d", len(got), got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSSSDPythonProseLines pins which lines the scanner calls prose. The detector
+// cases above only see it through a hit count; this one also fails on a line that
+// is marked, or left unmarked, for the wrong reason.
+func TestSSSDPythonProseLines(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want []int
+	}{
+		{"module docstring", "\"\"\"a\nb\n\"\"\"\nx = 1\n", []int{1, 2, 3}},
+		{"one-line docstring in a function", "def f():\n    \"\"\"a\"\"\"\n    return 1\n", []int{2}},
+		{"assigned string: interior and closing line are code", "X = '''\na\n'''\nx = 1\n", nil},
+		{"string argument closed on its own line", "f('''\na\n''', 1)\nx = 1\n", nil},
+		{"docstring, then an assigned string", "\"\"\"a\"\"\"\nX = \"\"\"\nb\n\"\"\"\n", []int{1}},
+		{"code after the closing quotes", "\"\"\"a\"\"\"; x = 1\n", nil},
+		{"a method call on the string", "\"\"\"a\"\"\".strip()\n", nil},
+		{"a comment after the closing quotes", "\"\"\"a\n\"\"\"  # c\n", []int{1, 2}},
+		{"an escaped triple quote does not close the docstring", "\"\"\"a \\\"\"\" b\n\"\"\"\n", []int{1, 2}},
+		{"an apostrophe in a comment or a string opens nothing", "# don't\ns = \"it's\"\n\"\"\"a\"\"\"\n", []int{3}},
+		{"triple quotes inside a single-quoted string", "x = '\"\"\"'\n\"\"\"a\"\"\"\n", []int{2}},
+		{"a backslash joins the string to the previous line", "x = 1 + \\\n\"\"\"a\"\"\"\n", nil},
+		{"a backslash continues a single-quoted string", "x = 'a\\\nb'\n\"\"\"c\"\"\"\n", []int{3}},
+		{"a statement after a bracketed expression starts fresh", "x = [\n    1,\n]\n\"\"\"a\"\"\"\n", []int{4}},
+		{"an unterminated triple-quoted string is code", "\"\"\"a\nb\n", nil},
+		{"carriage returns and a byte order mark", "\xef\xbb\xbf\"\"\"a\r\nb\"\"\"\r\nx = 1\r\n", []int{1, 2}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []int
+			for l := range pythonProseLines([]byte(tc.src)) {
+				got = append(got, l)
+			}
+			sort.Ints(got)
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("prose lines %v, want %v\n%s", got, tc.want, tc.src)
+			}
+		})
+	}
+}
+
+// pyASTScript prints, for every file named on its command line, the line ranges
+// Python's own parser assigns to docstrings ([first, last, 1 when the literal is
+// triple-quoted]) and to every other multi-line string literal ([first, last]).
+const pyASTScript = `import ast, json, sys
+out = {}
+for path in sys.argv[1:]:
+    with open(path, 'rb') as f:
+        data = f.read()
+    text = data.decode('utf-8-sig')
+    tree = ast.parse(data, path)
+    docs = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                docs.add(id(first.value))
+    entry = {'docstrings': [], 'strings': []}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        if id(node) in docs:
+            literal = (ast.get_source_segment(text, node) or '').lstrip('rRuUbBfF')
+            entry['docstrings'].append([node.lineno, node.end_lineno, int(literal[:3] in ('"""', "'''"))])
+        elif node.end_lineno > node.lineno:
+            entry['strings'].append([node.lineno, node.end_lineno])
+    out[path] = entry
+json.dump(out, sys.stdout)
+`
+
+// TestSSSDPythonProseLinesMatchPythonAST runs the scanner over every .py under
+// playbooks/ and compares it with Python's own parser: a line the scanner skips
+// must belong to a docstring, so code is never hidden (the failure that
+// wazuh-transaction.py exposed), and every line of a triple-quoted docstring must
+// be skipped, so the stale-entry check is not kept alive by documentation. The
+// corpus must contain multi-line strings that are not docstrings, or the
+// comparison could not tell the scanner from the line-prefix rule it replaced.
+func TestSSSDPythonProseLinesMatchPythonAST(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skipf("python3 is not on PATH, so pythonProseLines is not cross-checked against Python's own ast here: %v", err)
+	}
+	var files []string
+	err = filepath.WalkDir(filepath.Join("..", "..", "playbooks"), func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && filepath.Ext(path) == ".py" {
+			files = append(files, path)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("found no .py file under playbooks/")
+	}
+	sort.Strings(files)
+	cmd := exec.Command(python, append([]string{"-I", "-c", pyASTScript}, files...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("python3 could not parse the playbook helpers: %v\n%s", err, stderr.String())
+	}
+	var pyAST map[string]struct {
+		Docstrings [][3]int `json:"docstrings"`
+		Strings    [][2]int `json:"strings"`
+	}
+	if err := json.Unmarshal(out, &pyAST); err != nil {
+		t.Fatalf("unreadable ast output: %v\n%s", err, out)
+	}
+	docstringLines, codeStrings := 0, 0
+	for _, file := range files {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(string(raw), "\n")
+		skipped := pythonProseLines(raw)
+		inDocstring, inTripleDocstring := map[int]bool{}, map[int]bool{}
+		for _, d := range pyAST[file].Docstrings {
+			for l := d[0]; l <= d[1]; l++ {
+				inDocstring[l] = true
+				if d[2] == 1 {
+					inTripleDocstring[l] = true
+				}
+			}
+		}
+		docstringLines += len(inTripleDocstring)
+		codeStrings += len(pyAST[file].Strings)
+		for l := 1; l <= len(lines); l++ {
+			switch {
+			case skipped[l] && !inDocstring[l]:
+				t.Errorf("%s:%d is skipped as prose but Python does not see a docstring there, so code is hidden from the SSSD lint: %q", file, l, lines[l-1])
+			case inTripleDocstring[l] && !skipped[l]:
+				t.Errorf("%s:%d is in a triple-quoted docstring but is scanned as code: %q", file, l, lines[l-1])
+			}
+		}
+	}
+	if docstringLines == 0 || codeStrings == 0 {
+		t.Fatalf("the corpus has %d triple-quoted docstring lines and %d multi-line strings that are not docstrings; the cross-check needs both to prove anything", docstringLines, codeStrings)
 	}
 }
 
@@ -234,10 +409,13 @@ func scanSSSDCacheClears(root string) (map[string][]string, error) {
 func sssdCacheClears(name string, raw []byte) ([]string, error) {
 	var out []string
 	ext := filepath.Ext(name)
-	inDocstring := false
+	var prose map[int]bool
+	if ext == ".py" {
+		prose = pythonProseLines(raw)
+	}
 	for i, line := range strings.Split(string(raw), "\n") {
 		trimmed := strings.TrimSpace(line)
-		if ext == ".py" && skipPythonDocstringLine(trimmed, &inDocstring) {
+		if prose[i+1] {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "#") {
@@ -280,26 +458,145 @@ func sssdCacheClears(name string, raw []byte) ([]string, error) {
 	return out, nil
 }
 
-// skipPythonDocstringLine reports whether a (trimmed) Python line is part of a
-// docstring: a triple-quoted string that begins a statement. A triple-quoted
-// string assigned to a name or passed to a call (a shell script handed to
-// subprocess) is code and is still scanned. inDocstring carries the state
-// between lines.
-func skipPythonDocstringLine(trimmed string, inDocstring *bool) bool {
-	if *inDocstring {
-		if strings.Count(trimmed, `"""`)%2 == 1 || strings.Count(trimmed, `'''`)%2 == 1 {
-			*inDocstring = false
+// pythonProseLines returns the 1-based numbers of the lines of a Python source
+// that are prose: every line of a triple-quoted string that is a statement by
+// itself, which is a docstring or a string used as a block comment. Nothing else
+// is in the result. In particular the interior and the closing line of a
+// triple-quoted string that is assigned, passed to a call (a shell script handed
+// to subprocess), formatted or put in a list stay code, and so does every line
+// after them.
+//
+// The first version decided from the prefix of each line, so the closing quotes
+// of `X = """..."""` looked like the opening of a docstring and hid the rest of
+// the file (apply/files/wazuh-transaction.py: 700 lines of code). This scans the
+// whole text instead and tracks what Python's tokenizer tracks: single-line
+// strings with escapes and string prefixes, triple-quoted strings, # comments,
+// bracket depth and backslash continuations. Whether a string is prose is
+// decided once, at its opening delimiter: it is the first token of its logical
+// line (depth 0, not a continuation) and only whitespace or a comment follows
+// its closing delimiter. Strings inside brackets, after another token, followed
+// by `.format(...)`, `%` or a `;`, and f-strings (their replacement fields run
+// code) are code.
+//
+// It is a scanner, not a parser, and it errs toward scanning. Limits: a string
+// that shares its line with the header it belongs to (`def f(): """doc"""`) is
+// code; adjacent string literals are not joined across lines (that needs
+// brackets or a backslash, so they are code anyway); an f-string replacement
+// field that reuses the enclosing quote (PEP 701) ends the string early; an
+// unterminated triple-quoted string is code. TestSSSDPythonProseLinesMatchPythonAST
+// checks the result against Python's own ast for every .py under playbooks/.
+func pythonProseLines(raw []byte) map[int]bool {
+	src := strings.ReplaceAll(strings.TrimPrefix(string(raw), "\xef\xbb\xbf"), "\r\n", "\n")
+	prose := map[int]bool{}
+	line, depth := 1, 0
+	atStmt := true     // the next token is the first one of its logical line
+	continued := false // this physical line ended with a backslash
+	for i := 0; i < len(src); {
+		switch c := src[i]; {
+		case c == '\n':
+			if depth == 0 && !continued {
+				atStmt = true
+			}
+			continued = false
+			line++
+			i++
+		case c == ' ' || c == '\t' || c == '\f' || c == '\r':
+			i++
+		case c == '#':
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+		case c == '\\':
+			continued = i+1 < len(src) && src[i+1] == '\n'
+			i++
+		case c == '(' || c == '[' || c == '{':
+			depth++
+			atStmt = false
+			i++
+		case c == ')' || c == ']' || c == '}':
+			if depth > 0 {
+				depth--
+			}
+			atStmt = false
+			i++
+		case isPyWordByte(c) || c == '\'' || c == '"':
+			start := i
+			for i < len(src) && isPyWordByte(src[i]) {
+				i++
+			}
+			if i == len(src) || (src[i] != '\'' && src[i] != '"') || !isPyStringPrefix(src[start:i]) {
+				atStmt = false // a name or a number
+				continue
+			}
+			standalone := atStmt && !strings.ContainsAny(src[start:i], "fF")
+			atStmt = false
+			opening, triple := line, isPyTripleQuote(src, i)
+			end, newlines, closed := scanPyString(src, i)
+			i, line = end, line+newlines
+			if !standalone || !triple || !closed {
+				continue
+			}
+			tail, _, _ := strings.Cut(src[i:], "\n")
+			if tail = strings.TrimSpace(tail); tail == "" || strings.HasPrefix(tail, "#") {
+				for l := opening; l <= line; l++ {
+					prose[l] = true
+				}
+			}
+		default:
+			atStmt = false
+			i++
 		}
+	}
+	return prose
+}
+
+// scanPyString scans the string literal whose opening quote is src[i]. It
+// returns the index after the literal, how many newlines it spans, and whether
+// it was terminated. A single-quoted string ends at an unescaped newline; a
+// backslash escapes the next byte, a newline included, in raw strings too.
+func scanPyString(src string, i int) (end, newlines int, closed bool) {
+	delim := src[i : i+1]
+	triple := isPyTripleQuote(src, i)
+	if triple {
+		delim = src[i : i+3]
+	}
+	for i += len(delim); i < len(src); i++ {
+		switch {
+		case src[i] == '\\' && i+1 < len(src):
+			i++
+			if src[i] == '\n' {
+				newlines++
+			}
+		case src[i] == '\n':
+			if !triple {
+				return i, newlines, false
+			}
+			newlines++
+		case strings.HasPrefix(src[i:], delim):
+			return i + len(delim), newlines, true
+		}
+	}
+	return len(src), newlines, false
+}
+
+// isPyTripleQuote reports whether the quote at src[i] opens a triple-quoted string.
+func isPyTripleQuote(src string, i int) bool {
+	return strings.HasPrefix(src[i:], strings.Repeat(src[i:i+1], 3))
+}
+
+// isPyWordByte reports whether c can be part of a name, a number or a string prefix.
+func isPyWordByte(c byte) bool {
+	return c == '_' || c >= 0x80 || (c >= '0' && c <= '9') || ((c|0x20) >= 'a' && (c|0x20) <= 'z')
+}
+
+// isPyStringPrefix reports whether word is a legal prefix of a string literal
+// (the empty prefix included).
+func isPyStringPrefix(word string) bool {
+	switch strings.ToLower(word) {
+	case "", "r", "u", "b", "f", "br", "rb", "fr", "rf":
 		return true
 	}
-	body := strings.TrimLeft(trimmed, "rRuUbB")
-	if !strings.HasPrefix(body, `"""`) && !strings.HasPrefix(body, `'''`) {
-		return false
-	}
-	if strings.Count(trimmed, `"""`)%2 == 1 || strings.Count(trimmed, `'''`)%2 == 1 {
-		*inDocstring = true
-	}
-	return true
+	return false
 }
 
 // isYAMLNameLine reports whether a (trimmed) YAML line is a task or play name:,
