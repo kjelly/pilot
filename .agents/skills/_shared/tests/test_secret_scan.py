@@ -1065,12 +1065,52 @@ class Consistency(unittest.TestCase):
         if tracked.returncode:
             self.skipTest("not a git checkout")
         files = [x.decode() for x in tracked.stdout.split(b"\0") if x]
+        self.assertEqual([], self.stale_entries(exemptions, files, lambda f: (ROOT / f).read_bytes()))
+
+    # Exemptions are read from the BASE commit, so a PR that adds a fixture carrying a trigger shape needs
+    # its entry on the base branch before the fixture lands there. Each pre-registered entry is listed here
+    # with the PR that brings the content. The entry is exempt from the "still needed" check only while it
+    # does not match yet; once it matches, stale_entries demands its removal from this list.
+    PRE_REGISTERED = {
+        ("freeipa-secret-attribute", "internal/freeiparpc/capture_p24_test.go"): "kjelly/pilot#284",
+        ("freeipa-secret-attribute", "internal/freeiparpc/capture_p24_compare_test.go"): "kjelly/pilot#284",
+        ("ipa-session", "internal/freeiparpc/fixture_secrets_test.go"): "kjelly/pilot#284",
+        ("ipa-session", "internal/freeiparpc/write_captures_test.go"): "kjelly/pilot#284",
+    }
+
+    @classmethod
+    def stale_entries(cls, exemptions, files, read, pre_registered=None):
+        """Problems with the exemption list: a stale entry, or a pre-registered one that now matches."""
+        pre = cls.PRE_REGISTERED if pre_registered is None else pre_registered
+        problems = []
         for entry in exemptions:
             rx = scan.glob_regex(entry.path_glob)
             matching = [f for f in files if rx.match(f)]
-            self.assertTrue(matching, f"{entry.path_glob} matches no tracked file: remove the stale entry")
-            classes = {h.cls for f in matching for h in scan.scan_text(f, (ROOT / f).read_bytes())}
-            self.assertIn(entry.cls, classes, f"{entry.path_glob} no longer matches {entry.cls}: remove the entry")
+            classes = {h.cls for f in matching for h in scan.scan_text(f, read(f))}
+            matches = entry.cls in classes
+            if (entry.cls, entry.path_glob) in pre:
+                if matches:
+                    problems.append(f"{entry.path_glob} ({entry.cls}) now matches: remove it from PRE_REGISTERED")
+            elif not matching:
+                problems.append(f"{entry.path_glob} matches no tracked file: remove the stale entry")
+            elif not matches:
+                problems.append(f"{entry.path_glob} no longer matches {entry.cls}: remove the entry")
+        return problems
+
+    def test_pre_registered_entries_are_exempt_only_until_they_match(self):
+        entry = scan.Exemption(cls=scan.IPA_SESSION, path_glob="internal/x/new_test.go", reason="r")
+        key = {(scan.IPA_SESSION, "internal/x/new_test.go"): "PR"}
+        carries = b"Set-Cookie: ipa_session=" + b"0123456789abcdef" * 2 + b"\n"
+        gone = b"nothing here\n"
+        # strict without pre-registration: an untracked file and a rewritten fixture are both stale
+        self.assertEqual(1, len(self.stale_entries([entry], ["other.go"], lambda f: carries, {})))
+        self.assertEqual(1, len(self.stale_entries([entry], ["internal/x/new_test.go"], lambda f: gone, {})))
+        self.assertEqual([], self.stale_entries([entry], ["internal/x/new_test.go"], lambda f: carries, {}))
+        # pre-registered: allowed while the file is missing or does not carry the shape yet
+        self.assertEqual([], self.stale_entries([entry], ["other.go"], lambda f: carries, key))
+        self.assertEqual([], self.stale_entries([entry], ["internal/x/new_test.go"], lambda f: gone, key))
+        # pre-registered and now matching: must be removed from the list
+        self.assertEqual(1, len(self.stale_entries([entry], ["internal/x/new_test.go"], lambda f: carries, key)))
 
     def test_the_documented_class_names_are_the_exemption_classes(self):
         self.assertEqual(set(scan.CLASSES), {scan.FREEIPA_ATTRIBUTE, scan.PRIVATE_KEY, scan.AUTHORIZATION, scan.COOKIE,
