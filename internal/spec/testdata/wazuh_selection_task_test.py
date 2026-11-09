@@ -258,22 +258,39 @@ class SelectionGraphTests(unittest.TestCase):
             self.assertIsNone(state['ownership']['writer'])
 
     def test_mixed_failure_restores_only_selected_files_and_metadata(self):
+        # A failure INSIDE the configuration block rolls back exactly the selected resource (and C10 never runs).
         for tags, resource in (('C5,C10', 'config'), ('C7,C10', 'hosts')):
-            for fault in (None, (resource, 'before'), (resource, 'partial')):
+            for fault in ((resource, 'before'), (resource, 'partial')):
                 with self.subTest(tags=tags, fault=fault):
-                    result, events, state = self.graph(flags=('--tags', tags), fail_verify=not fault, fault=fault)
+                    result, events, state = self.graph(flags=('--tags', tags), fault=fault)
                     self.assertNotEqual(result.returncode, 0); self.assertEqual(state['before'], state['after'])
                     restored = next(e for e in events if e['action'] == 'ordinary-restored')
-                    self.assertEqual(restored['restored'], [] if fault and fault[1] == 'before' else [resource])
+                    self.assertEqual(restored['restored'], [] if fault[1] == 'before' else [resource])
                     self.assertEqual(restored['services'], [])
                     self.assertFalse(any(e['action'] == 'service' for e in events))
+                    self.assertNotIn('agent-verify', [e['action'] for e in events], 'C10 must not run after a failed configuration')
                     self.assertIsNone(state['ownership']['writer'])
 
-    def test_selected_service_failure_restores_availability_without_touching_audit_identity(self):
+    def test_a_verifier_only_failure_in_a_mixed_run_keeps_the_applied_selected_files(self):
+        # Contract (part A native-run finding, kept over the earlier part-B behavior): a failed C10 is a
+        # failed run, never a rollback of configuration that was applied correctly in the same run.
+        for tags, resource in (('C5,C10', 'config'), ('C7,C10', 'hosts')):
+            with self.subTest(tags=tags):
+                result, events, state = self.graph(flags=('--tags', tags), fail_verify=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotEqual(state['before'], state['after'], 'the correctly applied ' + resource + ' must stay in place')
+                self.assertFalse(any(e['action'] in ('ordinary-restored', 'agent-config-restore') for e in events), events)
+                self.assertIn('agent-verify', [e['action'] for e in events])
+                self.assertIsNone(state['ownership']['writer'], 'the writer is still released exactly')
+
+    def test_a_selected_service_verification_failure_keeps_the_applied_services_and_audit_identity(self):
         result, events, state = self.graph(flags=('--tags', 'C3,C5,C10'), fail_verify=True)
-        self.assertNotEqual(result.returncode, 0); self.assertEqual(state['before'], state['after'])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(e['action'] in ('ordinary-restored', 'agent-config-restore') for e in events), events)
+        self.assertNotEqual(state['before'], state['after'])
         self.assertTrue(state['services']['wazuh-agent']['active']); self.assertEqual(state['services']['wazuh-agent']['enabled'], 'enabled')
         self.assertEqual(state['services']['auditd']['generation'], 50)
+        self.assertIsNone(state['ownership']['writer'])
 
     def test_skip_family_and_check_mode_have_no_unmatched_package_mutator(self):
         for family in ('Debian', 'RedHat'):
