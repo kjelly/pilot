@@ -1,9 +1,10 @@
 """Real Ansible run of the production manager version gate.
 
-The production tasks (input gates, defaulting, docker pre-flight, the central
-coordinator gate, the selection facts) are extracted by name and run unchanged
-under real Ansible; the coordinator's `central` action runs for real over the
-modeled docker/Wazuh commands. A sentinel task after the gate stands for "the
+The production tasks (input gates, defaulting, docker pre-flight, the owner-held
+central inspect/execute entry point, the selection facts) are extracted by name from
+wherever the play nests them and run unchanged under real Ansible; the coordinator's
+`central` action runs for real over the modeled docker/Wazuh commands, after the
+host-wide writer is claimed for the play's owner. A sentinel task after the gate stands for "the
 stack would now be touched". Not native VM evidence.
 """
 import json
@@ -22,15 +23,23 @@ NAMES = ('Gate: common and legacy Wazuh release inputs agree',
          'Resolve inventory-overridable defaults without shadowing group_vars/host_vars',
          'Gate: the effective Wazuh release is an exact stable 4.14.x',
          'Pre-flight: docker engine is up (spec docs/verification/docker.md)',
-         'Gate: an existing Wazuh central stack already runs the requested release',
-         "Reset this play's selected manager installation plan",
+         'Inspect compatibility or execute the explicitly authorized central upgrade',
+         "Reset this play's selected manager replacement plan",
          "Mark this run's selected Wazuh manager installation plan",
-         'Record whether this check-mode preview covers a fresh central stack',
+         'Record whether the central runtime probe was legitimately deferred',
          'Gate: a fresh central stack requires selected container installation tasks')
 
 
+def walk(items):
+    for task in items:
+        yield task
+        for section in ('block', 'rescue', 'always'):
+            yield from walk(task.get(section, []))
+
+
 def picked(play, name):
-    for task in play['pre_tasks']:
+    # The production play nests its tasks under the host-writer block: find them wherever they are.
+    for task in walk(play.get('pre_tasks', []) + play.get('tasks', [])):
         if task.get('name') == name:
             return task
     raise AssertionError('missing production task: ' + name)
@@ -65,7 +74,13 @@ class ManagerGateTests(unittest.TestCase):
             tasks.append({'name': 'record the effective facts', 'check_mode': False, 'tags': ['always'], 'ansible.builtin.copy': {
                 'dest': str(root / 'facts.json'), 'mode': '0600',
                 'content': "{{ {'docker_version': wazuh_docker_version, 'planned': pilot_wazuh_manager_install_planned, 'preview_fresh': pilot_wazuh_manager_preview_fresh} | to_json }}"}})
-            values = {'stage': 'sandbox'}
+            values = {'stage': 'sandbox',
+                      # Inputs the owner-held central entry point consumes; the real plays derive them earlier
+                      # (writer claim, reader request, preview staging), which other harnesses cover.
+                      'wazuh_writer_owner': 'd' * 32, 'wazuh_reader_checker_hash': '',
+                      'wazuh_reader_request': {'selected': False, 'enabled': False, 'host': '', 'address': '', 'transport': 'tcp',
+                                               'port': '514', 'peer': '', 'tls': {}, 'tools': {}},
+                      'wazuh_reader_operation': {'stdout': 'e' * 32}, 'wazuh_preview_assets': {}}
             values.update(inputs or {})
             playbook = root / 'play.yml'
             playbook.write_text(yaml.safe_dump([{'hosts': 'localhost', 'connection': 'local', 'gather_facts': False,
@@ -103,20 +118,49 @@ class ManagerGateTests(unittest.TestCase):
             self.assertEqual(facts['planned'], True)
 
     def test_any_release_change_of_an_existing_stack_is_a_visible_typed_refusal_before_anything_else(self):
-        cases = ((('present', '4.14.1'), {'wazuh_version': '4.14.9'}),
-                 (('present', '4.14.9'), {}),
-                 (('present', '4.14.1'), {'wazuh_docker_version': '4.14.9'}),
-                 (('present', '4.14.6'), {'wazuh_version': '4.14.9'}))
-        for (stack, release), inputs in cases:
+        # Agents are consistent with the requested release so the refusal under test is the release change itself
+        # (a registered agent newer than the target is the separate, earlier typed refusal tested below).
+        cases = ((('present', '4.14.1'), {'wazuh_version': '4.14.9'}, None),
+                 (('present', '4.14.9'), {}, {'001': '4.14.1'}),
+                 (('present', '4.14.1'), {'wazuh_docker_version': '4.14.9'}, None),
+                 (('present', '4.14.6'), {'wazuh_version': '4.14.9'}, None))
+        for (stack, release), inputs, agents in cases:
             for flags in ((), ('--check',)):
                 with self.subTest(release=release, inputs=inputs, flags=flags):
-                    run, actions, docker, facts = self.run_gate(stack, release, inputs=inputs, flags=flags)
+                    run, actions, docker, facts = self.run_gate(stack, release, inputs=inputs, flags=flags, agents=agents)
                     self.assertNotEqual(run.returncode, 0)
-                    self.assertIn('central release change is not supported by this version', run.stdout)
+                    self.assertIn('only explicit central 4.14.1 -> 4.14.9 upgrade is supported', run.stdout)
                     self.assertIn('error_kind', run.stdout)
                     self.assertNotIn('mutation', actions, 'no stack task may follow a refused gate')
                     self.assertIsNone(facts)
                     self.assertFalse([a for a in docker if a[1] in ('compose', 'pull', 'stop', 'rm', 'up')], docker)
+
+    def test_upgrade_authorization_never_widens_the_supported_pair_or_allows_a_downgrade(self):
+        # B contract: an explicit wazuh_upgrade authorizes only 4.14.1 -> 4.14.9 of an existing stack.
+        for (stack, release), inputs, agents in ((('present', '4.14.6'), {'wazuh_version': '4.14.9'}, None),
+                                                 (('present', '4.14.9'), {'wazuh_version': '4.14.1'}, {'001': '4.14.1'}),
+                                                 (('present', '4.14.1'), {'wazuh_version': '4.14.6'}, None)):
+            with self.subTest(release=release, inputs=inputs):
+                run, actions, docker, facts = self.run_gate(stack, release, inputs=dict(inputs, wazuh_upgrade=True),
+                                                            flags=('--tags', 'C1'), agents=agents)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn('only explicit central 4.14.1 -> 4.14.9 upgrade is supported', run.stdout)
+                self.assertNotIn('mutation', actions)
+                self.assertFalse([a for a in docker if a[1] in ('compose', 'pull', 'stop', 'rm', 'up')], docker)
+        # A fresh host has nothing to upgrade: the authorization is simply unused.
+        run, actions, docker, facts = self.run_gate('absent', inputs={'wazuh_version': '4.14.9', 'wazuh_upgrade': True},
+                                                    flags=('--tags', 'C1'))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(facts['docker_version'], '4.14.9')
+
+    def test_a_non_boolean_upgrade_authorization_is_refused_before_any_docker_command(self):
+        for value in ('yes', '1', 'maybe'):
+            with self.subTest(wazuh_upgrade=value):
+                run, actions, docker, facts = self.run_gate('present', '4.14.1', inputs={'wazuh_upgrade': value})
+                self.assertNotEqual(run.returncode, 0)
+                self.assertNotIn('docker-info', actions)
+                self.assertEqual(docker, [])
+                self.assertNotIn('mutation', actions)
 
     def test_conflicting_or_invalid_release_inputs_are_refused_before_any_docker_command(self):
         for inputs in ({'wazuh_version': '4.14.9', 'wazuh_docker_version': '4.14.1'}, {'wazuh_version': '5.0.0'},
@@ -133,6 +177,14 @@ class ManagerGateTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn('a registered agent is newer than the central release', run.stdout)
         self.assertNotIn('mutation', actions)
+
+    def test_a_downgrade_request_over_a_newer_registered_agent_is_a_visible_typed_refusal(self):
+        for flags in ((), ('--check',)):
+            run, actions, docker, facts = self.run_gate('present', '4.14.9', flags=flags)
+            self.assertNotEqual(run.returncode, 0)
+            self.assertIn('a registered agent is newer than the central release', run.stdout)
+            self.assertIn('error_kind', run.stdout)
+            self.assertNotIn('mutation', actions)
 
     def test_an_unhealthy_or_unidentifiable_stack_is_never_treated_as_absent(self):
         run, actions, docker, facts = self.run_gate('present', '4.14.1', stopped_daemon='remoted')
@@ -168,7 +220,7 @@ class ManagerGateTests(unittest.TestCase):
         self.assertEqual(facts['planned'], False, 'C12 alone selects no installation')
         run, actions, docker, facts = self.run_gate('present', '4.14.1', inputs={'wazuh_version': '4.14.9'}, flags=('--tags', 'C12'))
         self.assertNotEqual(run.returncode, 0)
-        self.assertIn('central release change is not supported', run.stdout)
+        self.assertIn('only explicit central 4.14.1 -> 4.14.9 upgrade is supported', run.stdout)
         run, actions, docker, facts = self.run_gate('absent', flags=('--tags', 'C12'))
         self.assertNotEqual(run.returncode, 0)
         self.assertIn('Fresh Wazuh central tasks require C1/C2/C3 container installation to be selected', run.stdout)
@@ -187,6 +239,7 @@ class TopologyReceiverTests(unittest.TestCase):
     """
     TASKS = ('Gate: siem_forward_port is a TCP port number',
              'Resolve inventory-overridable defaults without shadowing group_vars/host_vars',
+             'Resolve forwarding transport defaults under the Wazuh writer',
              "Auto-detect SIEM forward host from this inventory's log-server group",
              "Gate: siem_forward_port matches the inventory log-server's siem_receiver_tcp_port")
 
@@ -231,7 +284,7 @@ class TopologyReceiverTests(unittest.TestCase):
 
     def test_a_topology_without_a_receiver_leaves_forwarding_off_which_is_why_the_chain_failed_natively(self):
         text = (REPO / 'docs/topologies/wazuh-version-topology.yaml').read_text()
-        without = text.replace('groups: [sandbox, log-server, wazuh-fim]', 'groups: [sandbox, wazuh-fim]')
+        without = text.replace('groups: [sandbox, log-server, audit-log-forwarding, wazuh-fim]', 'groups: [sandbox, wazuh-fim]')
         self.assertNotEqual(without, text)
         run, facts, hosts = self.run_over(without)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)

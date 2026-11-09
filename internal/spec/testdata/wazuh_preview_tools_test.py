@@ -364,8 +364,12 @@ args=sys.argv[1:]
 if '--preview-tools-json' in args:
  index=args.index('--preview-tools-json')+1;value=json.loads(args[index]);value['identity'][2:4]=[0,0];args[index]=json.dumps(value)
 with fixture.native_metadata(),fixture.product_paths(w,Path(SETTINGS['run']),Path(SETTINGS['ledger']),Path(SETTINGS['proc']),Path(SETTINGS['installed'])):
- central=w.Central(root=Path(SETTINGS['ledger']))
- central.discover=lambda:{'version':SETTINGS.get('discovered','4.14.9'),'directory':SETTINGS['project']}
+ # The modeled stack lives in the pilot-owned layout under a private managed root, as the coordinator's
+ # active-Compose-directory check requires; the default production root is host state and is never touched.
+ managed=Path(SETTINGS['project']).parent/'managed'
+ central=w.Central(root=Path(SETTINGS['ledger']),managed_root=managed)
+ discovered=SETTINGS.get('discovered','4.14.9')
+ central.discover=lambda:{'version':discovered,'directory':str(managed/('wazuh-docker-'+discovered)/'single-node')}
  central.check_agents=lambda _:{}
  if SETTINGS.get('observer_failure') and args[0]=='central':
   def observe_failure(*argv,**kwargs):
