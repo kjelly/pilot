@@ -358,7 +358,6 @@
               pilot-wazuh-delivery: "{{ lookup('file', playbook_dir ~ '/../files/pilot-wazuh-delivery', rstrip=False) | hash('sha256') }}"
               pilot-siem-relp-check: "{{ lookup('file', playbook_dir ~ '/../files/pilot-siem-relp-check', rstrip=False) | hash('sha256') }}"
             wazuh_reader_checker_hash: "{{ lookup('file', playbook_dir ~ '/../files/pilot-wazuh-heartbeat', rstrip=False) | hash('sha256') }}"
-          no_log: true
           tags: [always]
 
         - name: "Record allocation intent before dispatching any transient effect"
@@ -535,7 +534,6 @@
           check_mode: false
           when: not ansible_check_mode or docker_pre.rc == 0
           tags: [always]
-          no_log: true
 
         - name: "Record whether the central runtime probe was legitimately deferred"
           ansible.builtin.set_fact:
@@ -593,7 +591,6 @@
                 - pilot_wazuh_reader_selected | bool
                 - siem_forwarding_enabled | bool
                 - not pilot_wazuh_manager_preview_fresh
-              no_log: true
               tags: [always]
 
             - name: "Record selected readonly replay preview dispatch before execution"
@@ -624,7 +621,6 @@
                 - pilot_wazuh_reader_selected | bool
                 - siem_forwarding_enabled | bool
                 - not pilot_wazuh_manager_preview_fresh
-              no_log: true
               tags: [always]
 
             - name: "Remember this invocation's selected local enable admission"
@@ -971,7 +967,6 @@
                   when:
                     - wazuh_reader_enable_admitted | bool
                     - siem_forwarding_enabled | bool
-                  no_log: true
                   tags: [C10, C11]
 
                 - name: "Record that the ACL transaction completed successfully"
@@ -1111,7 +1106,6 @@
               when:
                 - not ansible_check_mode
                 - wazuh_reader_enable_admitted | bool
-              no_log: true
               tags: [always]
 
             - name: "Record local replay convergence independently of later verification"
@@ -1133,10 +1127,11 @@
           ansible.builtin.set_fact:
             wazuh_preview_failed: true
           tags: [always]
-        # The coordinator tasks run under no_log because their arguments carry
-        # operator inputs, which also censors why they failed. Their stdout holds a
-        # bounded typed refusal (error_kind refused|native plus a fixed message,
-        # never tool output); extract only that pair with a strict pattern.
+        # The coordinator tasks show their own failure: their arguments are secret-free
+        # (TLS material appears only as SHA-256) and their stdout holds a bounded typed
+        # refusal (error_kind refused|native plus a fixed message, never tool output).
+        # Extract only that pair with a strict pattern so it is also repeated in one
+        # line after any cleanup output.
         - name: "Extract only the bounded typed refusal from each coordinator result hidden by no_log"
           ansible.builtin.set_fact:
             wazuh_coordinator_refusals: >-
@@ -1219,7 +1214,6 @@
             - wazuh_writer_claimed | default(false) | bool
             - wazuh_reader_enable_admitted | default(false) | bool
             - not (wazuh_reader_enable_committed | default(false) | bool)
-          no_log: true
           tags: [always]
 
         - name: "Release only this exact writer after all mutators and recovery tasks have ended"

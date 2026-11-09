@@ -427,7 +427,6 @@
       ansible.builtin.command:
         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-apt-plan, --family, Debian, --owner, "{{ pilot_apt_wazuh_owner }}", --version, "{{ _pilot_apt_versions['wazuh-agent'] }}", --artifact, "{{ _pilot_apt_artifact }}"]
       changed_when: false
-      no_log: true
       when:
         - pilot_apt_wazuh_owner is defined
         - not _pilot_apt_stage_only
@@ -439,7 +438,6 @@
           ansible.builtin.command:
             argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-hook-prepare, --family, Debian, --owner, "{{ pilot_apt_wazuh_owner }}"]
           changed_when: false
-          no_log: true
           when: pilot_apt_wazuh_owner is defined
 
         - name: "APT package install ({{ pilot_apt_component }}) — install (ordinary sanctioned mutation point, no ignore_errors)"
@@ -486,7 +484,6 @@
           ansible.builtin.command:
             argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-hook-cleanup, --family, Debian, --owner, "{{ pilot_apt_wazuh_owner }}", --confirm-previous-stopped]
           changed_when: false
-          no_log: true
           when: pilot_apt_wazuh_owner is defined
 
     - name: "APT package install ({{ pilot_apt_component }}) — SUCCESS"

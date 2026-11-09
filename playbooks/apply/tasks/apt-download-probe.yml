@@ -56,7 +56,6 @@
   ansible.builtin.command:
     argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-apt-plan, --family, Debian, --owner, "{{ pilot_apt_wazuh_owner }}", --version, "{{ _pilot_apt_versions['wazuh-agent'] }}", --stage]
   changed_when: false
-  no_log: true
   when: pilot_apt_wazuh_owner is defined
 
 - name: "APT download probe ({{ pilot_apt_probe_stage }}) — apt-get install --download-only, never installs"

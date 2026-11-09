@@ -373,7 +373,6 @@
               ansible.builtin.command:
                 argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-policy-check, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_writer_owner }}"]
               changed_when: false
-              no_log: true
               tags: [C1, C2]
 
             - name: "Step 1: Ensure /usr/share/keyrings exists (Debian apt)"
@@ -449,7 +448,6 @@
                 argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-policy-check, --family, RedHat, --owner, "{{ wazuh_writer_owner }}"]
               register: wazuh_dnf_prerequisite_state
               changed_when: false
-              no_log: true
               when:
                 - ansible_os_family == 'RedHat'
                 - not ansible_check_mode
@@ -492,7 +490,6 @@
                 stdin: "{{ wazuh_agent_version_plan | to_json }}"
               register: wazuh_agent_fresh_rpm
               changed_when: false
-              no_log: true
               tags: [C1, C2]
               when:
                 - not ansible_check_mode
@@ -543,7 +540,6 @@
                       ansible.builtin.command:
                         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-config-save, --owner, "{{ wazuh_writer_owner }}", --operation, "{{ wazuh_config_operation }}", --resource, config, --path, "{{ wazuh_ossec_conf }}"]
                       changed_when: false
-                      no_log: true
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Record only this invocation's selected attempted resources"
                       ansible.builtin.set_fact:
@@ -589,7 +585,6 @@
                       ansible.builtin.command:
                         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-config-save, --owner, "{{ wazuh_writer_owner }}", --operation, "{{ wazuh_config_operation }}", --resource, hosts]
                       changed_when: false
-                      no_log: true
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Record only this invocation's selected attempted resources"
                       ansible.builtin.set_fact:
@@ -618,7 +613,6 @@
                       ansible.builtin.command:
                         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-config-save, --owner, "{{ wazuh_writer_owner }}", --operation, "{{ wazuh_config_operation }}", --resource, config, --path, "{{ wazuh_ossec_conf }}"]
                       changed_when: false
-                      no_log: true
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Record only this invocation's selected attempted resources"
                       ansible.builtin.set_fact:
@@ -674,13 +668,11 @@
                       ansible.builtin.command:
                         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-config-save, --owner, "{{ wazuh_writer_owner }}", --operation, "{{ wazuh_config_operation }}", --resource, agent-service]
                       changed_when: false
-                      no_log: true
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Snapshot audit-service before its selected mutation"
                       ansible.builtin.command:
                         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-config-save, --owner, "{{ wazuh_writer_owner }}", --operation, "{{ wazuh_config_operation }}", --resource, audit-service]
                       changed_when: false
-                      no_log: true
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Record only this invocation's selected attempted resources"
                       ansible.builtin.set_fact:
@@ -705,7 +697,6 @@
                       ansible.builtin.command:
                         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-config-save, --owner, "{{ wazuh_writer_owner }}", --operation, "{{ wazuh_config_operation }}", --resource, agent-service]
                       changed_when: false
-                      no_log: true
                       when: not (wazuh_agent_transaction_reserved | default(false) | bool)
                     - name: "Record only this invocation's selected attempted resources"
                       ansible.builtin.set_fact:
@@ -728,7 +719,6 @@
                   changed_when: false
                   when: wazuh_agent_transaction_reserved is defined and wazuh_agent_transaction_reserved | bool
                   tags: [C1, C2]
-                  no_log: true
 
                 - name: "Step 11c: Controlled upgrades require native agent availability"
                   ansible.builtin.assert:
@@ -760,7 +750,6 @@
                     - (wazuh_agent_final_runtime.stdout | from_json).active
                     - (wazuh_agent_final_runtime.stdout | from_json).id is defined
                   tags: [C1, C2]
-                  no_log: true
 
                 - name: "Step 11e: Commit only after selected configuration, enrollment and native verification"
                   ansible.builtin.command:
@@ -768,15 +757,6 @@
                   changed_when: false
                   when: wazuh_agent_transaction_reserved is defined and wazuh_agent_transaction_reserved | bool
                   tags: [C1, C2]
-                  no_log: true
-
-                - name: "Step 11f: Verify the stable native agent release, pin and availability (spec C10)"
-                  ansible.builtin.command:
-                    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-verify, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_writer_owner }}"]
-                  changed_when: false
-                  when: not (wazuh_agent_transaction_reserved | default(false) | bool)
-                  tags: [C10]
-                  no_log: true
 
               rescue:
                 - name: "ROLLBACK — recover the owned version transaction including original configuration"
@@ -791,7 +771,6 @@
                   ansible.builtin.command:
                     argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-config-restore, --owner, "{{ wazuh_writer_owner }}", --operation, "{{ wazuh_config_operation }}", --resources, "{{ wazuh_ordinary_resources | to_json }}"]
                   changed_when: false
-                  no_log: true
                   when:
                     - wazuh_agent_transaction_reserved is not defined or not (wazuh_agent_transaction_reserved | bool)
                     - wazuh_ordinary_resources is defined
@@ -807,6 +786,19 @@
                       restores only this invocation's selected attempted config
                       and service resources; completed enrollment remains valid
                       for retry. A verifier-only failure grants no config cleanup.
+
+            # The native verification sits OUTSIDE the block whose rescue reverts
+            # configuration (but inside the writer-owning block, so it still runs
+            # under the host-wide owner): a failed verification is a failed run that
+            # leaves the applied configuration in place for diagnosis, never a rollback.
+            - name: "Step 12: Verify the native agent release, version pin and availability (spec C10)"
+              ansible.builtin.command:
+                argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-verify, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_writer_owner }}"]
+              changed_when: false
+              when:
+                - not ansible_check_mode
+                - not (wazuh_agent_transaction_reserved | default(false) | bool)
+              tags: [C10]
 
       always:
         - name: "Release only this exact writer after all mutators and recovery tasks have ended"

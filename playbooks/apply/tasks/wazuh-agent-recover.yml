@@ -3,7 +3,6 @@
   ansible.builtin.command:
     argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-hook-cleanup, --family, Debian, --owner, "{{ wazuh_agent_transaction_owner }}", --confirm-previous-stopped]
   changed_when: false
-  no_log: true
   when: ansible_os_family == 'Debian'
 
 - name: "Enter recovery for the exact durable agent owner"
@@ -11,7 +10,6 @@
     argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-recovery, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
   register: wazuh_agent_recovery_result
   changed_when: false
-  no_log: true
 
 - name: "Reinstall the retained old Debian agent through the shared APT framework"
   ansible.builtin.include_tasks:
@@ -49,7 +47,6 @@
     argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-restore, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
   changed_when: false
   when: not (wazuh_agent_recovery_result.stdout | from_json).restored
-  no_log: true
 
 - name: "Observe the restored native agent and original enrollment identity"
   ansible.builtin.command:
@@ -57,7 +54,6 @@
   register: wazuh_agent_restored_runtime
   changed_when: false
   when: (wazuh_agent_recovery_result.stdout | from_json).need_commit
-  no_log: true
 
 - name: "Manager must observe the original active identity and version after recovery"
   ansible.builtin.script:
@@ -78,11 +74,9 @@
     - (wazuh_agent_recovery_result.stdout | from_json).manager_host | length > 0
     - (wazuh_agent_restored_runtime.stdout | from_json).active
     - (wazuh_agent_restored_runtime.stdout | from_json).id is defined
-  no_log: true
 
 - name: "Commit recovery only after local and applicable central observations"
   ansible.builtin.command:
     argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-recovery-commit, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
   changed_when: false
   when: (wazuh_agent_recovery_result.stdout | from_json).need_commit
-  no_log: true

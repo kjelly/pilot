@@ -13,7 +13,6 @@
     stdin: "{{ wazuh_agent_version_plan | to_json }}"
   register: wazuh_agent_stage_result
   changed_when: false
-  no_log: true
 
 - name: "Stage the exact signed old and new Debian agent packages before downtime"
   ansible.builtin.include_tasks: apt-package-install.yml
@@ -57,7 +56,6 @@
                'prerequisite_plugin_present': ((wazuh_dnf_prerequisite_state.stdout | from_json).prerequisite_plugin_present
                  if ansible_os_family == 'RedHat' else none)}) | to_json }}
       changed_when: false
-      no_log: true
 
     - name: "Grant this run recovery ownership"
       ansible.builtin.set_fact:
@@ -67,14 +65,12 @@
       ansible.builtin.command:
         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-backup, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
       changed_when: false
-      no_log: true
 
     - name: "Authorize replacement only for the verified backup and owner"
       ansible.builtin.command:
         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-install, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
       register: wazuh_agent_install_result
       changed_when: false
-      no_log: true
 
     - name: "Install the frozen Debian target through the shared APT framework"
       ansible.builtin.include_tasks: apt-package-install.yml
@@ -105,7 +101,6 @@
       ansible.builtin.command:
         argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-activate, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
       changed_when: false
-      no_log: true
 
   rescue:
     - name: "Recover this run's owned agent transaction"

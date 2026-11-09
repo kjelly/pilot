@@ -441,10 +441,6 @@ class SelectionGraphTests(unittest.TestCase):
             # The graph itself re-establishes the official source before replacing any package.
             self.assertLess(self.actions(events).index('source-ready'), self.actions(events).index('install-agent'))
 
-
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
-
     def test_fresh_package_family_full_C1_C2_and_prepared_foreign_source_both_backends(self):
         for family in ('Debian', 'RedHat'):
             for tags, prepared, foreign in ((None, False, False), ('C1', False, False), ('C2', False, False), ('C2', True, True)):
@@ -554,5 +550,9 @@ if __name__ == '__main__':
                 self.assertNotIn('agent-protect', actions); self.assertNotIn('agent-check', actions)
                 self.assertEqual(state['installed'], '4.14.1-1'); self.assertTrue(state['protected'])
                 self.assertIn('OPERATOR FIM SENTINEL', bytes.fromhex(state['after']['config']['bytes']).decode())
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
 
 if __name__ == '__main__': unittest.main(verbosity=2)

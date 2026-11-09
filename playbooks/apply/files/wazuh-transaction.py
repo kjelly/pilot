@@ -1019,21 +1019,24 @@ class PackageGuard:
         return before == after
 
     def protect(self, package, require_installed=True):
+        """Establish the native guard for the package; idempotent (changed reports whether it acted)."""
         self.nevra(package)
         self.ownership()
         if self.family == 'Debian':
-            if not self.apt_state()['held']:
+            changed = not self.apt_state()['held']
+            if changed:
                 self.r.run(['apt-mark', 'hold', 'wazuh-agent'], timeout=60, operation='hold only Wazuh agent')
             if not require_installed:
                 if not self.apt_state()['held']:
                     raise Refused('recovery did not establish the native Wazuh hold')
-                return {'guard': 'apt-hold'}
+                return {'guard': 'apt-hold', 'changed': changed}
         else:
             context = self.dnf_context()
             content = self.lock_text(context['locks'].get('text', ''), package)
-            if content != context['locks'].get('text', ''):
+            changed = content != context['locks'].get('text', '')
+            if changed:
                 atomic_text(self.LOCKS, content)
-        return self.verify(package)
+        return dict(self.verify(package), changed=changed)
 
     def verify(self, package):
         self.nevra(package)
@@ -1349,6 +1352,58 @@ def bounded_flock(filename, shared=False, timeout=30):
         os.close(fd)
 
 
+@contextlib.contextmanager
+def shared_existing(filename, timeout=30):
+    """Shared flock on a lock file that already exists; it never creates one.
+
+    An observation must not write (a check-mode preview creates nothing): when the lock file does
+    not exist no writer has ever taken it, so there is nothing to exclude. When it exists, a
+    writer holding it exclusively still makes the observation wait and then refuse.
+    """
+    try:
+        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        yield
+        return
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+            raise Refused('unsafe Wazuh coordinator lock')
+        until = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= until:
+                    raise Refused('Wazuh coordinator lock acquisition timed out') from exc
+                time.sleep(0.02)
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def shared_existing_component(filename):
+    """The component lock of a pure observation: shared, immediate refusal, never created."""
+    try:
+        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        yield
+        return
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+            raise Refused('unsafe transaction lock')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise Refused('another Wazuh transaction is running') from exc
+        yield
+    finally:
+        os.close(fd)
+
+
 class HostWriter:
     """One durable owner for all Wazuh writers on this host, including hosts.
 
@@ -1453,8 +1508,15 @@ class HostWriter:
             yield
 
     @contextlib.contextmanager
-    def reader(self, component, owner=None):
-        with self.mutex(shared=True):
+    def observe_mutex(self):
+        """The shared coordinator lock for a pure observation: never creates the state root or lock."""
+        path_shape(self.root, 'directory', missing=True)
+        with shared_existing(self.root / 'coordinator.lock'):
+            yield
+
+    @contextlib.contextmanager
+    def reader(self, component, owner=None, observe=False):
+        with (self.observe_mutex() if observe else self.mutex(shared=True)):
             marker = self.active()
             if marker:
                 own = owner and marker['owner'] == owner and marker['component'] == component
@@ -1480,12 +1542,26 @@ class Transaction:
 
     @contextlib.contextmanager
     def lock(self, owner=None, reader=False):
+        if reader:
+            # A pure observation never creates the state root, a lock or a journal (a check-mode
+            # preview must not write): it takes non-creating shared locks on whatever a writer left.
+            absent = not (self.root.exists() or self.root.is_symlink())
+            with HostWriter(self.root).reader(self.kind, owner, observe=True):
+                with shared_existing_component(self.root / (self.kind + '.lock')):
+                    yield
+            if absent and (self.root.exists() or self.root.is_symlink()):
+                # With no state root there is no lock to hold, so a writer may claim while the
+                # observation runs. A writer creates the root before it changes anything, so a
+                # root that appeared means the observation may have seen a transaction's
+                # temporary state: discard it instead of returning it.
+                raise Refused('a Wazuh writer claimed this host during the observation')
+            return
         MountTable().backup(path_shape(self.root, 'directory', missing=True))
         private_dir(self.root)
         host = HostWriter(self.root)
-        scope = host.reader(self.kind, owner) if reader else host.guard(owner, self.kind) if owner is not None else contextlib.nullcontext()
+        scope = host.guard(owner, self.kind) if owner is not None else contextlib.nullcontext()
         with scope:
-            with self.component_lock(shared=reader):
+            with self.component_lock(shared=False):
                 yield
 
     @contextlib.contextmanager
@@ -3922,20 +3998,6 @@ class Central(Transaction):
                 result['canary'] = self.canary()
             return result
 
-    def gate(self, target):
-        """An existing stack must already run the requested release; none is changed."""
-        version(target)
-        state = self.discover()
-        if not state:
-            return {'changed': False, 'fresh': True, 'version': target}
-        if state['version'] != target:
-            raise Refused('central release change is not supported by this version')
-        expected = canonical(self.managed_root / ('wazuh-docker-' + target) / 'single-node')
-        if Path(state['directory']) != expected:
-            raise Refused('active Compose directory does not match the requested release')
-        self.check_agents(state['version'])
-        return {'changed': False, 'fresh': False, 'version': target, 'directory': state['directory']}
-
     def discover(self):
         self.r.run(['docker', 'info'], timeout=30)
         docker_root = canonical(self.r.run(['docker', 'info', '--format', '{{.DockerRootDir}}'], timeout=30).stdout.strip())
@@ -4451,6 +4513,15 @@ class Central(Transaction):
         self.check_agents(item['target_version'])
         return {}
 
+    def expect_directory(self, state, target):
+        """The active Compose project must be the requested release's own directory. A controlled
+        4.14.1 -> 4.14.9 upgrade retains the original directory, so that one is also accepted for 4.14.9."""
+        allowed = {canonical(self.managed_root / ('wazuh-docker-' + target) / 'single-node')}
+        if target == '4.14.9':
+            allowed.add(canonical(self.managed_root / 'wazuh-docker-4.14.1' / 'single-node'))
+        if Path(state['directory']) not in allowed:
+            raise Refused('active Compose directory does not match the requested release')
+
     def execute(self, target, upgrade=False, preview=False, recover=False, owner='',
                 reader_request=None, reader_checker='', reader_ack=False, preview_assets=None):
         version(target)
@@ -4484,6 +4555,7 @@ class Central(Transaction):
                 return {'changed': False, 'fresh': True, 'version': target}
             state['registry'] = self.check_agents(target)
             if state['version'] == target:
+                self.expect_directory(state, target)
                 return {'changed': False, 'fresh': False, 'version': target,
                         'directory': state['directory']}
             if not upgrade or (state['version'], target) != ('4.14.1', '4.14.9'):
@@ -4911,6 +4983,8 @@ class Agent(Transaction):
                 self.audit_check(item)
                 if package != item['package']:
                     raise Refused('cannot advance native protection before the exact target is installed')
+            if not package:
+                raise Refused('cannot protect an absent Wazuh agent package')
             return self.guard().protect(package)
 
     def policy_ownership(self, owner):
@@ -5489,8 +5563,8 @@ class Agent(Transaction):
             if not result['active']:
                 raise Refused('agent native service is inactive')
             installed = self.installed()
-            self.verify_managed_pin(installed)
-            return dict(result, **{'pass': True})
+            guard = self.verify_managed_pin(installed)
+            return dict(result, **{'pass': True, 'guard': guard['guard']})
 
 
 def preview_attestation(args, assets):
@@ -5547,7 +5621,7 @@ def main():
     parser.add_argument('--reader-checker-sha256', default='')
     parser.add_argument('--ack-rsyslog-downtime-and-replay', action='store_true')
     args = parser.parse_args()
-    if os.geteuid() != 0:
+    if not is_root():
         parser.error('Wazuh transactions require root')
     try:
         assets=None

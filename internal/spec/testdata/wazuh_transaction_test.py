@@ -122,7 +122,10 @@ class HermeticHarnessTests(unittest.TestCase):
         for name, value in redirected.items():
             self.assertIsNone(wazuh_hermetic.offending(value), name + ' still names real host state')
             self.assertTrue(str(value).startswith(str(HERMETIC_ROOT)), name)
-            self.assertFalse(Path(value).exists(), name + ' must start absent like a bare host')
+            if name == 'ROOT':
+                self.assertTrue(ROOT_STARTED_ABSENT, 'ROOT must start absent like a bare host')
+            else:
+                self.assertFalse(Path(value).exists(), name + ' must start absent like a bare host')
 
     def test_an_unredirected_native_policy_path_fails_loudly_instead_of_reading_the_host(self):
         # The guard's /etc/dnf constants are literals: a test that forgets to
@@ -229,6 +232,23 @@ class TypedErrorContractTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             w.typed_error('anything-else', 'x')
 
+    def test_typed_error_is_bounded_and_never_needs_escaping(self):
+        pattern = re.compile('(?<="error": ")[^"]{1,300}(?=", "error_kind")')
+        for text in ('plain text', 'quote " and backslash \\ end', 'unicode é中', 'new\nline\ttab', 'x' * 500,
+                     "apostrophe ' ok", 'braces {} [] ok'):
+            for kind in ('refused', 'native'):
+                value = w.typed_error(kind, text)
+                self.assertEqual(set(value), {'error', 'error_kind'})
+                self.assertLessEqual(len(value['error']), 300)
+                encoded = json.dumps(value)
+                self.assertEqual(json.loads(encoded), value)
+                # json.dumps() adds no escape sequence, so the strict pattern recovers it exactly.
+                self.assertNotIn('\\', value['error'])
+                self.assertFalse(set(value['error']) & set('{}"'), 'braces would reach Jinja')
+                self.assertEqual(pattern.search(encoded).group(0), value['error'])
+        with self.assertRaises(AssertionError):
+            w.typed_error('anything-else', 'x')
+
 
 class PolicyTests(unittest.TestCase):
     def test_native_failure_does_not_echo_argv_or_tool_output(self):
@@ -276,6 +296,55 @@ class PolicyTests(unittest.TestCase):
                 with self.assertRaisesRegex(w.Refused, 'requires an observed manager version'):
                     agent.check('', '4.14.9', True)
         self.assertEqual(w.agent_plan('', '')['package'], '4.14.1-1')
+
+    def test_a_compatible_installed_agent_is_kept_whatever_its_build_or_age(self):
+        for installed, manager, requested in (('4.14.1-1', '4.14.1', ''), ('4.14.6-1', '4.14.9', ''),
+                                              ('4.14.9-1', '4.14.9', ''), ('4.14.9-2', '4.14.9', '4.14.9'),
+                                              ('4.14.6-1', '', ''), ('4.14.1-1', '4.14.9', '4.14.1')):
+            plan = w.agent_plan(installed, manager, requested)
+            self.assertEqual((plan['package'], plan['install']), (installed, False), (installed, manager, requested))
+            self.assertEqual(plan['version'], installed.rsplit('-', 1)[0])
+
+    def test_every_release_change_of_an_installed_agent_is_refused_with_its_reason(self):
+        cases = ((('4.14.9-1', '4.14.1', ''), 'newer than the observed manager'),
+                 (('4.14.9-1', '4.14.1', '4.14.1'), 'newer than the observed manager'),
+                 (('4.14.6-1', '4.14.9', '4.14.9'), 'agent upgrade requires wazuh_upgrade=true and target 4.14.9'),
+                 (('4.14.6-1', '', '4.14.9'), 'controlled agent upgrade requires an observed manager version'),
+                 (('4.14.9-1', '4.14.9', '4.14.6'), 'downgrade'))
+        for args, reason in cases:
+            with self.assertRaisesRegex(w.Refused, reason, msg=str(args)):
+                w.agent_plan(*args)
+
+    def test_unknown_installed_or_manager_versions_never_pass(self):
+        for installed in ('4.14.9-rc1', '5.0.0-1', '4.14.1', '4.14.09-1', '1:4.14.1-1', '4.14.1-0', '4.13.9-1'):
+            with self.assertRaises(w.Refused, msg=installed):
+                w.agent_plan(installed, '4.14.9')
+        for manager in ('4.14', '5.0.0', '4.14.9-rc1', 'v4.14.9', '4.14.09'):
+            with self.assertRaises(w.Refused, msg=manager):
+                w.agent_plan('', manager)
+        with self.assertRaises(w.Refused):
+            w.agent_plan('', '', 'not-a-release')
+
+    def test_a_fresh_install_is_exactly_the_requested_release_or_the_managers(self):
+        self.assertEqual(w.agent_plan('', '4.14.9')['package'], '4.14.9-1')
+        self.assertEqual(w.agent_plan('', '')['package'], '4.14.1-1')
+        self.assertEqual(w.agent_plan('', '4.14.9', '4.14.6')['package'], '4.14.6-1')
+        self.assertEqual(w.agent_plan('', '', '4.14.9')['package'], '4.14.9-1')
+        plan = w.agent_plan('', '4.14.9')
+        self.assertEqual((plan['install'], plan['installed'], plan['manager']), (True, '', '4.14.9'))
+        with self.assertRaisesRegex(w.Refused, 'newer than the observed manager'):
+            w.agent_plan('', '4.14.1', '4.14.9')
+
+    def test_the_plan_is_a_pure_function_of_native_probes_for_both_backends(self):
+        for family in ('Debian', 'RedHat'):
+            for release in ('4.14.1-1', '4.14.9-1'):
+                command = Commands(family, release)
+                agent = w.Agent(family, runner=command, root=HERMETIC_ROOT / 'unused')
+                self.assertEqual(agent.check('4.14.9')['package'], release)
+                with self.assertRaisesRegex(w.Refused, 'newer'):
+                    agent.check('4.14.0')
+                self.assertTrue(any(call[0] == ('dpkg-query' if family == 'Debian' else 'rpm') for call in command.calls))
+            self.assertEqual(w.Agent(family, runner=Commands(family, ''), root=HERMETIC_ROOT / 'unused').check('4.14.9')['package'], '4.14.9-1')
 
 
 class NativePackageGuardTests(unittest.TestCase):
@@ -536,23 +605,6 @@ class DiscoveryFilesystemTests(unittest.TestCase):
                 self.assertEqual(alias.read_bytes(), original)
                 self.assertFalse(any(call[1] in ('stop', 'rm', 'compose') for call in native.calls))
 
-    def test_typed_error_is_bounded_and_never_needs_escaping(self):
-        pattern = re.compile('(?<="error": ")[^"]{1,300}(?=", "error_kind")')
-        for text in ('plain text', 'quote " and backslash \\ end', 'unicode é中', 'new\nline\ttab', 'x' * 500,
-                     "apostrophe ' ok", 'braces {} [] ok'):
-            for kind in ('refused', 'native'):
-                value = w.typed_error(kind, text)
-                self.assertEqual(set(value), {'error', 'error_kind'})
-                self.assertLessEqual(len(value['error']), 300)
-                encoded = json.dumps(value)
-                self.assertEqual(json.loads(encoded), value)
-                # json.dumps() adds no escape sequence, so the strict pattern recovers it exactly.
-                self.assertNotIn('\\', value['error'])
-                self.assertFalse(set(value['error']) & set('{}"'), 'braces would reach Jinja')
-                self.assertEqual(pattern.search(encoded).group(0), value['error'])
-        with self.assertRaises(AssertionError):
-            w.typed_error('anything-else', 'x')
-
 
 class Commands:
     """Native dpkg/rpm model shared by the agent tests (rpm -q absent: native capture, rc 1 and the stdout text)."""
@@ -592,9 +644,77 @@ class Commands:
             return [{'State': {'Running': False}}]
         raise AssertionError(argv)
 
+
+class BackendTests(unittest.TestCase):
+
     def test_unsupported_backend_is_refused(self):
         with self.assertRaises(w.Refused):
             w.Agent('Suse')
+    def test_native_held_dpkg_status_remains_an_installed_compatible_agent(self):
+        class Native(Commands):
+            def run(self, argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, 'hold ok installed\t4.14.1-1\tamd64', '')
+        with tempfile.TemporaryDirectory() as temporary:
+            # The journal path is fixed at construction: assigning agent.root
+            # afterwards left it on the real host ledger.
+            agent = w.Agent('Debian', runner=Native(), root=Path(temporary) / 'private')
+            self.assertEqual(agent.installed(), '4.14.1-1')
+            self.assertFalse(agent.check('4.14.9')['change'])
+
+    def test_incomplete_dpkg_states_and_foreign_architectures_are_not_an_installed_agent(self):
+        for text in ('install ok half-installed\t4.14.1-1\tamd64', 'deinstall ok config-files\t4.14.1-1\tamd64',
+                     'install ok installed\t4.14.1-1\ti386', 'hold reinstreq installed\t4.14.1-1\tamd64', 'junk'):
+            class Native(Commands):
+                def run(self, argv, **kwargs):
+                    return subprocess.CompletedProcess(argv, 0, text, '')
+            with self.assertRaises(w.Refused, msg=text):
+                w.Agent('Debian', runner=Native(), root=HERMETIC_ROOT / 'unused').installed()
+        class Rpm(Commands):
+            def run(self, argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 0, '4.14.1-1\taarch64', '')
+        with self.assertRaisesRegex(w.Refused, 'architecture'):
+            w.Agent('RedHat', runner=Rpm(), root=HERMETIC_ROOT / 'unused').installed()
+
+    def test_known_absent_and_unknown_query_failure_are_distinct(self):
+        for family in ('Debian', 'RedHat'):
+            native = Commands(family, '')
+            self.assertEqual(w.Agent(family, runner=native).installed(), '')
+        class BadQuery(Commands):
+            def run(self, argv, **kwargs):
+                return subprocess.CompletedProcess(argv, 1, '', 'database query failed')
+        with self.assertRaisesRegex(w.Refused, 'probe failed'):
+            w.Agent('Debian', runner=BadQuery()).installed()
+
+    def test_both_package_backends_enforce_same_policy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            for family in ('Debian', 'RedHat'):
+                for release in ('4.14.1-1', '4.14.9-1'):
+                    command = Commands(family, release)
+                    agent = w.Agent(family, runner=command, root=Path(temp) / family)
+                    self.assertEqual(agent.check('4.14.9')['package'], release)
+                    with self.assertRaisesRegex(w.Refused, 'newer'):
+                        agent.check('4.14.0')
+                    self.assertTrue(any(call[0] == ('dpkg-query' if family == 'Debian' else 'rpm') for call in command.calls))
+
+    def test_probe_errors_never_become_fresh_installs(self):
+        class Broken(Commands):
+            def run(self, argv, **kwargs):
+                if argv[0] == 'rpm':
+                    return subprocess.CompletedProcess(argv, 1, 'rpmdb: query failed', '')
+                raise w.Refused('query failed')
+        for family in ('Debian', 'RedHat'):
+            with self.assertRaises(w.Refused):
+                w.Agent(family, runner=Broken()).installed()
+
+    def test_registry_all_retained_agents_bound_target(self):
+        command = Commands()
+        central = w.Central(runner=command)
+        with self.assertRaisesRegex(w.Refused, 'registered agent is newer than the central release'):
+            central.check_agents('4.14.1')
+        central.check_agents('4.14.9')
+        command.unknown = True
+        with self.assertRaisesRegex(w.Refused, 'unknown retained'):
+            central.check_agents('4.14.9')
 
 
 class NativeDebianGuardTests(unittest.TestCase):
@@ -1161,6 +1281,9 @@ class PrivateRpmKeyringTests(unittest.TestCase):
             self.assertFalse(any(call[0] in ('chcon', 'rpmkeys', 'systemctl', 'dnf') for call in native.calls))
 
 
+
+
+
 class PackagePolicyHarness:
     """Native package-policy seam for filesystem/phase tests only.
 
@@ -1183,122 +1306,11 @@ class PackagePolicyHarness:
     def verify_rpm_keyring(self, *args): return None
     def artifact_plan(self, overlay, owner, *args, **kwargs): return overlay['config']
 
-    def test_a_compatible_installed_agent_is_kept_whatever_its_build_or_age(self):
-        for installed, manager, requested in (('4.14.1-1', '4.14.1', ''), ('4.14.6-1', '4.14.9', ''),
-                                              ('4.14.9-1', '4.14.9', ''), ('4.14.9-2', '4.14.9', '4.14.9'),
-                                              ('4.14.6-1', '', ''), ('4.14.1-1', '4.14.9', '4.14.1')):
-            plan = w.agent_plan(installed, manager, requested)
-            self.assertEqual((plan['package'], plan['install']), (installed, False), (installed, manager, requested))
-            self.assertEqual(plan['version'], installed.rsplit('-', 1)[0])
 
-    def test_every_release_change_of_an_installed_agent_is_refused_with_its_reason(self):
-        cases = ((('4.14.9-1', '4.14.1', ''), 'newer than the observed manager'),
-                 (('4.14.9-1', '4.14.1', '4.14.1'), 'newer than the observed manager'),
-                 (('4.14.6-1', '4.14.9', '4.14.9'), 'upgrade is not supported'),
-                 (('4.14.6-1', '', '4.14.9'), 'upgrade is not supported'),
-                 (('4.14.9-1', '4.14.9', '4.14.6'), 'downgrade'))
-        for args, reason in cases:
-            with self.assertRaisesRegex(w.Refused, reason, msg=str(args)):
-                w.agent_plan(*args)
-
-    def test_unknown_installed_or_manager_versions_never_pass(self):
-        for installed in ('4.14.9-rc1', '5.0.0-1', '4.14.1', '4.14.09-1', '1:4.14.1-1', '4.14.1-0', '4.13.9-1'):
-            with self.assertRaises(w.Refused, msg=installed):
-                w.agent_plan(installed, '4.14.9')
-        for manager in ('4.14', '5.0.0', '4.14.9-rc1', 'v4.14.9', '4.14.09'):
-            with self.assertRaises(w.Refused, msg=manager):
-                w.agent_plan('', manager)
-        with self.assertRaises(w.Refused):
-            w.agent_plan('', '', 'not-a-release')
-
-    def test_a_fresh_install_is_exactly_the_requested_release_or_the_managers(self):
-        self.assertEqual(w.agent_plan('', '4.14.9')['package'], '4.14.9-1')
-        self.assertEqual(w.agent_plan('', '')['package'], '4.14.1-1')
-        self.assertEqual(w.agent_plan('', '4.14.9', '4.14.6')['package'], '4.14.6-1')
-        self.assertEqual(w.agent_plan('', '', '4.14.9')['package'], '4.14.9-1')
-        plan = w.agent_plan('', '4.14.9')
-        self.assertEqual((plan['install'], plan['installed'], plan['manager']), (True, '', '4.14.9'))
-        with self.assertRaisesRegex(w.Refused, 'newer than the observed manager'):
-            w.agent_plan('', '4.14.1', '4.14.9')
-
-    def test_the_plan_is_a_pure_function_of_native_probes_for_both_backends(self):
-        for family in ('Debian', 'RedHat'):
-            for release in ('4.14.1-1', '4.14.9-1'):
-                command = Commands(family, release)
-                agent = w.Agent(family, runner=command, root=HERMETIC_ROOT / 'unused')
-                self.assertEqual(agent.check('4.14.9')['package'], release)
-                with self.assertRaisesRegex(w.Refused, 'newer'):
-                    agent.check('4.14.0')
-                self.assertTrue(any(call[0] == ('dpkg-query' if family == 'Debian' else 'rpm') for call in command.calls))
-            self.assertEqual(w.Agent(family, runner=Commands(family, ''), root=HERMETIC_ROOT / 'unused').check('4.14.9')['package'], '4.14.9-1')
-
-
-class BackendTests(unittest.TestCase):
-    def test_native_held_dpkg_status_remains_an_installed_compatible_agent(self):
-        class Native(Commands):
-            def run(self, argv, **kwargs):
-                return subprocess.CompletedProcess(argv, 0, 'hold ok installed\t4.14.1-1\tamd64', '')
-        with tempfile.TemporaryDirectory() as temporary:
-            # The journal path is fixed at construction: assigning agent.root
-            # afterwards left it on the real host ledger.
-            agent = w.Agent('Debian', runner=Native(), root=Path(temporary) / 'private')
-            self.assertEqual(agent.installed(), '4.14.1-1')
-            self.assertFalse(agent.check('4.14.9')['change'])
-
-    def test_incomplete_dpkg_states_and_foreign_architectures_are_not_an_installed_agent(self):
-        for text in ('install ok half-installed\t4.14.1-1\tamd64', 'deinstall ok config-files\t4.14.1-1\tamd64',
-                     'install ok installed\t4.14.1-1\ti386', 'hold reinstreq installed\t4.14.1-1\tamd64', 'junk'):
-            class Native(Commands):
-                def run(self, argv, **kwargs):
-                    return subprocess.CompletedProcess(argv, 0, text, '')
-            with self.assertRaises(w.Refused, msg=text):
-                w.Agent('Debian', runner=Native(), root=HERMETIC_ROOT / 'unused').installed()
-        class Rpm(Commands):
-            def run(self, argv, **kwargs):
-                return subprocess.CompletedProcess(argv, 0, '4.14.1-1\taarch64', '')
-        with self.assertRaisesRegex(w.Refused, 'architecture'):
-            w.Agent('RedHat', runner=Rpm(), root=HERMETIC_ROOT / 'unused').installed()
-
-    def test_known_absent_and_unknown_query_failure_are_distinct(self):
-        for family in ('Debian', 'RedHat'):
-            native = Commands(family, '')
-            self.assertEqual(w.Agent(family, runner=native).installed(), '')
-        class BadQuery(Commands):
-            def run(self, argv, **kwargs):
-                return subprocess.CompletedProcess(argv, 1, '', 'database query failed')
-        with self.assertRaisesRegex(w.Refused, 'probe failed'):
-            w.Agent('Debian', runner=BadQuery()).installed()
-
-    def test_both_package_backends_enforce_same_policy(self):
-        with tempfile.TemporaryDirectory() as temp:
-            for family in ('Debian', 'RedHat'):
-                for release in ('4.14.1-1', '4.14.9-1'):
-                    command = Commands(family, release)
-                    agent = w.Agent(family, runner=command, root=Path(temp) / family)
-                    self.assertEqual(agent.check('4.14.9')['package'], release)
-                    with self.assertRaisesRegex(w.Refused, 'newer'):
-                        agent.check('4.14.0')
-                    self.assertTrue(any(call[0] == ('dpkg-query' if family == 'Debian' else 'rpm') for call in command.calls))
-
-    def test_probe_errors_never_become_fresh_installs(self):
-        class Broken(Commands):
-            def run(self, argv, **kwargs):
-                if argv[0] == 'rpm':
-                    return subprocess.CompletedProcess(argv, 1, 'rpmdb: query failed', '')
-                raise w.Refused('query failed')
-        for family in ('Debian', 'RedHat'):
-            with self.assertRaises(w.Refused):
-                w.Agent(family, runner=Broken()).installed()
-
-    def test_registry_all_retained_agents_bound_target(self):
-        command = Commands()
-        central = w.Central(runner=command)
-        with self.assertRaisesRegex(w.Refused, 'older than a retained'):
-            central.check_agents('4.14.1')
-        central.check_agents('4.14.9')
-        command.unknown = True
-        with self.assertRaisesRegex(w.Refused, 'unknown retained'):
-            central.check_agents('4.14.9')
+class ManagerVersion(Commands):
+    """Only the manager's native version probe, for tests about reading it."""
+    def run(self, argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, 'WAZUH_VERSION="v4.14.1"\n', '')
 
 
 class CommonWriterTests(unittest.TestCase):
@@ -1389,6 +1401,10 @@ class CommonWriterTests(unittest.TestCase):
                     if not finish.wait(3):
                         raise AssertionError('reader barrier did not release')
                     return subprocess.CompletedProcess(argv, 0, 'WAZUH_VERSION="v4.14.1"\n', '')
+            # The state root and its lock already exist (an earlier writer ran): a read holds the shared
+            # lock, so the next claim waits for it. (With no state root a read holds nothing: see
+            # test_a_read_on_a_host_without_state_never_adopts_a_concurrent_claim.)
+            w.HostWriter(root).claim('1' * 32, 'central'); w.HostWriter(root).release('1' * 32)
             central = w.Central(root=root, runner=Native())
             writer = w.HostWriter(root)
             with ThreadPoolExecutor(2) as pool:
@@ -1403,6 +1419,49 @@ class CommonWriterTests(unittest.TestCase):
             with self.assertRaisesRegex(w.Refused, 'active Wazuh writer'):
                 central.observe_manager()
             writer.release('9' * 32)
+
+
+    def test_a_read_on_a_host_without_state_creates_nothing_and_never_adopts_a_concurrent_claim(self):
+        # A's guarantee (a check-mode preview never writes) next to B's (a read never reports a
+        # transaction's temporary state): with no state root there is no lock to hold, so the read
+        # creates nothing and a root that appears while it runs makes it discard what it saw.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'private'
+            central = w.Central(root=root, runner=ManagerVersion())
+            self.assertEqual(central.observe_manager(), {'version': '4.14.1'})
+            self.assertFalse(root.exists(), 'a read must not create the state root, a lock or a journal')
+            entered, finish = threading.Event(), threading.Event()
+            class Native(Commands):
+                def run(self, argv, **kwargs):
+                    entered.set()
+                    if not finish.wait(3):
+                        raise AssertionError('reader barrier did not release')
+                    return subprocess.CompletedProcess(argv, 0, 'WAZUH_VERSION="v4.14.9"\n', '')
+            central = w.Central(root=root, runner=Native())
+            with ThreadPoolExecutor(2) as pool:
+                read = pool.submit(central.observe_manager)
+                self.assertTrue(entered.wait(3))
+                w.HostWriter(root).claim('2' * 32, 'central')   # a writer starts while the read runs
+                finish.set()
+                with self.assertRaisesRegex(w.Refused, 'claimed this host during the observation'):
+                    read.result(timeout=3)
+
+    def test_a_running_central_writer_still_makes_an_external_read_refuse(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'private'
+            central = w.Central(root=root, runner=ManagerVersion())
+            # 1. The durable writer marker: the read is refused, and it created nothing of its own.
+            w.HostWriter(root).claim('3' * 32, 'central')
+            before = sorted(path.name for path in root.iterdir())
+            with self.assertRaisesRegex(w.Refused, 'active Wazuh writer prevents a stable external read'):
+                central.observe_manager()
+            self.assertEqual(sorted(path.name for path in root.iterdir()), before)
+            w.HostWriter(root).release('3' * 32)
+            # 2. A writer holding the component lock without a marker (mid-transaction): refused at once.
+            with central.component_lock():
+                with self.assertRaisesRegex(w.Refused, 'another Wazuh transaction is running'):
+                    central.observe_manager()
+            self.assertEqual(central.observe_manager(), {'version': '4.14.1'})
 
     def test_policy_is_replanned_after_writer_admission(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2932,6 +2991,10 @@ class AgentRecoveryDispatchTests(unittest.TestCase):
                     self.assertTrue(result['need_commit'])
                     self.assertEqual(agent.active()['phase'], phase)
 
+
+class OfficialRpmSignatureTests(RpmFixture, unittest.TestCase):
+    """A's signature-line contract, kept on A's RpmFixture model (the shapes rpmkeys can print)."""
+
     def test_only_a_verified_signature_line_authorizes_the_rpm_whatever_the_return_code(self):
         # Accept case first: the signed shape passes and rpmkeys ran against the private key ring.
         with self.fixture() as (_, native, guard):
@@ -3017,6 +3080,8 @@ class FreshRpmTests(RpmFixture, unittest.TestCase):
         guard.dnf_native = dnf
         agent = w.Agent('RedHat', runner=native, root=root)
         agent.guard = lambda: guard
+        # B's ownership contract: the stage runs under the exact host-wide writer owner.
+        w.HostWriter(root).claim(self.OWNER, 'agent', 'apply')
         return agent, guard
 
     def plan(self):
@@ -3141,9 +3206,21 @@ class FreshRpmTests(RpmFixture, unittest.TestCase):
                 locks.append(Path(filename).name)
                 with real(filename, **kwargs):
                     yield
+            components = []
+            real_component = agent.component_lock
+
+            @contextlib.contextmanager
+            def component(shared=False):
+                components.append(('agent.lock', shared))
+                with real_component(shared=shared):
+                    yield
+            agent.component_lock = component
             with mock.patch.object(w, 'bounded_flock', recording):
                 agent.fresh_rpm(self.OWNER, self.plan())
-            self.assertEqual(locks, ['agent.lock'])
+            # B's contract: the shared host-writer mutex checks the owner, and the stage then holds the
+            # component lock EXCLUSIVELY (the lock A recorded as bounded_flock('agent.lock')).
+            self.assertEqual(locks, ['coordinator.lock'])
+            self.assertEqual(components, [('agent.lock', False)])
 
     def test_a_stale_or_aliased_artifact_in_the_stage_directory_is_refused(self):
         with self.fixture() as (root, native, _):
@@ -3213,12 +3290,17 @@ class ProtectionFlowTests(unittest.TestCase):
                 locks.append(Path(filename).name)
                 with real(filename, **kwargs):
                     yield
+            owner = 'd' * 32
+            w.HostWriter(agent.root).claim(owner, 'agent')
             with mock.patch.object(w, 'bounded_flock', recording):
                 with self.assertRaisesRegex(w.Refused, 'absent'):
-                    agent.protect_package()
-            self.assertEqual(locks, ['agent.lock'])
+                    agent.protect_package(owner)
+            # B's contract: the shared host-writer mutex, then the component lock file (never skipped).
+            self.assertEqual(locks, ['coordinator.lock'])
+            self.assertTrue((agent.root / 'agent.lock').is_file())
             self.assertEqual(oct((Path(temporary) / 'private').stat().st_mode & 0o777), '0o700')
 
+    @wazuh_hermetic.absent('/var/ossec/etc/client.keys')
     def test_verify_reports_the_stable_native_release_pin_and_availability(self):
         with tempfile.TemporaryDirectory() as temporary:
             class Native(Commands):
@@ -3234,7 +3316,7 @@ class ProtectionFlowTests(unittest.TestCase):
             guard = mock.Mock()
             guard.verify.return_value = {'guard': 'apt-hold'}
             agent.guard = lambda: guard
-            self.assertEqual(agent.verify(), {'pass': True, 'version': '4.14.1', 'guard': 'apt-hold'})
+            self.assertEqual(agent.verify(), {'pass': True, 'version': '4.14.1', 'active': True, 'guard': 'apt-hold'})
             guard.verify.assert_called_once_with('4.14.1-1')
             native.release = '4.14.9'
             with self.assertRaisesRegex(w.Refused, 'release differ'):
@@ -3257,9 +3339,17 @@ class ProtectionFlowTests(unittest.TestCase):
             with mock.patch.object(w, 'bounded_flock', side_effect=AssertionError('a read must not lock')):
                 agent.check('4.14.9')
                 agent.check('')
-                agent.guard = lambda: mock.Mock(ownership=lambda: {'plugin': {'present': False}})
-                self.assertEqual(agent.policy_ownership(), {'checked': True, 'prerequisite_plugin_present': False})
             self.assertFalse((Path(temporary) / 'private').exists())
+
+    def test_policy_ownership_runs_only_under_the_exact_writer_owner(self):
+        # B's contract: the foreign-policy admission is an owned step (it is not a read).
+        with tempfile.TemporaryDirectory() as temporary:
+            agent = self.agent(Commands('RedHat', '4.14.1-1'), Path(temporary))
+            agent.guard = lambda: mock.Mock(ownership=lambda: {'plugin': {'present': False}})
+            with self.assertRaisesRegex(w.Refused, 'exact host-wide Wazuh writer owner'):
+                agent.policy_ownership('f' * 32)
+            w.HostWriter(agent.root).claim('f' * 32, 'agent')
+            self.assertEqual(agent.policy_ownership('f' * 32), {'checked': True, 'prerequisite_plugin_present': False})
 
     def test_the_cli_privilege_check_follows_the_effective_uid(self):
         with mock.patch.object(w.os, 'geteuid', return_value=1000):
@@ -3278,6 +3368,20 @@ class ProtectionFlowTests(unittest.TestCase):
                 pass
 
 
+CENTRAL_OWNER = 'c' * 32
+
+
+def central_execute(central, target, **kwargs):
+    """An apply-time central action runs under the host-wide writer (B's ownership contract): claim it
+    for the call, run the real Central.execute with that owner (no upgrade authorization unless the
+    caller passes one) and release it, so later external reads see an idle host."""
+    w.HostWriter(central.root).claim(CENTRAL_OWNER, 'central')
+    try:
+        return central.execute(target, owner=CENTRAL_OWNER, **kwargs)
+    finally:
+        w.HostWriter(central.root).release(CENTRAL_OWNER)
+
+
 class CentralTests(unittest.TestCase):
     def central(self, release='4.14.1', agents=None):
         temporary = tempfile.TemporaryDirectory()
@@ -3292,7 +3396,7 @@ class CentralTests(unittest.TestCase):
         self.assertEqual(docker.calls[-1][:3], ['docker', 'exec', 'single-node-wazuh.manager-1'])
         for text in ('', 'WAZUH_VERSION="v5.0.0"\n', 'WAZUH_VERSION="v4.14.1"\nWAZUH_VERSION="v4.14.9"\n', 'WAZUH_VERSION="4.14.9-rc1"\n'):
             central.r.run = lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, text, '')
-            with self.assertRaisesRegex(w.Refused, 'unknown effective manager version'):
+            with self.assertRaisesRegex(w.Refused, 'unknown committed manager version'):
                 central.observe_manager()
         def down(argv, **kwargs):
             raise w.Refused('operation failed: docker rc=1')
@@ -3352,7 +3456,7 @@ class CentralTests(unittest.TestCase):
                     central, docker = self.central('4.14.1')
                     setattr(docker, knob, reported)
                     # Every path that claims the release: discovery, the ordinary-apply gate and C12.
-                    for action in (central.discover, lambda: central.gate('4.14.1'), central.verify):
+                    for action in (central.discover, lambda: central_execute(central, '4.14.1'), central.verify):
                         with self.assertRaisesRegex(w.Refused, reason):
                             action()
                     self.assertFalse(any(call[1] in ('compose', 'pull', 'stop', 'rm', 'up') for call in docker.calls if call[0] == 'docker'))
@@ -3360,13 +3464,13 @@ class CentralTests(unittest.TestCase):
         # Wazuh release one level down (native capture): reading it must not satisfy the plugin leg.
         central, docker = self.central('4.14.1')
         docker.dashboard_shape = 'opensearch-root'
-        for action in (central.discover, lambda: central.gate('4.14.1'), central.verify):
+        for action in (central.discover, lambda: central_execute(central, '4.14.1'), central.verify):
             with self.assertRaisesRegex(w.Refused, 'dashboard Wazuh plugin version probe failed'):
                 action()
         # Accept case: both agree with the manager (also when stated explicitly, so the knob itself is inert).
         central, docker = self.central('4.14.1')
         docker.dashboard_release = docker.indexer_release = '4.14.1'
-        self.assertEqual(central.gate('4.14.1')['version'], '4.14.1')
+        self.assertEqual(central_execute(central, '4.14.1')['version'], '4.14.1')
         self.assertEqual(central.verify(), {'pass': True, 'version': '4.14.1'})
         # A disagreeing manager is still the first leg and is reported as such.
         central, docker = self.central('4.14.1')
@@ -3386,45 +3490,52 @@ class CentralTests(unittest.TestCase):
         with self.assertRaisesRegex(w.Refused, 'outside the pilot-owned single-node layout'):
             central.discover()
 
-    def test_gate_is_a_noop_on_an_absent_stack_so_a_fresh_install_pins_the_requested_release(self):
+    def test_execute_is_a_noop_on_an_absent_stack_so_a_fresh_install_pins_the_requested_release(self):
         central, docker = self.central()
         docker.drop = set(w.SERVICES)
-        self.assertEqual(central.gate('4.14.6'), {'changed': False, 'fresh': True, 'version': '4.14.6'})
+        self.assertEqual(central_execute(central, '4.14.6'), {'changed': False, 'fresh': True, 'version': '4.14.6'})
 
-    def test_gate_accepts_an_existing_stack_only_at_exactly_the_requested_release(self):
+    def test_execute_accepts_an_existing_stack_at_exactly_the_requested_release(self):
         central, docker = self.central('4.14.1')
-        result = central.gate('4.14.1')
+        result = central_execute(central, '4.14.1')
         self.assertEqual(result, {'changed': False, 'fresh': False, 'version': '4.14.1', 'directory': str(docker.project)})
 
-    def test_gate_refuses_any_release_change_before_looking_at_anything_that_could_mutate(self):
-        for running, requested in (('4.14.1', '4.14.9'), ('4.14.9', '4.14.1'), ('4.14.6', '4.14.9'), ('4.14.9', '4.14.6')):
+    def test_execute_refuses_an_unauthorized_release_change_before_looking_at_anything_that_could_mutate(self):
+        # Without wazuh_upgrade authorization only an exact match passes. An unauthorized 4.14.1 -> 4.14.9
+        # (and any other pair) is refused by the upgrade rule; a request below the running release is
+        # refused earlier, because the registered agents (running at the manager release) would be newer.
+        reasons = {('4.14.1', '4.14.9'): 'only explicit central 4.14.1 -> 4.14.9 upgrade is supported',
+                   ('4.14.9', '4.14.1'): 'registered agent is newer than the central release',
+                   ('4.14.6', '4.14.9'): 'only explicit central 4.14.1 -> 4.14.9 upgrade is supported',
+                   ('4.14.9', '4.14.6'): 'registered agent is newer than the central release'}
+        for (running, requested), reason in reasons.items():
             with self.subTest(running=running, requested=requested):
                 central, docker = self.central(running)
-                with self.assertRaisesRegex(w.Refused, 'central release change is not supported'):
-                    central.gate(requested)
+                with self.assertRaisesRegex(w.Refused, reason):
+                    central_execute(central, requested)
                 self.assertFalse(any(call[1] in ('compose', 'pull', 'stop', 'rm', 'run', 'up', 'restart', 'image') and call[:3] != ['docker', 'image', 'inspect']
                                      for call in docker.calls if call[0] == 'docker'), docker.calls)
 
-    def test_gate_refuses_an_invalid_or_unsupported_target(self):
+    def test_execute_refuses_an_invalid_or_unsupported_target(self):
         central, _ = self.central()
         for target in ('', '5.0.0', '4.14', 'latest', '4.14.1-1'):
             with self.assertRaises(w.Refused, msg=target):
-                central.gate(target)
+                central_execute(central, target)
 
-    def test_gate_refuses_a_registered_agent_newer_than_the_running_manager(self):
+    def test_execute_refuses_a_registered_agent_newer_than_the_running_manager(self):
         central, docker = self.central('4.14.1', agents={'001': '4.14.1', '002': '4.14.9'})
         with self.assertRaisesRegex(w.Refused, 'registered agent is newer than the central release'):
-            central.gate('4.14.1')
+            central_execute(central, '4.14.1')
         docker.agents['002'] = '4.14.1'
-        central.gate('4.14.1')
+        central_execute(central, '4.14.1')
 
-    def test_gate_refuses_when_the_active_compose_directory_is_not_the_requested_releases(self):
+    def test_execute_refuses_when_the_active_compose_directory_is_not_the_requested_releases(self):
         central, docker = self.central('4.14.1')
         other = docker.managed / 'wazuh-docker-4.14.9' / 'single-node'
         other.mkdir(parents=True); (other / 'docker-compose.yml').write_text('services: {}\n')
         docker.project, docker.compose = other, other / 'docker-compose.yml'
         with self.assertRaisesRegex(w.Refused, 'does not match the requested release'):
-            central.gate('4.14.1')
+            central_execute(central, '4.14.1')
 
     def test_registry_bounds_every_retained_agent_and_unknown_versions_are_refused(self):
         central, docker = self.central('4.14.1', agents={'001': '4.14.1', '002': '4.14.6'})
@@ -3450,7 +3561,7 @@ class CentralTests(unittest.TestCase):
         docker.agents['003'] = {'status': 'Never connected'}
         self.assertIn('Never connected', docker.agent_list())
         self.assertIn('Client version:      (null)', docker.agent_info('003'))
-        for action in (lambda: central.check_agents('4.14.9'), central.verify, lambda: central.gate('4.14.9')):
+        for action in (lambda: central.check_agents('4.14.9'), central.verify, lambda: central_execute(central, '4.14.9')):
             with self.assertRaises(w.Refused) as refusal:
                 action()
             self.assertEqual(str(refusal.exception), 'unknown retained agent version in manager registry (agent ID 003)')
@@ -3486,7 +3597,7 @@ class CentralTests(unittest.TestCase):
     def test_central_reads_never_lock_or_create_state(self):
         central, docker = self.central()
         with mock.patch.object(w, 'bounded_flock', side_effect=AssertionError('a read must not lock')):
-            central.observe_manager(); central.gate('4.14.1'); central.verify()
+            central.observe_manager(); central.verify()
         self.assertFalse((docker.managed.parent / 'private').exists())
         for call in docker.calls:
             self.assertNotIn(call[1], ('compose', 'pull', 'stop', 'rm', 'up', 'restart'), call)
@@ -3505,7 +3616,8 @@ class CommandLineTests(unittest.TestCase):
         return status, json.loads(stdout.getvalue())
 
     def test_agent_check_prints_the_plan_and_exits_zero(self):
-        status, value = self.invoke('agent-check', '--family', 'Debian', '--manager', '4.14.9', '--version', '')
+        status, value = self.invoke('agent-check', '--family', 'Debian', '--manager', '4.14.9', '--version', '',
+                                    commands=Commands('Debian', '4.14.1-1'))
         self.assertEqual((status, value['package'], value['install']), (0, '4.14.1-1', False))
         status, value = self.invoke('agent-check', '--family', 'RedHat', '--manager', '4.14.9', commands=Commands('RedHat', ''))
         self.assertEqual((status, value['package'], value['install']), (0, '4.14.9-1', True))
@@ -3519,7 +3631,7 @@ class CommandLineTests(unittest.TestCase):
                                     commands=Commands('Debian', '4.14.9-1'))
         self.assertEqual((status, value['error']), (1, 'Wazuh agent downgrade refused'))
         status, value = self.invoke('agent-check', '--family', 'Debian', '--manager', '4.14.9', '--version', '4.14.9')
-        self.assertEqual((status, value['error']), (1, 'Wazuh agent upgrade is not supported by this version'))
+        self.assertEqual((status, value['error']), (1, 'agent upgrade requires wazuh_upgrade=true and target 4.14.9'))
         status, value = self.invoke('central', '--version', '4.14.9', '--legacy', '4.14.1')
         self.assertEqual((status, value['error']), (1, 'wazuh_version conflicts with wazuh_docker_version'))
 
@@ -3531,32 +3643,46 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual((status, value['error_kind']), (1, 'native'))
         self.assertNotIn('SECRET_SENTINEL', json.dumps(value))
 
-    def test_central_actions_run_the_gate_and_the_c12_oracle(self):
+    def test_central_actions_run_execute_under_the_writer_and_the_c12_oracle(self):
         with tempfile.TemporaryDirectory() as temporary:
             docker = Docker(w, Path(temporary), '4.14.1')
-            with mock.patch.object(w.Central, '__init__', lambda self, **kwargs: w.Transaction.__init__(self, 'central', runner=docker, root=Path(temporary) / 'p') or setattr(self, 'managed_root', docker.managed)):
-                self.assertEqual(self.invoke('manager-version', commands=docker), (0, {'version': '4.14.1'}))
-                self.assertEqual(self.invoke('central', '--version', '4.14.1', commands=docker)[1]['fresh'], False)
-                self.assertEqual(self.invoke('central-verify', commands=docker), (0, {'pass': True, 'version': '4.14.1'}))
-                status, value = self.invoke('central', '--version', '4.14.9', commands=docker)
-                self.assertEqual((status, value['error']), (1, 'central release change is not supported by this version'))
-                # The C12 command and the gate both refuse a dashboard or indexer on another release.
+            root = Path(temporary) / 'p'
+            with mock.patch.object(w.Central, '__init__', lambda self, **kwargs: w.Transaction.__init__(self, 'central', runner=docker, root=root) or setattr(self, 'managed_root', docker.managed)):
+                def run(*action):
+                    # `central` is a mutating action: it needs the exact host-wide writer owner (B's contract).
+                    if action[0] != 'central':
+                        return self.invoke(*action, commands=docker)
+                    w.HostWriter(root).claim(CENTRAL_OWNER, 'central')
+                    try:
+                        return self.invoke(*action, '--owner', CENTRAL_OWNER, commands=docker)
+                    finally:
+                        w.HostWriter(root).release(CENTRAL_OWNER)
+                self.assertEqual(run('manager-version'), (0, {'version': '4.14.1'}))
+                self.assertEqual(run('central', '--version', '4.14.1')[1]['fresh'], False)
+                self.assertEqual(run('central-verify'), (0, {'pass': True, 'version': '4.14.1'}))
+                status, value = run('central', '--version', '4.14.9')
+                self.assertEqual((status, value['error']), (1, 'only explicit central 4.14.1 -> 4.14.9 upgrade is supported'))
+                # Without the writer owner the same action is refused before it looks at anything.
+                status, value = self.invoke('central', '--version', '4.14.1', '--owner', CENTRAL_OWNER, commands=docker)
+                self.assertEqual((status, value['error']), (1, 'operation requires the exact host-wide Wazuh writer owner'))
+                # The C12 command and the apply action both refuse a dashboard or indexer on another release.
                 for knob, reason in (('dashboard_release', 'dashboard Wazuh plugin version probe failed'),
                                      ('indexer_release', 'indexer effective Wazuh version probe failed')):
                     setattr(docker, knob, '4.14.9')
                     for action in (('central-verify',), ('central', '--version', '4.14.1')):
-                        status, value = self.invoke(*action, commands=docker)
+                        status, value = run(*action)
                         self.assertEqual((status, value['error'], value['error_kind']), (1, reason, 'refused'), (knob, action))
                     setattr(docker, knob, None)
-                self.assertEqual(self.invoke('central-verify', commands=docker), (0, {'pass': True, 'version': '4.14.1'}))
-                self.assertEqual(self.invoke('central', commands=docker)[0], 0, 'the default release is the shipped 4.14.1')
+                self.assertEqual(run('central-verify'), (0, {'pass': True, 'version': '4.14.1'}))
+                self.assertEqual(run('central')[0], 0, 'the default release is the shipped 4.14.1')
 
     def test_the_cli_refuses_to_run_unprivileged_and_unknown_actions(self):
         with mock.patch.object(sys, 'argv', ['x', 'agent-check']), mock.patch.object(w, 'is_root', return_value=False):
             with self.assertRaises(SystemExit) as stop, contextlib.redirect_stderr(io.StringIO()):
                 w.main()
             self.assertEqual(stop.exception.code, 2)
-        for action in ('agent-upgrade', 'writer-claim', 'central-recover'):
+        # writer-claim is a real action since the host-writer ownership contract (it is exercised by CommonWriterTests).
+        for action in ('agent-upgrade', 'central-recover'):
             with mock.patch.object(sys, 'argv', ['x', action]), mock.patch.object(w, 'is_root', return_value=True):
                 with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                     w.main()
@@ -3565,8 +3691,17 @@ class CommandLineTests(unittest.TestCase):
         status, value = self.invoke('agent-rpm-fresh', '--family', 'RedHat', '--owner', '../x',
                                     stdin=json.dumps(w.agent_plan('', '4.14.1')), commands=Commands('RedHat', ''))
         self.assertEqual((status, value['error']), (1, 'invalid private RPM stage owner'))
+        # Without the exact host-wide writer owner the stage is refused (B's ownership contract) ...
         status, value = self.invoke('agent-rpm-fresh', '--family', 'RedHat', '--owner', 'a' * 32,
                                     stdin='{}', commands=Commands('RedHat', ''))
+        self.assertEqual((status, value['error']), (1, 'operation requires the exact host-wide Wazuh writer owner'))
+        # ... and with it a malformed plan is a typed native failure, not a traceback.
+        w.HostWriter().claim('a' * 32, 'agent')
+        try:
+            status, value = self.invoke('agent-rpm-fresh', '--family', 'RedHat', '--owner', 'a' * 32,
+                                        stdin='{}', commands=Commands('RedHat', ''))
+        finally:
+            w.HostWriter().release('a' * 32)
         self.assertEqual((status, value['error_kind']), (1, 'native'), 'a malformed plan is a typed native failure, not a traceback')
 
 

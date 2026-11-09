@@ -16,16 +16,12 @@ spec=importlib.util.spec_from_file_location('wazuh_endpoint',REPO/'playbooks/app
 endpoint=importlib.util.module_from_spec(spec);spec.loader.exec_module(endpoint)
 
 
-REPO = Path(__file__).resolve().parents[3]
-spec = importlib.util.spec_from_file_location('wazuh_endpoint', REPO / 'playbooks/apply/files/wazuh-endpoint.py')
-endpoint = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(endpoint)
-
 BINDING = ('Resolve the exact inventory manager used for native version observation',
            'Gate: native manager observation uses an inventory manager',
            'Bind enrollment to its unique trusted inventory manager',
            'Retain the manager transport bound before native observation',
-           "Step 5b: Pin target is the address bound to the observed inventory manager (spec C7)")
+           # B's name for the same step (it sets hosts_alias_resolved_ip from the bound address).
+           'Step 5b: Resolve wazuh_manager_host for the /etc/hosts pin (spec C7)')
 
 
 def picked(play, name):
@@ -219,10 +215,6 @@ class EndpointTests(unittest.TestCase):
                 self.assertIn(expected, result.stdout)
                 self.assertNotIn('SECRET_ARGUMENT_TEXT', result.stdout + result.stderr)
 
-
-if __name__ == '__main__':
-    unittest.main()
-
     def test_actual_ansible_include_binds_selected_manager_receiver_and_preview(self):
         from wazuh_manager_script_args_test import picked
         fim=yaml.safe_load((REPO/'playbooks/apply/wazuh-fim-apply.yml').read_text())[0]
@@ -348,6 +340,10 @@ if __name__ == '__main__':
                 self.assertEqual('--preview-tools-json' in argv,check)
                 if check:self.assertEqual(json.loads(argv[argv.index('--preview-tools-json')+1]),{'transport_fixture':True})
                 self.assertNotIn('--upgrade',argv,'C10/C11 cannot grant component upgrade authority')
+
+
+if __name__ == '__main__':
+    unittest.main()
 
 
 if __name__=='__main__':unittest.main()
