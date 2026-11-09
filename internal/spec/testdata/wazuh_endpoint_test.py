@@ -1,4 +1,5 @@
 """Real inventory/resolver/ScriptModule binding; no product mutations."""
+import copy
 import importlib.util
 import json
 import os
@@ -9,6 +10,11 @@ import tempfile
 import unittest
 from unittest import mock
 import yaml
+
+REPO=Path(__file__).resolve().parents[3]
+spec=importlib.util.spec_from_file_location('wazuh_endpoint',REPO/'playbooks/apply/files/wazuh-endpoint.py')
+endpoint=importlib.util.module_from_spec(spec);spec.loader.exec_module(endpoint)
+
 
 REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('wazuh_endpoint', REPO / 'playbooks/apply/files/wazuh-endpoint.py')
@@ -216,3 +222,132 @@ class EndpointTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+    def test_actual_ansible_include_binds_selected_manager_receiver_and_preview(self):
+        from wazuh_manager_script_args_test import picked
+        fim=yaml.safe_load((REPO/'playbooks/apply/wazuh-fim-apply.yml').read_text())[0]
+        # This executes the exact task include, shared resolver and native
+        # ScriptModule/shell. Only inventory data are synthetic.
+        with tempfile.TemporaryDirectory(prefix='wazuh-endpoint-graph-') as temporary:
+            root=Path(temporary);(root/'tasks').mkdir();(root/'files').mkdir()
+            for name in ('wazuh-endpoint-resolve.yml','resolve-hosts-alias-target.yml'):
+                shutil.copy2(REPO/'playbooks/apply/tasks'/name,root/'tasks'/name)
+            shutil.copy2(REPO/'playbooks/apply/files/wazuh-endpoint.py',root/'files/wazuh-endpoint.py')
+            inventory={'all':{'hosts':{'observer':{'ansible_connection':'local'},
+                'manager-a':{'ansible_host':'192.0.2.15','ansible_fqdn':'manager.example.test'},
+                'manager-b':{'ansible_host':'192.0.2.16','ansible_fqdn':'other.example.test'},
+                'manager-external':{'ansible_host':'192.0.2.17','ansible_fqdn':'external.example.test'},
+                'manager-six':{'ansible_host':'2001:db8::15','ansible_fqdn':'six.example.test'},
+                'manager-local':{'ansible_host':'localhost','ansible_fqdn':'local.example.test'},
+                'manager-collision':{'ansible_host':'192.0.2.18','ansible_fqdn':'MANAGER.EXAMPLE.TEST'}},
+                'children':{'wazuh-manager':{'hosts':{'manager-a':{},'manager-b':{}}}}}}
+            inv=root/'inventory.yml';inv.write_text(yaml.safe_dump(inventory))
+            cases=[
+                ('numeric','192.0.2.15','manager-a',True,'192.0.2.15'),
+                ('fqdn','manager.example.test','manager-a',True,'192.0.2.15'),
+                ('mixed-case-fqdn','MANAGER.Example.TEST','manager-a',True,'192.0.2.15'),
+                ('mixed-case-hostname','LOCALHOST','manager-local',True,'127.0.0.1'),
+                ('normalized-collision','manager.example.test','manager-collision',False,None),
+                ('opaque-key-case','MANAGER-A','manager-a',False,None),
+                ('alias','manager-a','manager-a',True,'192.0.2.15'),
+                ('outside-group-fqdn','external.example.test','manager-external',True,'192.0.2.17'),
+                ('canonical-ipv6','2001:0db8:0:0:0:0:0:15','manager-six',True,'2001:db8::15'),
+                ('wrong-manager','manager.example.test','manager-b',False,None),
+                ('wrong-address','192.0.2.16','manager-a',False,None),
+                ('unknown-name','unknown.example.test','manager-a',False,None),
+                ('receiver-fqdn','manager.example.test','',True,'192.0.2.15'),
+                ('receiver-alias','manager-a','',True,'192.0.2.15'),
+                ('receiver-ip','192.0.2.15','',True,'192.0.2.15'),
+            ]
+            for check in (False,True):
+                plays=[]
+                for name,raw,manager,success,address in cases:
+                    result=root/(name+str(check)+'.json')
+                    include={'ansible.builtin.include_tasks':{'file':'tasks/wazuh-endpoint-resolve.yml',
+                        'apply':{'tags':['always']}},'tags':['always']}
+                    binding=[include]
+                    if manager:
+                        binding=[picked(fim,name) for name in (
+                            'Resolve the exact inventory manager used for native version observation',
+                            'Gate: native manager observation uses an inventory manager',
+                            'Bind enrollment to its unique trusted inventory manager',
+                            'Retain the manager transport bound before native observation',
+                            'Step 5b: Resolve wazuh_manager_host for the /etc/hosts pin (spec C7)')]
+                    plays.append({'hosts':'observer','gather_facts':False,
+                        'vars':{'wazuh_manager_host':raw,'wazuh_manager_inventory_host':manager,
+                                'wazuh_enrollment_enabled':True,
+                                'wazuh_endpoint_value':raw,'wazuh_endpoint_manager':manager,
+                                'wazuh_endpoint_inventory':['manager-a','manager-b']},
+                        'tasks':[{'ansible.builtin.set_fact':{'bound':False}},
+                            {'block':binding+[{'ansible.builtin.set_fact':{'bound':True}}],
+                             'rescue':[{'ansible.builtin.set_fact':{'bound':False}}]},
+                            {'ansible.builtin.copy':{'dest':str(result),'mode':'0600',
+                             'content':"{{ {'bound':bound, 'address':wazuh_endpoint_address if bound else ''} | to_json }}"},
+                             'check_mode':False}]})
+                play=root/('check.yml' if check else 'apply.yml');play.write_text(yaml.safe_dump(plays,sort_keys=False))
+                run=subprocess.run(['ansible-playbook','-i',str(inv),str(play),*(['--check'] if check else [])],
+                    cwd=REPO,capture_output=True,text=True,timeout=150,
+                    env=dict(os.environ,ANSIBLE_CONFIG=str(REPO/'ansible.cfg'),ANSIBLE_CACHE_PLUGIN='memory',
+                        ANSIBLE_LOCAL_TEMP=str(root/'local'),ANSIBLE_REMOTE_TEMP=str(root/'remote'),
+                        ANSIBLE_NOCOLOR='1',PYTHONDONTWRITEBYTECODE='1'))
+                self.assertEqual(run.returncode,0,(run.stdout,run.stderr))
+                for name,raw,manager,success,address in cases:
+                    result=json.loads((root/(name+str(check)+'.json')).read_text())
+                    self.assertEqual(result,{'bound':success,'address':address if success else ''},name)
+
+
+    def test_actual_selected_receiver_request_reaches_script_with_bound_address(self):
+        from wazuh_manager_script_args_test import picked, RECEIVER, OWNER
+        import shlex
+        source=yaml.safe_load((REPO/'playbooks/apply/wazuh-manager-apply.yml').read_text())[0]
+        names=["Reset this play's actual forwarding selection",
+               'Mark selected forwarding intent without granting container authority',
+               "Reset this invocation's bound receiver transport",
+               'Bind selected forwarding transport independently from TLS identity',
+               'Retain the receiver address before version and receipt admission',
+               'Build the secret-free selected reader request',
+               "Reset this play's selected manager replacement plan",
+               "Mark this run's selected Wazuh manager installation plan"]
+        with tempfile.TemporaryDirectory(prefix='wazuh-endpoint-request-') as temporary:
+            root=Path(temporary);(root/'tasks').mkdir();(root/'files').mkdir()
+            for helper in ('wazuh-endpoint-resolve.yml','resolve-hosts-alias-target.yml'):
+                shutil.copy2(REPO/'playbooks/apply/tasks'/helper,root/'tasks'/helper)
+            shutil.copy2(REPO/'playbooks/apply/files/wazuh-endpoint.py',root/'files/wazuh-endpoint.py')
+            receiver=root/'receiver.py';receiver.write_text(RECEIVER)
+            inv=root/'inventory.yml';inv.write_text(yaml.safe_dump({'all':{'hosts':{
+                'observer':{'ansible_connection':'local'},'receiver':{
+                    'ansible_host':'192.0.2.15','ansible_fqdn':'receiver.example.test'}}}}))
+            for tag,check,recover in (('C10',False,False),('C11',True,False),('C12',False,False),('C10',False,True)):
+                command=picked(source,'Inspect compatibility or execute the explicitly authorized central upgrade')
+                path=root/(tag+str(recover)+'.json')
+                command['ansible.builtin.script']['cmd']=command['ansible.builtin.script']['cmd'].replace(
+                    'files/wazuh-transaction.py',shlex.quote(str(receiver)),1)
+                command['environment']={'WAZUH_ARGV_RECORD':str(path)}
+                values={'siem_forwarding_enabled':True,'siem_forward_host':
+                    'unused.invalid.test' if tag=='C12' or recover else 'receiver.example.test',
+                    'siem_forward_transport':'tcp','siem_forward_port':514,
+                    'wazuh_reader_tools':{},'wazuh_reader_checker_hash':'b'*64,
+                    'wazuh_reader_operation':{'stdout':'d'*32},'wazuh_preview_assets':{'transport_fixture':True},
+                    'wazuh_writer_owner':OWNER,'wazuh_docker_version':'4.14.9','wazuh_recover':recover,'docker_pre':{'rc':0}}
+                play=root/(tag+str(recover)+'.yml');play.write_text(yaml.safe_dump([{
+                    'hosts':'observer','gather_facts':False,'vars':values,
+                    'tasks':[picked(source,name) for name in names]+[command]}],sort_keys=False))
+                run=subprocess.run(['ansible-playbook','-i',str(inv),str(play),'--tags',tag,
+                    *(['--check'] if check else [])],cwd=REPO,capture_output=True,text=True,timeout=90,
+                    env=dict(os.environ,ANSIBLE_CONFIG=str(REPO/'ansible.cfg'),ANSIBLE_CACHE_PLUGIN='memory',
+                             ANSIBLE_LOCAL_TEMP=str(root/'local'),ANSIBLE_REMOTE_TEMP=str(root/'remote')))
+                self.assertEqual(run.returncode,0,(run.stdout,run.stderr))
+                argv=json.loads(path.read_text())['argv']
+                request=json.loads(argv[argv.index('--reader-desired-json')+1])
+                self.assertEqual(request['host'],values['siem_forward_host'])
+                self.assertEqual(request['selected'],tag!='C12')
+                self.assertEqual(request['address'],'192.0.2.15' if tag!='C12' and not recover else '')
+                self.assertEqual('--preview' in argv,check)
+                self.assertEqual('--operation' in argv,check)
+                if check:self.assertEqual(argv[argv.index('--operation')+1],'d'*32)
+                self.assertEqual('--preview-tools-json' in argv,check)
+                if check:self.assertEqual(json.loads(argv[argv.index('--preview-tools-json')+1]),{'transport_fixture':True})
+                self.assertNotIn('--upgrade',argv,'C10/C11 cannot grant component upgrade authority')
+
+
+if __name__=='__main__':unittest.main()

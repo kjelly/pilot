@@ -22,7 +22,7 @@ import (
 // leave the controls unrun, and "No module named 'yaml'" halfway through a
 // shard is a confusing way to learn that.
 const (
-	wazuhHarnessMinPythonMinor = 11 // CI's setup-python is pinned to 3.11
+	wazuhHarnessMinPythonMinor = 11 // unittest.TestCase.enterContext (3.11); CI's setup-python is pinned to 3.11
 	wazuhHarnessAnsibleCore    = "2.19"
 )
 
@@ -42,6 +42,7 @@ type wazuhHarnessTools struct {
 // probeWazuhHarnessTools checks the interpreter, PyYAML and ansible-core found
 // through env (python3 and ansible-playbook come from PATH, exactly as the
 // harness subprocesses will resolve them).
+
 func probeWazuhHarnessTools(env []string) (wazuhHarnessTools, error) {
 	var tools wazuhHarnessTools
 	run := func(name string, args ...string) (string, error) {
@@ -97,6 +98,7 @@ func probeWazuhHarnessTools(env []string) (wazuhHarnessTools, error) {
 
 // lookPathIn finds name in the PATH carried by env (the last PATH entry wins,
 // as it does for exec.Cmd.Env).
+
 func lookPathIn(env []string, name string) (string, error) {
 	paths := ""
 	for _, entry := range env {
@@ -121,6 +123,7 @@ var (
 
 // wazuhHarnessEnv keeps harness runs from writing bytecode into the tree and
 // states the hermetic contract: testdata/wazuh_hermetic.py enforces it.
+
 func wazuhHarnessEnv() []string {
 	return append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1", "PILOT_WAZUH_HERMETIC=enforce")
 }
@@ -133,6 +136,7 @@ var wazuhRan = regexp.MustCompile(`(?m)^Ran (\d+) tests? in `)
 // modules, site-packages and sys.executable differently, so a result obtained in
 // one proves nothing about CI. Without this check a venv shows up as a dozen
 // unrelated-looking failures.
+
 func wazuhSystemPythonError(tools wazuhHarnessTools) error {
 	if tools.Venv {
 		return fmt.Errorf("python3 (%s) is a virtual environment (sys.prefix != sys.base_prefix); the harnesses are qualified on the CI interpreter: put a non-venv Python %d.%d+ first on PATH (PyYAML via PYTHONPATH or `pip install --user`)",
@@ -146,6 +150,7 @@ func wazuhSystemPythonError(tools wazuhHarnessTools) error {
 
 // wazuhHarnessReady probes the toolchain once per process and fails the test
 // when a prerequisite is missing or the interpreter is a virtual environment.
+
 func wazuhHarnessReady(t *testing.T, what string) wazuhHarnessTools {
 	t.Helper()
 	wazuhToolsOnce.Do(func() {
@@ -163,6 +168,7 @@ func wazuhHarnessReady(t *testing.T, what string) wazuhHarnessTools {
 // runWazuhHarness runs one Python harness and fails the test on any problem:
 // a missing prerequisite, a non-zero exit, a skipped test, or a run that
 // executed no test at all.
+
 func runWazuhHarness(t *testing.T, script, what string, extra ...string) {
 	t.Helper()
 	wazuhHarnessReady(t, what)
@@ -195,26 +201,48 @@ func runWazuhHarness(t *testing.T, script, what string, extra ...string) {
 // The coordinator harness has explicit boundaries in its module docstring: the
 // native commands are modeled, so it proves policy, parsing and ordering of the
 // real code, not VM/native package, signature or Docker behavior.
+
 func TestWazuhVersionCoordinatorBehavior(t *testing.T) {
 	runWazuhHarness(t, "testdata/wazuh_transaction_test.py", "Wazuh version coordinator behavioral controls")
 }
 
 // The production manager gate tasks run unchanged under real Ansible; the
 // coordinator's central action runs for real over modeled docker commands.
+
 func TestWazuhManagerGateGraph(t *testing.T) {
 	runWazuhHarness(t, "testdata/wazuh_manager_gate_test.py", "real Ansible Wazuh manager version-gate graph")
+}
+
+func TestWazuhVersionTransactionBehavior(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_transaction_test.py", "Wazuh transaction behavioral controls")
 }
 
 func TestAptExactVersionTaskBehavior(t *testing.T) {
 	runWazuhHarness(t, "testdata/apt_exact_task_test.py", "real Ansible exact APT task controls")
 }
 
+func TestWazuhWriterTaskGraph(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_writer_task_test.py", "real Ansible Wazuh writer/delegation graph")
+}
+
+// Exercise the installed script action and its actual shell: splitting a
+// rendered command in Python would hide newlines retained by ScriptModule.
+
+func TestWazuhManagerScriptArguments(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_manager_script_args_test.py", "real Ansible manager script argument controls")
+}
+
 func TestWazuhSelectionTaskGraph(t *testing.T) {
-	runWazuhHarness(t, "testdata/wazuh_selection_task_test.py", "real Ansible Wazuh agent selection/refusal graph")
+	runWazuhHarness(t, "testdata/wazuh_selection_task_test.py", "real Ansible Wazuh selection/failure-authority graph")
+}
+
+func TestWazuhReaderCustodyBehavior(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_reader_test.py", "Wazuh reader custody controls")
 }
 
 // Endpoint identity is exercised through the actual shared resolver and
 // ScriptModule, with only inventory/transport data supplied by the fixture.
+
 func TestWazuhEndpointBinding(t *testing.T) {
 	runWazuhHarness(t, "testdata/wazuh_endpoint_test.py", "Wazuh endpoint binding controls")
 }
@@ -223,6 +251,49 @@ func TestWazuhEndpointBinding(t *testing.T) {
 // shim first on PATH that behaves like the broken environment and checks the
 // probe's message names the fix, so a CI job without PyYAML or the pinned
 // ansible-core cannot report a quiet pass.
+
+func TestWazuhRecoveryEntryAuthority(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_recovery_entry_test.py", "Wazuh recovery entry authority controls")
+}
+
+// Real static filesystem closure and complete native Exec serialization; native
+// systemd/start/cache writes remain independently required target evidence.
+
+func TestWazuhReaderPrestartAuthority(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_reader_prestart_test.py", "Wazuh prestart authority controls")
+}
+
+// Kernel FD EOF does not prove imfile's logical or durable queue handoff.
+// Local real proc/files + authenticated reference-C controls remain distinct
+// from the required native unit/queue and receiver target qualification.
+
+func TestWazuhReaderLogicalHandoff(t *testing.T) {
+	// cc builds the authenticated reference SipHash implementation.
+	runWazuhHarness(t, "testdata/wazuh_reader_logical_test.py", "Wazuh logical handoff controls", "cc")
+}
+
+// Actual private Ansible copy/file/temp operations and typed preview asset
+// validation, with native account/path facts explicitly modeled by the fixture.
+
+func TestWazuhPreviewToolsBehavior(t *testing.T) {
+	if err := wazuhSystemPythonError(wazuhHarnessReady(t, "Wazuh preview asset controls")); err != nil {
+		t.Fatalf("Wazuh preview asset controls cannot run: %v", err)
+	}
+	runWazuhHarness(t, "testdata/wazuh_preview_tools_test.py", "Wazuh preview asset controls")
+}
+
+// The always-tagged retained-agent reinstall tasks report changed from what apt
+// or dnf did, not literally true (real Ansible over captured/modeled output).
+
+func TestWazuhRetainedReinstallConvergence(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_convergence_test.py", "Wazuh retained reinstall convergence controls")
+}
+
+// A prerequisite that is missing must stop the harness loudly. Each case puts a
+// shim first on PATH that behaves like the broken environment and checks the
+// probe's message names the fix, so a CI job without PyYAML or the pinned
+// ansible-core cannot report a quiet pass.
+
 func TestWazuhHarnessPrerequisitesFailLoudly(t *testing.T) {
 	realPython, err := exec.LookPath("python3")
 	if err != nil {
@@ -272,6 +343,7 @@ exec ` + realPython + ` "$@"`, "need Python 3.11 or newer"},
 // probe's reported sys.prefix and not from whichever interpreter happens to run
 // this test: the shim answers the probe like a venv python (and like a system
 // one for the control).
+
 func TestWazuhHarnessNeedsASystemPython(t *testing.T) {
 	realAnsible, err := exec.LookPath("ansible-playbook")
 	if err != nil {
@@ -308,6 +380,44 @@ func TestWazuhHarnessNeedsASystemPython(t *testing.T) {
 // Wazuh harnesses need before it runs them: a Python at least as new as the
 // harness minimum, then PyYAML and the pinned ansible-core, in a step that
 // covers the spec shard and comes before `make test-race`.
+
+func TestWazuhPreviewHarnessNeedsASystemPython(t *testing.T) {
+	realAnsible, err := exec.LookPath("ansible-playbook")
+	if err != nil {
+		t.Fatalf("ansible-playbook is required on PATH: %v", err)
+	}
+	probeWith := func(t *testing.T, reply string) wazuhHarnessTools {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(dir+"/python3", []byte("#!/bin/sh\necho '"+reply+"'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		tools, err := probeWazuhHarnessTools(append(os.Environ(), "PATH="+dir+":"+filepath.Dir(realAnsible)+":"+os.Getenv("PATH")))
+		if err != nil {
+			t.Fatalf("probe failed: %v", err)
+		}
+		return tools
+	}
+	venv := probeWith(t, `{"python":[3,11],"yaml":"6.0","executable":"/work/.venv/bin/python3","venv":true}`)
+	err = wazuhSystemPythonError(venv)
+	if err == nil || !strings.Contains(err.Error(), "virtual environment") || !strings.Contains(err.Error(), "/work/.venv/bin/python3") {
+		t.Fatalf("a venv python passed or the error does not name it: %v", err)
+	}
+	relative := probeWith(t, `{"python":[3,11],"yaml":"6.0","executable":"python3","venv":false}`)
+	if err := wazuhSystemPythonError(relative); err == nil || !strings.Contains(err.Error(), "non-absolute") {
+		t.Fatalf("a relative sys.executable passed or is misreported: %v", err)
+	}
+	system := probeWith(t, `{"python":[3,11],"yaml":"6.0","executable":"/usr/bin/python3","venv":false}`)
+	if err := wazuhSystemPythonError(system); err != nil {
+		t.Fatalf("a system python was refused: %v", err)
+	}
+}
+
+// checkWazuhHarnessCI reports whether the Go test job provisions what the
+// Wazuh harnesses need before it runs them: a Python at least as new as the
+// harness minimum, then PyYAML and the pinned ansible-core, in a step that
+// covers the spec shard and comes before `make test-race`.
+
 func checkWazuhHarnessCI(ciYAML string) error {
 	var wf struct {
 		Jobs map[string]struct {

@@ -5,15 +5,28 @@
   ansible.builtin.import_playbook: ../../apply/docker-apply.yml
   tags: [docker]
 
-# The manager forwards to this receiver (its C10/C11 rows need one in the inventory).
-- name: Deploy the independent log receiver before the manager forwards to it
+- name: Deploy the actual independent SIEM receiver before forwarding
   ansible.builtin.import_playbook: ../../apply/log-server-apply.yml
   tags: [log-server]
 
-- name: Deploy the central Wazuh stack
+# log-server C7/C8 require its own canonical local audit/auth sender.
+# Keep this receiver-only baseline before the cohosted FIM/audit configuration.
+- name: Deploy the receiver self-test forwarding prerequisite
+  ansible.builtin.import_playbook: ../../apply/audit-log-forwarding-apply.yml
+  tags: [log-server, audit-log-forwarding]
+
+- name: Deploy the central Wazuh stack first
   ansible.builtin.import_playbook: ../../apply/wazuh-manager-apply.yml
   tags: [wazuh-manager]
 
 - name: Deploy compatible Wazuh agents last
   ansible.builtin.import_playbook: ../../apply/wazuh-fim-apply.yml
   tags: [wazuh-fim]
+
+
+# Explicit diagnostic fixture emits one genuine engine alert and a new receiver
+# challenge each apply. It is deferred during the mandatory pristine dry-run.
+- name: Generate a fresh native alert challenge for actual receiver verification
+  ansible.builtin.import_playbook: wazuh-alert-delivery-fixtures.yml
+  when: not ansible_check_mode
+  tags: [wazuh-delivery]

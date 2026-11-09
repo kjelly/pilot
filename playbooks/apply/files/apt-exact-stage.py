@@ -4,8 +4,8 @@
 Only called by the shared APT framework: --cache-preflight before any download
 or install (output paths must be plain, owner-private, alias-free), and the
 verification of a staged exact package after the framework's successful
-authenticated download. Never resolves, downloads, installs, or changes package
-state itself.
+authenticated download, or of an owned retained recovery artifact. Never resolves,
+downloads, installs, or changes package state itself.
 """
 import hashlib
 import json
@@ -134,10 +134,58 @@ def verify_wazuh_source(versions, source_file='/etc/apt/sources.list.d/wazuh.lis
     return result
 
 
+def verify_recovery(filename, versions, root=Path('/var/backups/pilot/wazuh'), installation=False, require_cache_name=False):
+    """Trust an archive only through the coordinator's private recovery manifest.
+
+    The original stage verified APT metadata and the manifest froze its digest.
+    Recovery must work after repository metadata changes or disappears.
+    """
+    path = safe_path(filename)
+    parent = path.parent
+    if parent.parent != root or not parent.name.startswith('agent-'):
+        raise ValueError('artifact outside private agent transaction')
+    for directory in (parent, parent.parent):
+        info = safe_path(directory, directory=True).lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError('unsafe recovery directory')
+    manifest = parent / 'manifest.json'
+    info = safe_path(manifest).lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise ValueError('unsafe recovery manifest')
+    item = json.loads(manifest.read_text())
+    active = json.loads(safe_path(parent.parent / 'agent-active.json').read_text())
+    phase = 'installing' if installation else 'recovering'
+    if active.get('owner') != item.get('owner') or active.get('phase') != phase:
+        raise ValueError('recovery owner is no longer active')
+    if item['phase'] != phase or item['family'] != 'Debian' or item['kind'] != 'agent':
+        raise ValueError('recovery is not authorized')
+    version = item['package'] if installation else item['installed']
+    if versions != {'wazuh-agent': version}:
+        raise ValueError('recovery target does not match the saved package')
+    expected = item['packages'][version]
+    if expected['path'] != str(path) or str(parent) != item['backup']:
+        raise ValueError('recovery archive identity mismatch')
+    checksum = hashlib.sha256(path.read_bytes()).hexdigest()
+    if checksum != expected['sha256']:
+        raise ValueError('recovery artifact checksum mismatch')
+    fields = run(['dpkg-deb', '--show', '--showformat=${Package}\n${Version}\n${Architecture}', str(path)]).splitlines()
+    if fields != ['wazuh-agent', version, 'amd64']:
+        raise ValueError('recovery artifact package identity mismatch')
+    if require_cache_name and path.name != 'wazuh-agent_' + version + '_amd64.deb':
+        raise ValueError('retained recovery artifact is not its exact native APT cache basename')
+    return {'path': str(path), 'version': version, 'sha256': checksum}
+
+
 if __name__ == '__main__':
     try:
         if len(sys.argv) == 2 and sys.argv[1] == '--cache-preflight':
             result = {'cache': str(validate_cache())}
+        elif len(sys.argv) == 4 and sys.argv[1] == '--recovery':
+            result = verify_recovery(sys.argv[2], json.loads(sys.argv[3]))
+        elif len(sys.argv) == 4 and sys.argv[1] == '--installation':
+            result = verify_recovery(sys.argv[2], json.loads(sys.argv[3]), installation=True)
+        elif len(sys.argv) == 4 and sys.argv[1] == '--recovery-cache':
+            result = verify_recovery(sys.argv[2], json.loads(sys.argv[3]), require_cache_name=True)
         else:
             result = verify(json.loads(sys.argv[1]))
             if len(sys.argv) == 4 and sys.argv[2] == '--wazuh-source':
