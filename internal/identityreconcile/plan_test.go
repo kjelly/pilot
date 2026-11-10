@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 var capturedGroupNames = []string{"p1-team", "p1-nonposix", "p1-parent", "p1-leaf", "p1-mid", "p1-top"}
@@ -141,7 +143,7 @@ func TestPlanPasswordActions(t *testing.T) {
 		for _, n := range names {
 			u := byName(users, n)
 			dn := u.DisplayName
-			d.Users = append(d.Users, DesiredUser{Name: n, First: u.First, Last: u.Last, DisplayName: &dn, Shell: u.Shell, Home: u.Home, Enabled: !u.Locked, HasInitialPassword: true, PreserveExisting: preserve})
+			d.Users = append(d.Users, DesiredUser{Name: n, First: u.First, Last: u.Last, DisplayName: &dn, Shell: u.Shell, Home: u.Home, Enabled: !u.Locked, HasInitialPassword: true, PasswordFormRead: true, PasswordForm: inventory.PasswordLiteral, PreserveExisting: preserve})
 		}
 		return d
 	}
@@ -170,7 +172,7 @@ func TestPlanEnabledState(t *testing.T) {
 // its group.
 func TestPlanCreatesInDependencyOrder(t *testing.T) {
 	d := Desired{
-		Users: []DesiredUser{{Name: "carol", First: "Carol", Last: "C", Shell: "/bin/bash", Home: "/home/carol", HasInitialPassword: true, PreserveExisting: true}},
+		Users: []DesiredUser{{Name: "carol", First: "Carol", Last: "C", Shell: "/bin/bash", Home: "/home/carol", HasInitialPassword: true, PasswordFormRead: true, PasswordForm: inventory.PasswordLiteral, PreserveExisting: true}},
 		Groups: []DesiredGroup{
 			{Name: "team-new", Description: "team-new", Type: TypePosix, Authoritative: true, Users: []string{"carol"}, UsersDeclared: true, GroupsDeclared: true},
 			{Name: "data-new", Description: "data-new", Type: TypeNonPosix, Authoritative: true, Groups: []string{"team-new"}, UsersDeclared: true, GroupsDeclared: true},

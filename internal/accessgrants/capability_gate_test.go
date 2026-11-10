@@ -135,6 +135,7 @@ func TestReconcileOnce_RefusesBeforeApplyWhenCapabilityUnknown(t *testing.T) {
 	runner := &capabilityAwareFakeRunner{} // capability probe "runs" but produces nothing
 
 	_, _, err := ReconcileOnce(context.Background(), ReconcileOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", Runner: runner,
 	})
 	if err == nil {

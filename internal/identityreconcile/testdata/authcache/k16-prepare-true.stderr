@@ -1,0 +1,2 @@
+▶ ansible-playbook playbooks/apply/freeipa-identity-auth-cache.yml -i <inventory> -e target_group=all -e {"pilot_identity_auth_cache_output": "<out>/prepare-true.json", "pilot_identity_auth_cache_action": "prepare"}
+  transcript: <transcript>

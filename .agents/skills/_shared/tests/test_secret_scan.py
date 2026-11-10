@@ -1071,12 +1071,7 @@ class Consistency(unittest.TestCase):
     # its entry on the base branch before the fixture lands there. Each pre-registered entry is listed here
     # with the PR that brings the content. The entry is exempt from the "still needed" check only while it
     # does not match yet; once it matches, stale_entries demands its removal from this list.
-    PRE_REGISTERED = {
-        ("freeipa-secret-attribute", "internal/freeiparpc/capture_p24_test.go"): "kjelly/pilot#284",
-        ("freeipa-secret-attribute", "internal/freeiparpc/capture_p24_compare_test.go"): "kjelly/pilot#284",
-        ("ipa-session", "internal/freeiparpc/fixture_secrets_test.go"): "kjelly/pilot#284",
-        ("ipa-session", "internal/freeiparpc/write_captures_test.go"): "kjelly/pilot#284",
-    }
+    PRE_REGISTERED: dict[tuple[str, str], str] = {}
 
     @classmethod
     def stale_entries(cls, exemptions, files, read, pre_registered=None):

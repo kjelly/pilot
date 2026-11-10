@@ -20,12 +20,27 @@ var (
 	runsOutput       string
 	runsArchiveID    string
 	runsConfirmPrune bool
+	// runsIncludeUsersGroups: last-success also counts the Go identity engine's
+	// users-groups runs (Q6).
+	runsIncludeUsersGroups bool
 )
 
 var runsCmd = &cobra.Command{Use: "runs", Short: "Query append-only delivery evidence"}
 var runsListCmd = &cobra.Command{Use: "list", Short: "List recent delivery runs", Args: cobra.NoArgs, RunE: runRunsList}
 var runsShowCmd = &cobra.Command{Use: "show <run-id>", Short: "Show one run and host-by-row evidence", Args: cobra.ExactArgs(1), RunE: runRunsShow}
-var runsLastSuccessCmd = &cobra.Command{Use: "last-success", Short: "Show a host's most recent successful delivery", Args: cobra.NoArgs, RunE: runRunsLastSuccess}
+var runsLastSuccessCmd = &cobra.Command{
+	Use:   "last-success",
+	Short: "Show a host's most recent successful delivery",
+	Long: `Show the newest successful delivery that included --host.
+
+A run of "pilot reconcile --engine golang --scope users-groups" is not counted by default: it
+reconciles the users and groups only and runs no playbook, so a success of it (a run that wrote
+nothing and found no authorization cache obligation owed) is not a delivery of the component.
+--include-users-groups counts those runs too. A run that ended partial_failed (an obligation left
+unsettled, a verification undone) is never a success, with or without the flag.`,
+	Args: cobra.NoArgs,
+	RunE: runRunsLastSuccess,
+}
 var runsPendingSpecCmd = &cobra.Command{Use: "pending-spec <spec-path>", Short: "List recorded hosts not passing a spec", Args: cobra.ExactArgs(1), RunE: runRunsPendingSpec}
 var runsDiffCmd = &cobra.Command{Use: "diff <run-a> <run-b>", Short: "Diff host-by-row evidence between two runs", Args: cobra.ExactArgs(2), RunE: runRunsDiff}
 var runsAffectedCmd = &cobra.Command{Use: "affected", Short: "List recorded runs for a component", Args: cobra.NoArgs, RunE: runRunsAffected}
@@ -37,6 +52,7 @@ func init() {
 	runsListCmd.Flags().StringVar(&runsHost, "host", "", "only runs that included this host")
 	runsListCmd.Flags().StringVar(&runsComponent, "component", "", "only runs that selected this contract component")
 	runsLastSuccessCmd.Flags().StringVar(&runsHost, "host", "", "host to query (required)")
+	runsLastSuccessCmd.Flags().BoolVar(&runsIncludeUsersGroups, "include-users-groups", false, "also count the runs of the Go identity engine's users-groups scope (they ran no playbook; not counted by default)")
 	runsAffectedCmd.Flags().StringVar(&runsComponent, "component", "", "contract component to query (required)")
 	runsAffectedCmd.Flags().IntVar(&runsLimit, "limit", 50, "maximum runs to display")
 	runsArchiveCmd.Flags().StringVar(&runsBefore, "before", "", "RFC3339 cutoff; only finished runs strictly before it are archived")
@@ -147,7 +163,7 @@ func runRunsLastSuccess(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer s.Close()
-	run, err := s.LastSuccess(runsHost)
+	run, err := s.LastSuccessWith(runsHost, store.LastSuccessOptions{IncludeUsersGroups: runsIncludeUsersGroups})
 	if err != nil {
 		return err
 	}

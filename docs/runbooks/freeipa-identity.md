@@ -278,6 +278,82 @@ ansible-playbook -i inventory-freeipa.yaml \
 > 管權限 = 改 `~/.vault/ipa-identity.yaml` 再跑一次。Repo 永遠只有「怎麼做」，
 > 沒有「是誰、什麼密碼」。
 
+**pilot 自己的入口會先取 FreeIPA server 的 `/etc/ipa` 遠端鎖**（Phase 2 P2-2 的行為契約；
+這一段是程式碼的行為說明，已在 P2-2 的 live arm（L1–L11）對真實 sshd 實跑驗證，結果在該 PR 的 evidence
+record，不在這裡累積）：`pilot deploy`／`pilot reconcile` 選到 freeipa-identity、`pilot access
+reconcile --once`、`pilot access breakglass activate`／`deactivate`、`pilot access drift`／`pilot
+identity drift` 的 `--repair-managed`、`pilot edit` 的 break-glass，都在最後一個確認之後、送出
+playbook 之前取鎖，playbook（含冪等性再套用）結束才放；`pilot host decommission` 的鎖屬於整輪，
+在 approval 之後、第一個步驟（client 的 uninstall）之前取，整輪結束才放（見下面第 9 點）。別的 pilot 執行持有鎖時 CLI 最多等 30 分鐘（`pilot reconcile --lock-wait` 可調，`0` 是忙碌
+就立即失敗；`pilot edit` 的 TUI 不等待，訊息會指向 `pilot access breakglass activate`）。
+freeipa-server 主機若用 docker／local connection、ProxyCommand、密碼 SSH、`ansible_ssh_executable`
+或不在 allowlist 的 `-o`，這些入口會拒絕並指出是哪個 hostvar，**不會無鎖執行**；而且是在任何
+ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（見下面第 1 點），不是取鎖時才拒絕。鎖只約束 pilot 自己的程式碼路徑：上面
+的 `ansible-playbook` 手動執行與 `pilot vm-target run`／`test` 不取鎖，也不會被鎖擋住。
+
+操作者要知道的行為與限制（同一份說明在各指令的 `--help`）：
+
+1. **拒絕發生在任何 ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前。** 每個入口先用取鎖本身
+   那一套規則做一次不啟動 ssh 的檢查（`pilot deploy`／`pilot reconcile` 在顯示計畫與依賴 apply 之前，`--preview-only` 與
+   `--force` 的結果一致；access、breakglass、drift 修復在探測之前；`pilot host decommission apply`／
+   `resume` 在記錄 approval 與第一個步驟之前，所以 client 不會在拒絕之前被解除安裝）。
+   `--repair-managed` 即使沒有 drift 也會被拒絕（檢查在探測之前）。`resume` 即使 converge 步驟已經做完，
+   inventory 後來變成不支援也會被拒絕。`pilot host decommission plan` **不拒絕**：它在 stderr 印警告，
+   plan 照存、結束碼 0；之後的 apply 才會被拒絕。取鎖時仍會再檢查一次。
+   **不是在所有事情之前**：只整理 workspace 的事仍在檢查之前——精靈的問題、從 `hosts.yml` 重新產生
+   `inventory.yml`、roster 的 schema 自動升級（會留備份），decommission 的 stage 確認與 `inventory.yml`
+   的重新產生。**webhook**：互動式單一元件 `pilot deploy`（沒有 `--component`）無論錯誤出在哪個階段都會發
+   一個 `failure` 事件，所以被拒絕也會發一個（沒有元件被執行）；`pilot reconcile`、`pilot deploy
+   --component`、`pilot access …`、breakglass 的 CLI 在拒絕時不發事件。
+2. **這些入口現在用 `ansible-inventory --list`（不帶 vault 密碼）讀 inventory。**（行為變更）
+   `pilot access`、breakglass、drift 修復與 `pilot host decommission` 原本不經過這一步：group_vars／
+   host_vars 裡有 contract 宣告為 `secret: true` 的明文輸入、或整份 group_vars 被 ansible-vault 加密
+   （`ansible-inventory` 沒有密碼讀不了，錯誤是 `Attempting to decrypt but no vault secrets found.`），
+   現在這些指令在取鎖前就失敗。處理：secret 放 `.vault/main.yaml`，group_vars 不要整份加密。
+3. **檢查看不到只靠下列方式提供的連線設定**：`-e @file`（與 JSON 物件形式的 `-e`）裡的 `ansible_host`、
+   `ansible_user`、`ansible_port`、`target_group`；`ansible.cfg` 的 `ssh_args`、`host_key_checking`；環境變數
+   `ANSIBLE_SSH_ARGS`。最嚴重的後果：`target_group` 或 `ansible_host` 只由 `-e @file` 提供時，鎖可能鎖
+   A 機而 playbook 的目標是 B 機。連線設定請寫在 inventory（host_vars／group_vars）。`ansible_connection`
+   接受 `ssh` 與 `ansible.builtin.ssh`（同一個外掛），其他（`paramiko`、`smart` 等）一律拒絕。
+4. **`--ask-vault-pass`／`--ask-become-pass`（deploy／reconcile 精靈的答案）的密碼提示發生在取鎖之後**，
+   在 ansible-playbook 裡：輸入密碼的時間算在持鎖時間裡，別的 pilot 執行要多等。互斥本身不受影響。
+   這是已知限制，不是拒絕；要避免就用 `--vault-password-file`。
+5. **掉鎖（網路中斷約 45 秒、ssh 結束）時 pilot 只殺 ansible-playbook 的主行程**，不殺它的 process
+   group：ansible 的 fork worker 可能在掉鎖**之後**把正在執行的那一個 task 做完，那個 task 沒有鎖的保護
+   （之後不會有新的 task）。掉鎖後整個 run 一律回報失敗、要重跑。
+6. **breakglass `activate`／`deactivate` 在掉鎖時會在記錄 activation 之前回傳錯誤**，即使 playbook 已以 0
+   結束：規則可能已在 FreeIPA 啟用（或已被收掉），而 `breakglass-activations.json` 沒有這筆紀錄（或仍是
+   active）。處理：重跑同一個指令（`activate` 的 apply 是冪等的）；要收掉就跑 `deactivate`。
+7. **`pilot edit --actions`、scenario 與 MCP apply 的 `activate_breakglass`／`deactivate_breakglass` 失敗就是
+   步驟失敗**：預檢查拒絕、鎖忙碌（TUI 不等待）、掉鎖、playbook 失敗時，`--actions` 結束碼非 0、stderr 是
+   `step N (activate_breakglass): break-glass <name>: activation failed: <原因>`（停用是 `deactivation failed`；
+   之前的步驟保留），apply 整個 rollback、MCP 回 `apply_failed`。訊息只說操作失敗，不說啟用的狀態，因為失敗可以
+   發生在 FreeIPA 已改動之後：原因寫 `activation applied to FreeIPA but recording state failed`（或停用的
+   `deactivation applied to …`）時規則已在 FreeIPA 生效（或已被收掉）、本機紀錄卻沒寫進去，要用
+   `pilot access breakglass status` 檢查，再重跑或 `deactivate`。FreeIPA 還沒改動之前就失敗的（預檢查拒絕、鎖忙碌、
+   playbook 失敗）不留紀錄，失敗的停用不改紀錄。（修正之前這些情況回報成功，結束碼 0 而沒有任何緊急存取生效。）**plan 不執行這兩個步驟**：它回 warning「沒有執行 …」，不是失敗；要實際
+   啟用請 apply，或用 `pilot access breakglass activate`。
+8. **apply 的 rollback 收不回已生效的 breakglass 啟用**：scenario 裡 `activate_breakglass` 之後的步驟失敗時，
+   workspace 的檔案會還原，但啟用已在 FreeIPA 生效、也已記錄。把 breakglass 步驟放在 scenario 最後，或失敗後
+   用 `pilot access breakglass status` 檢查並 `deactivate`。
+9. **`pilot host decommission apply`／`resume` 在第一個步驟之前取鎖**（有 FreeIPA client 的 converge 步驟的 plan；
+   TUI 的下架流程是同一個函式）。順序是：stage 確認、provider 的建立與取鎖前檢查、記錄 approval、**取鎖**（最多等
+   30 分鐘）、client 的 uninstall、roster 的 tombstone、identity 收斂、驗證與 finalize，最後才放鎖。鎖忙碌、等待逾時、
+   或被拒絕時，**沒有任何步驟執行**：client 仍 enrolled、roster 與 `hosts.yml` 不變、server 不變，approval 保留，錯誤訊息寫明
+   `was not started`。**等待中按 Ctrl-C 或收到 SIGTERM 時沒有訊息**：`apply`／`resume` 沒有安裝訊號處理，行程直接結束，
+   不會印 `was not started`，也沒有任何其他輸出；狀態同樣沒有改變（client 仍 enrolled、roster 與 `hosts.yml` 不變、approval
+   保留、plan 可 resume），看狀態、不要等訊息。鎖空出來之後，用同一份 plan 跑 `pilot host decommission resume
+   --id <plan>` 或再跑一次 `apply --confirm-host <host>` 都能繼續，不必重新 plan。（修正之前鎖取在最後的 identity 收斂
+   步驟：被中斷的 apply 已經先把 client 解除 enrollment。這個修正改的是鎖何時取；一個 workspace 若沒有設選用的
+   `ipa_client_fqdn`，uninstall 之後的 SSH 快取退役檢查會失敗，那是另一個既有缺口〔issue #303〕，與鎖無關，這個修正
+   也沒有改變它。）**TUI 的下架不等鎖**：它在終端機裡同步執行，沒有進度畫面也無法取消，所以鎖忙碌時立即失敗並顯示
+   「尚未開始」（沒有任何步驟執行、approval 保留），用 `pilot host decommission resume --id <plan>`（會等鎖，最多 30
+   分鐘）或重新進入畫面繼續。一輪開始之後掉鎖（網路中斷約 45 秒、ssh 結束）：執行中的 playbook 被殺，這一輪以 `lock lost`
+   結束、不啟動下一個步驟；client 可能已部分或全部解除 enrollment，要重跑，之後能不能 `resume` 取決於 workspace 是否
+   有效（`ipa_client_fqdn`）。掉鎖若發生在 finalize 之後（receipt 已記錄），這一輪仍以非 0 結束，因為它沒有持有鎖到結束；
+   但訊息寫的是「下架已完成」，並說明同時執行的 identity 作業可能讓 client 的授權快取沒被刷新（client 在 SSSD 快取過期前
+   可能仍沿用被下架主機的授權），不會叫你重跑。已完成的 plan 重跑只重播 receipt，不取鎖。
+
 ### 4.4 只跑一部分（tags）
 
 ```bash

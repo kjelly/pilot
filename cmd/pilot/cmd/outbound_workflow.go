@@ -207,6 +207,34 @@ func containsOutcome(outcomes []delivery.Outcome, targets ...delivery.Outcome) b
 	return false
 }
 
+// workflowOutcomeResult is how each delivery outcome reads as the public
+// operation.result: every delivery.Outcome constant is listed, so adding an
+// outcome without deciding how it is published fails
+// TestEveryDeliveryOutcomeIsPublishedExplicitly. An outcome that is not listed
+// is published as a failure (aggregateWorkflowResult), never as a success: the
+// default used to be "success", so a new outcome would have been announced to
+// every webhook subscriber as one (spec 2026-11-06 phase 2 §6.4, D15).
+var workflowOutcomeResult = map[delivery.Outcome]string{
+	delivery.OutcomeSuccess:               "success",
+	delivery.OutcomePartialSuccess:        "success",
+	delivery.OutcomeFailed:                "failure",
+	delivery.OutcomePartialFailed:         "failure",
+	delivery.OutcomeRolledBack:            "failure",
+	delivery.OutcomeRollbackFailed:        "failure",
+	delivery.OutcomeEvidenceFailed:        "failure",
+	delivery.OutcomeAuthorizationRequired: "failure",
+	delivery.OutcomeCancelled:             "cancelled",
+}
+
+// workflowResultOf is the public result of one outcome; an outcome nobody
+// classified is a failure.
+func workflowResultOf(o delivery.Outcome) string {
+	if r, ok := workflowOutcomeResult[o]; ok {
+		return r
+	}
+	return "failure"
+}
+
 // aggregateWorkflowResult implements design spec §9's multi-transaction
 // aggregation: the public result (deploy spec's operation.result) and
 // application_consistency, deterministically, regardless of component
@@ -228,14 +256,21 @@ func aggregateWorkflowResult(results []ComponentDeliveryResult) (publicResult st
 		}
 	}
 
-	switch {
-	case containsOutcome(outcomes, delivery.OutcomeFailed, delivery.OutcomePartialFailed, delivery.OutcomeRolledBack,
-		delivery.OutcomeRollbackFailed, delivery.OutcomeEvidenceFailed, delivery.OutcomeAuthorizationRequired):
-		publicResult = "failure"
-	case containsOutcome(outcomes, delivery.OutcomeCancelled):
-		publicResult = "cancelled"
-	default:
-		publicResult = "success"
+	// Any failure wins, then a cancellation, and only when every outcome reads as
+	// a success is the result one.
+	publicResult = "success"
+	for _, o := range outcomes {
+		switch workflowResultOf(o) {
+		case "failure":
+			publicResult = "failure"
+		case "cancelled":
+			if publicResult != "failure" {
+				publicResult = "cancelled"
+			}
+		}
+		if publicResult == "failure" {
+			break
+		}
 	}
 
 	switch {
@@ -371,12 +406,36 @@ func aggregateDeploymentResult(results []ComponentDeliveryResult) aggregatedDepl
 	}
 }
 
+// How long the terminal publication of a run whose ctx was already cancelled may
+// take (outboundPublishTimeout, for the whole function) and how much of it the
+// webhook delivery may use (webhookFlushTimeout; an event that is not delivered
+// stays in the outbox for `pilot webhook flush`). Variables so tests can shorten them.
+var (
+	outboundPublishTimeout = 30 * time.Second
+	webhookFlushTimeout    = 10 * time.Second
+)
+
 // publishTerminalWorkflow is the shared terminal-publication step design
 // spec §28.2 requires. It is always called AFTER the real operation has
 // already reached its terminal outcome, and it never returns anything
 // the caller must act on — every failure path here is a printed warning,
 // not a propagated error (INV-2).
 func publishTerminalWorkflow(ctx context.Context, out io.Writer, in PublishTerminalWorkflowInput) {
+	flush := outbound.DefaultFlushOptions()
+	if ctx.Err() != nil {
+		// The run's ctx was cancelled before the terminal publication began
+		// (Ctrl-C, --timeout, a lost lock): this records the run's result, so it
+		// goes on with the cancellation detached and bounded, or the enqueue would
+		// fail on the cancelled ctx and a run with committed writes would announce
+		// nothing (T5-T7 of spec 2026-11-06 phase 2 §4.4, the class rule). Only
+		// when ctx was already cancelled on entry: the normal path keeps its
+		// behavior (a 30 s flush budget, a projection with no limit), and a signal
+		// that arrives during the publication is still the operator's.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), outboundPublishTimeout)
+		defer cancel()
+		flush.Budget = webhookFlushTimeout
+	}
 	cfg, err := outbound.LoadConfigFile(outbound.DefaultConfigPath(in.WorkspaceDir))
 	if err != nil {
 		fmt.Fprintf(out, "⚠ outbound webhook: %v (original operation result unaffected)\n", err)
@@ -499,7 +558,7 @@ func publishTerminalWorkflow(ctx context.Context, out io.Writer, in PublishTermi
 		Outbox: o, Now: time.Now, RNG: rand.New(rand.NewSource(time.Now().UnixNano())),
 		PilotVersion: rootCmd.Version, SecretLookup: os.LookupEnv,
 	}
-	outcomes := d.FlushWebhooks(ctx, identities, outbound.DefaultFlushOptions())
+	outcomes := d.FlushWebhooks(ctx, identities, flush)
 	for _, oc := range outcomes {
 		switch {
 		case oc.Delivered:

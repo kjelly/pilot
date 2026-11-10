@@ -1,0 +1,86 @@
+{
+  "result": {
+    "result": {
+      "cn": [
+        "P24 Cap"
+      ],
+      "displayname": [
+        "P24 Cap"
+      ],
+      "initials": [
+        "PC"
+      ],
+      "gecos": [
+        "P24 Cap"
+      ],
+      "objectclass": [
+        "top",
+        "person",
+        "organizationalperson",
+        "inetorgperson",
+        "inetuser",
+        "posixaccount",
+        "krbprincipalaux",
+        "krbticketpolicyaux",
+        "ipaobject",
+        "ipasshuser",
+        "ipaSshGroupOfPubKeys",
+        "mepOriginEntry",
+        "ipantuserattrs"
+      ],
+      "ipauniqueid": [
+        "97f2e7ee-d9ef-11f1-83d1-5254001b059e"
+      ],
+      "mepmanagedentry": [
+        "cn=p24cap-ur,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      ],
+      "ipantsecurityidentifier": [
+        "S-1-5-21-3998632271-3893472475-798555519-1490"
+      ],
+      "sn": [
+        "Cap"
+      ],
+      "givenname": [
+        "P24"
+      ],
+      "uidnumber": [
+        "1927600490"
+      ],
+      "mail": [
+        "p24cap-ur@ipa.pilot.internal"
+      ],
+      "homedirectory": [
+        "/home/p24cap-ur"
+      ],
+      "loginshell": [
+        "/bin/sh"
+      ],
+      "krbcanonicalname": [
+        "p24cap-ur@IPA.PILOT.INTERNAL"
+      ],
+      "uid": [
+        "p24cap-ur"
+      ],
+      "krbprincipalname": [
+        "p24cap-ur@IPA.PILOT.INTERNAL"
+      ],
+      "gidnumber": [
+        "1927600490"
+      ],
+      "nsaccountlock": false,
+      "has_password": false,
+      "has_keytab": false,
+      "preserved": false,
+      "memberof_group": [
+        "ipausers"
+      ],
+      "dn": "uid=p24cap-ur,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p24cap-ur",
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

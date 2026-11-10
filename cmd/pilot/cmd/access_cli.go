@@ -70,6 +70,13 @@ native sudoNotBefore/sudoNotAfter attributes (spec.md §9/§10), then
 applies the result via one ansible-playbook run against
 playbooks/apply/freeipa-identity-apply.yml.
 
+The run takes the FreeIPA server's /etc/ipa lock first and holds it until
+the playbook has ended, waiting up to 30 minutes for another pilot run to give
+it back. The lock only binds pilot's own commands: a hand-run ansible-playbook
+does not take it.
+
+` + identityLockHelp + `
+
 --once is required: it is currently the only supported mode (a standing
 reconcile daemon/loop is not part of this delivery) — passing it makes
 that explicit rather than implying a continuous mode that doesn't exist.`,
@@ -193,6 +200,13 @@ func runAccessReconcileCmd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Refused before the capability probe, the playbook or any ssh when the
+	// inventory cannot give the lock (see checkIdentityLockTarget).
+	lock, err := identityLockFor(cmd.Context(), identityLockRequest{Inventory: accessReconcileInventory, Wait: identityLockWaitDefault, Progress: cmd.ErrOrStderr()})
+	if err != nil {
+		return err
+	}
+
 	workflowID := newWorkflowID()
 	startedAt := time.Now()
 
@@ -206,6 +220,7 @@ func runAccessReconcileCmd(cmd *cobra.Command, args []string) error {
 		Playbook:   accessReconcilePlaybook,
 		StateDir:   resolveStateDir(accessStateFiles...),
 		Now:        startedAt,
+		Lock:       lock,
 	})
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "compiled %d hbac rule(s), %d sudo rule(s), %d account expiration(s)\n", len(plan.HBACRules), len(plan.SudoRules), len(plan.AccountExpirations))

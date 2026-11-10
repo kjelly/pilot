@@ -47,6 +47,10 @@ func TestIdentityDriftRepairManagedKeepsItsOutputContract(t *testing.T) {
 		t.Run(c.name+"/prints the apply output", func(t *testing.T) {
 			resetDriftCmdState(t)
 			fakeDriftAnsible(t)
+			// The repair is a funnel of the identity lock gate (it runs the identity
+			// playbook through accessgrants.RepairManaged): no FreeIPA server here, so
+			// an in-memory lock, whose use is asserted at the end.
+			lock := useFakeIdentityLock(t)
 			stdout := filepath.Join(t.TempDir(), "apply.stdout")
 			if err := os.WriteFile(stdout, []byte(applyLine+"\n"), 0o600); err != nil {
 				t.Fatal(err)
@@ -63,12 +67,20 @@ func TestIdentityDriftRepairManagedKeepsItsOutputContract(t *testing.T) {
 			if strings.Contains(out, "apply exit code") {
 				t.Errorf("the raw apply output was replaced by a summary:\n%s", out)
 			}
+			req := onlyRequest(t, lock)
+			if req.Inventory != ws.inventory || req.Hosts != nil || req.Wait != identityLockWaitDefault {
+				t.Errorf("lock request = %+v: want the repaired inventory, the freeipa-server group and the default wait", req)
+			}
+			if lock.Acquired() != 1 || lock.Released() != 1 {
+				t.Errorf("the lock was taken %d times and released %d around the repair", lock.Acquired(), lock.Released())
+			}
 		})
 	}
 
 	t.Run("identity drift --repair-managed --format json is still accepted", func(t *testing.T) {
 		resetDriftCmdState(t)
 		fakeDriftAnsible(t)
+		useFakeIdentityLock(t)
 		ws := newDriftWorkspace(t, "")
 		out, err := runDriftCmd(t, "identity", "drift", ws.roster, "-i", ws.inventory, "--repair-managed", "--format", "json")
 		if err != nil {

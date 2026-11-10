@@ -17,16 +17,15 @@ var golangGateExemptions = map[string]string{
 	// The Ansible engine's own checks, which the Go preview shares only a
 	// function with (spec §2.1 refuses the Go engine's combinations earlier,
 	// in validateReconcileEngineFlags).
-	"ansible-force-and-preview-only": "Ansible engine; the Go engine refuses --force earlier (engine-preview-only). Row: TestReconcileRejectsFlagMisuse 'force and preview-only'",
-	"ansible-actions-with-limit":     "Ansible engine --actions path; the Go engine refuses --actions earlier (engine-actions). Not part of the Go preview and without a row before this change",
-	"ansible-actions-with-flags":     "Ansible engine --actions path. Row: TestReconcileRejectsFlagMisuse 'actions with component'",
-	"ansible-actions-dispatch":       "delegates to the Ansible engine's scenario runner; the Go engine refuses --actions earlier",
-	"ansible-needs-component":        "Ansible engine; the Go engine needs exactly one --component earlier (engine-component). Row: TestReconcileRejectsFlagMisuse 'preview-only without component'",
-	"ansible-interactive-dispatch":   "delegates to the Ansible engine's wizard. Row: TestReconcileNonInteractiveRunsWithoutTTY",
+	"ansible-actions-with-limit":   "Ansible engine --actions path; the Go engine refuses --actions earlier (engine-actions). Not part of the Go preview and without a row before this change",
+	"ansible-actions-with-flags":   "Ansible engine --actions path. Row: TestReconcileRejectsFlagMisuse 'actions with component'",
+	"ansible-actions-dispatch":     "delegates to the Ansible engine's scenario runner; the Go engine refuses --actions earlier",
+	"ansible-needs-component":      "Ansible engine; the Go engine needs exactly one --component earlier (engine-component). Row: TestReconcileRejectsFlagMisuse 'preview-only without component'",
+	"ansible-interactive-dispatch": "delegates to the Ansible engine's wizard. Row: TestReconcileNonInteractiveRunsWithoutTTY",
 
 	// Defense in depth: a failure that cannot be produced from a test
 	// without breaking the process or the machine.
-	"plan-out-abs":        "filepath.Abs fails only when the working directory no longer exists",
+	"output-abs":          "filepath.Abs fails only when the working directory no longer exists",
 	"hosts-abs-dir":       "filepath.Abs fails only when the working directory no longer exists",
 	"hosts-abs-inventory": "filepath.Abs fails only when the working directory no longer exists",
 	"hosts-read-inventory": "inventory.yml vanishing between validateFileExists (gate inventory-missing) and this read; a race, " +
@@ -35,9 +34,23 @@ var golangGateExemptions = map[string]string{
 		"loadDeployInventorySnapshot runs first and refuses with gate ansible-inventory (row: a plaintext secret in group_vars)",
 	"roster-file-unset": "validateDeploymentCompletenessSnapshot refuses a host without freeipa_roster_file first " +
 		"(gate completeness; row 'no freeipa_roster_file: completeness refuses first' documents the order)",
-	"plan-marshal":     "json.MarshalIndent of the plan document, plain data, cannot fail",
-	"plan-write-bytes": "a write error on a file created a moment ago: needs a full disk",
-	"plan-close":       "a close error on a file just written: needs a full disk",
+	"plan-marshal": "json.MarshalIndent of the plan document, plain data, cannot fail",
+	"output-close": "a close error on a file just written: needs a full disk",
+
+	// The Go apply (reconcile_golang_apply.go): the same kinds of defence in depth, and the
+	// returns that pass on a refusal whose own gates have rows.
+	"apply-lock-wait":       "the value was parsed and refused at the entry (entry-lock-wait-value) before golangApply is reached",
+	"apply-runtime-prepare": "the same call as the preview's runtime-prepare, whose row is the pilot data directory that cannot be created",
+	"apply-passwords":       "RosterUserPasswords fails only on a roster that FromRosterWithForms has already read; two names that differ only in case are refused by the roster's own validator first (a row of the roster-adapter tests)",
+	"apply-root":            "resolveContractRoot fails only when the working directory no longer exists",
+	"apply-auth-output":     "the private directory for the entry's result file cannot be made only when the temporary directory is unusable",
+	"apply-entry":           "NewAuthCacheEntry refuses only a missing result file, command, lock or FQDN, all of which this function has just made or checked",
+	"apply-start-run":       "StartRun fails only on a store that opened a moment ago (a failing open is apply-store's row)",
+	"preview-plan-commit":   "a write or close error on a file created a moment ago: needs a full disk; commitOutput's own write failure is output-write's row",
+	// P2-7: golangPreviewPlan was cut out of golangPreview so the mixed run's preview and idempotency check
+	// read the same plan; the return that hands its error on has no gate of its own.
+	"mixed-passthrough":        "returns what the Ansible engine's reconcile path returned for the mixed run, whose own refusals carry their gates (the Go phase's in executeDeploymentTransaction and the mixed step's wrappers have rows in reconcile_golang_mixed_test.go and reconcile_golang_mixed_cli_test.go; the rest are the Ansible engine's)",
+	"preview-plan-passthrough": "returns what golangPreviewPlan returned, whose own returns carry the gates (preview-connect, observe, writes-guard, plan-marshal, preview-plan-commit, blocked-plan, each with its row)",
 }
 
 // AGENTS.md §5.10 and §5.12 for the Go preview: every return that refuses
@@ -50,9 +63,13 @@ func TestReconcileGolangEveryGateHasARow(t *testing.T) {
 	holders := map[string][]string{
 		"reconcile.go": {"runReconcile"},
 		"reconcile_golang.go": {
-			"validateReconcileEngineFlags", "runReconcileGolangPreview", "golangPreview", "inventoryCurrentWithHosts",
-			"golangPreviewStage", "rosterServer", "sshTargetFromHostVars", "sshOptionArgs", "splitShellWords", "writeGolangPlan",
+			"validateReconcileEngineFlags", "runReconcileGolangPreview", "golangPreview", "golangPreviewPlan", "inventoryCurrentWithHosts",
+			"golangPreviewStage", "rosterServer", "golangPreflightFor", "golangConnect",
 		},
+		"reconcile_golang_apply.go": {
+			"reserveOutput", "commitOutput", "runReconcileGolangApply", "golangApply", "runGolangApplyUnderLock",
+		},
+		"reconcile_golang_mixed.go": {"runReconcileGolangMixed", "golangMixed"},
 	}
 	var res gateledger.Result
 	for file, funcs := range holders {
@@ -91,7 +108,7 @@ func TestReconcileGolangGateLedgerFiresOnTheRealSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	scan := func(source string) []string {
-		res, err := gateledger.Scan("reconcile_golang.go", []byte(source), "golangPreview", "writeGolangPlan")
+		res, err := gateledger.Scan("reconcile_golang.go", []byte(source), "golangPreviewPlan", "golangConnect")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -120,7 +137,7 @@ func TestReconcileGolangGateLedgerFiresOnTheRealSource(t *testing.T) {
 		if !strings.Contains(string(src), anchor) {
 			t.Fatal("the anchor line moved")
 		}
-		mutated := strings.Replace(string(src), anchor, "\tif host == \"\" {\n\t\treturn fmt.Errorf(\"new refusal\")\n\t}\n"+anchor, 1)
+		mutated := strings.Replace(string(src), anchor, "\tif prep.host == \"\" {\n\t\treturn identityreconcile.Document{}, fmt.Errorf(\"new refusal\")\n\t}\n"+anchor, 1)
 		if p := scan(mutated); !slices.ContainsFunc(p, func(s string) bool { return strings.Contains(s, "new refusal") }) {
 			t.Fatalf("problems = %v, want the added return named", p)
 		}

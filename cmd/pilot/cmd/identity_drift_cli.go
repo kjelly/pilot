@@ -67,7 +67,12 @@ which is not reachable yet: coverage is partial, so even a clean run returns 3.
 apply path 'pilot access reconcile' uses — it only ever touches
 Pilot-owned managed constructs (spec.md §13.1's ownership boundary),
 never a hand-authored roster entry it doesn't compile itself. The repair step
-itself still reads the admin password from the roster only.
+itself still reads the admin password from the roster only. It takes the
+FreeIPA server's /etc/ipa lock around the repair, and checks the lock can be
+taken before it probes (so an inventory it cannot lock is refused even when
+there is no drift).
+
+` + identityLockHelp + `
 
 The probe reads the FreeIPA admin password from the vault vars file's
 ipa_admin_password first (the same order 'pilot deploy' uses), then from the
@@ -157,11 +162,18 @@ func runIdentityDriftCmd(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Refused before the read-only probe, the repair or any ssh when the
+	// inventory cannot give the lock (see checkIdentityLockTarget).
+	lock, err := identityLockFor(cmd.Context(), identityLockRequest{Inventory: identityDriftInventory, Wait: identityLockWaitDefault, Progress: cmd.ErrOrStderr()})
+	if err != nil {
+		return err
+	}
 	before, plan, result, err := accessgrants.RepairManaged(cmd.Context(), driftOpts, accessgrants.ReconcileOptions{
 		RosterFile: readPath,
 		Inventory:  identityDriftInventory,
 		StateDir:   resolveStateDir(accessStateFiles...),
 		Now:        time.Now(),
+		Lock:       lock,
 	})
 	if perr := printIdentityDriftReport(out, before); perr != nil {
 		return perr

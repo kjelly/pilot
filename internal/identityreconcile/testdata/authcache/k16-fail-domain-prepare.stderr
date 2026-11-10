@@ -1,0 +1,10 @@
+▶ ansible-playbook playbooks/apply/freeipa-identity-auth-cache.yml -i <inventory> -e target_group=all -e {"pilot_identity_auth_cache_output": "<out>/fail-domain-prepare.json", "pilot_identity_auth_cache_action": "prepare"} -e freeipa_domain=other.example
+
+❌ Ansible 失敗摘要
+  1. host=ipa-1 (fatal)
+     task=Record the authorization-cache obligation (prepare)
+     msg=non-zero return code
+  詳細輸出請查看上方內容或 run transcript。
+  transcript: <transcript>
+  ✗ playbooks/apply/freeipa-identity-auth-cache.yml
+exit status 2

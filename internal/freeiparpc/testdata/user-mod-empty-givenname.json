@@ -1,0 +1,14 @@
+{
+  "result": null,
+  "error": {
+    "code": 3007,
+    "message": "'givenname' is required",
+    "data": {
+      "name": "givenname"
+    },
+    "name": "RequirementError"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

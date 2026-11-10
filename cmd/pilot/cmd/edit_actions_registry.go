@@ -1240,7 +1240,7 @@ func editActionRegistry() []editActionDef {
 		{
 			Spec: semanticActionSpec{
 				Name:                     "activate_breakglass",
-				Description:              "activate a kind: breakglass grant for a bounded duration (spec.md §14) — duration must not exceed the grant's own activation.max_duration; reason/ticket are required unless the grant's activation explicitly disables require_reason/require_ticket. Applies one compiled HBAC rule immediately (not a full grants reconcile) and records the activation in local state — never rewrites the grant definition",
+				Description:              "activate a kind: breakglass grant for a bounded duration (spec.md §14) — duration must not exceed the grant's own activation.max_duration; reason/ticket are required unless the grant's activation explicitly disables require_reason/require_ticket. Applies one compiled HBAC rule immediately (not a full grants reconcile) and records the activation in local state — never rewrites the grant definition. Any failure fails the step with its cause (refused before anything runs, the FreeIPA identity lock busy or lost, the playbook failing, or the record not written after the rule was applied — the cause says when FreeIPA was already changed): `pilot edit --actions` exits non-zero and an apply rolls the workspace files back, not an activation that already took effect. A plan does not run this step (it cannot preview it) and skips it with a warning; apply is what runs it",
 				Required:                 []string{"name", "duration"},
 				Optional:                 []string{"reason", "ticket", "inventory"},
 				ExecutionMode:            ExecutionModeStructured,
@@ -1260,7 +1260,7 @@ func editActionRegistry() []editActionDef {
 		{
 			Spec: semanticActionSpec{
 				Name:                     "deactivate_breakglass",
-				Description:              "end a breakglass grant's active authorization early (idempotent — a no-op if nothing is currently active)",
+				Description:              "end a breakglass grant's active authorization early (idempotent — a no-op if nothing is currently active). Any failure fails the step with its cause (refused before anything runs, the FreeIPA identity lock busy or lost, the playbook failing, or the record not updated after the rule was pruned — the cause says when FreeIPA was already changed): `pilot edit --actions` exits non-zero and an apply rolls the workspace files back, not a deactivation that already took effect. A plan does not run this step (it cannot preview it) and skips it with a warning; apply is what runs it",
 				Required:                 []string{"name"},
 				Optional:                 []string{"inventory"},
 				ExecutionMode:            ExecutionModeStructured,

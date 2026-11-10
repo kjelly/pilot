@@ -143,16 +143,49 @@ func (s *Store) GetRun(runID string) (DeliveryRun, []RunEvidence, error) {
 	return run, evidence, rows.Err()
 }
 
-// LastSuccess returns the newest successful delivery that included host.
+// ScopeUsersGroups is the "scope" the Go identity engine records in the metadata of a
+// run that reconciled only the users and groups of the roster and ran no playbook
+// (identityreconcile.ScopeUsersGroups is this constant). Such a run is not a delivery
+// of the component: it did not run the identity playbook, so a host's last
+// successful delivery is not it (spec 2026-11-06 phase 2, Q6).
+const ScopeUsersGroups = "users-groups"
+
+// LastSuccessOptions says what LastSuccessWith counts.
+type LastSuccessOptions struct {
+	// IncludeUsersGroups counts the runs of the users-groups scope too. The default
+	// does not: a zero-write users-groups run whose obligation probe read "nothing
+	// owed" is a success, and it would otherwise stand for the host's last full
+	// delivery although no playbook ran (Q6, R11).
+	IncludeUsersGroups bool
+}
+
+// LastSuccess returns the newest successful delivery that included host, not counting
+// the runs of the Go identity engine's users-groups scope (Q6; LastSuccessWith counts
+// them on request). A run that ended partial_failed is never one, in either form: a run
+// that left an obligation unsettled or a verification undone is not a success (I4).
 func (s *Store) LastSuccess(host string) (DeliveryRun, error) {
+	return s.LastSuccessWith(host, LastSuccessOptions{})
+}
+
+// LastSuccessWith is LastSuccess with the options.
+func (s *Store) LastSuccessWith(host string, opts LastSuccessOptions) (DeliveryRun, error) {
 	runs, err := s.ListRuns(RunFilter{Host: host, Limit: 500})
 	if err != nil {
 		return DeliveryRun{}, err
 	}
+	skipped := 0
 	for _, run := range runs {
-		if run.Outcome == "success" || run.Outcome == "partial_success" {
-			return run, nil
+		if run.Outcome != "success" && run.Outcome != "partial_success" {
+			continue
 		}
+		if !opts.IncludeUsersGroups && run.Metadata["scope"] == ScopeUsersGroups {
+			skipped++
+			continue
+		}
+		return run, nil
+	}
+	if skipped > 0 {
+		return DeliveryRun{}, fmt.Errorf("no successful delivery recorded for host %q (%d successful %s-scope run(s) of the Go identity engine are not counted: they ran no playbook; include them to see them)", host, skipped, ScopeUsersGroups)
 	}
 	return DeliveryRun{}, fmt.Errorf("no successful delivery recorded for host %q", host)
 }

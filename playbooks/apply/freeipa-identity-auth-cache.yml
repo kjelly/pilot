@@ -1,0 +1,197 @@
+# Internal entry playbook: record or read the authorization-cache obligation of
+# the FreeIPA identity journal, for pilot's Go reconciler (Phase 2, P2-3; spec
+# docs/superpowers/specs/2026-11-06-freeipa-go-reconcile-phase2-spec.md §5).
+#
+# This is NOT a component: it has no contract, no catalog entry and no row in
+# site.yml, and nothing but pilot's Go code runs it (hence the name that is not
+# `<component>-apply.yml`; AGENTS.md §4.0). It carries the full AGENTS.md §4.3 gate
+# all the same, because it writes the same journal the identity playbook does.
+#
+# One file, two modes, chosen by the required variable
+# pilot_identity_auth_cache_action (no default):
+#
+#   prepare  Before the Go reconciler writes anything, record that the clients'
+#            authorization caches are owed a refresh: the helper's auth_prepare
+#            (the same action, on the same journal, as the identity playbook's
+#            "Prepare legacy authorization cache recovery"). Go then writes; the
+#            next full identity apply settles and acknowledges the obligation.
+#   probe    Read the obligation without changing anything: the helper's
+#            read-only auth_inspect. A journal that does not exist is owed.
+#
+# Either mode writes ONE JSON object to the controller, at the absolute path of
+# pilot_identity_auth_cache_output (a 0600 file Go created empty before the run):
+#
+#   {"schema": "pilot.identity-auth-cache/v1", "action": "prepare|probe",
+#    "host": <inventory host>, "fqdn": <hostname -f>,
+#    "previous": <bool>   (prepare)   |   "pending": <bool>   (probe)}
+#
+# ansible-playbook's own exit code proves nothing about the obligation: with no
+# host matched, or a task skipped, it exits 0 and writes nothing (captured in
+# internal/identityreconcile/testdata/authcache-*; the spec's K16, K17). Go
+# therefore trusts only a non-empty, well-formed result from the locked host.
+#
+# It is for one host at a time, never a preview and never a tag selection: the
+# gates below refuse --check, --tags/--skip-tags, more than one host, an unknown
+# action and a missing output path, all tagged `always` so that no tag selection
+# can skip them. The caller holds the FreeIPA server's /etc/ipa lock for the run
+# (internal/identitylock); this playbook does not take it.
+#
+# Inputs it shares with freeipa-identity-apply.yml, spelled the same way there
+# and here (internal/spec/freeipa_identity_auth_cache_entry_test.go checks):
+#   - the journal path  ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json')
+#   - ipa_domain        freeipa_domain | default('ipa.pilot.internal')
+#   - the helper source files/freeipa-ssh-key-cache.py, read from the same file
+---
+- name: FreeIPA identity authorization-cache entry (prepare or probe)
+  hosts: "{{ target_group | default('freeipa-server') }}"
+  become: false
+  gather_facts: false
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+
+    # Spelled exactly as in freeipa-identity-apply.yml. The journal path and
+    # freeipa_domain are inventory inputs and are NOT declared here (a play var
+    # would shadow the inventory's value, AGENTS.md §4.5 point 3).
+    ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
+    ipa_ssh_cache_program: "{{ lookup('file', playbook_dir ~ '/files/freeipa-ssh-key-cache.py') }}"
+
+  pre_tasks:
+    # AGENTS.md §4.3: stage gate first, every gate `always`.
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    # The entry changes the journal (prepare) or reads it for a decision; a
+    # preview of either would be a run that did neither.
+    - name: "Gate: this entry is never a preview"
+      ansible.builtin.assert:
+        that:
+          - not ansible_check_mode
+        fail_msg: >-
+          freeipa-identity-auth-cache.yml does not run in check mode: it records or
+          reads the authorization-cache obligation, and a preview would do neither.
+      tags: [always]
+
+    # `| list`: ansible-core 2.19 passes ansible_run_tags as a tuple, which never
+    # equals a list (AGENTS.md §4.3 point 7). A run with no --tags is ['all'].
+    - name: "Gate: this entry takes no --tags and no --skip-tags"
+      ansible.builtin.assert:
+        that:
+          - (ansible_run_tags | list) == ['all']
+          - (ansible_skip_tags | list | length) == 0
+        fail_msg: >-
+          freeipa-identity-auth-cache.yml takes no --tags and no --skip-tags
+          (run tags: {{ ansible_run_tags | list }}, skipped: {{ ansible_skip_tags | list }}).
+      tags: [always]
+
+    - name: "Gate: exactly one host"
+      ansible.builtin.assert:
+        that:
+          - (ansible_play_hosts_all | length) == 1
+        fail_msg: >-
+          freeipa-identity-auth-cache.yml is for exactly one host (the one whose
+          /etc/ipa lock the caller holds), got {{ ansible_play_hosts_all | length }}:
+          {{ ansible_play_hosts_all | to_json }}.
+      tags: [always]
+
+    - name: "Gate: the action is prepare or probe and the result path is absolute"
+      ansible.builtin.assert:
+        that:
+          - pilot_identity_auth_cache_action is defined
+          - pilot_identity_auth_cache_action in ['prepare', 'probe']
+          - pilot_identity_auth_cache_output is defined
+          - pilot_identity_auth_cache_output is string
+          - pilot_identity_auth_cache_output is match('^/')
+        fail_msg: >-
+          pilot_identity_auth_cache_action must be prepare or probe, and
+          pilot_identity_auth_cache_output must be the absolute path of the result
+          file on the controller (no default for either).
+      tags: [always]
+
+  tasks:
+    - name: "Read the host's FQDN"
+      ansible.builtin.command: hostname -f
+      register: ipa_auth_cache_entry_fqdn
+      changed_when: false
+      check_mode: false
+      failed_when: ipa_auth_cache_entry_fqdn.stdout | trim | length == 0
+
+    - name: "Record the authorization-cache obligation (prepare)"
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - "{{ ipa_ssh_cache_program }}"
+          - auth_prepare
+          - "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"
+        stdin: "{{ {'domain': ipa_domain} | to_json }}"
+      become: true
+      register: ipa_auth_cache_entry_prepare
+      changed_when: false
+      when: pilot_identity_auth_cache_action == 'prepare'
+
+    - name: "Read the authorization-cache obligation (probe)"
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - "{{ ipa_ssh_cache_program }}"
+          - auth_inspect
+          - "{{ ipa_identity_ssh_cache_state_file | default('/var/lib/pilot-identity/ssh-cache.json') }}"
+        stdin: "{{ {'domain': ipa_domain} | to_json }}"
+      become: true
+      register: ipa_auth_cache_entry_probe
+      changed_when: false
+      when: pilot_identity_auth_cache_action == 'probe'
+
+    # On the controller, last, and only when the helper succeeded: a failed
+    # helper task stops the play before this one, so the file stays empty and Go
+    # refuses to write. The file belongs to the user who runs pilot, so this task
+    # never becomes anyone else, whatever the inventory says: `become: false` and,
+    # because an ansible_become set for localhost in the inventory is a variable and
+    # beats the keyword, the same value as a task variable.
+    - name: "Write the result for pilot (on the controller)"
+      ansible.builtin.copy:
+        content: "{{ ipa_auth_cache_entry_result | to_json }}"
+        dest: "{{ pilot_identity_auth_cache_output }}"
+        mode: "0600"
+      vars:
+        ansible_become: false
+        ipa_auth_cache_entry_result: >-
+          {{ {'schema': 'pilot.identity-auth-cache/v1',
+              'action': pilot_identity_auth_cache_action,
+              'host': inventory_hostname,
+              'fqdn': ipa_auth_cache_entry_fqdn.stdout | trim}
+             | combine({'previous': (ipa_auth_cache_entry_prepare.stdout | from_json).previous}
+                       if pilot_identity_auth_cache_action == 'prepare'
+                       else {'pending': (ipa_auth_cache_entry_probe.stdout | from_json).auth_pending}) }}
+      delegate_to: localhost
+      become: false
+      changed_when: false

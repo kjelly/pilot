@@ -35,26 +35,37 @@ import (
 func TestValidateReconcileEngineFlags(t *testing.T) {
 	identity := []string{"freeipa-identity"}
 	for _, tc := range []struct {
-		name                  string
-		engine                string
-		preview, force        bool
-		components            []string
-		actions, planOut, err string
+		name                                        string
+		engine                                      string
+		preview, force                              bool
+		components                                  []string
+		actions, planOut, scope, resultOut, wantErr string
 	}{
 		{name: "ansible default", engine: "ansible", preview: true, components: identity},
 		{name: "golang preview", engine: "golang", preview: true, components: identity, planOut: "p.json"},
-		{name: "unknown engine", engine: "go", preview: true, components: identity, err: "--engine 只能是"},
-		{name: "golang without preview", engine: "golang", components: identity, err: "只提供預覽"},
-		{name: "golang with force", engine: "golang", force: true, components: identity, err: "只提供預覽"},
-		{name: "golang other component", engine: "golang", preview: true, components: []string{"dns"}, err: "只處理 --component freeipa-identity"},
-		{name: "golang two components", engine: "golang", preview: true, components: []string{"freeipa-identity", "dns"}, err: "只處理"},
-		{name: "golang no component", engine: "golang", preview: true, err: "只處理"},
-		{name: "golang with actions", engine: "golang", preview: true, components: identity, actions: "s.json", err: "--actions"},
-		{name: "plan-out without golang", engine: "ansible", preview: true, components: identity, planOut: "p.json", err: "--plan-out"},
+		{name: "golang preview, scope named", engine: "golang", preview: true, components: identity, scope: "users-groups"},
+		{name: "golang apply, users-groups", engine: "golang", force: true, components: identity, scope: "users-groups", resultOut: "r.json"},
+		{name: "unknown engine", engine: "go", preview: true, components: identity, wantErr: "--engine 只能是"},
+		{name: "golang without a mode", engine: "golang", components: identity, wantErr: "不支援互動"},
+		{name: "golang force without a scope", engine: "golang", force: true, components: identity, wantErr: "需要 --scope"},
+		{name: "golang with an unknown scope", engine: "golang", force: true, components: identity, scope: "all", wantErr: "--scope 只能是"},
+		{name: "golang apply, mixed scope", engine: "golang", force: true, components: identity, scope: "full", resultOut: "r.json"},
+		{name: "golang preview of the mixed scope", engine: "golang", preview: true, components: identity, scope: "full", planOut: "p.json"},
+		{name: "golang other component", engine: "golang", preview: true, components: []string{"dns"}, wantErr: "只處理 --component freeipa-identity"},
+		{name: "golang two components", engine: "golang", preview: true, components: []string{"freeipa-identity", "dns"}, wantErr: "只處理"},
+		{name: "golang no component", engine: "golang", preview: true, wantErr: "只處理"},
+		{name: "golang with actions", engine: "golang", preview: true, components: identity, actions: "s.json", wantErr: "--actions"},
+		{name: "plan-out without golang", engine: "ansible", preview: true, components: identity, planOut: "p.json", wantErr: "--plan-out"},
+		{name: "scope without golang", engine: "ansible", preview: true, components: identity, scope: "users-groups", wantErr: "--scope 只能與"},
+		{name: "result-out without golang", engine: "ansible", force: true, components: identity, resultOut: "r.json", wantErr: "--result-out 只能與"},
+		{name: "result-out of a preview", engine: "golang", preview: true, components: identity, resultOut: "r.json", wantErr: "只能與 --force"},
+		{name: "plan-out of an apply", engine: "golang", force: true, components: identity, scope: "users-groups", planOut: "p.json", wantErr: "--result-out"},
+		{name: "plan-out of a mixed apply", engine: "golang", force: true, components: identity, scope: "full", planOut: "p.json", wantErr: "--result-out"},
+		{name: "result-out of a mixed preview", engine: "golang", preview: true, components: identity, scope: "full", resultOut: "r.json", wantErr: "只能與 --force"},
 	} {
-		err := validateReconcileEngineFlags(tc.engine, tc.preview, tc.force, tc.components, tc.actions, tc.planOut)
-		if tc.err == "" && err != nil || tc.err != "" && (err == nil || !strings.Contains(err.Error(), tc.err)) {
-			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.err)
+		err := validateReconcileEngineFlags(tc.engine, tc.preview, tc.force, tc.components, tc.actions, tc.planOut, tc.scope, tc.resultOut)
+		if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.wantErr)
 		}
 	}
 }
@@ -109,81 +120,6 @@ func TestGolangPreviewStageMatchesThePlaybookGate(t *testing.T) {
 	}
 }
 
-func TestSSHTargetFromHostVars(t *testing.T) {
-	// The shape pilot vm-target show-inventory prints.
-	vmTarget := map[string]any{
-		"ansible_connection":           "ssh",
-		"ansible_host":                 "192.168.122.3",
-		"ansible_user":                 "root",
-		"ansible_port":                 22,
-		"ansible_ssh_private_key_file": "/var/lib/libvirt/images/pilot/x/id_ed25519",
-		"ansible_ssh_args":             `-o ControlMaster=auto -o ControlPath="/tmp/pilot-vmt-1000-171a9ac4/%C" -o ControlPersist=60s`,
-		"ansible_ssh_common_args":      "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
-		"ansible_ssh_pipelining":       true,
-	}
-	got, err := sshTargetFromHostVars("ipa-1", vmTarget)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := sshdial.Target{Host: "192.168.122.3", User: "root", Port: 22, IdentityFile: "/var/lib/libvirt/images/pilot/x/id_ed25519",
-		Options: map[string]string{"StrictHostKeyChecking": "no", "UserKnownHostsFile": "/dev/null"}}
-	if got.Host != want.Host || got.User != want.User || got.Port != want.Port || got.IdentityFile != want.IdentityFile || !mapsEqual(got.Options, want.Options) {
-		t.Fatalf("target = %+v\nwant   %+v", got, want)
-	}
-	if got, err := sshTargetFromHostVars("ipa-1.example.test", map[string]any{}); err != nil || got.Host != "ipa-1.example.test" {
-		t.Fatalf("no ansible_host: %+v, %v", got, err)
-	}
-	// Each refusal, with the message of its own gate: a refusal that came
-	// from another check would prove nothing about this one.
-	for _, tc := range []struct {
-		name string
-		vars map[string]any
-		gate string // the gates the case makes fire, comma separated
-		want string // in the error
-	}{
-		{name: "docker connection", vars: map[string]any{"ansible_connection": "docker"}, gate: "ssh-connection", want: "ansible_connection 是 docker"},
-		{name: "password", vars: map[string]any{"ansible_ssh_pass": "x"}, gate: "ssh-unsupported-var", want: "設定了 ansible_ssh_pass"},
-		{name: "legacy host alias", vars: map[string]any{"ansible_ssh_host": "10.0.0.1"}, gate: "ssh-unsupported-var", want: "設定了 ansible_ssh_host"},
-		{name: "an option sshdial does not allow", vars: map[string]any{"ansible_ssh_common_args": "-o ProxyCommand=nc"}, gate: "ssh-validate", want: "ProxyCommand"},
-		{name: "option value with a space", vars: map[string]any{"ansible_ssh_common_args": `-o "ProxyJump=a b"`}, gate: "ssh-validate", want: "ipa-1："},
-		{name: "short jump flag", vars: map[string]any{"ansible_ssh_common_args": "-J bastion"}, gate: "ssh-extra-args,opts-not-dash-o", want: "只接受 -o Key=Value"},
-		{name: "an option without a value", vars: map[string]any{"ansible_ssh_extra_args": "-o StrictHostKeyChecking"}, gate: "ssh-extra-args,opts-not-key-value", want: "不是 Key=Value"},
-		{name: "unbalanced quote", vars: map[string]any{"ansible_ssh_common_args": `-o "UserKnownHostsFile=/x`}, gate: "ssh-extra-args,opts-split,split-quote", want: "引號沒有成對"},
-		{name: "a backslash", vars: map[string]any{"ansible_ssh_extra_args": `-o UserKnownHostsFile=C:\x`}, gate: "ssh-extra-args,opts-split,split-backslash", want: "不支援反斜線跳脫"},
-		{name: "extra args that are not a string", vars: map[string]any{"ansible_ssh_common_args": 5}, gate: "ssh-extra-args,opts-not-string", want: "不是字串"},
-		{name: "ssh_args that do not split", vars: map[string]any{"ansible_ssh_args": `-o "ControlPath=/x`}, gate: "ssh-args-parse,opts-split,split-quote", want: "ansible_ssh_args："},
-		{name: "ssh_args beyond mux", vars: map[string]any{"ansible_ssh_args": "-o ControlMaster=auto -o ForwardAgent=yes"}, gate: "ssh-args-mux", want: "ansible_ssh_args 含 ForwardAgent"},
-		{name: "non-integer port", vars: map[string]any{"ansible_port": "ssh"}, gate: "ssh-port", want: "ansible_port ssh 不是整數"},
-		// A value of another type is refused, not ignored: ignoring
-		// ansible_user 1000 connects as the local user (spec §4).
-		{name: "a numeric ansible_user", vars: map[string]any{"ansible_user": 1000}, gate: "ssh-var-type", want: "ansible_user 是 int，不是字串"},
-		{name: "a list ansible_user", vars: map[string]any{"ansible_user": []any{"root"}}, gate: "ssh-var-type", want: "ansible_user 是 []interface {}，不是字串"},
-		{name: "a boolean ansible_host", vars: map[string]any{"ansible_host": true}, gate: "ssh-var-type", want: "ansible_host 是 bool，不是字串"},
-		{name: "a numeric key file", vars: map[string]any{"ansible_ssh_private_key_file": 7}, gate: "ssh-var-type", want: "ansible_ssh_private_key_file 是 int，不是字串"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Logf("gate: %s", tc.gate)
-			_, err := sshTargetFromHostVars("ipa-1", tc.vars)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v, want %q", err, tc.want)
-			}
-		})
-	}
-	// What is not a refusal: an unset or null value keeps the default.
-	for name, vars := range map[string]map[string]any{
-		"null ansible_user":      {"ansible_user": nil},
-		"null ansible_host":      {"ansible_host": nil},
-		"empty ansible_host":     {"ansible_host": ""},
-		"null key file":          {"ansible_ssh_private_key_file": nil},
-		"numeric string port":    {"ansible_port": "2222"},
-		"float port from a JSON": {"ansible_port": float64(2222)},
-	} {
-		if got, err := sshTargetFromHostVars("ipa-1", vars); err != nil || got.Host != "ipa-1" {
-			t.Errorf("%s: %+v, %v", name, got, err)
-		}
-	}
-}
-
 // The three checks of the playbook's stage gate and the attestation each
 // refuse with their own message; the acceptance matrix above compares the
 // sets, this names the gate that fired (AGENTS.md §5.12).
@@ -222,18 +158,6 @@ func TestGolangPreviewStageRefusals(t *testing.T) {
 	}
 }
 
-func mapsEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
 const golangTestFQDN = "ipa.example.test"
 const golangTestPassword = "Sample-Admin-Password-9"
 
@@ -257,6 +181,9 @@ type fakeIPA struct {
 	hang     map[string]bool   // JSON-RPC methods the server never answers (until the test ends)
 	stop     chan struct{}     // closed when the test ends, to release hung requests
 	onHang   func(string)      // called, with the method, when a request the server never answers arrives
+	// respond, when set, sees each JSON-RPC request first and may answer it itself (the
+	// stateful scenarios of the apply tests); ok false leaves it to the captured answers.
+	respond func(method string, params []any) (body string, ok bool)
 }
 
 // replay answers with a captured status, headers and body (the .status,
@@ -360,6 +287,12 @@ func (f *fakeIPA) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if f.respond != nil {
+		if body, ok := f.respond(req.Method, req.Params); ok {
+			_, _ = w.Write([]byte(body))
+			return
+		}
+	}
 	key := req.Method
 	if req.Method == "user_find" && opts["preserved"] == true {
 		key = "user_find/preserved"
@@ -381,8 +314,10 @@ func (f *fakeIPA) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(f.fixture("user-find-states"))
 	case req.Method == "user_find":
 		_, _ = w.Write(f.withAdmins(f.fixture("user-find-states")))
-	case req.Method == "group_find":
+	case req.Method == "group_find" && f.noAdmins:
 		_, _ = w.Write(f.fixture("group-find-no-match"))
+	case req.Method == "group_find":
+		_, _ = w.Write(f.adminsGroupRead())
 	case req.Method == "session_logout":
 		_, _ = w.Write([]byte(`{"result":{"result":null},"error":null,"id":0,"principal":"admin@EXAMPLE.TEST","version":"4.13.4"}`))
 	default:
@@ -391,8 +326,8 @@ func (f *fakeIPA) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// withAdmins makes the captured reader a member of admins (spec §9 K4
-// replaces this with a real admin entry once captured).
+// withAdmins makes the captured reader a member of admins (spec §9 K4); the group
+// read gives the same fact with adminsGroupRead.
 func (f *fakeIPA) withAdmins(data []byte) []byte {
 	var env map[string]any
 	_ = json.Unmarshal(data, &env)
@@ -402,6 +337,35 @@ func (f *fakeIPA) withAdmins(data []byte) []byte {
 			u["memberof_group"] = append(u["memberof_group"].([]any), "admins")
 		}
 	}
+	out, _ := json.Marshal(env)
+	return out
+}
+
+// adminsGroupRead is the group_find answer that goes with withAdmins: the one group
+// admins, as a real server returns it (the captured entry of
+// k3-records10-sizelimit0-groups), listing the reader in member_user. The two reads
+// are of one fact, so the fake gives them together: the self-lockout check refuses
+// reads that disagree (spec §7.10).
+func (f *fakeIPA) adminsGroupRead() []byte {
+	var env, captured map[string]any
+	if err := json.Unmarshal(f.fixture("group-find-no-match"), &env); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := json.Unmarshal(f.fixture("k3-records10-sizelimit0-groups"), &captured); err != nil {
+		f.t.Fatal(err)
+	}
+	var admins map[string]any
+	for _, e := range captured["result"].(map[string]any)["result"].([]any) {
+		if g := e.(map[string]any); g["cn"].([]any)[0] == "admins" {
+			admins = g
+		}
+	}
+	if admins == nil {
+		f.t.Fatal("the capture has no admins group")
+	}
+	admins["member_user"] = []any{f.reader}
+	res := env["result"].(map[string]any)
+	res["result"], res["count"], res["summary"] = []any{admins}, 1, "1 group matched"
 	out, _ := json.Marshal(env)
 	return out
 }

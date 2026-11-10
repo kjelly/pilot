@@ -1,0 +1,15 @@
+{
+  "result": {
+    "result": {
+      "failed": []
+    },
+    "value": [
+      "p24cap-up"
+    ],
+    "summary": "Preserved user \"p24cap-up\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

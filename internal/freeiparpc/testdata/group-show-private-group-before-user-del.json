@@ -1,0 +1,34 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "posixgroup",
+        "ipaobject",
+        "mepManagedEntry",
+        "top"
+      ],
+      "mepmanagedby": [
+        "uid=p24cap-ux,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      ],
+      "ipauniqueid": [
+        "9438ec16-d9ef-11f1-a6ed-5254001b059e"
+      ],
+      "description": [
+        "User private group for p24cap-ux"
+      ],
+      "gidnumber": [
+        "1927600488"
+      ],
+      "cn": [
+        "p24cap-ux"
+      ],
+      "dn": "cn=p24cap-ux,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p24cap-ux",
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

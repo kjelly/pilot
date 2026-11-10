@@ -22,6 +22,48 @@ const DefaultLockPath = "/etc/ipa"
 // out.
 const lockBusyExit = 75
 
+// The ssh keepalive the lock's session runs with unless the Target sets its
+// own: the lock is held by that session, so a network that has been gone for
+// ServerAliveInterval*ServerAliveCountMax (about 45 s) must end the session
+// and close Lost instead of leaving the holder believing it still has the
+// lock. A larger product tolerates longer interruptions, and makes the
+// window in which the server has already dropped the lock but this side has
+// not noticed longer too (docs/superpowers/specs/2026-11-06-freeipa-go-reconcile-phase2-spec.md
+// R8, R10).
+const (
+	lockServerAliveInterval = "15"
+	lockServerAliveCountMax = "3"
+)
+
+// lockConnectTimeout bounds how long the lock's ssh waits for the TCP
+// connection, unless the Target sets its own ConnectTimeout. Without it a
+// server that does not answer holds the caller for the operating system's
+// connect timeout (minutes), which is what the pilot edit break-glass does
+// not survive: its call is synchronous, takes the lock without waiting and
+// has no context to cancel. It limits the connection only, never the wait for
+// a busy lock (flock --wait does that) or the time the lock is held.
+const lockConnectTimeout = "30"
+
+// lockTarget is the Target the lock's ssh uses: d.Target, with the keepalive
+// options and the connect timeout above for the ones it does not set.
+func (t Target) lockTarget() Target {
+	opts := make(map[string]string, len(t.Options)+3)
+	for k, v := range t.Options {
+		opts[k] = v
+	}
+	if _, ok := opts["ServerAliveInterval"]; !ok {
+		opts["ServerAliveInterval"] = lockServerAliveInterval
+	}
+	if _, ok := opts["ServerAliveCountMax"]; !ok {
+		opts["ServerAliveCountMax"] = lockServerAliveCountMax
+	}
+	if _, ok := opts["ConnectTimeout"]; !ok {
+		opts["ConnectTimeout"] = lockConnectTimeout
+	}
+	t.Options = opts
+	return t
+}
+
 var lockPathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 
 // Lock is an exclusive lock held on the server for as long as its ssh
@@ -58,7 +100,7 @@ func (d *Dialer) AcquireLock(ctx context.Context, opts LockOptions) (*Lock, erro
 	}
 	command := fmt.Sprintf("flock %s --conflict-exit-code %d %s sh -c 'echo locked; exec cat'", wait, lockBusyExit, path)
 	// Not CommandContext: the lock outlives the context that acquired it.
-	cmd := exec.Command(d.program(), d.Target.args()...)
+	cmd := exec.Command(d.program(), d.Target.lockTarget().args()...)
 	cmd.Args = append(cmd.Args, command)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -105,8 +147,11 @@ func (d *Dialer) AcquireLock(ctx context.Context, opts LockOptions) (*Lock, erro
 	}
 }
 
-// Lost is closed when the lock's ssh session ends without Release: from
-// then on another run can take the lock, so no further write may be sent.
+// Lost is closed when the lock's ssh session has ended, whatever ended it:
+// the network, the server, Dialer.Close or Release. From then on another
+// run can take the lock, so no further write may be sent. It does not say
+// which: a holder that needs "ended without my Release" (identitylock.Held)
+// records its own Release before calling it.
 func (l *Lock) Lost() <-chan struct{} { return l.p.done }
 
 // Release gives the lock back and waits for the session to end.

@@ -207,7 +207,10 @@ func injectDrift(target sshdial.Target, password, user, group string) error {
 	if err != nil {
 		return err
 	}
-	c, err := freeiparpc.New(freeiparpc.Config{FQDN: fqdn, CA: ca, DialContext: d.DialContext})
+	// The drift fixture is test set-up on a disposable server, written through
+	// the Phase 0 client rather than through the engine under test, so its gate
+	// is open: there is no lock to ask.
+	c, err := freeiparpc.New(freeiparpc.Config{FQDN: fqdn, CA: ca, DialContext: d.DialContext, WriteGate: func(context.Context, string) error { return nil }})
 	if err != nil {
 		return err
 	}
@@ -234,8 +237,10 @@ func injectDrift(target sshdial.Target, password, user, group string) error {
 }
 
 // writeMethod matches a FreeIPA API log line of a command the users/groups
-// engine may write with.
-var writeMethod = regexp.MustCompile(`\b(user_add|user_mod|user_del|user_enable|user_disable|passwd|group_add|group_mod|group_del|group_add_member|group_remove_member)\(`)
+// engine may write with. The server logs a command with several versions as
+// "passwd/1(" and "group_add_member/1(" when the ipa CLI sent it, and plain when the JSON-RPC
+// client did, so the version suffix is optional.
+var writeMethod = regexp.MustCompile(`\b(user_add|user_mod|user_del|user_enable|user_disable|passwd|group_add|group_mod|group_del|group_add_member|group_remove_member)(?:/\d+)?\(`)
 
 const serverLog = "/var/log/httpd/error_log"
 

@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // Operation kinds, in the order a plan lists them (spec §7.2, the
@@ -48,6 +50,16 @@ const (
 	BlockedMarkerCollision   = "marker_collision"
 	BlockedCaseCollision     = "case_collision"
 	BlockedReferenceToAbsent = "reference_to_absent"
+	// BlockedPasswordValue: the user's password operation cannot be sent because
+	// the password is not a string written out in the roster (a template, an
+	// inline !vault value, a value YAML may read as a number, an empty string, or
+	// a roster whose password forms were not read). Only an operation that is
+	// planned is blocked on it; a user whose password needs no change is not.
+	BlockedPasswordValue = "password_value_unsupported"
+	// BlockedProtectedObject: running the plan would take away what the engine
+	// itself needs: the login it uses, its path to admins, or a group FreeIPA
+	// depends on (selflock.go).
+	BlockedProtectedObject = "protected_object"
 )
 
 // Change is one attribute's live and desired value; From is nil for an
@@ -116,6 +128,7 @@ func (p Plan) Writes() int { return len(p.Operations) }
 // the reads returned, preserved ones included (LiveUser.Preserved).
 func Build(d Desired, users []LiveUser, groups []LiveGroup) Plan {
 	b := &builder{
+		principal:     d.Principal,
 		plan:          Plan{Operations: []Operation{}, Blocked: []Blocked{}},
 		liveUsers:     map[string]LiveUser{},
 		preserved:     map[string]bool{},
@@ -141,11 +154,13 @@ func Build(d Desired, users []LiveUser, groups []LiveGroup) Plan {
 	b.users(d)
 	b.membership(d)
 	b.deletions(d)
+	b.protect(d.Principal)
 	b.finish()
 	return b.plan
 }
 
 type builder struct {
+	principal     string
 	plan          Plan
 	liveUsers     map[string]LiveUser
 	preserved     map[string]bool
@@ -263,7 +278,7 @@ func (b *builder) groups(d Desired) {
 			}
 			createID = b.add(Operation{Kind: KindGroupCreate, Object: name, Fields: fields})
 			b.createdGroups[name] = createID
-		} else if !isOnly(live.Description, g.Description) {
+		} else if !descriptionMatches(live.Description, g.Description) {
 			b.add(Operation{Kind: KindGroupUpdate, Object: name, Fields: map[string]Change{"description": {From: listValue(live.Description), To: g.Description}}})
 		}
 		b.ensureMarker(g.Name, createID)
@@ -313,6 +328,14 @@ func (b *builder) users(d Desired) {
 				continue
 			}
 		}
+		// A password operation that cannot be sent blocks the user before any of
+		// its operations is planned: the others would be a half of a user.
+		if passwordAction(u, live, exists) != "" {
+			if detail := passwordUnsupported(u); detail != "" {
+				b.block(key, BlockedPasswordValue, u.Name, detail)
+				continue
+			}
+		}
 		var createID string
 		if !exists {
 			fields := map[string]Change{}
@@ -336,7 +359,7 @@ func desiredAttrs(u DesiredUser) map[string]any {
 		out["displayname"] = *u.DisplayName
 	}
 	if u.Email != nil {
-		out["mail"] = []string{*u.Email}
+		out["mail"] = mailValues(*u.Email)
 	}
 	if u.UID != nil {
 		out["uidnumber"] = strconv.FormatInt(*u.UID, 10)
@@ -361,10 +384,89 @@ func attrChanges(u DesiredUser, live LiveUser) map[string]Change {
 	if u.DisplayName != nil {
 		cmp("displayname", live.DisplayName, *u.DisplayName)
 	}
-	if u.Email != nil && !isOnly(live.Mail, *u.Email) {
-		out["mail"] = Change{From: listValue(live.Mail), To: []string{*u.Email}}
+	if u.Email != nil {
+		if want := mailValues(*u.Email); !sameValues(live.Mail, want) {
+			out["mail"] = Change{From: listValue(live.Mail), To: want}
+		}
 	}
 	return out
+}
+
+// An empty string in the roster means "no value" for login_shell, display_name,
+// email and a group's description (spec Q8, decided as the default pending the
+// maintainer's confirmation). FreeIPA agrees: given "" for any of them, add and
+// mod succeed and the attribute is not there afterwards, on add instead of the
+// default and on mod clearing a value (captured, K21). So desired "" and a live
+// attribute that is absent are the same state, and a plan made against either
+// has nothing to do: what a preview shows is what an apply converges to
+// (Plan₃ empty), because both are this one Build.
+
+// mailValues is the set of mail values an email key declares: none for "".
+func mailValues(email string) []string {
+	if email == "" {
+		return []string{}
+	}
+	return []string{email}
+}
+
+// sameValues reports whether live holds exactly the values of want, in no
+// particular order: FreeIPA does not keep a multi-valued attribute's order
+// (captured), and an empty want is an attribute that is absent.
+func sameValues(live, want []string) bool {
+	if len(live) != len(want) {
+		return false
+	}
+	return len(want) == 0 || slices.Equal(sortedCopy(live), sortedCopy(want))
+}
+
+func sortedCopy(in []string) []string {
+	out := slices.Clone(in)
+	sort.Strings(out)
+	return out
+}
+
+// descriptionMatches reports whether a group's live description is what the roster
+// declares: an empty declared description is no description at all.
+func descriptionMatches(live []string, want string) bool {
+	return sameValues(live, mailValues(want))
+}
+
+// passwordAction is the password operation the playbook's "Decide the password
+// action for each user" takes for a user: only a user declaring password.initial
+// has one; initialize without a Kerberos key, reset when not preserving and the
+// user is no longer on the last reset password.
+func passwordAction(u DesiredUser, live LiveUser, exists bool) string {
+	switch {
+	case !u.HasInitialPassword:
+		return ""
+	case !exists || live.LastPwdChange == "":
+		return KindPasswordInitialize
+	case !u.PreserveExisting && !onResetPassword(live):
+		return KindPasswordReset
+	}
+	return ""
+}
+
+// passwordUnsupported is why the password of u cannot be sent, "" when it can.
+// The engine sets only a password written out in the roster: anything Ansible
+// would render or decrypt is not something it can read, and an empty one is
+// refused by FreeIPA (RequirementError, captured K6). The text names the form,
+// never the value.
+func passwordUnsupported(u DesiredUser) string {
+	if !u.PasswordFormRead {
+		return "the roster's password forms were not read, so what password.initial holds is not known (Desired.WithPasswordForms)"
+	}
+	switch u.PasswordForm {
+	case inventory.PasswordLiteral:
+		return ""
+	case inventory.PasswordTemplate:
+		return "password.initial is a Jinja template: pilot does not render templates, and the Go engine sets only a password written out in the roster; use the Ansible engine for it"
+	case inventory.PasswordEncrypted:
+		return "password.initial is an inline !vault value: only Ansible can decrypt it; use the Ansible engine for it, or encrypt the whole roster file instead"
+	case inventory.PasswordNotString:
+		return "password.initial may be read as something other than a string: quote it so it stays one"
+	}
+	return "password.initial is empty: FreeIPA refuses an empty password"
 }
 
 func idChange(u DesiredUser, live LiveUser) string {
@@ -386,18 +488,15 @@ func idChange(u DesiredUser, live LiveUser) string {
 // Kerberos key, reset when not preserving and the user is no longer on
 // the last reset password (expiration <= last change means still on it).
 func (b *builder) password(u DesiredUser, live LiveUser, exists bool, createID string) {
-	if !u.HasInitialPassword {
-		return
-	}
 	name := strings.ToLower(u.Name)
 	var deps []string
 	if createID != "" {
 		deps = []string{createID}
 	}
-	switch {
-	case !exists || live.LastPwdChange == "":
+	switch passwordAction(u, live, exists) {
+	case KindPasswordInitialize:
 		b.add(Operation{Kind: KindPasswordInitialize, Object: name, DependsOn: deps})
-	case !u.PreserveExisting && !onResetPassword(live):
+	case KindPasswordReset:
 		b.add(Operation{Kind: KindPasswordReset, Object: name, Destructive: true})
 	}
 }
@@ -590,11 +689,6 @@ func difference(a, b []string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// isOnly reports whether values holds exactly want.
-func isOnly(values []string, want string) bool {
-	return len(values) == 1 && values[0] == want
 }
 
 // onResetPassword: an admin reset leaves the expiration at or before the

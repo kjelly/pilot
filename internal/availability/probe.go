@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kjelly/pilot/internal/inventory"
+	"github.com/kjelly/pilot/internal/sshdial"
 )
 
 // RuntimeHost is the subset of one host's resolved Ansible inventory
@@ -79,7 +80,8 @@ type ConnectionSupport struct {
 
 // ClassifyConnectionSupport decides whether rh is eligible for TCP
 // availability probing at all, per spec §9.3:
-//   - implicit or explicit ansible_connection=ssh: probable.
+//   - implicit or explicit ansible_connection=ssh (or its full name
+//     ansible.builtin.ssh, the same plugin): probable.
 //   - localhost / a local controller play: never remote-probed, not fatal.
 //   - any other connection type declared optional: fatal — v1 has no safe
 //     prober for it, so silently treating it as reachable/optional would
@@ -92,7 +94,11 @@ func ClassifyConnectionSupport(rh RuntimeHost) ConnectionSupport {
 	if rh.Name == "localhost" || rh.AnsibleConnection == "local" {
 		return ConnectionSupport{Reason: "local controller play is never remote-probed"}
 	}
-	if rh.AnsibleConnection != "" && rh.AnsibleConnection != "ssh" {
+	// ssh by either of its names: the same rule as the identity lock's target
+	// derivation (sshdial.IsSSHConnection), so an inventory that spells the
+	// plugin ansible.builtin.ssh is probed like one that says ssh instead of
+	// being refused as an unsupported optional host.
+	if rh.AnsibleConnection != "" && !sshdial.IsSSHConnection(rh.AnsibleConnection) {
 		if rh.DeploymentAvailability.Effective() == inventory.DeploymentAvailabilityOptional {
 			return ConnectionSupport{
 				Fatal:  true,

@@ -1,0 +1,80 @@
+TASK [Private Kerberos cache — create the cache file] **************************
+ok: [ipa-1]
+
+TASK [Private Kerberos cache — point KRB5CCNAME at it] *************************
+ok: [ipa-1]
+
+TASK [Private Kerberos cache — find caches a killed run left behind] ***********
+ok: [ipa-1]
+
+TASK [Private Kerberos cache — remove them] ************************************
+skipping: [ipa-1]
+
+TASK [Kinit admin] *************************************************************
+ok: [ipa-1]
+
+TASK [Validate durable SSH cache scope before managed mutations] ***************
+included: <repo>/playbooks/apply/tasks/freeipa-ssh-cache-preflight.yml for ipa-1
+
+TASK [Reset the SSH cache inventory identity index] ****************************
+ok: [ipa-1]
+
+TASK [Index actual SSH cache inventory identities] *****************************
+ok: [ipa-1] => (item=client-1)
+ok: [ipa-1] => (item=ipa-1)
+
+TASK [Inspect durable SSH work and bind authorized retirements] ****************
+ok: [ipa-1]
+
+TASK [Resolve authorized retirement aliases] ***********************************
+ok: [ipa-1]
+
+TASK [Gate: unfinished retirement requires the selected central cleanup] *******
+skipping: [ipa-1]
+
+TASK [Gate: existing pending SSH cache targets exist before mutation] **********
+skipping: [ipa-1]
+
+TASK [Gate: existing and current SSH cache targets match stage before mutation] ***
+ok: [ipa-1] => (item=client-1) => {
+    "ansible_loop_var": "item",
+    "changed": false,
+    "item": "client-1",
+    "msg": "All assertions passed"
+}
+ok: [ipa-1] => (item=ipa-1) => {
+    "ansible_loop_var": "item",
+    "changed": false,
+    "item": "ipa-1",
+    "msg": "All assertions passed"
+}
+
+TASK [Validate absent host gateway ownership before managed identity mutations] ***
+skipping: [ipa-1]
+
+TASK [Prepare legacy authorization cache recovery] *****************************
+[ERROR]: Task failed: Module failed: non-zero return code
+Origin: <repo>/playbooks/apply/freeipa-identity-apply.yml:925:11
+
+923           tags: [always]
+924
+925         - name: "Prepare legacy authorization cache recovery"
+              ^ column 11
+
+fatal: [ipa-1]: FAILED! => {"changed": false, "cmd": ["python3", "-c", "<helper source elided>", "auth_prepare", "/proc/pilot-p23/ssh-cache.json"], "delta": "0:00:00.028301", "end": "2026-11-06 12:50:55.093961", "msg": "non-zero return code", "rc": 1, "start": "2026-11-06 12:50:55.065660", "stderr": "", "stderr_lines": [], "stdout": "{\"error\": \"[Errno 2] No such file or directory: '/proc/pilot-p23'\"}", "stdout_lines": ["{\"error\": \"[Errno 2] No such file or directory: '/proc/pilot-p23'\"}"]}
+
+TASK [Destroy the private Kerberos cache] **************************************
+included: <repo>/playbooks/apply/tasks/freeipa-private-ccache-close.yml for ipa-1
+
+TASK [Private Kerberos cache — destroy the tickets in it] **********************
+ok: [ipa-1]
+
+TASK [Private Kerberos cache — remove the cache file] **************************
+ok: [ipa-1]
+
+TASK [Private Kerberos cache — forget it] **************************************
+ok: [ipa-1]
+
+PLAY RECAP *********************************************************************
+ipa-1                      : ok=44   changed=0    unreachable=0    failed=1    skipped=12   rescued=0    ignored=0   
+

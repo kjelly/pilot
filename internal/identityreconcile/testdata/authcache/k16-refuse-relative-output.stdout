@@ -1,0 +1,55 @@
+
+PLAY [FreeIPA identity authorization-cache entry (prepare or probe)] ***********
+
+TASK [Gate: staging or prod requires explicit confirm] *************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: stage must match this host's inventory environment group] **********
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: prod requires recent staging attestation] **************************
+skipping: [ipa-1]
+
+TASK [Gate: this entry is never a preview] *************************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: this entry takes no --tags and no --skip-tags] *********************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: exactly one host] **************************************************
+ok: [ipa-1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Gate: the action is prepare or probe and the result path is absolute] ****
+[ERROR]: Task failed: Action failed: pilot_identity_auth_cache_action must be prepare or probe, and pilot_identity_auth_cache_output must be the absolute path of the result file on the controller (no default for either).
+Origin: <repo>/playbooks/apply/freeipa-identity-auth-cache.yml:124:7
+
+122       tags: [always]
+123
+124     - name: "Gate: the action is prepare or probe and the result path is absolute"
+          ^ column 7
+
+fatal: [ipa-1]: FAILED! => {
+    "assertion": "pilot_identity_auth_cache_output is match('^/')",
+    "changed": false,
+    "evaluated_to": false,
+    "msg": "pilot_identity_auth_cache_action must be prepare or probe, and pilot_identity_auth_cache_output must be the absolute path of the result file on the controller (no default for either)."
+}
+
+PLAY RECAP *********************************************************************
+ipa-1                  : ok=5    changed=0    unreachable=0    failed=1    skipped=1    rescued=0    ignored=0   
+

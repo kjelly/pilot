@@ -88,6 +88,7 @@ func TestExplain_BreakglassOnlyAppearsWhenActivated(t *testing.T) {
 	}
 
 	if _, err := Activate(context.Background(), ActivateOptions{
+		Lock:       testLock(t),
 		RosterFile: rosterPath, Inventory: "inv.yml", StateDir: stateDir,
 		Name: "infra-emergency", Duration: 45 * time.Minute, Reason: "x", Ticket: "y",
 		Now: now, Runner: &fakeRunner{exitCode: 0},
