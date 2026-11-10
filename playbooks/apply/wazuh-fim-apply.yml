@@ -370,10 +370,16 @@
                 msg: "wazuh_fim_directories={{ wazuh_fim_directories }}"
 
             # A read-only observation: it runs in check mode too, so a preview surfaces foreign package-policy
-            # ownership instead of reporting a clean plan for an apply that would refuse.
+            # ownership instead of reporting a clean plan for an apply that would refuse. It is the controller-
+            # shipped script, never the installed /usr/local/sbin copy: under --check the "Install the root-owned
+            # Wazuh transaction coordinator" copy above is only simulated, so on a fresh host that path does not
+            # exist yet (ENOENT on every fresh node).
             - name: "Admit native package policy ownership before the selected C1/C2 family"
-              ansible.builtin.command:
-                argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-policy-check, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_writer_owner }}"]
+              ansible.builtin.script:
+                cmd: >-
+                  files/wazuh-transaction.py agent-policy-check --family {{ ansible_os_family | quote }}
+                  --owner {{ wazuh_writer_owner | quote }}
+                executable: python3
               changed_when: false
               check_mode: false
               tags: [C1, C2]

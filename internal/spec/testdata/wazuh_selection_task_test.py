@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -22,6 +23,11 @@ SOURCE = REPO / 'playbooks/apply'
 s = importlib.util.spec_from_file_location('selection_library', SOURCE / 'files/wazuh-transaction.py')
 W = importlib.util.module_from_spec(s); s.loader.exec_module(W)
 mounts = W.MountTable; W.MountTable = lambda: mounts('1 0 8:1 / / rw - ext4 /dev/synthetic rw\n')
+
+# The path the production play installs the coordinator to and executes it from. The harness aims the real
+# copy module at a private directory instead, so the installed file exists exactly when a run applied the copy.
+COORDINATOR = '/usr/local/sbin/pilot-wazuh-transaction'
+POLICY_READ = 'Admit native package policy ownership before the selected C1/C2 family'
 
 OWN_BLOCK = '<!-- BEGIN ANSIBLE MANAGED BLOCK (wazuh-fim-apply.yml FIM whodata) -->'
 # Effects that change the host: a refusal must never reach one. (The writer claim/release is bookkeeping under the
@@ -41,7 +47,7 @@ class SelectionGraphTests(unittest.TestCase):
               foreign_source=False, foreign_policy=False, inherited=False, old_snapshot=False, fail_commit=False, recovery=False,
               manager_error=False, enrollment_host='localhost', manager_address='127.0.0.1', preview_fresh_manager=False,
               extra_vars=None, protected=None, native_preference=None, drift_preference=False, real_guard=False,
-              prior_block=True):
+              prior_block=True, legacy_policy_read=False):
         with tempfile.TemporaryDirectory(prefix='i244-selection-') as temporary:
             root = Path(temporary); data = root / 'data'; data.mkdir()
             paths = {'config': str(data / 'ossec.conf'), 'hosts': str(data / 'hosts')}
@@ -82,6 +88,12 @@ class SelectionGraphTests(unittest.TestCase):
                                              'drift_preference': drift_preference, 'real_guard': real_guard,
                                              'fault_resource': fault[0] if fault else ''}))
             worker = REPO / 'internal/spec/testdata/wazuh_selection_backend.py'
+            # The modeled host: /usr/local/sbin exists but holds no coordinator until the play's copy task runs.
+            # `ansible-playbook --check` only simulates that copy, so executing the installed path in a preview
+            # fails with the real ENOENT here, as it does on every fresh node; the stand-in runs the same worker.
+            coordinator_path = root / 'sbin' / 'pilot-wazuh-transaction'; coordinator_path.parent.mkdir()
+            shim = root / 'shim'; shim.mkdir()
+            (shim / 'pilot-wazuh-transaction').write_text('#!/bin/sh\nexec python3 %s %s "$@"\n' % (shlex.quote(str(worker)), shlex.quote(str(settings))))
             tasks = root / 'tasks'; tasks.mkdir()
             for pattern in ('apt-*.yml', 'wazuh-agent-*.yml', 'wazuh-endpoint-resolve.yml', 'resolve-hosts-alias-target.yml'):
                 for source in (SOURCE / 'tasks').glob(pattern): shutil.copy2(source, tasks / source.name)
@@ -95,6 +107,16 @@ class SelectionGraphTests(unittest.TestCase):
             if managed: play['vars'].update(wazuh_manager_host=enrollment_host, wazuh_manager_inventory_host='localhost')
             if requested: play['vars']['wazuh_version'] = requested
             play['vars'].update(extra_vars or {})
+            if legacy_policy_read:
+                # The shape the play had before the fix: the package-policy read executes the installed coordinator.
+                def find(items):
+                    for item in items:
+                        if item.get('name') == POLICY_READ: yield item
+                        for field in ('block', 'rescue', 'always'): yield from find(item.get(field, []))
+                (legacy,) = list(find(play['pre_tasks'] + play['tasks']))
+                del legacy['ansible.builtin.script']
+                legacy['ansible.builtin.command'] = {'argv': [COORDINATOR, 'agent-policy-check', '--family', '{{ ansible_os_family }}',
+                                                              '--owner', '{{ wazuh_writer_owner }}']}
             if old_snapshot: play['vars'].update(wazuh_writer_resume_owner='9' * 32, wazuh_confirm_previous_operation_stopped=True)
             if recovery:
                 play['vars'].update(wazuh_writer_resume_owner='9' * 32, wazuh_confirm_previous_operation_stopped=True,
@@ -137,8 +159,8 @@ class SelectionGraphTests(unittest.TestCase):
                         del task['ansible.builtin.package_facts']; task['ansible.builtin.set_fact'] = {'ansible_facts': {'packages': packages}}
                     elif 'ansible.builtin.command' in task:
                         command = task['ansible.builtin.command']
-                        if isinstance(command, dict) and command.get('argv', [''])[0] == '/usr/local/sbin/pilot-wazuh-transaction':
-                            command['argv'] = ['python3', str(worker), str(settings)] + command['argv'][1:]
+                        if isinstance(command, dict) and command.get('argv', [''])[0] == COORDINATOR:
+                            command['argv'] = [str(coordinator_path)] + command['argv'][1:]
                         elif task['name'].startswith('Allocate an independent owner'): pass
                         elif task.get('register') == 'hosts_alias_dns_lookup': pass
                         else: replace(task, 'native-probe', payload=command if isinstance(command, dict) else {'argv': []})
@@ -152,6 +174,10 @@ class SelectionGraphTests(unittest.TestCase):
                     elif 'ansible.builtin.copy' in task:
                         params = task['ansible.builtin.copy']; dest = params.get('dest', '')
                         if dest == '/etc/apt/sources.list.d/wazuh.list': replace(task, 'source', ['--family', family], {'kind': 'repo'})
+                        elif dest == COORDINATOR:
+                            # The real copy module: --check simulates it and leaves no file, a real run installs the stand-in.
+                            params['src'] = str(shim / 'pilot-wazuh-transaction'); params['dest'] = str(coordinator_path)
+                            params.pop('owner', None); params.pop('group', None)
                         elif dest == '/etc/apt/preferences.d/pilot-wazuh-agent' and real_guard:
                             params['dest'] = str(preference)  # the real preference text lands where the real guard reads it
                             # The harness runs unprivileged: only ownership is dropped, content and mode stay real.
@@ -188,6 +214,7 @@ class SelectionGraphTests(unittest.TestCase):
             state['before'] = before; state['after'] = {name: metadata(Path(value)) for name, value in paths.items()}
             state['config'] = Path(paths['config']).read_text(); state['hosts'] = Path(paths['hosts']).read_text()
             state['preference'] = preference.read_text() if preference.exists() else None
+            state['coordinator_installed'] = coordinator_path.exists()
             return run, events, state
 
     def assert_ok(self, result, events, state):
@@ -530,6 +557,33 @@ class SelectionGraphTests(unittest.TestCase):
                 self.assertEqual(state['before'], state['after'])
                 self.assertIsNone(state['ownership']['writer'])
                 self.assertEqual(state['ownership']['journals'], [], 'a preview leaves no transaction behind')
+                self.assertFalse(state['coordinator_installed'], 'a preview only simulates the coordinator copy')
+
+    def test_a_preview_cannot_exec_the_installed_coordinator_that_it_has_not_installed(self):
+        # Control for the harness itself: the shape the play had before the fix (the package-policy read through the
+        # installed /usr/local/sbin copy) must fail a fresh-host --check with the real ENOENT, because --check only
+        # simulates the copy. The twin below proves the same shape works once a real run has applied the copy, so the
+        # preview failure is the missing file and nothing else.
+        for family in ('Debian', 'RedHat'):
+            with self.subTest(family=family):
+                result, events, state = self.agraph(family, '', flags=('--check',), prepared=False, legacy_policy_read=True)
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0, output)
+                self.assertIn(POLICY_READ, output)
+                self.assertIn('No such file or directory', output)
+                self.assertIn('sbin/pilot-wazuh-transaction', output)
+                self.assertNotIn('agent-policy-check', self.actions(events), 'the read never reached the coordinator')
+                self.assertFalse(state['coordinator_installed'])
+                self.assertEqual(state['before'], state['after'])
+                self.assertIsNone(state['ownership']['writer'], 'the writer is still released exactly')
+
+    def test_the_installed_coordinator_is_honoured_once_a_real_run_has_copied_it(self):
+        for family in ('Debian', 'RedHat'):
+            with self.subTest(family=family):
+                result, events, state = self.agraph(family, '', prepared=False, legacy_policy_read=True)
+                self.assert_run_ok(result)
+                self.assertTrue(state['coordinator_installed'])
+                self.assertIn('agent-policy-check', self.actions(events))
 
     def test_a_manager_that_the_same_check_run_only_previews_is_not_observed_but_a_real_run_observes_it(self):
         result, events, state = self.agraph('Debian', '', flags=('--check',), preview_fresh_manager=True, prepared=False)
