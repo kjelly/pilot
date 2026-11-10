@@ -60,6 +60,9 @@ try:
   with host.reader('central' if a.action=='central-verify' else 'agent',a.owner or None): result={'pass':True}
  elif a.action in ('agent-config-save','agent-config-restore','agent-policy-check'):
   with host.guard(a.owner,'agent'): result={'saved':a.resource}
+ elif a.action=='agent-whodata-ensure':
+  # Declared native leaf: auditd/syscheckd are not modeled here. The real ensure runs in wazuh_whodata_ensure_test.py.
+  with host.guard(a.owner,'agent'): result={'changed':False,'watches':2}
  elif a.action=='native-mutation':
   marker=host.inspect()['writer']
   with host.guard(marker['owner'],settings['component']): result={'native_action_substituted':True}

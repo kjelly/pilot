@@ -764,13 +764,28 @@
                 mode: "0755"
               when: not ansible_check_mode
 
+            # The bundle is only needed to create the ACTIVE project (wazuh_single_node_dir, which a
+            # controlled patch upgrade keeps at the old release's directory). Deciding from the requested
+            # version string instead downloaded a second, never-unpacked bundle on the first identical
+            # rerun after an upgrade (changed=1; the second rerun then reported ok). The reader of this
+            # fact runs under C1/C2/C3, so its setter carries the same tags.
+            - name: "Step 3: Check whether the active project already exists (spec C1-C3)"
+              tags: [C1, C2, C3]
+              ansible.builtin.stat:
+                path: "{{ wazuh_single_node_dir }}/docker-compose.yml"
+                get_checksum: false
+              register: wazuh_active_project_compose
+              when: not ansible_check_mode
+
             - name: "Step 3: Download the official wazuh-docker release bundle (spec C1-C3)"
               tags: [C1, C2, C3]
               ansible.builtin.get_url:
                 url: "https://github.com/wazuh/wazuh-docker/archive/refs/tags/v{{ wazuh_docker_version }}.tar.gz"
                 dest: "{{ wazuh_docker_tarball }}"
                 mode: "0644"
-              when: not ansible_check_mode
+              when:
+                - not ansible_check_mode
+                - not (wazuh_active_project_compose.stat.exists | default(false))
 
             - name: "Step 4: Unpack the release bundle (spec C1-C3)"
               tags: [C1, C2, C3]

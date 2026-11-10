@@ -151,6 +151,11 @@ try:
     elif action == 'agent-activate':
         with host.guard(a.owner, 'agent'):
             transaction().owned(a.owner, ('installing',)); state['services']['wazuh-agent']['active'] = True; save(); result = {}
+    elif action == 'agent-whodata-ensure':
+        # Declared native leaf: auditd/syscheckd are not modeled here. The real ensure runs in wazuh_whodata_ensure_test.py.
+        with host.guard(a.owner, 'agent'):
+            if settings.get('fail_whodata'): raise w.Refused('controlled who-data endpoint failure')
+            result = {'changed': False, 'watches': 2}
     elif action == 'agent-runtime': result = runtime()
     elif action == 'verify-agent':
         with host.reader('central'):

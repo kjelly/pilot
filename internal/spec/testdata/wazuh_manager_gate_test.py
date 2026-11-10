@@ -291,5 +291,56 @@ class TopologyReceiverTests(unittest.TestCase):
         self.assertEqual(facts, {'host': '', 'enabled': False})
 
 
+class BundleDownloadTests(unittest.TestCase):
+    """D2 (native run 19cfe69b): the official bundle is fetched only when the ACTIVE project needs it.
+
+    The production "check the active project" and "download" tasks run unchanged under real Ansible; the only
+    substitution is the bundle URL, a file:// URL (the network leaf), so a download is observable on disk."""
+    def run_steps(self, project_present, requested='4.14.9', check_mode=False):
+        play = yaml.safe_load((SOURCE / 'wazuh-manager-apply.yml').read_text())[0]
+        tasks = [picked(play, 'Step 3: Check whether the active project already exists (spec C1-C3)'),
+                 picked(play, 'Step 3: Download the official wazuh-docker release bundle (spec C1-C3)')]
+        with tempfile.TemporaryDirectory(prefix='wazuh-bundle-') as temporary:
+            root = Path(temporary)
+            # A controlled upgrade keeps the project directory of the OLD release (4.14.1) while the requested
+            # release is the new one: the case that downloaded an unused second bundle.
+            project = root / 'wazuh-docker-4.14.1/single-node'
+            if project_present:
+                project.mkdir(parents=True)
+                (project / 'docker-compose.yml').write_text('services: {}\n')
+            bundle = root / 'official-bundle.tar.gz'
+            bundle.write_bytes(b'official bundle bytes')
+            tasks[1] = dict(tasks[1])
+            tasks[1]['ansible.builtin.get_url'] = dict(tasks[1]['ansible.builtin.get_url'], url='file://' + str(bundle))
+            tarball = root / ('wazuh-docker-v' + requested + '.tar.gz')
+            playbook = root / 'play.yml'
+            playbook.write_text(yaml.safe_dump([{'hosts': 'localhost', 'connection': 'local', 'gather_facts': False,
+                'vars': {'wazuh_single_node_dir': str(project), 'wazuh_docker_tarball': str(tarball),
+                         'wazuh_docker_version': requested}, 'tasks': tasks}], sort_keys=False))
+            env = dict(os.environ, ANSIBLE_LOCAL_TEMP=str(root / 'local'), ANSIBLE_REMOTE_TEMP=str(root / 'remote'),
+                       ANSIBLE_NOCOLOR='1', PYTHONDONTWRITEBYTECODE='1')
+            run = subprocess.run(['ansible-playbook', '-i', 'localhost,', str(playbook), *(['--check'] if check_mode else [])],
+                                 cwd=root, env=env, capture_output=True, text=True, timeout=120)
+            recap = re.search(r'localhost\s*: ok=(\d+)\s+changed=(\d+)', run.stdout)
+            return run, int(recap.group(2)) if recap else None, tarball.exists()
+
+    def test_an_existing_active_project_means_no_download_and_no_change(self):
+        run, changed, downloaded = self.run_steps(project_present=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual((changed, downloaded), (0, False), 'the identical rerun after an upgrade must not fetch a bundle')
+
+    def test_a_missing_active_project_downloads_the_bundle(self):
+        run, changed, downloaded = self.run_steps(project_present=False)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual((changed, downloaded), (1, True), 'a fresh host still needs the bundle for its project')
+
+    def test_check_mode_never_downloads(self):
+        for present in (True, False):
+            with self.subTest(project_present=present):
+                run, changed, downloaded = self.run_steps(project_present=present, check_mode=True)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertEqual((changed, downloaded), (0, False))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

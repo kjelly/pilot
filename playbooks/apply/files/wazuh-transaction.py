@@ -34,6 +34,7 @@ import grp
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -631,6 +632,15 @@ class AuditRuntime:
     @staticmethod
     def endpoint(): return Path('/var/ossec/queue/sockets/audit')
 
+    @staticmethod
+    def plugin(): return Path('/etc/audit/plugins.d/af_wazuh.conf')
+
+    @classmethod
+    def plugin_active(cls):
+        """Whether auditd is configured to run the Wazuh af_unix plugin (the one source of this fact)."""
+        plugin = cls.plugin()
+        return plugin.exists() and re.search(r'^\s*active\s*=\s*yes\s*$', plugin.read_text(), re.M) is not None
+
     @classmethod
     def anchors(cls):
         endpoint = cls.endpoint()
@@ -708,11 +718,44 @@ class AuditRuntime:
                 raise Refused('native Wazuh audit client/watch readiness timed out')
             time.sleep(0.5)
 
+    def reload_plugins(self):
+        """Send ONE SIGHUP to the validated auditd main process so it loads a plugin that appeared after it started.
+
+        EL's auditd refuses `systemctl reload/restart` (CanReload=no, RefuseManualStop=yes) and ships no `service`
+        command, so the signal is the only supported way to load a newly installed plugin. The target is the
+        systemd MainPID whose executable is exactly /usr/sbin/auditd, held by a pidfd so a recycled PID cannot be
+        signalled. Nothing is retried and no other process is ever signalled.
+        """
+        value = self.r.run(['systemctl', 'show', 'auditd', '-p', 'MainPID', '--value'], timeout=30,
+                           operation='native audit daemon identity').stdout.strip()
+        if not value.isdecimal() or int(value) <= 1:
+            raise Refused('audit daemon identity is unavailable')
+        descriptor = os.pidfd_open(int(value))
+        try:
+            if self.process(int(value))['exe'] != '/usr/sbin/auditd':
+                raise Refused('unsupported audit daemon executable')
+            signal.pidfd_send_signal(descriptor, signal.SIGHUP)
+        finally:
+            os.close(descriptor)
+
+    def wait_endpoint(self, seconds=30):
+        """Wait for the endpoint socket and its exact listener; return the listener process."""
+        deadline = time.monotonic() + seconds
+        while True:
+            failure = None
+            if self.endpoint().is_socket():
+                try:
+                    return self.audit_processes()[1]
+                except Refused as exc:
+                    failure = exc
+            if time.monotonic() >= deadline:
+                raise failure or Refused('external audit endpoint did not appear after reloading the audit daemon')
+            time.sleep(0.5)
+
     def snapshot(self, capture):
         endpoint = self.endpoint()
         if not endpoint.exists():
-            plugin = Path('/etc/audit/plugins.d/af_wazuh.conf')
-            if plugin.exists() and re.search(r'^\s*active\s*=\s*yes\s*$', plugin.read_text(), re.M):
+            if self.plugin_active():
                 raise Refused('configured external audit endpoint is unavailable before upgrade')
             agent_socket_gate(capture)
             return None
@@ -4806,6 +4849,36 @@ class Agent(Transaction):
 
     def audit_runtime(self): return AuditRuntime(self.r)
 
+    def whodata_ensure(self, owner):
+        """Leave the who-data endpoint the ordinary apply is responsible for live, or refuse with a typed reason.
+
+        Invariant after any ordinary apply on any family: when the Wazuh audit plugin is active, the endpoint is a
+        socket, the exact audisp-af_unix listener is a child of auditd, wazuh-syscheckd is connected to it and the
+        kernel has the wazuh_fim watches: the predicate AuditRuntime.ready proves for a controlled upgrade, so
+        the version transaction's admission can never refuse a host this apply just converged.
+        An existing endpoint is only verified (no signal, no restart). A missing one under an active plugin is
+        repaired once: one SIGHUP loads a plugin installed after auditd started, then the agent is restarted so
+        its who-data engine connects (a syscheckd that started without the endpoint silently fell back to
+        real-time). A missing endpoint under an inactive plugin cannot exist and is refused, as is any
+        endpoint that does not come up: the agent is not restarted into an unproven state.
+        """
+        with self.lock(owner=owner):
+            self.idle()
+            runtime = self.audit_runtime()
+            endpoint, changed = runtime.endpoint(), False
+            if not endpoint.exists():
+                if not runtime.plugin_active():
+                    raise Refused('the Wazuh audit plugin is not active, so no who-data endpoint can exist')
+                runtime.reload_plugins()
+                runtime.wait_endpoint()
+                self.r.run(['systemctl', 'restart', 'wazuh-agent'], timeout=120,
+                           operation='restart wazuh-agent after the audit endpoint appeared')
+                changed = True
+            elif not endpoint.is_socket():
+                raise Refused('the external audit endpoint is not a socket')
+            listener = runtime.audit_processes()[1]
+            return {'changed': changed, 'watches': len(runtime.ready({'listener': listener}))}
+
     def audit_check(self, item, stopped=False, ready=False, capture=None):
         self.audit_runtime().check(item.get('audit_runtime'), capture or self.capture_sources(recovery=True), stopped, ready)
 
@@ -5597,7 +5670,7 @@ def main():
                                          'central', 'central-verify', 'manager-version', 'verify-agent', 'agent-verify', 'agent-runtime', 'agent-check', 'agent-stage', 'agent-reserve', 'agent-backup',
                                          'agent-install', 'agent-recovery', 'agent-restore', 'agent-recovery-commit', 'agent-commit', 'agent-activate',
                                          'agent-policy-check', 'agent-protect', 'agent-apt-plan', 'agent-rpm-fresh',
-                                         'agent-hook-prepare', 'agent-hook-cleanup', 'agent-config-save', 'agent-config-restore',
+                                         'agent-hook-prepare', 'agent-hook-cleanup', 'agent-whodata-ensure', 'agent-config-save', 'agent-config-restore',
                                          'reader-tools-check', 'reader-enable-admit', 'reader-enable-expose', 'reader-enable-verify', 'reader-enable-complete', 'reader-enable-failed'])
     parser.add_argument('--version', default='')
     parser.add_argument('--legacy', default='')
@@ -5688,6 +5761,8 @@ def main():
                 value = agent.hook_prepare(args.owner)
             elif args.action == 'agent-hook-cleanup':
                 value = agent.hook_cleanup(args.owner, args.confirm_previous_stopped)
+            elif args.action == 'agent-whodata-ensure':
+                value = agent.whodata_ensure(args.owner)
             elif args.action == 'agent-runtime':
                 value = agent.runtime(args.owner or None)
             elif args.action == 'agent-verify':

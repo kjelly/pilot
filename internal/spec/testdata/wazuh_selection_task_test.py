@@ -47,7 +47,7 @@ class SelectionGraphTests(unittest.TestCase):
               foreign_source=False, foreign_policy=False, inherited=False, old_snapshot=False, fail_commit=False, recovery=False,
               manager_error=False, enrollment_host='localhost', manager_address='127.0.0.1', preview_fresh_manager=False,
               extra_vars=None, protected=None, native_preference=None, drift_preference=False, real_guard=False,
-              prior_block=True, legacy_policy_read=False):
+              prior_block=True, legacy_policy_read=False, fail_whodata=False):
         with tempfile.TemporaryDirectory(prefix='i244-selection-') as temporary:
             root = Path(temporary); data = root / 'data'; data.mkdir()
             paths = {'config': str(data / 'ossec.conf'), 'hosts': str(data / 'hosts')}
@@ -83,7 +83,7 @@ class SelectionGraphTests(unittest.TestCase):
             settings = root / 'settings.json'
             settings.write_text(json.dumps({'library': str(SOURCE / 'files/wazuh-transaction.py'), 'root': str(ledger),
                                              'state': str(state_file), 'events': str(events_file), 'paths': paths,
-                                             'manager': manager, 'fail_verify': fail_verify, 'fail_commit': fail_commit,
+                                             'manager': manager, 'fail_verify': fail_verify, 'fail_commit': fail_commit, 'fail_whodata': fail_whodata,
                                              'preference': str(preference), 'manager_error': manager_error,
                                              'drift_preference': drift_preference, 'real_guard': real_guard,
                                              'fault_resource': fault[0] if fault else ''}))
@@ -535,6 +535,49 @@ class SelectionGraphTests(unittest.TestCase):
         self.assertIn('controlled stable C10 failure', result.stdout)
         self.assertEqual(state['config'].count(OWN_BLOCK), 1, 'verification failure must not roll the FIM block back')
         self.assertIn('wazuh-manager', state['hosts'])
+
+    # --- Issue #244 native run 19cfe69b, defect D1: the ordinary apply makes sure the who-data endpoint is live.
+    # The coordinator's action is a declared native leaf here (the real action runs in wazuh_whodata_ensure_test.py);
+    # what these runs prove is the PLAY: where the step sits, what selects it, and what skips or rolls it back.
+    def test_the_who_data_endpoint_is_ensured_after_the_last_service_change_and_before_C10(self):
+        for family in ('Debian', 'RedHat'):
+            with self.subTest(family=family):
+                result, events, state = self.agraph(family, '4.14.1-1')
+                self.assert_run_ok(result)
+                actions = self.actions(events)
+                self.assertEqual(actions.count('agent-whodata-ensure'), 1)
+                self.assertGreater(actions.index('agent-whodata-ensure'), max(i for i, a in enumerate(actions) if a == 'service'),
+                                   'the endpoint is proven after the agent restart that re-arms the watches')
+                self.assertLess(actions.index('agent-whodata-ensure'), actions.index('agent-verify'))
+
+    def test_the_C11_selector_runs_the_endpoint_step_alone_with_its_service_snapshots(self):
+        result, events, state = self.agraph('Debian', '4.14.1-1', flags=('--tags', 'C11'))
+        self.assert_run_ok(result)
+        actions = [a for a in self.actions(events) if a not in self.WRITER_BOOKKEEPING]
+        self.assertEqual(actions.count('agent-whodata-ensure'), 1)
+        self.assertFalse([a for a in actions if a in MUTATORS], actions)
+        self.assertNotIn('agent-verify', actions, 'C10 is another row')
+        self.assertEqual(state['before'], state['after'], 'the selected step changes no file')
+
+    def test_the_endpoint_step_is_never_part_of_a_version_transaction_or_a_preview(self):
+        for family in ('Debian', 'RedHat'):
+            with self.subTest(family=family, run='upgrade'):
+                result, events, state = self.graph(family, manager='4.14.9', requested='4.14.9', upgrade=True)
+                self.assert_ok(result, events, state)
+                self.assertIn('agent-commit', [e['action'] for e in events])
+                self.assertNotIn('agent-whodata-ensure', [e['action'] for e in events], 'the transaction owns its audit proof')
+            with self.subTest(family=family, run='preview'):
+                result, events, state = self.agraph(family, '4.14.1-1', flags=('--check',))
+                self.assert_run_ok(result)
+                self.assertNotIn('agent-whodata-ensure', self.actions(events))
+
+    def test_a_who_data_endpoint_that_cannot_be_made_live_fails_the_run_visibly_and_rolls_back_like_any_mutation(self):
+        result, events, state = self.agraph('Debian', '4.14.1-1', fail_whodata=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('controlled who-data endpoint failure', result.stdout, 'the typed refusal must not be hidden')
+        self.assertEqual(state['config'].count(OWN_BLOCK), 0, 'the ordinary rollback scope covers the endpoint step')
+        self.assertNotIn('agent-verify', self.actions(events))
+        self.assertIsNone(state['ownership']['writer'], 'the host-wide writer is still released')
 
     def test_a_failure_inside_the_configuration_block_still_rolls_back_through_the_existing_rescue(self):
         for resource, fault in (('config', 'before'), ('config', 'partial'), ('hosts', 'partial')):

@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,7 +49,7 @@ func TestRegression_WazuhFimC1InstalledSelectionStates(t *testing.T) {
 }
 
 // TestRegression_WazuhFimSpec locks the structure of
-// docs/verification/wazuh-fim.md (v1.5 — Wazuh agent FIM/syscheck with
+// docs/verification/wazuh-fim.md (v1.6 — Wazuh agent FIM/syscheck with
 // whodata on a per-host-overridable directory list, auditd-backed who-data
 // attribution, optional enrollment against
 // docs/verification/wazuh-manager.md):
@@ -63,6 +64,8 @@ func TestRegression_WazuhFimC1InstalledSelectionStates(t *testing.T) {
 //	C8      <address> in ossec.conf points at the wazuh-manager alias
 //	C9      client.keys populated (agent-auth registration completed)
 //	C10     native/package version equality, exact pin, service and stable journal
+//	C11     who-data actually live: endpoint socket, connected audisp-af_unix stream,
+//	        kernel wazuh_fim watch (a configured-but-never-started EL passed C1-C10)
 //
 // Cross-row invariants locked below:
 //
@@ -93,7 +96,7 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -125,6 +128,10 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 			t.Errorf("%s package probe must support both EL rpm and Ubuntu dpkg, got %q", id, cmd[id])
 		}
 	}
+	// EL needs the af_unix plugin package too: audit alone leaves the plugin `active = yes` with no binary.
+	if !strings.Contains(cmd["C2"], "rpm -q audit audispd-plugins") {
+		t.Errorf("C2 must check both EL packages that provide who-data (audit, audispd-plugins), got %q", cmd["C2"])
+	}
 	if !strings.Contains(cmd["C1"], "grep -qxE '(install|hold) ok installed'") {
 		t.Errorf("C1 must recognize native held installed packages without accepting incomplete dpkg states: %q", cmd["C1"])
 	}
@@ -138,8 +145,15 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 			t.Errorf("C10 native effective-state probe lacks %q", token)
 		}
 	}
-	if !NeedsBecome(s.Rows[len(s.Rows)-1]) {
-		t.Error("C10 root-only coordinator must execute with verify privilege escalation")
+	for _, token := range []string{"test -S /var/ossec/queue/sockets/audit", "ss -xHap", "ESTAB", "audisp-af_unix", "auditctl -l", "wazuh_fim", "&& echo 0", "|| echo 1"} {
+		if !strings.Contains(cmd["C11"], token) {
+			t.Errorf("C11 live who-data probe lacks %q: %q", token, cmd["C11"])
+		}
+	}
+	for _, row := range s.Rows {
+		if (row.ID == "C10" || row.ID == "C11") && !NeedsBecome(row) {
+			t.Errorf("%s reads root-only state (coordinator / process names / kernel audit rules) and must execute with verify privilege escalation", row.ID)
+		}
 	}
 
 	// C5 must gate on check_all+whodata attributes together, but must NOT
@@ -223,5 +237,106 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 		if !covered[id] {
 			t.Errorf("spec row %s is not covered by any generated task", id)
 		}
+	}
+}
+
+// TestRegression_WazuhFimC11LiveWhoDataStates runs the C11 row's own shell over states captured on real hosts
+// (testdata/native-captures: Ubuntu 24.04 and AlmaLinux 9). The only substitution is the endpoint path, which is a
+// private socket so the test needs no /var/ossec; `ss` and `auditctl` answer from the captures through PATH shims,
+// the pipeline and its matchers are the spec's. The row must pass for a live endpoint and fire for every state in
+// which who-data is not really working, including the one that made C1-C10 pass on a broken EL: no endpoint at all.
+func TestRegression_WazuhFimC11LiveWhoDataStates(t *testing.T) {
+	s, err := Parse("../../docs/verification/wazuh-fim.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := ""
+	for _, row := range s.Rows {
+		if row.ID == "C11" {
+			command = row.Command
+		}
+	}
+	if command == "" {
+		t.Fatal("missing C11 command")
+	}
+	capture := func(name string) string {
+		path, err := filepath.Abs(filepath.Join("testdata", "native-captures", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	type state struct {
+		name, ss, auditctl string
+		socket, want       bool
+	}
+	states := []state{
+		// Live: a connected stream on the endpoint and the kernel watches (Ubuntu 24.04 capture).
+		{"live endpoint with kernel watches", "ss-xHap.audit-endpoint.healthy.ubuntu2404.txt", "auditctl-l.wazuh_fim.ubuntu2404.txt", true, true},
+		// AlmaLinux 9 capture of the same live state after the fixed apply.
+		{"live endpoint with kernel watches, EL", "ss-xHap.audit-endpoint.healthy.almalinux9.txt", "auditctl-l.wazuh_fim.almalinux9.txt", true, true},
+		// The agent is stopped: the plugin still listens but nobody is connected and the watches are gone.
+		{"agent stopped", "ss-xHap.audit-endpoint.agent-stopped.ubuntu2404.txt", "auditctl-l.no-rules.ubuntu2404.txt", true, false},
+		// Connected but no kernel watch, and a watch with nobody connected: each half alone is not who-data.
+		{"connected stream without kernel watch", "ss-xHap.audit-endpoint.healthy.ubuntu2404.txt", "auditctl-l.no-rules.ubuntu2404.txt", true, false},
+		{"kernel watch without a connected stream", "ss-xHap.audit-endpoint.agent-stopped.ubuntu2404.txt", "auditctl-l.wazuh_fim.ubuntu2404.txt", true, false},
+		// Ubuntu capture: the plugin was deactivated and the socket FILE stayed behind with no listener.
+		{"stale socket file, plugin gone", "ss-xHap.audit-endpoint.plugin-gone.ubuntu2404.txt", "auditctl-l.wazuh_fim.ubuntu2404.txt", true, false},
+		// AlmaLinux capture of the pre-fix state: audispd-plugins absent, so no socket, no listener, no watch.
+		{"no endpoint at all, EL without audispd-plugins", "ss-xHap.audit-endpoint.no-plugin.almalinux9.txt", "auditctl-l.no-rules.almalinux9.txt", false, false},
+	}
+	for _, tc := range states {
+		t.Run(tc.name, func(t *testing.T) {
+			// A fixed-shape directory: the endpoint path is substituted into the row's shell text, and the
+			// default t.TempDir() keeps shell metacharacters of the subtest name (parentheses) in the path.
+			directory, err := os.MkdirTemp("", "pilot-c11-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(directory) })
+			endpoint := filepath.Join(directory, "audit")
+			if tc.socket {
+				listener, err := net.Listen("unix", endpoint)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = listener.Close() })
+			}
+			for _, name := range []string{"sh", "grep", "sed", "cat"} {
+				path, err := exec.LookPath(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(path, filepath.Join(directory, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			shims := map[string]string{
+				"ss":       "#!/bin/sh\nsed \"s#/var/ossec/queue/sockets/audit#$PILOT_ENDPOINT#g\" \"$PILOT_SS\"\n",
+				"auditctl": "#!/bin/sh\ncat \"$PILOT_AUDITCTL\"\n",
+			}
+			for name, body := range shims {
+				if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("/bin/sh", "-c", strings.ReplaceAll(command, "/var/ossec/queue/sockets/audit", endpoint))
+			cmd.Env = []string{"PATH=" + directory, "PILOT_ENDPOINT=" + endpoint,
+				"PILOT_SS=" + capture(tc.ss), "PILOT_AUDITCTL=" + capture(tc.auditctl)}
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("the row's own shell must always return 0 and print its verdict: %v", err)
+			}
+			want := "1"
+			if tc.want {
+				want = "0"
+			}
+			if got := strings.TrimSpace(string(out)); got != want {
+				t.Fatalf("C11 printed %q, want %q for %s", got, want, tc.name)
+			}
+		})
 	}
 }
