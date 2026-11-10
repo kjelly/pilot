@@ -1,0 +1,48 @@
+[
+    {
+        "name": "CONFIG_FILE",
+        "origin": "",
+        "value": null
+    },
+    {
+        "name": "DEFAULT_ASK_PASS",
+        "origin": "env: ANSIBLE_ASK_PASS",
+        "value": true
+    },
+    {
+        "GALAXY_SERVERS": {}
+    },
+    {
+        "BECOME_PLUGINS": []
+    },
+    {
+        "CACHE_PLUGINS": []
+    },
+    {
+        "CALLBACK_PLUGINS": []
+    },
+    {
+        "CLICONF_PLUGINS": []
+    },
+    {
+        "CONNECTION_PLUGINS": []
+    },
+    {
+        "HTTPAPI_PLUGINS": []
+    },
+    {
+        "INVENTORY_PLUGINS": []
+    },
+    {
+        "LOOKUP_PLUGINS": []
+    },
+    {
+        "NETCONF_PLUGINS": []
+    },
+    {
+        "SHELL_PLUGINS": []
+    },
+    {
+        "VARS_PLUGINS": []
+    }
+]

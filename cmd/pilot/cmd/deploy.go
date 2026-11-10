@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1843,7 +1844,7 @@ func promptReconcileExecutionAuthorization(plannedPlaybooks int) (*deploymentAut
 // honored) before availability dropped any: the host the apply step locks is
 // one of them, and the contract's exactly-one cardinality fails a run with
 // more at its own preflight anyway, only later.
-func precheckIdentityDeploy(ctx context.Context, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string) error {
+func precheckIdentityDeploy(ctx context.Context, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string, vault vaultInput) error {
 	if !identitylock.IsApplyPlaybook(playbook) {
 		return nil
 	}
@@ -1854,7 +1855,7 @@ func precheckIdentityDeploy(ctx context.Context, catalog contract.Catalog, compo
 	// Non-nil even when empty: none resolved is "0 hosts", refused, not "resolve
 	// the group again".
 	hosts := append([]string{}, deploymentCandidateHosts(applied, scope)...)
-	return checkIdentityLockTarget(ctx, identityLockRequest{Inventory: inv, Hosts: hosts})
+	return checkIdentityLockTarget(ctx, identityLockRequest{Inventory: inv, Hosts: hosts, ExtraArgs: ansibleExtraVarArgs(extraVars, vault)})
 }
 
 // precheckIdentityBatch runs precheckIdentityDeploy for every request of a
@@ -1881,7 +1882,7 @@ func precheckIdentityBatch(ctx context.Context, requests []catalogDeploymentRequ
 		if err != nil {
 			return err
 		}
-		if err := precheckIdentityDeploy(ctx, catalog, components, request.playbook, request.inv, request.limit, request.extraVars); err != nil {
+		if err := precheckIdentityDeploy(ctx, catalog, components, request.playbook, request.inv, request.limit, request.extraVars, request.vault); err != nil {
 			return err
 		}
 	}
@@ -1917,7 +1918,7 @@ func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runne
 	// runs under the server's /etc/ipa lock, and an inventory the lock cannot be
 	// taken through is refused here instead of after all of that. --preview-only
 	// gets the same answer --force would (see checkIdentityLockTarget).
-	err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars)
+	err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars, vault)
 	if err != nil {
 		return DeploymentExecutionResult{}, err
 	}
@@ -2322,7 +2323,10 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 			// Non-nil even when empty: none resolved is "0 hosts", refused, not
 			// "resolve the group again".
 			Inventory: inv, Hosts: append([]string{}, appliedHosts...),
-			Wait: identityLockWaitFrom(ctx), Progress: identityLockProgressFrom(ctx),
+			// The same -e and vault arguments the apply step hands to
+			// ansible-playbook (executeDeploymentTransaction's baseArgs).
+			ExtraArgs: ansibleExtraVarArgs(extraVars, vault),
+			Wait:      identityLockWaitFrom(ctx), Progress: identityLockProgressFrom(ctx),
 		})
 	}
 
@@ -2828,10 +2832,26 @@ type deployInventorySnapshot struct {
 }
 
 func loadDeployInventorySnapshot(ctx context.Context, inventory string) (deployInventorySnapshot, error) {
+	return loadDeployInventorySnapshotWithArgs(ctx, inventory, nil)
+}
+
+// loadDeployInventorySnapshotWithArgs is loadDeployInventorySnapshot with the
+// -e / vault arguments a playbook run is going to get (ansibleExtraVarArgs):
+// Ansible merges them over the inventory in the order it will for the playbook,
+// so the host variables are the effective ones — what the playbook will connect
+// with — and not what the inventory alone says. nil asks for the inventory
+// alone.
+func loadDeployInventorySnapshotWithArgs(ctx context.Context, inventory string, extraArgs []string) (deployInventorySnapshot, error) {
 	if err := validateInventorySecretStorage(filepath.Dir(inventory)); err != nil {
 		return deployInventorySnapshot{}, err
 	}
-	command := deployAnsibleCommand(ctx, "ansible-inventory", "-i", inventory, "--list")
+	args := append([]string{"-i", inventory, "--list"}, extraArgs...)
+	command := deployAnsibleCommand(ctx, "ansible-inventory", args...)
+	if slices.Contains(extraArgs, "--ask-vault-pass") {
+		// The only prompt that can come from this command, as in
+		// resolveInventoryVariables.
+		command.Stdin = os.Stdin
+	}
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr

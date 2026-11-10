@@ -355,7 +355,7 @@ func TestDeployAndReconcileRefuseAnUnlockableInventoryBeforeAnything(t *testing.
 		env := newFunnelEnv(t, proxyCommandVars)
 		t.Setenv("PILOT_ROOT", repoRootForTest(t))
 		catalog := loadRepoCatalogForPrecheck(t)
-		if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-dns"}, "playbooks/apply/freeipa-dns-apply.yml", env.inv, "", nil); err != nil {
+		if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-dns"}, "playbooks/apply/freeipa-dns-apply.yml", env.inv, "", nil, vaultInput{}); err != nil {
 			t.Fatalf("a component that is not the identity playbook was refused: %v", err)
 		}
 	})
@@ -382,7 +382,7 @@ func TestDeployPrecheckPassesALockableInventoryAndFollowsTheScope(t *testing.T) 
 	env := newFunnelEnv(t, lockCommonArgs)
 	t.Setenv("PILOT_ROOT", repoRootForTest(t))
 	catalog := loadRepoCatalogForPrecheck(t)
-	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "", nil); err != nil {
+	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "", nil, vaultInput{}); err != nil {
 		t.Fatalf("a supported inventory was refused: %v", err)
 	}
 
@@ -391,12 +391,12 @@ func TestDeployPrecheckPassesALockableInventoryAndFollowsTheScope(t *testing.T) 
 	if err := os.WriteFile(env.inv, []byte(two), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "", nil)
+	err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "", nil, vaultInput{})
 	if err == nil || !strings.Contains(err.Error(), "剛好一台 freeipa-server") {
 		t.Fatalf("two servers: err = %v, want the exactly-one refusal", err)
 	}
 	// --limit narrows it to one, as it does for the run.
-	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-1", nil); err != nil {
+	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-1", nil, vaultInput{}); err != nil {
 		t.Fatalf("--limit ipa-1: %v", err)
 	}
 	// A server the limit leaves out is not asked about: ipa-2 is the one with the
@@ -405,10 +405,10 @@ func TestDeployPrecheckPassesALockableInventoryAndFollowsTheScope(t *testing.T) 
 	if err := os.WriteFile(env.inv, []byte(bad), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-1", nil); err != nil {
+	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-1", nil, vaultInput{}); err != nil {
 		t.Fatalf("--limit ipa-1 with a refusing ipa-2 outside the limit: %v", err)
 	}
-	err = precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-2", nil)
+	err = precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-2", nil, vaultInput{})
 	if err == nil || !strings.Contains(err.Error(), "ansible_connection 是 docker") {
 		t.Fatalf("--limit ipa-2: err = %v, want the docker refusal", err)
 	}

@@ -127,17 +127,49 @@ const lockInventory = `all:
           ansible_host: 192.0.2.20
 `
 
+// ansibleConnectionEnv are the environment variables that change how Ansible
+// connects: the lock reads them through ansible-config, so a test of it must
+// not inherit the developer's or the CI runner's.
+var ansibleConnectionEnv = []string{
+	"ANSIBLE_SSH_ARGS", "ANSIBLE_SSH_COMMON_ARGS", "ANSIBLE_SSH_EXTRA_ARGS", "ANSIBLE_SSH_EXECUTABLE",
+	"ANSIBLE_REMOTE_USER", "ANSIBLE_REMOTE_PORT", "ANSIBLE_PRIVATE_KEY_FILE",
+	"ANSIBLE_TRANSPORT", "ANSIBLE_CONNECTION", "ANSIBLE_ASK_PASS",
+}
+
+// hermeticAnsibleConfig points Ansible at an ansible.cfg with body (an empty one
+// for "") instead of whichever ansible.cfg, ~/.ansible.cfg or ANSIBLE_CONFIG the
+// machine has, and clears the connection environment, for the length of the
+// test. It returns the cfg path.
+func hermeticAnsibleConfig(t *testing.T, body string) string {
+	t.Helper()
+	cfg := filepath.Join(t.TempDir(), "ansible.cfg")
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANSIBLE_CONFIG", cfg)
+	for _, name := range ansibleConnectionEnv {
+		// t.Setenv registers the restore; the variable must be absent, not
+		// empty (an empty ANSIBLE_SSH_ARGS is a setting).
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return cfg
+}
+
 // writeLockInventory writes a real inventory file, with extra lines added to
-// ipa-1's variables, and gives ansible a home of its own.
+// ipa-1's variables, and gives ansible a home and a configuration of its own.
 func writeLockInventory(t *testing.T, extraVars string) string {
 	t.Helper()
-	for _, tool := range []string{"ansible", "ansible-inventory", "flock"} {
+	for _, tool := range []string{"ansible", "ansible-inventory", "ansible-config", "flock"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s is not installed", tool)
 		}
 	}
 	t.Setenv("ANSIBLE_HOME", t.TempDir())
 	t.Setenv("ANSIBLE_LOCAL_TEMP", t.TempDir())
+	hermeticAnsibleConfig(t, "")
 	inv := filepath.Join(t.TempDir(), "inventory.yml")
 	content := lockInventory
 	if extraVars != "" {
