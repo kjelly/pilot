@@ -850,4 +850,6 @@ class PreviewModuleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:self.run_case(Path(temporary),check=False,fresh=True)
 
 
-if __name__=='__main__':unittest.main(verbosity=2)
+if __name__ == '__main__':
+    import wazuh_shard
+    wazuh_shard.run_tests()

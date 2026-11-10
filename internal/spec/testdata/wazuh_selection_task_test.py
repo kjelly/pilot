@@ -565,4 +565,6 @@ class SelectionGraphTests(unittest.TestCase):
             self.assertLess(self.actions(events).index('source-ready'), self.actions(events).index('install-agent'))
 
 
-if __name__ == '__main__': unittest.main(verbosity=2)
+if __name__ == '__main__':
+    import wazuh_shard
+    wazuh_shard.run_tests()

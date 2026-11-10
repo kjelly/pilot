@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -171,6 +172,12 @@ func wazuhHarnessReady(t *testing.T, what string) wazuhHarnessTools {
 
 func runWazuhHarness(t *testing.T, script, what string, extra ...string) {
 	t.Helper()
+	// The harnesses are independent (private temp trees, own processes): run them
+	// alongside each other once the serial tests of the package are done, except the
+	// ones whose assertions read shared filesystem state (wazuhSerialHarnesses).
+	if !wazuhSerialHarnesses[script] {
+		t.Parallel()
+	}
 	wazuhHarnessReady(t, what)
 	for _, tool := range extra {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -179,7 +186,7 @@ func runWazuhHarness(t *testing.T, script, what string, extra ...string) {
 	}
 	cmd := exec.Command("python3", script)
 	cmd.Env = wazuhHarnessEnv()
-	output, err := cmd.CombinedOutput()
+	output, err := runWazuhHarnessProcess(cmd)
 	if err != nil {
 		t.Fatalf("%s failed: %v\n%s", what, err, output)
 	}
@@ -196,6 +203,77 @@ func runWazuhHarness(t *testing.T, script, what string, extra ...string) {
 	}
 	t.Logf("%s: %d tests executed, 0 skipped (python %d.%d, PyYAML %s, ansible-core %s)",
 		script, count, wazuhTools.PythonMajor, wazuhTools.PythonMinor, wazuhTools.PyYAML, wazuhTools.AnsibleCore)
+}
+
+// wazuhSerialHarnesses must not run alongside other tests: the prestart inspector compares the
+// filesystem metadata of every ancestor of its temporary tree, including the shared /tmp, and
+// correctly refuses an input that "changed during inspection" when a concurrent test creates
+// files there. Relaxing that check would defeat what the harness proves.
+var wazuhSerialHarnesses = map[string]bool{"testdata/wazuh_reader_prestart_test.py": true}
+
+// wazuhHarnessSlots bounds how many Python/Ansible harness processes run at once. Each real
+// ansible-playbook run has a fixed in-harness timeout, so an oversubscribed machine turns
+// speed-ups into spurious timeouts; four matches a hosted CI runner's cores.
+var wazuhHarnessSlots = make(chan struct{}, min(4, max(2, runtime.GOMAXPROCS(0))))
+
+func runWazuhHarnessProcess(cmd *exec.Cmd) ([]byte, error) {
+	wazuhHarnessSlots <- struct{}{}
+	defer func() { <-wazuhHarnessSlots }()
+	return cmd.CombinedOutput()
+}
+
+var wazuhShardLine = regexp.MustCompile(`(?m)^SHARD (\d+)/(\d+): (\d+) of (\d+) tests$`)
+
+// runWazuhHarnessSharded runs one slow harness as n parallel shards (PILOT_WAZUH_SHARD=i/n,
+// see wazuh_hermetic.run_tests) and proves the shards together executed every test: each
+// shard reports how many tests it ran of the module's total, and the counts must add up.
+func runWazuhHarnessSharded(t *testing.T, script, what string, shards int) {
+	t.Helper()
+	t.Parallel()
+	wazuhHarnessReady(t, what)
+	var mu sync.Mutex
+	ran, total := 0, -1
+	t.Run("shards", func(t *testing.T) {
+		for i := 0; i < shards; i++ {
+			t.Run(fmt.Sprintf("shard%d", i), func(t *testing.T) {
+				t.Parallel()
+				cmd := exec.Command("python3", script)
+				cmd.Env = append(wazuhHarnessEnv(), fmt.Sprintf("PILOT_WAZUH_SHARD=%d/%d", i, shards))
+				output, err := runWazuhHarnessProcess(cmd)
+				if err != nil {
+					t.Fatalf("%s shard %d/%d failed: %v\n%s", what, i, shards, err, output)
+				}
+				line := wazuhShardLine.FindSubmatch(output)
+				summary := wazuhRan.FindSubmatch(output)
+				if line == nil || summary == nil {
+					t.Fatalf("%s shard %d/%d: no shard or unittest summary, so nothing proves it ran:\n%s", what, i, shards, output)
+				}
+				mine, _ := strconv.Atoi(string(line[3]))
+				all, _ := strconv.Atoi(string(line[4]))
+				count, _ := strconv.Atoi(string(summary[1]))
+				if count != mine {
+					t.Fatalf("%s shard %d/%d announced %d tests but ran %d", what, i, shards, mine, count)
+				}
+				if regexp.MustCompile(`(?m)^OK \(.*skipped=`).Match(output) || strings.Contains(string(output), "skipped '") {
+					t.Fatalf("%s shard %d/%d skipped tests; every control must execute:\n%s", what, i, shards, output)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				ran += count
+				if total >= 0 && total != all {
+					t.Errorf("%s shards disagree on the total number of tests: %d vs %d", what, total, all)
+				}
+				total = all
+			})
+		}
+	})
+	if t.Failed() {
+		return
+	}
+	if total <= 0 || ran != total {
+		t.Fatalf("%s: the %d shards ran %d tests of %d; a shard dropped tests", what, shards, ran, total)
+	}
+	t.Logf("%s: %d tests executed across %d parallel shards, 0 skipped", script, ran, shards)
 }
 
 // The coordinator harness has explicit boundaries in its module docstring: the
@@ -222,7 +300,7 @@ func TestAptExactVersionTaskBehavior(t *testing.T) {
 }
 
 func TestWazuhWriterTaskGraph(t *testing.T) {
-	runWazuhHarness(t, "testdata/wazuh_writer_task_test.py", "real Ansible Wazuh writer/delegation graph")
+	runWazuhHarnessSharded(t, "testdata/wazuh_writer_task_test.py", "real Ansible Wazuh writer/delegation graph", 3)
 }
 
 // Exercise the installed script action and its actual shell: splitting a
@@ -233,7 +311,7 @@ func TestWazuhManagerScriptArguments(t *testing.T) {
 }
 
 func TestWazuhSelectionTaskGraph(t *testing.T) {
-	runWazuhHarness(t, "testdata/wazuh_selection_task_test.py", "real Ansible Wazuh selection/failure-authority graph")
+	runWazuhHarnessSharded(t, "testdata/wazuh_selection_task_test.py", "real Ansible Wazuh selection/failure-authority graph", 6)
 }
 
 func TestWazuhReaderCustodyBehavior(t *testing.T) {
@@ -279,7 +357,7 @@ func TestWazuhPreviewToolsBehavior(t *testing.T) {
 	if err := wazuhSystemPythonError(wazuhHarnessReady(t, "Wazuh preview asset controls")); err != nil {
 		t.Fatalf("Wazuh preview asset controls cannot run: %v", err)
 	}
-	runWazuhHarness(t, "testdata/wazuh_preview_tools_test.py", "Wazuh preview asset controls")
+	runWazuhHarnessSharded(t, "testdata/wazuh_preview_tools_test.py", "Wazuh preview asset controls", 5)
 }
 
 // The always-tagged retained-agent reinstall tasks report changed from what apt
