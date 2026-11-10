@@ -24,7 +24,8 @@ class Interrupted(BaseException):
     pass
 
 
-def fixture(root, failure='partial', mode='disabled', retained=True):
+def fixture(root, failure='partial', mode='disabled', retained=True, engine=None):
+    """engine is the native_model.Rsyslog behind the real Reader.qualify (never a stub)."""
     library=w
     managed=root/'managed';project=managed/'wazuh-docker-4.14.1/single-node'
     project.mkdir(parents=True)
@@ -47,6 +48,7 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
         native_model.cursor(spool,volume) if mode=='enabled' else (spool/'state'/'native-offset').write_text('old offset')
         (spool/'wazuh_alerts.00000001').write_text('CURRENT retained queue')
     proc=root/'empty-proc';proc.mkdir();native_model.proc_root(proc,volume)
+    maps=lambda loaded:engine.maps(imfile=loaded) if engine else None
 
     class Native:
         def __init__(self):
@@ -91,6 +93,8 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
                 if Path(argv[-1])!=volume/'alerts/alerts.json' or not os.access(argv[-1],os.R_OK):
                     raise library.Refused('modeled native syslog source access failed')
                 return subprocess.CompletedProcess(argv,0,'','')
+            if engine is not None and engine.run(argv) is not None:
+                return engine.run(argv)
             if argv[:2]==['/usr/local/libexec/pilot-wazuh-delivery','local']:
                 if self.running!=set(library.SERVICES) or self.service['ActiveState']!='active':
                     raise library.Refused('modeled native local C11 unavailable')
@@ -238,7 +242,7 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
             import shutil
             for entry in proc.iterdir():
                 if entry.name.isdecimal():shutil.rmtree(entry)
-            native_model.process(proc,volume,native.unit_process['pid'])
+            native_model.process(proc,volume,native.unit_process['pid'],maps=maps(True))
             return dict(native.unit_process)
         units.start=start  # declared qualified native start observation leaf
         return units
@@ -254,22 +258,25 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
             def observe(loaded=True):
                 self.r.event('observe','reader-'+('loaded' if loaded else 'cold'))
                 if self.r.boundary_fail:raise library.Refused('native reader observation unavailable')
-                value={'schema':2,'mode_candidate':mode,'files':{},'profile':None,'pid':0,
+                # Native fact (pilot-wazuh-heartbeat inspect_reader, R2c on 19cfe69b): the helper reports
+                # the live rsyslog MainPID in EVERY mode, including disabled and never-configured.
+                value={'schema':2,'mode_candidate':mode,'files':{},'profile':None,'pid':int(self.r.service['MainPID']),
                        'resources':[],'authorization':'UNVALIDATED_OBSERVATIONS'}
                 if mode!='never':
                     value.update(files={str(profile):library.digest(profile)},profile=json.loads(profile.read_text()),
                                  profile_sha256=library.digest(profile))
                 if mode=='enabled':
-                    value['pid']=int(self.r.service['MainPID'])
                     value['resources']=native_model.resources(volume,spool,reader.CONFIG)
                     value['files'][str(reader.CONFIG)]=library.digest(reader.CONFIG)
                 return value
             reader.observe=observe
-            # Declared native software/account facts, not custody authority.
-            reader.qualify=lambda baseline:{'engine':'explicit native software identity leaf'}
+            # The running rsyslogd as /proc shows it. Only an enabled reader has loaded imfile; a disabled
+            # or never-configured host runs the same daemon with no imfile mapping and no source FD.
+            # Reader.qualify is the production code over the engine's declared native leaves.
+            native_model.process(proc,volume if volume.exists() else root,int(self.r.service['MainPID']),
+                opened=mode=='enabled' and volume.exists(),maps=maps(mode=='enabled'))
             if mode=='enabled':
                 reader.units=unit_model(self.r)
-                native_model.process(proc,volume,int(self.r.service['MainPID']))
                 reader.verify_tools=lambda:None  # native installed-tool identity leaf
                 def fds(pid,source,drained=False):
                     info=(Path(source)/'alerts/alerts.json').stat()
@@ -288,6 +295,10 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
                     'exposure-intent' if self.interrupt=='exposure' else 'reader-stop-intent'):
                 self.interrupt=None;raise Interrupted('after durable reader effect intent')
 
+            if self.interrupt=='producers-stopped' and item.get('reader',{}).get('phase')=='producers-stopped':
+                # The journal native run 19cfe69b stranded (R2c): producers stopped, first reader boundary not run.
+                self.interrupt=None;raise Interrupted('after producers stopped, before the first reader boundary')
+
             if self.interrupt=='after-intent' and phase=='recovering':
                 self.interrupt=None;raise Interrupted('after recovery intent')
             if self.interrupt=='stopping' and phase=='stopping' and self.stopping_count==2:
@@ -304,11 +315,13 @@ def fixture(root, failure='partial', mode='disabled', retained=True):
 class RecoveryEntryTests(unittest.TestCase):
     OWNER='1'*32
     def create(self,root,failure='partial',mode='disabled',retained=True):
+        engine=native_model.Rsyslog(root).enter(self)
         user=type('NativeUser',(),{'pw_uid':os.geteuid()})()
         group=type('NativeGroup',(),{'gr_gid':os.getegid()})()
         self.enterContext(mock.patch.object(w.pwd,'getpwnam',return_value=user))
         self.enterContext(mock.patch.object(w.grp,'getgrnam',return_value=group))
-        central,document,compose,spool=fixture(root,failure,mode,retained)
+        central,document,compose,spool=fixture(root,failure,mode,retained,engine)
+        self.engine=engine
         # Production has one installed constant path; this private filesystem
         # seam covers receipts instantiated independently during finalization.
         self.enterContext(mock.patch.object(w.Reader,'SPOOL',spool))
@@ -550,6 +563,177 @@ class RecoveryEntryTests(unittest.TestCase):
             with self.assertRaises(w.Refused):central.execute('4.14.9',recover=True,owner=self.OWNER)
             self.assertEqual(central.active()['phase'],'committed')
             self.assertFalse(any(event[0] in ('effect','write') for event in central.r.events[start:]))
+
+
+    # --- Issue #244 native run 19cfe69b, defect D3 (R2c/R2d): the engine qualification is the
+    # real Reader.qualify over declared native leaves (native_model.Rsyslog), and the helper
+    # reports the live rsyslog MainPID in every mode, as it does natively. A disabled or
+    # never-configured host runs rsyslogd with NO imfile mapping; that is its converged state.
+    def trace(self):
+        """Record every Reader.qualify call and every live /proc/<pid>/maps read, with the
+        mode the enclosing qualify call was given (None for a read outside qualify)."""
+        calls,reads,current=[],[],[]
+        real_qualify,real_read=w.Reader.qualify,Path.read_text
+        def qualify(reader,baseline,*mode):
+            # Pass the arguments through untouched: a caller that does not name the mode is recorded as None.
+            named=mode[0] if mode else None
+            calls.append((named,baseline['pid']));current.append(named)
+            try:return real_qualify(reader,baseline,*mode)
+            finally:current.pop()
+        def read_text(path,*args,**kwargs):
+            if path.name=='maps' and path.parent.name.isdecimal():reads.append(current[-1] if current else None)
+            return real_read(path,*args,**kwargs)
+        self.enterContext(mock.patch.object(w.Reader,'qualify',qualify))
+        self.enterContext(mock.patch.object(Path,'read_text',read_text))
+        return calls,reads
+    def committed(self,central):
+        manifest=json.loads(next(central.root.glob('central-*/manifest.json')).read_text())
+        return manifest
+
+    def test_disabled_and_never_reader_upgrade_completes_with_no_live_imfile_mapping(self):
+        for mode,retained in (('disabled',True),('disabled',False),('never',False)):
+            with self.subTest(mode=mode,retained=retained),tempfile.TemporaryDirectory() as temporary:
+                central,document,compose,spool=self.create(Path(temporary),None,mode,retained)
+                pid=int(central.r.service['MainPID'])
+                # Precondition: the converged state is a live rsyslogd with no imfile mapping (native capture).
+                self.assertNotIn('imfile',(central.make_reader().PROC/str(pid)/'maps').read_text())
+                calls,reads=self.trace()
+                result=central.execute('4.14.9',upgrade=True,owner=self.OWNER,reader_ack=True)
+                self.assertEqual(result['version'],'4.14.9')
+                manifest=self.committed(central)
+                self.assertEqual((manifest['phase'],manifest['reader']['mode'],manifest['reader']['phase']),('committed',mode,'final'))
+                self.assertEqual(manifest['reader'].get('cursor_present'),True if retained and mode=='disabled' else (False if mode=='disabled' else None))
+                if mode=='disabled' and retained:
+                    # The retained cursor/queue are what the engine identity protects; they are kept untouched.
+                    self.assertEqual((spool/'wazuh_alerts.00000001').read_text(),'CURRENT retained queue')
+                    # The REAL qualify ran (a stub returns a fixed dict with no digest of the engine file).
+                    self.assertEqual(manifest['reader']['engine']['sha256'],w.digest(self.engine.engine))
+                self.assertTrue(all(call[0]==mode and call[1]==pid for call in calls),calls)
+                # Admission qualifies the engine only when there is retained data it governs.
+                self.assertEqual(bool(calls),mode=='disabled' and retained,calls)
+                self.assertEqual(reads,[],'a non-enabled reader must never be compared against live imfile mappings')
+                w.HostWriter(central.root).release(self.OWNER)
+
+    def test_enabled_reader_without_its_live_imfile_mapping_is_still_refused(self):
+        # Negative control: the live-mapping identity check still guards an enabled running reader.
+        for fault,expected in (('no-imfile-mapping','loaded imfile module differs from qualified on-disk identity'),
+                               ('foreign-imfile-inode','loaded imfile module differs from qualified on-disk identity'),
+                               ('on-disk-module-changed','reader package/module differs from qualified software build')):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as temporary:
+                central,document,compose,spool=self.create(Path(temporary),None,'enabled')
+                # The proc model is rebuilt on every make_reader, so the fault is injected into what the
+                # running rsyslogd is modeled to map.
+                real=self.engine.maps
+                if fault=='no-imfile-mapping':self.engine.maps=lambda imfile=False:real(imfile=False)
+                elif fault=='foreign-imfile-inode':self.engine.maps=lambda imfile=False:real(imfile=imfile,inode=999999999)
+                else:self.engine.module.write_bytes(b'a different imfile.so than the qualified build')
+                with self.assertRaisesRegex(w.Refused,expected):
+                    central.execute('4.14.9',upgrade=True,owner=self.OWNER,reader_ack=True)
+                self.assertIsNone(central.active(),'refused at admission, before any journal or downtime')
+                self.assertEqual(central.r.running,set(w.SERVICES))
+                w.HostWriter(central.root).release(self.OWNER)
+
+    def test_disabled_reader_still_qualifies_the_on_disk_engine_identity(self):
+        # The disabled check is narrower, not removed: a changed on-disk module or engine still refuses.
+        for fault,expected in (('imfile-module','reader package/module differs from qualified software build'),
+                               ('engine','actual native reader queue engine has not been qualified')):
+            with self.subTest(fault=fault),tempfile.TemporaryDirectory() as temporary:
+                central,document,compose,spool=self.create(Path(temporary),None,'disabled')
+                (self.engine.module if fault=='imfile-module' else self.engine.engine).write_bytes(b'unqualified native build')
+                with self.assertRaisesRegex(w.Refused,expected):
+                    central.execute('4.14.9',upgrade=True,owner=self.OWNER,reader_ack=True)
+                self.assertIsNone(central.active())
+                w.HostWriter(central.root).release(self.OWNER)
+
+    def test_stranded_disabled_journal_from_native_run_recovers_before_switch(self):
+        # Journal exactly as R2c left it: phase stopping, reader disabled/producers-stopped with a retained
+        # cursor, containers stopped. Native explicit recovery (R2d) refused it with "loaded imfile module
+        # differs from qualified on-disk identity" because it demanded the imfile mapping of a disabled reader.
+        with tempfile.TemporaryDirectory() as temporary:
+            central,document,compose,spool=self.create(Path(temporary),None,'disabled')
+            central.interrupt='producers-stopped'
+            with self.assertRaises(Interrupted):
+                central.execute('4.14.9',upgrade=True,owner=self.OWNER,reader_ack=True)
+            item=central.active()
+            self.assertEqual(item['phase'],'stopping')
+            self.assertEqual({key:item['reader'].get(key) for key in ('mode','phase','cursor_present','ack')},
+                             {'mode':'disabled','phase':'producers-stopped','cursor_present':True,'ack':True})
+            self.assertEqual(central.r.running,set())
+            calls,reads=self.trace()
+            w.HostWriter(central.root).resume(self.OWNER,'central','recover',confirmed=True)
+            result=central.execute('4.14.9',recover=True,owner=self.OWNER)
+            self.assertTrue(result['recovered'])
+            self.assertEqual(self.committed(central)['phase'],'recovered-before-switch')
+            self.assertIsNone(central.active())
+            self.assertEqual(central.r.running,set(w.SERVICES),'the stack is available again')
+            self.assertEqual((spool/'wazuh_alerts.00000001').read_text(),'CURRENT retained queue')
+            self.assertEqual((spool/'state'/'native-offset').read_text(),'old offset')
+            self.assertTrue(calls and all(call[0]=='disabled' for call in calls),calls)
+            self.assertEqual(reads,[])
+            w.HostWriter(central.root).release(self.OWNER)
+
+    def test_every_qualify_call_names_the_mode_across_forward_automatic_and_explicit_recovery(self):
+        # Class lock: admission, every boundary and both recovery entries use ONE predicate. For a disabled
+        # reader no live maps are read; for an enabled one every read comes with mode "enabled" (control).
+        def forward(case,mode):
+            central,*_=case.create(Path(tempfile.mkdtemp(dir=case.work)),None,mode)
+            central.execute('4.14.9',upgrade=True,owner=case.OWNER,reader_ack=True)
+            return central
+        def automatic(case,mode):
+            central,*_=case.create(Path(tempfile.mkdtemp(dir=case.work)),None,mode)
+            failure=[]
+            real=w.Reader.pause
+            def pause(reader,item,restoring=False):
+                if not failure:
+                    failure.append(1);raise w.Refused('injected failure at the first reader boundary')
+                return real(reader,item,restoring)
+            with mock.patch.object(w.Reader,'pause',pause),self.assertRaisesRegex(w.Refused,'previous images, data and availability recovered'):
+                central.execute('4.14.9',upgrade=True,owner=case.OWNER,reader_ack=True)
+            self.assertEqual(case.committed(central)['phase'],'recovered-before-switch')
+            return central
+        def explicit(case,mode):
+            central,*_=case.create(Path(tempfile.mkdtemp(dir=case.work)),None,mode)
+            central.interrupt='producers-stopped'
+            with case.assertRaises(Interrupted):
+                central.execute('4.14.9',upgrade=True,owner=case.OWNER,reader_ack=True)
+            w.HostWriter(central.root).resume(case.OWNER,'central','recover',confirmed=True)
+            central.execute('4.14.9',recover=True,owner=case.OWNER)
+            self.assertEqual(case.committed(central)['phase'],'recovered-before-switch')
+            return central
+        self.work=Path(self.enterContext(tempfile.TemporaryDirectory()))
+        for mode in ('disabled','enabled'):
+            for name,entry in (('forward',forward),('automatic recovery',automatic),('explicit recovery',explicit)):
+                with self.subTest(mode=mode,path=name):
+                    calls,reads=self.trace()
+                    central=entry(self,mode)
+                    self.assertTrue(calls,'the engine was qualified')
+                    self.assertTrue(all(call[0]==mode for call in calls),calls)
+                    self.assertTrue(set(reads)<={'enabled'},reads)
+                    self.assertEqual(bool(reads),mode=='enabled','live maps are read only for an enabled reader',)
+                    w.HostWriter(central.root).release(self.OWNER)
+
+    def test_every_converged_reader_state_is_accepted_at_admission_boundaries_and_recovery(self):
+        # Postcondition closure: each state the ordinary apply converges to ({never, disabled fresh,
+        # disabled with a retained cursor/queue after having been enabled, enabled}) is accepted by
+        # admission and every later boundary (forward run) and by same-owner recovery of the journal
+        # stranded at the first boundary, with the same predicate.
+        states=(('never',False),('disabled',False),('disabled',True),('enabled',True))
+        for mode,retained in states:
+            with self.subTest(state=(mode,retained),run='forward'),tempfile.TemporaryDirectory() as temporary:
+                central,*_=self.create(Path(temporary),None,mode,retained)
+                central.execute('4.14.9',upgrade=True,owner=self.OWNER,reader_ack=True)
+                manifest=self.committed(central)
+                self.assertEqual((manifest['phase'],manifest['reader']['mode'],manifest['reader']['phase']),('committed',mode,'final'))
+                w.HostWriter(central.root).release(self.OWNER)
+            with self.subTest(state=(mode,retained),run='recovery'),tempfile.TemporaryDirectory() as temporary:
+                central,*_=self.create(Path(temporary),None,mode,retained)
+                central.interrupt='producers-stopped'
+                with self.assertRaises(Interrupted):
+                    central.execute('4.14.9',upgrade=True,owner=self.OWNER,reader_ack=True)
+                w.HostWriter(central.root).resume(self.OWNER,'central','recover',confirmed=True)
+                self.assertTrue(central.execute('4.14.9',recover=True,owner=self.OWNER)['recovered'])
+                self.assertEqual(self.committed(central)['phase'],'recovered-before-switch')
+                w.HostWriter(central.root).release(self.OWNER)
 
 
 if __name__=='__main__':unittest.main()

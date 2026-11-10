@@ -12,7 +12,9 @@ import subprocess
 import tempfile
 import unittest
 from unittest import mock
+import datetime
 import wazuh_hermetic as hermetic
+import wazuh_models
 import wazuh_transaction_test as existing
 import wazuh_reader_model as native_model
 
@@ -420,15 +422,19 @@ class SelectedReceiverIdentityTests(unittest.TestCase):
                     'profile':{'enabled':True,'source':str(source),'transport':'tcp'},'action':{'port':'514'}}
                 reader.source=lambda _:str(source)
                 reader.source_users=lambda *args,**kwargs:None
-                reader.qualify=lambda _: {'engine':'native-leaf'}
+                # Reader.qualify is the production code over the declared native engine leaves.
+                engine=native_model.Rsyslog(root).enter(self)
+                (root/'proc/42').mkdir(parents=True);(root/'proc/42/maps').write_text(engine.maps(imfile=True))
+                reader.PROC=root/'proc'
                 reader.verify_tools=lambda:None
                 reader.units.admit=lambda **kwargs: {'native':'unit-leaf'}
                 original=Path.read_text
                 def text(path,*args,**kwargs):
                     if str(path)=='/etc/hosts':return pin+' siem-log-server\n'
                     return original(path,*args,**kwargs)
-                with mock.patch.object(Path,'read_text',text),mock.patch.object(reader.r,'run',
-                        return_value=subprocess.CompletedProcess([],0,'native C11','')):
+                def native(argv,**kwargs):
+                    return engine.run(argv) or subprocess.CompletedProcess(argv,0,'native C11','')
+                with mock.patch.object(Path,'read_text',text),mock.patch.object(reader.r,'run',side_effect=native):
                     if success:self.assertEqual(reader.admit({'paths':[]})['mode'],'enabled')
                     else:
                         with self.assertRaisesRegex(w.Refused,'receiver address'):
@@ -540,7 +546,7 @@ class EnabledReaderIntegrationTests(unittest.TestCase):
                             'action':{'port':'514','queue.type':'LinkedList'},
                             'files':{str(self.t.forward):w.digest(self.t.forward)}}
                 def source(self,state):return str(self.t.volume)
-                def qualify(self,baseline):return {'engine':'explicit-native-leaf'}
+                def qualify(self,baseline,mode):return {'engine':'explicit-native-leaf'}
                 def verify_tools(self):pass
                 def fds(self,pid,source,drained=False):
                     info=(Path(source)/'alerts/alerts.json').stat()
@@ -727,7 +733,19 @@ class ReaderInspectionTests(unittest.TestCase):
                 'input(type="imfile" File="'+str(source)+'/alerts/alerts.json" ruleset="pilotWazuhForward" '
                 'Tag="pilot-wazuh-alert:" Facility="local5" Severity="info" addMetadata="off" '
                 'PersistStateInterval="1" freshStartTail="off" reopenOnTruncate="on")\n')
-        maps=root/'maps';maps.write_text('')
+        # Native captures (Ubuntu 24.04, rsyslog 8.2312.0): a rsyslogd that loaded no imfile maps only imklog,
+        # imuxsock and lmnet; once it loaded the module its maps also carry the imfile.so lines.
+        # Reader.qualify is the production code over these declared native leaves (never a stub).
+        engine=native_model.Rsyslog(root).enter(self);self.engine=engine
+        (root/'proc/42').mkdir(parents=True)
+        maps=root/'proc/42/maps';maps.write_text(engine.maps(imfile=enabled))
+        # When rsyslog.service last became active. None: after every file the apply wrote (nothing is stale);
+        # a test sets an epoch to model a rsyslogd started BEFORE the profile/includes were written, which is
+        # what an ordinary apply leaves on a host that does not forward (it restarts rsyslog only to forward).
+        self.clock={'started':None}
+        def started():
+            if self.clock['started'] is not None:return self.clock['started']
+            return max(Path(name).stat().st_mtime for name in (config,extra,profile,owner) if Path(name).exists())+10
         argv=root/'cmdline';argv.write_bytes(b'/usr/sbin/rsyslogd\0-n\0-iNONE\0')
         checker=root/'checker';checker.write_bytes((existing.REPO/'playbooks/files/pilot-wazuh-heartbeat').read_bytes());checker.chmod(0o700)
         real_path=Path
@@ -739,8 +757,13 @@ class ReaderInspectionTests(unittest.TestCase):
         def native(command,**kwargs):
             calls.append(command)
             if command[:2]==['systemctl','show']:
-                text='2030-01-01 00:00:00 UTC' if 'ActiveEnterTimestamp' in command else '42\n'
-            elif command[0]=='date':text='1893456000.0\n'
+                # `systemctl show --timestamp=us -p ActiveEnterTimestamp --value`: "Tue 2026-11-10 09:37:25.703371 UTC".
+                text=(datetime.datetime.fromtimestamp(started(),datetime.timezone.utc).strftime('%a %Y-%m-%d %H:%M:%S.%f UTC')+'\n'
+                      if 'ActiveEnterTimestamp' in command else '42\n')
+            elif command[0]=='date':
+                # `date -d <that text> +%s.%N`, converted from the text it was given.
+                when=datetime.datetime.strptime(command[2].removesuffix(' UTC'),'%a %Y-%m-%d %H:%M:%S.%f')
+                text='%.9f\n'%when.replace(tzinfo=datetime.timezone.utc).timestamp()
             elif command[:2]==['rsyslogd','-N1']:text=''
             else:raise AssertionError('undeclared native call '+repr(command))
             return subprocess.CompletedProcess(command,0,text,'')
@@ -766,6 +789,7 @@ class ReaderInspectionTests(unittest.TestCase):
         class Native:
             def run(self,command,**kwargs):
                 calls.append(command)
+                if engine.run(command) is not None:return engine.run(command)
                 if command[:3]==['docker','ps','-aq']:text='c'*64+'\n'
                 elif command[:2]==['docker','info']:text=str(docker)+'\n'
                 elif command==['/usr/local/libexec/pilot-wazuh-delivery','local']:text='native leaf'
@@ -790,7 +814,7 @@ class ReaderInspectionTests(unittest.TestCase):
         reader.CHECKER=checker;reader.PROFILE=profile;reader.CONFIG=owner;reader.SPOOL=root/'spool'
         reader.source_users=lambda *args,**kwargs:None  # native FD leaf
         reader.fds=lambda *args,**kwargs:[]              # native FD leaf
-        reader.qualify=lambda baseline:{'engine':'native-qualified-leaf'}
+        reader.PROC=root/'proc'
         reader.verify_tools=lambda:None
         reader.units.admit=lambda **kwargs:{'units':'native-policy-leaf'}
         # This class tests actual inspector/layout call chain, not native cursor.
@@ -831,6 +855,78 @@ class ReaderInspectionTests(unittest.TestCase):
             with self.assertRaisesRegex(w.Refused,'capture'):
                 reader.admit(state)
 
+
+    # --- Issue #244 native run 19cfe69b, defect D4: a fresh standalone manager whose ordinary apply recorded
+    # the (never-configured or disabled) reader state without restarting rsyslog has a profile/include newer
+    # than the running rsyslogd. The helper refused it as "not loaded", so the version transaction could not
+    # even be admitted (`inspect effective owned reader baseline rc=1`). The helper is called directly: main()
+    # masks its message.
+    def stale(self,root,configured,enabled,imfile=False,newer=True):
+        reader,state,inspect,extra,profile,owner,source,argv,calls=self.fixture(root,configured,enabled)
+        if imfile:(root/'proc/42/maps').write_text(self.engine.maps(imfile=True))
+        if newer:
+            files=[extra]+([profile] if configured else [])
+            self.clock['started']=min(Path(name).stat().st_mtime for name in files)-60
+        return reader,state,inspect
+
+    def test_inspector_trusts_the_live_rsyslogd_for_unloaded_modes_and_still_requires_loaded_readers_to_be_current(self):
+        refused='reader profile/include changes are not loaded'
+        # (configured, enabled, imfile mapped by the running rsyslogd, files newer than rsyslog) -> mode or refusal
+        for configured,enabled,imfile,newer,want in (
+                (False,False,False,True,'never'),      # never configured, unrelated operator include edited after start
+                (True,False,False,True,'disabled'),    # disabled by an ordinary apply that did not restart rsyslog
+                (False,False,True,True,refused),       # an imfile input IS loaded (operator's own): staleness matters
+                (True,False,True,True,refused),
+                (True,True,False,True,refused),        # an enabled reader must have loaded its configuration
+                (True,True,True,True,refused),
+                (False,False,False,False,'never'),     # controls: nothing newer than the running rsyslogd
+                (True,False,False,False,'disabled'),
+                (True,True,True,False,'enabled')):
+            with self.subTest(configured=configured,enabled=enabled,imfile=imfile,newer=newer),tempfile.TemporaryDirectory() as temporary:
+                reader,state,inspect=self.stale(Path(temporary),configured,enabled,imfile,newer)
+                if want==refused:
+                    with self.assertRaisesRegex(ValueError,refused):inspect()
+                else:
+                    self.assertEqual(inspect()['mode_candidate'],want)
+                # A cold inspection never judged freshness, so it is unchanged by the model's clock.
+                if configured or not enabled:self.assertIn(inspect(cold=True)['mode_candidate'],('never','disabled','enabled'))
+
+    def converged(self,configured,enabled,retained):
+        """Postcondition closure for the reader side. A state the ordinary apply converges to ({never, disabled
+        fresh, disabled with the retained cursor/queue of a once-enabled reader, enabled}) is admitted by the REAL
+        helper + REAL qualify, then crosses a cold and a loaded boundary with the same predicate. Only the
+        unloaded modes have rsyslog older than their files (an enabled reader is restarted by the apply)."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            reader,state,inspect=self.stale(root,configured,enabled,newer=not enabled)
+            self.enterContext(mock.patch.object(w.pwd,'getpwnam',return_value=type('U',(),{'pw_uid':os.geteuid()})()))
+            self.enterContext(mock.patch.object(w.grp,'getgrnam',return_value=type('G',(),{'gr_gid':os.getegid()})()))
+            if retained and not enabled:
+                reader.SPOOL.mkdir(mode=0o700);(reader.SPOOL/'state').mkdir(mode=0o700)
+                (reader.SPOOL/'state'/'native-offset').write_text('old offset');(reader.SPOOL/'wazuh_alerts.00000001').write_text('retained')
+            reader.units.boundary=lambda proof:None  # immutable native policy leaf, covered by the unit tests
+            central=reader.t;central.reader=reader
+            state['reader']=reader.admit(state)
+            self.assertEqual(state['reader']['mode'],'enabled' if enabled else ('disabled' if configured else 'never'))
+            if configured and not enabled and retained:
+                self.assertEqual(state['reader']['engine']['sha256'],w.digest(self.engine.engine))
+            owner='1'*32;w.HostWriter(central.root).claim(owner,'central')
+            item=central.begin(owner,state)
+            reader.boundary(item)
+            if not enabled:reader.boundary(item,running=True)
+            central.finish(item,'recovered');w.HostWriter(central.root).release(owner)
+
+    def test_converged_never_configured_state_is_admitted_and_crosses_every_boundary(self):
+        self.converged(False,False,False)
+
+    def test_converged_disabled_fresh_state_is_admitted_and_crosses_every_boundary(self):
+        self.converged(True,False,False)
+
+    def test_converged_disabled_state_with_retained_cursor_is_admitted_and_crosses_every_boundary(self):
+        self.converged(True,False,True)
+
+    def test_converged_enabled_state_is_admitted_and_crosses_every_boundary(self):
+        self.converged(True,True,True)
 
     def test_pending_receipt_refreshes_actual_source_and_pinned_observer(self):
         with tempfile.TemporaryDirectory() as temporary:

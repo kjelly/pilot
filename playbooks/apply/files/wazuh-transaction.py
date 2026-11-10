@@ -3027,7 +3027,22 @@ class Reader:
                 if time.monotonic() >= deadline: raise
                 time.sleep(0.05)
 
-    def qualify(self, baseline):
+    def qualify(self, baseline, mode):
+        """Qualify the native rsyslog engine that governs this reader's retained data.
+
+        ``mode`` is the reader state being qualified and is deliberately mandatory:
+        the on-disk rsyslogd, package and imfile.so identities are compared for
+        every mode (they govern the later replay of a kept cursor or queue), but a
+        live process can only be compared against them when an enabled reader is
+        running. A disabled or never-configured reader has no owned input loaded,
+        so its rsyslogd legitimately maps no imfile.so; its "unloaded" state is
+        proven by FD exclusion, not by this identity check. Admission, every later
+        boundary and recovery call this with the same mode, so a state the
+        ordinary apply converged to cannot be accepted at admission and then
+        refused at the first boundary (native run 19cfe69b, R2c/R2d).
+        """
+        if mode not in ('never', 'disabled', 'enabled'):
+            raise Refused('unknown reader baseline mode')
         engine = canonical('/usr/sbin/rsyslogd')
         qualification = READER_ENGINES.get(digest(engine))
         action = baseline.get('action', {})
@@ -3044,9 +3059,9 @@ class Reader:
         module = canonical('/usr/lib/x86_64-linux-gnu/rsyslog/imfile.so')
         if package != qualification['package'] or digest(module) != qualification['imfile_sha256']:
             raise Refused('reader package/module differs from qualified software build')
-        if baseline['pid']:
+        if mode == 'enabled' and baseline['pid']:
             info = module.stat()
-            maps = (Path('/proc') / str(baseline['pid']) / 'maps').read_text().splitlines()
+            maps = (self.PROC / str(baseline['pid']) / 'maps').read_text().splitlines()
             entries = [line.split() for line in maps if str(module) in line]
             device = format(os.major(info.st_dev), '02x') + ':' + format(os.minor(info.st_dev), '02x')
             if not entries or any(len(entry) != 6 or entry[3] != device
@@ -3143,7 +3158,7 @@ class Reader:
             result.update(spool_identity=None, cursor_present=False, queue_present=False, cursor_identity=None)
         if mode == 'disabled':
             if result['cursor_present'] or result['queue_present']:
-                result['engine'] = self.qualify(dict(observed, pid=0))
+                result['engine'] = self.qualify(observed, mode)
                 if any(name.endswith(('.da-engine', '.segq')) for name in names):
                     raise Refused('retained disabled queue uses an unqualified engine')
             if self.fds(observed['pid'], source):
@@ -3153,7 +3168,7 @@ class Reader:
             return result
         if not self.ack and not preview:
             raise Refused('configured version upgrade requires rsyslog downtime and replay acknowledgement')
-        result['engine'] = self.qualify(observed)
+        result['engine'] = self.qualify(observed, mode)
         if not result.get('spool_identity') or not result.get('cursor_present'):
             raise Refused('enabled native input lacks a qualified nonempty cursor baseline')
         native = self.cursor(dict(state, reader=result), pid=observed['pid'], retry=True)
@@ -3236,7 +3251,7 @@ class Reader:
             self.units.boundary(value['units'])
         if value.get('engine'):
             software = current if current else dict(baseline, pid=0)
-            if self.qualify(software) != value['engine']:
+            if self.qualify(software, value['mode']) != value['engine']:
                 raise Refused('native reader software/engine changed before an effect')
 
 

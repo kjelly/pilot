@@ -370,6 +370,13 @@ def inspect_reader(cold=False):
     pid = loaded_pid.stdout.strip()
     if not pid.isdecimal():
         raise ValueError('unknown reader runtime PID')
+    # Whether the running rsyslogd may be missing configuration that is on disk. A running reader
+    # must have loaded it, but a disabled or never-configured host legitimately has a profile or
+    # include newer than the process: an ordinary apply records that state without restarting
+    # rsyslog (it restarts only when it forwards). There the live process is the authority: no
+    # imfile.so mapping means no owned input was ever loaded by it (the owned configuration always
+    # loads imfile), so a newer file cannot be unloaded owned state.
+    stale = imfile_loaded = False
     if int(pid) > 0:
         argv = pathlib.Path('/proc/' + pid + '/cmdline').read_bytes().rstrip(b'\0').split(b'\0')
         if argv not in ([b'/usr/sbin/rsyslogd', b'-n', b'-iNONE'],
@@ -386,14 +393,16 @@ def inspect_reader(cold=False):
             latest = [pathlib.Path(filename).stat().st_mtime for filename in files]
             if profile.exists():
                 latest.append(profile.stat().st_mtime)
-            if latest and max(latest) > float(epoch.stdout):
-                raise ValueError('reader profile/include changes are not loaded')
+            stale = bool(latest) and max(latest) > float(epoch.stdout)
+            imfile_loaded = 'imfile.so' in pathlib.Path('/proc/' + pid + '/maps').read_text()
     hashes = {filename: hashlib.sha256(text.encode()).hexdigest() for filename, text in files.items()}
     base = {'schema': 2, 'files': hashes, 'pid': int(pid), 'imfile_inputs': [{'file': attrs.get('file', '')} for attrs, _ in inputs],
             'resources': resources, 'authorization': 'UNVALIDATED_OBSERVATIONS'}
     if not profile.exists() and not profile.is_symlink():
         if OWNER.exists() or OWNER.is_symlink() or owned_text or owned_inputs or actions:
             raise ValueError('Wazuh reader without owned profile')
+        if stale and imfile_loaded:
+            raise ValueError('reader profile/include changes are not loaded')
         return dict(base, mode_candidate='never', profile=None)
     if (profile.is_symlink() or not profile.is_file() or profile.resolve() != profile.absolute()
             or profile.stat().st_uid != 0 or profile.stat().st_nlink != 1
@@ -410,9 +419,13 @@ def inspect_reader(cold=False):
     if not value['enabled']:
         if owned_text or owned_inputs or actions:
             raise ValueError('disabled profile still has Wazuh input/action/cursor access')
+        if stale and imfile_loaded:
+            raise ValueError('reader profile/include changes are not loaded')
         # Loaded FDs are independently inspected by the transaction against
         # the actual central volume; profile strings alone cannot prove absence.
         return dict(base, mode_candidate='disabled')
+    if stale:
+        raise ValueError('reader profile/include changes are not loaded')
     if (not owned_text.startswith(HEADER + '\n') or len(owned_inputs) != 1
             or len(inputs) != 1 or len(actions) != 1 or len(modules) != 1):
         raise ValueError('Wazuh cursor is not an exclusive owned imfile namespace')
