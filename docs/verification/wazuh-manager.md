@@ -119,6 +119,12 @@ credentials、憑證及 enrollment identity。成功需驗證有效版本、可�
 舊版可用性及代表性資料。只改回舊 tag 不算恢復，恢復失敗必須明確回報。
 未完成的持久交易阻止一般套用，只能進入明確的同交易 recovery 流程。
 root-only 備份保留於 `/var/backups/pilot/wazuh`，不自動清除。
+已知限制：每次中央升級嘗試（含失敗後回復）在 `/var/backups/pilot/wazuh/central-<owner>` 留下一份
+完整冷備份，實測約 9.5–10.6 GiB（4.14.1 → 4.14.9 single-node，測試拓樸資料量），重複嘗試會累積並
+最終使停機前的備份容量檢查拒絕下一次升級。只有 `writer-inspect` 顯示沒有 journal 與 writer 時，才可以
+**以 owner 目錄為單位**手動刪除已結束嘗試的 `central-<owner>`；不得刪除 `*.lock`、`image-provenance.json`
+或仍被 journal 引用的目錄。納入 restic（見 `group_vars/restic-backup.example.yml`）時，這些冷備份會讓備份
+體積成倍增加，應先清理或另行評估。
 中央 project 與所有選取的 volume data source 必須是真實目錄且祖先沒有 symlink；
 來源本身或子樹有 mount（包含同裝置 bind mount）時，在授予 reserve／停機權限前
 拒絕。此交易不支援刪除、重建 mount root。backup store 可位於一般獨立 filesystem，
@@ -148,7 +154,9 @@ writer release，不能用 end_host 跳過 cleanup。此協調只涵蓋本版 Wa
 entrypoints，其他角色、舊版 controller 或外部 root 修改仍須獨占維護時段。
 
 版本升級 run 保留現有設定，只完成版本交易；欲改 forwarding 等設定，必須另跑
-一般 apply。C12 是不注入事件的目前狀態原生 oracle，不把「曾產生 backup 檔」
+一般 apply。升級完成後以相同參數重跑，第一次重跑即須 changed=0：官方 Docker bundle 只在
+作用中的 project 目錄缺少 compose 檔時才下載，不因請求的版本字串與保留的 project 目錄不同而下載。
+C12 是不注入事件的目前狀態原生 oracle，不把「曾產生 backup 檔」
 當作回復已成功的證明。首次開發 probe 已在 4.14.1 disposable manager 真跑；正式
 candidate 驗收須涵蓋 fresh、upgrade、故障回復與 idempotency。canary 以唯一
 synthetic nonce 從原生 analysis socket 注入，必須以 agent `000`、精確 rule
@@ -217,6 +225,19 @@ profile。欲改目的地／TLS／profile 的 mixed request 必須拒絕，先�
   offline 狀態 archive／retire／發布空 generation。cursor 與 queue 皆不存在時記錄確切 absence；
   cursor 缺少但 queue 非空仍須保留 queue，不人工 drain。另一輪 cold restore 記錄另一個 generation。
 - **已啟用**：完整執行下列 pause/resume/recovery 與 receiver 驗收，不以停用替代。
+
+「loaded runtime 一致」依 mode 判斷，且 admission、每個 boundary（pause／resume／final／retire／
+recovery／rollback）與明示 recovery 使用同一個判斷，不得在 admission 通過後於後續 boundary 改用較嚴的條件：
+
+- 從未設定與已停用：以 live rsyslogd 為權威。process 沒有映射 `imfile.so`，即證明 owned input
+  從未被這個 process 載入（`31-pilot-wazuh.conf` 一律載入 imfile），此時 profile／include 的 mtime 晚於
+  rsyslog 啟動時間不構成拒絕：一般 apply 在停用或從未設定時刻意不重啟 rsyslog。imfile 已映射
+  （例如操作者自己的 imfile input）時，仍須證明 include／profile 已載入，並以 FD 排除證明 owned input
+  已卸載。
+- retained engine 資格化（精確的 `rsyslogd`、套件與 `imfile.so` 的 on-disk identity，它們決定日後
+  重播保留的 cursor／queue 的軟體）對所有 mode 比對 on-disk identity；只有已啟用且正在執行的
+  reader 另要求 live process 映射的 `imfile.so` 與 on-disk identity 一致。停用 reader 的 live process 沒有映射
+  imfile 是正常狀態，不是 identity 漂移。
 
 停用狀態 cold restore 後仍有 retained cursor/queue 者，須在中央 finalize 前持久保存 root-owned
 replay-pending receipt，綁定 source/profile、current cursor generation 與 queued-resource
@@ -456,3 +477,4 @@ manager 與 wazuh-fim 的列；receiver 的 self-forwarding 與 real-alert deliv
 | 2026-11-05 | Issue #244 (A) | 新增 `wazuh_version` 與 C12：manager、indexer、dashboard 的原生 release 一致且所有已註冊 agent 不高於 manager；既有 stack 的任何 release 變更與 agent 新於 manager 一律在變更前 typed 拒絕。升級、備份與回復不在本版範圍。未放寬任何既有 Expected。 |
 | 2026-11-06 | Issue #244 (A) | 原生實跑後修正：從未連線或 pre-4.14 agent 的 fail closed 帶出 agent ID 並記載 `manage_agents -r` 解除方式；target chain 加入 log receiver 使 C10/C11 適用；dashboard/indexer 各自獨立讀取 release。未放寬任何 Expected。 |
 | 2026-11-09 | Issue #244 (B) | 以已合併的 A（#271）為基底重新整合受控升級（B）：版本契約由 A 負責、B 只加 writer／transaction／reader／preview；未帶 `wazuh_upgrade=true` 的版本變更仍 typed 拒絕；版本標示加上 B。未放寬任何 Expected。 |
+| 2026-11-10 | Issue #244 (B) | 原生實跑發現：從已停用且收斂的 reader 升級在 pause 之後被拒絕而無法回復（要求 live rsyslogd 映射 `imfile.so`，停用狀態本來就沒有），從未設定的全新 manager 在一般 apply 後無法升級（要求 include／profile 不晚於 rsyslog 啟動，而一般 apply 不重啟 rsyslog）。明定「loaded runtime 一致」依 mode 判斷：停用與從未設定以 live rsyslogd 未映射 imfile 作為 owned input 未載入的證明；retained engine 資格化對所有 mode 比對 on-disk identity，只有已啟用且執行中的 reader 另比對 live 映射；admission、boundary 與 recovery 共用同一判斷。升級後以相同參數重跑時，官方 Docker bundle 只在作用中的 project 缺少 compose 檔時才下載，第一次重跑即 changed=0（先前第一次重跑會再下載一次不會被使用的 bundle 並回報 changed）。補記備份不自動清除的已知限制。程式碼要求的比本 spec 的停用／未設定條文更多；未放寬任何 Expected。 |
