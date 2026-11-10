@@ -1,14 +1,11 @@
 """Behavioral controls for the real Wazuh coordinator (no host mutation).
 
-Native command harnesses are explicitly separate from VM/systemd evidence.
-Cold-backup recovery tests use real GNU tar and actual changed filesystem data.
-"""
-"""Behavioral controls for the real Wazuh version coordinator (no host mutation).
-
 The coordinator is imported and driven in-process. Native commands (dpkg, rpm,
 apt, dnf, docker, systemctl) are an explicit model: they prove the policy, the
-parsing and the ordering of the real code, not VM/native evidence. The private
-filesystem, flock and file-policy code run for real in temporary directories.
+parsing and the ordering of the real code, not VM/systemd/native evidence. The
+private filesystem, flock and file-policy code run for real in temporary
+directories; cold-backup recovery tests use real GNU tar and actual changed
+filesystem data.
 """
 import wazuh_hermetic  # noqa: F401  (tripwire first: no harness may touch real host state)
 from wazuh_models import Docker, capture

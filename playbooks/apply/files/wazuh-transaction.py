@@ -1,32 +1,20 @@
 #!/usr/bin/env python3
 """Wazuh's bounded release policy and durable, private upgrade transactions.
 
+Read-only observations of a central stack's and an agent's effective Wazuh release, one
+deterministic compatibility plan, and the native package guard of an agent (APT hold plus
+preference, or an owned DNF versionlock rule), including the signed exact fresh RPM install
+path. The invariant for every agent with an observed manager M: installed agent V <= M before
+and after apply. A fresh install is exactly the requested release, or M; a compatible
+installed agent is kept as-is. A release change of an agent or of an existing central stack
+is a typed refusal before the first mutation unless the operator authorized a controlled
+upgrade (wazuh_upgrade, 4.14.1 -> 4.14.9 only), which runs as a durable transaction below.
+
 Central transactions hold flock for their complete lifetime. Agent transactions
 span Ansible package tasks: a durable owner/phase journal reserves the resource,
 and each transition checks that owner under flock. Debian installation remains
 in apt-package-install.yml, including recovery; this module only probes APT
 plans and never performs an APT/dpkg installation.
-"""
-#!/usr/bin/env python3
-"""Wazuh release compatibility and native package protection (Issue #244, part A).
-
-Read-only observations of a central stack's and an agent's effective Wazuh
-release, one deterministic compatibility plan, and the native package guard of
-an agent (APT hold plus preference, or an owned DNF versionlock rule), including
-the signed exact fresh RPM install path. The invariant this version enforces:
-
-  for every agent with an observed manager M, installed agent V <= M before and
-  after apply. A fresh install is exactly the requested release, or M. A
-  compatible installed agent is kept as-is. Any release change of an agent or of
-  an existing central stack is a typed refusal that comes before the first
-  mutation.
-
-There is no upgrade, downgrade, backup, journal or host-wide writer here:
-the only mutating actions (agent-protect, agent-rpm-fresh) are idempotent and
-re-derivable from native state, and take one per-component flock. Debian package
-installation stays in apt-package-install.yml; this module never runs apt/dpkg
-install, dnf install (except the stage-only --downloadonly of the exact RPM), or
-touches a service.
 """
 import argparse
 import contextlib
