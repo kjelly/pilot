@@ -442,12 +442,24 @@ func TestDecommissionApplyInterruptedWhileAnotherRunHoldsTheRealLockThenResumes(
 		t.Fatal("the other run does not hold the lock")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	// The run is interrupted 1.5 s after the precheck has finished, that is, while
+	// it waits for the lock. A deadline that started with apply would also count
+	// the precheck (ansible-inventory, ansible and ansible-config, each of which
+	// starts Python): on a slow runner it used up the whole budget before the
+	// approval was recorded and the run never reached the wait this test is about.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	prevPrecheck := identityLockPrecheck
+	t.Cleanup(func() { identityLockPrecheck = prevPrecheck })
+	identityLockPrecheck = func(c context.Context, req identityLockRequest) error {
+		err := prevPrecheck(c, req)
+		time.AfterFunc(1500*time.Millisecond, cancel)
+		return err
+	}
 	started := time.Now()
 	_, err = env.applyIn(ctx)
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want the wait to end with the context's deadline", err)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the wait to end with the context's cancellation", err)
 	}
 	if time.Since(started) > 25*time.Second {
 		t.Fatalf("the run took %v to give up", time.Since(started))
