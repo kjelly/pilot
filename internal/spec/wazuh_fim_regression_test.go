@@ -261,7 +261,8 @@ type c11State struct {
 }
 
 // c11States builds the states from the committed native captures. Every state that is not an unedited capture is
-// MODELED by editing a native one (a line removed, a program renamed, an inode pair altered) and names its edit.
+// MODELED by editing a native one (a line removed, a program renamed, an inode pair altered) and names its edit; the
+// state of an EL host after a HUP with no agent restart is itself a native capture.
 func c11States(t *testing.T) []c11State {
 	t.Helper()
 	capture := func(name string) string {
@@ -286,7 +287,6 @@ func c11States(t *testing.T) []c11State {
 		}
 		return strings.Join(out, "\n")
 	}
-	isServer := func(f []string) bool { return f[1] == "ESTAB" && f[4] == endpoint }
 	isClient := func(f []string, line string) bool {
 		return f[0] == "u_str" && f[1] == "ESTAB" && strings.Contains(line, "wazuh-syscheckd")
 	}
@@ -304,8 +304,9 @@ func c11States(t *testing.T) []c11State {
 		{"listener only, no stream (agent stopped; Ubuntu 24.04 capture)", stopped, true, true, false, ""},
 		{"no endpoint at all, EL without audispd-plugins (empty AlmaLinux 9 capture)", capture("ss-xHap.audit-endpoint.no-plugin.almalinux9.txt"), false, true, false, ""},
 		{"stale socket file, nothing listens (empty Ubuntu 24.04 capture, plugin gone)", capture("ss-xHap.audit-endpoint.plugin-gone.ubuntu2404.txt"), true, true, false, ""},
-		{"EL listener after HUP alone: no syscheckd stream", edit(healthy, dropIf(func(f []string, l string) bool { return isServer(f) || isClient(f, l) })), true, true, false,
-			"AlmaLinux 9 capture without its connected pair (no native capture of this exact state is committed)"},
+		// Native AlmaLinux 9.8 (audit 3.1.5): auditd sent one SIGHUP with audispd-plugins installed and no agent restart;
+		// the capture is the endpoint-path lines of `ss -xHap` (`grep -F sockets/audit`), trailing column padding stripped.
+		{"EL listener after HUP alone: no syscheckd stream (AlmaLinux 9.8 capture)", capture("ss-xHap.audit-endpoint.hup-only.almalinux9.txt"), true, true, false, ""},
 		{"accepted server side without a syscheckd client", edit(healthy, dropIf(isClient)), true, true, false, "AlmaLinux 9 capture without the syscheckd stream line"},
 		{"syscheckd stream that is not the peer of the endpoint", edit(healthy, func(f []string, l string) (string, bool) {
 			if isClient(f, l) {

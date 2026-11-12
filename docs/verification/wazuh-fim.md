@@ -121,7 +121,8 @@ EL 的 who-data endpoint 由一般套用建立，否則套用失敗（Issue #323
   之後重啟 agent，檔案可能尚未寫出）；再對 auditd 主程序（systemd `MainPID`，以 pidfd 持有，執行檔必須是
   `/usr/sbin/auditd`）送恰好一次 SIGHUP；有上限地等待 endpoint 以有 listener 的 socket 出現；然後重啟一次
   `wazuh-agent`，並要求 syscheckd 已連線且至少一條 `wazuh_fim` kernel watch 出現（只有本次套用自己重啟 agent
-  之後才要求 watch）。
+  之後才要求 watch）。全新主機的第一次套用因此會重啟 agent 兩次（Step 11 一次、本步驟一次）；第二次套用
+  不送訊號、不重啟、`changed=0`。
 - 下列情形以 typed refusal 讓套用失敗，既有 rescue 隨後執行（rescue 永遠不重啟 auditd，SIGHUP 不回復）：
   plugin 在上限內始終不是 `active = yes`（不送訊號）；endpoint 路徑存在但不是 socket；socket 存在但沒有任何
   listener；單一次 SIGHUP 之後 endpoint 仍未出現（不重啟 agent）；重啟之後 stream 或 watch 沒有出現。
@@ -135,8 +136,8 @@ revision 的一般套用，才能帶 `wazuh_upgrade=true`。在尚未修復的�
 設定 `gpgcheck=1`），所以被拒絕的這次執行使 `/var/backups/pilot/wazuh` 增加約 22 MB，主要是 staged
 RPM：觀察到 `rpm-stage` 在拒絕後至少約 3 分鐘仍存在；保留的 root-only `agent-policy-<owner>` 目錄也留下。
 上述順序的依據是全新 AlmaLinux 9 VM（×3）上的順序探測（觀察到的事實）：僅安裝 `audispd-plugins`（不論在 agent
-之前或同時）沒有 endpoint、沒有 `wazuh_fim` watch；之後單獨對 auditd 主程序 HUP 有 endpoint 但沒有 watch（60
-秒內持續為 0）；單獨重啟 agent 什麼都沒有；HUP 之後再重啟 agent 兩者皆有；重新開機單獨即生效。操作者另觀察到
+之前或同時）沒有 endpoint、沒有 `wazuh_fim` watch；之後單獨對 auditd 主程序 HUP 有 endpoint（`ss -xHap` 只有一筆由 `audisp-af_unix` 持有的 LISTEN，沒有 ESTAB 連線）
+但沒有 watch（60 秒內持續為 0）；單獨重啟 agent 什麼都沒有；HUP 之後再重啟 agent 兩者皆有；重新開機單獨即生效。操作者另觀察到
 EL 上 `systemctl restart auditd` 被拒絕。Ubuntu 22.04（auditd 以內建的 `builtin_af_unix` 提供 af_unix，未安裝
 `audispd-plugins`）與 aarch64 不在本修復與 evidence 的涵蓋範圍（#325）。由未變更的 admission gate 推論，
 未以升級嘗試原生執行：Ubuntu 22.04 沒有外部的 `audisp-af_unix` listener，受控 agent 升級預期以

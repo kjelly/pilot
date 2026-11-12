@@ -5,7 +5,10 @@ armed) run over a temporary /proc and host tree under the production host-wide w
 Declared leaves, each shaped from the captures of an AlmaLinux 9 VM in native-captures/
 (ss-xHap.audit-endpoint.healthy.almalinux9, auditctl-l.wazuh_fim.almalinux9, af_wazuh.conf.almalinux9):
   * `ss -xHap` and `auditctl -l` answer from those captures; which of their lines are present is the modeled state
-    (listening, connected) and only the endpoint path is substituted;
+    (listening, connected) and only the endpoint path is substituted. The state "listening, no connected syscheckd"
+    (the host after a SIGHUP alone, before any agent restart) answers from a NATIVE capture of it
+    (ss-xHap.audit-endpoint.hup-only.almalinux9: the endpoint-path lines of `ss -xHap` on AlmaLinux 9.8, one LISTEN
+    line); the other partial states (stale socket, crossed stream) are derived by editing the healthy capture;
   * auditd's reaction to SIGHUP (loading the plugin, which opens the listening endpoint) and wazuh-agent's reaction
     to a restart (syscheckd connects and arms the kernel watches only if the endpoint already exists) are MODELED;
     the native fact each models is named where it is produced (they are the fresh AlmaLinux 9 sequence probes recorded
@@ -159,6 +162,12 @@ class Host:
         return self.native.__class__.run(self.native, argv, **kwargs)
 
     def ss(self):
+        if self.listening and not self.connected:
+            # NATIVE state: the listener exists, no syscheckd stream (what a SIGHUP alone leaves behind).
+            text = wazuh_models.capture('ss-xHap.audit-endpoint.hup-only.almalinux9.txt')
+            if self.listener == 'auditd':
+                text = text.replace('"audisp-af_unix"', '"auditd"')
+            return text.replace(ENDPOINT, str(self.endpoint()))
         out = []
         for line in wazuh_models.capture('ss-xHap.audit-endpoint.healthy.almalinux9.txt').splitlines():
             fields = line.split()
@@ -231,7 +240,7 @@ class WhodataEnsureTests(unittest.TestCase):
     # ---- repair paths: at most one signal and one restart, in that order ----
     def test_a_listener_without_a_connected_syscheckd_costs_one_restart_and_no_signal(self):
         # The state after HUP alone (spec section 2): the endpoint listens, but syscheckd runs in real-time with no
-        # stream. MODELED here (no native capture of this exact ss output is committed).
+        # stream. The ss answer is the native capture of exactly that state (hup-only.almalinux9).
         with self.host() as (agent, model):
             model.plugin_conf()
             model.socket_file()
