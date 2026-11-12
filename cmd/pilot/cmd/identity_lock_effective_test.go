@@ -300,6 +300,10 @@ func TestProductionIdentityLockDialsWhatTheExtraArgsSay(t *testing.T) {
 		{"-e @file overrides address, port and user, hosts left to the acquirer", file(overrides), nil, "ipa-1", "192.0.2.99", "ops", 2222},
 		{"-e key=value overrides the address", []string{"-e", "ansible_host=192.0.2.77"}, []string{"ipa-1"}, "ipa-1", "192.0.2.77", "root", 0},
 		{"-e @file target_group moves the play, hosts left to the acquirer", file("target_group: other\n"), nil, "ipa-2", "192.0.2.30", "root", 0},
+		// The accepted twin of the refusal row below, not a binding of its own:
+		// the handed host already is ipa-2, so an acquirer that ignores the
+		// extra vars passes this row too. The rows that bind the acquirer's
+		// ExtraArgs are the ones with the hosts left to it and the refusal.
 		{"-e @file target_group moves the play, the host it reaches handed over", file("target_group: other\n"), []string{"ipa-2"}, "ipa-2", "192.0.2.30", "root", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

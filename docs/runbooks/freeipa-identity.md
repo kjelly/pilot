@@ -337,9 +337,11 @@ ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（�
      `~/.ssh/config` 對 Ansible 的 ssh 與鎖的 ssh 同樣生效，不用比對；Go engine 自己的 tunnel（見下一點）。
    - **`pilot reconcile --engine golang --scope full`（混合執行）：取鎖跟著 `-e @file`／vault 檔的覆寫，Go 的 tunnel
      不會。** 鎖取在有效的位址（例如 `-e @file` 把 `ansible_host` 改了），Go 的 tunnel 只讀 inventory，
-     所以兩者可能連到不同的主機；這個 PR 沒有處理，另由 kjelly/pilot#322 追蹤。`--scope users-groups --force` 的
-     取鎖和 tunnel 都只讀 inventory，沒有這個差異。要讓兩者一致，連線變數（`ansible_host`、`ansible_port`、
-     `ansible_user`）寫在 inventory，不要只靠 `-e @file` 或 vault 檔提供。
+     所以兩者可能連到不同的主機；這個 PR 沒有處理，另由 kjelly/pilot#322 追蹤。`--scope users-groups --force` 沒有 `-e`／vault 檔的輸入，所以
+     沒有這個差異，但取鎖讀 `ansible.cfg` 與 `ANSIBLE_*`（`remote_user`、`remote_port`、`private_key_file`、
+     `ProxyJump` 等），tunnel 不讀，兩者在這些設定上仍可能不同，也由 #322 追蹤。要讓兩者一致，連線變數
+     （`ansible_host`、`ansible_port`、`ansible_user`）寫在 inventory，不要只靠 `-e @file`、vault 檔、
+     `ansible.cfg` 或環境變數提供。
    `ansible_connection` 接受 `ssh` 與 `ansible.builtin.ssh`（同一個外掛），其他（`paramiko`、`smart` 等）一律拒絕。
 4. **`--ask-vault-pass`／`--ask-become-pass`（deploy／reconcile 精靈的答案）在 ansible-playbook 裡的密碼提示
    發生在取鎖之後**：輸入密碼的時間算在持鎖時間裡，別的 pilot 執行要多等。互斥本身不受影響。
