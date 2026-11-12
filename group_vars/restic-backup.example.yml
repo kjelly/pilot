@@ -104,6 +104,11 @@ restic_s3_target_host: ""
 #   restic_backup_paths:
 #     - "/opt/pilot/wazuh-docker"
 #     - "/var/lib/docker/volumes/single-node_wazuh_etc/_data"
+#   # Controlled Wazuh upgrade backups additionally contain cold archives of
+#   # ALL discovered project volumes, configuration and exact image identities.
+#   # Include their root-only store; a live Docker volume copy alone is not a
+#   # consistent upgrade recovery backup. Backups are retained until explicit cleanup.
+#     - "/var/backups/pilot/wazuh"
 #
 #   # host_vars/detection-1.yml(中央 Detection Engine：不能直接複製執行中
 #   # 的 state.db，用 binary 自己的 `db backup`（SQLite VACUUM INTO 一致性

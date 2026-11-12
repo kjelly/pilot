@@ -1,0 +1,5 @@
+7156e261a000-7156e261d000 r--p 00000000 fd:01 6446                       /usr/lib/x86_64-linux-gnu/rsyslog/imfile.so
+7156e261d000-7156e2625000 r-xp 00003000 fd:01 6446                       /usr/lib/x86_64-linux-gnu/rsyslog/imfile.so
+7156e2625000-7156e2628000 r--p 0000b000 fd:01 6446                       /usr/lib/x86_64-linux-gnu/rsyslog/imfile.so
+7156e2628000-7156e2629000 r--p 0000e000 fd:01 6446                       /usr/lib/x86_64-linux-gnu/rsyslog/imfile.so
+7156e2629000-7156e262a000 rw-p 0000f000 fd:01 6446                       /usr/lib/x86_64-linux-gnu/rsyslog/imfile.so

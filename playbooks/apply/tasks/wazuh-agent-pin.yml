@@ -7,7 +7,7 @@
 # changed only when it actually changed the guard.
 - name: "Refuse foreign native package policy ownership before managed writes"
   ansible.builtin.command:
-    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-policy-check, --family, "{{ ansible_os_family }}"]
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-policy-check, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_writer_owner }}"]
   changed_when: false
 
 - name: "Pin the effective Debian agent version and exclude all other versions"
@@ -28,6 +28,6 @@
 
 - name: "Protect the installed version with a native APT hold or global DNF versionlock"
   ansible.builtin.command:
-    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-protect, --family, "{{ ansible_os_family }}"]
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-protect, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_writer_owner }}"]
   register: wazuh_agent_protection
   changed_when: (wazuh_agent_protection.stdout | from_json).changed | bool

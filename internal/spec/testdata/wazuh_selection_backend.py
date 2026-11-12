@@ -1,217 +1,230 @@
-"""Explicit native backend substitute for the real Ansible selection graph.
+"""Explicit native backend substitutes for the real Ansible selection graph.
 
-The production coordinator runs for real here: the compatibility planning, the
-typed refusals, the Debian dpkg/APT-hold guard (including its foreign-ownership
-refusals on a real preference file) and the C10 verification all execute their
-actual code against a modeled dpkg/rpm/apt-mark/systemctl. The EL package guard
-and the signed RPM stage are modeled (they have their own behavioral tests), as
-are repository, package-manager, service and manager observations. This is not
-native VM evidence.
+Real production owner locks, policy planning, ordinary snapshot/tar restoration
+and real Ansible include/apply/config modules are retained. Package/signature,
+service, kernel and manager observations here are modeled, not VM evidence.
 """
 import argparse
 import importlib.util
-import io
 import json
 from pathlib import Path
 import subprocess
 import sys
-import contextlib
 
-settings_file, action, *rest = sys.argv[1:]
-settings = json.loads(Path(settings_file).read_text())
-spec = importlib.util.spec_from_file_location('production', settings['library'])
-w = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(w)
-state_file = Path(settings['state'])
-state = json.loads(state_file.read_text())
-
-
-def save():
-    state_file.write_text(json.dumps(state))
-
-
-def event(name, **fields):
-    with open(settings['events'], 'a') as out:
-        out.write(json.dumps(dict(action=name, **fields)) + '\n')
-
-
+p = argparse.ArgumentParser()
+p.add_argument('settings'); p.add_argument('action')
+for field in ('owner', 'component', 'mode', 'family', 'manager', 'version', 'legacy', 'agent-id', 'agent-name',
+              'operation', 'resource', 'path', 'resources', 'artifact', 'payload', 'version-map', 'packages'):
+    p.add_argument('--' + field, default='')
+for field in ('confirm-previous-stopped', 'upgrade', 'preview', 'recover', 'canary', 'stage'):
+    p.add_argument('--' + field, action='store_true')
+a = p.parse_args()
+settings = json.loads(Path(a.settings).read_text())
+s = importlib.util.spec_from_file_location('production', settings['library']); w = importlib.util.module_from_spec(s); s.loader.exec_module(w)
+mounts = w.MountTable; w.MountTable = lambda: mounts('1 0 8:1 / / rw - ext4 /dev/synthetic rw\n')
+filename = Path(settings['state']); state = json.loads(filename.read_text())
+host = w.HostWriter(settings['root'])
+def save(): filename.write_text(json.dumps(state))
+def event(action, **fields):
+    with open(settings['events'], 'a') as out: out.write(json.dumps(dict(action=action, **fields)) + '\n')
+def pkg_version(): return state['installed']
 class Native:
-    """dpkg / rpm / apt-mark / apt-cache / wazuh-control / systemctl model."""
     def run(self, argv, **kwargs):
-        argv = [str(value) for value in argv]
-        version = state['installed']
+        argv = [str(v) for v in argv]
+        if argv[0] in ('tar', 'du'): return w.Runner().run(argv, **kwargs)
+        if argv[0] == 'systemctl':
+            operation, unit = argv[1:3]; service = state['services'][unit]
+            if operation == 'is-active': return subprocess.CompletedProcess(argv, 0 if service['active'] else 3, 'active' if service['active'] else 'inactive', '')
+            if operation == 'is-enabled': return subprocess.CompletedProcess(argv, 0 if service['enabled'] == 'enabled' else 1, service['enabled'], '')
+            if operation == 'show': return subprocess.CompletedProcess(argv, 0, 'no', '')
+            if operation in ('start', 'restart'):
+                if operation == 'restart' or not service['active']: service['generation'] += 1
+                service['active'] = True
+            elif operation == 'stop': service['active'] = False
+            elif operation in ('enable', 'disable'): service['enabled'] = 'enabled' if operation == 'enable' else 'disabled'
+            else: raise AssertionError(argv)
+            event('service', operation=operation, unit=unit); save()
+            return subprocess.CompletedProcess(argv, 0, '', '')
         if argv[0] == 'dpkg-query':
-            if not version:
-                return subprocess.CompletedProcess(argv, 1, '', 'dpkg-query: no packages found matching wazuh-agent\n')
-            return subprocess.CompletedProcess(argv, 0, ('hold' if state['protected'] else 'install') + ' ok installed\t' + version + '\tamd64', '')
-        if argv[:2] == ['rpm', '-q']:
-            if not version:
-                return subprocess.CompletedProcess(argv, 1, 'package wazuh-agent is not installed\n', '')
-            return subprocess.CompletedProcess(argv, 0, version + '\tx86_64', '')
+            value = ('hold' if state['protected'] else 'install') + ' ok installed\t' + pkg_version() + '\tamd64'
+            return subprocess.CompletedProcess(argv, 0, value, '') if pkg_version() else subprocess.CompletedProcess(argv, 1, '', 'dpkg-query: no packages found matching wazuh-agent\n')
         if argv[0] == 'dpkg':
             return subprocess.CompletedProcess(argv, 0, 'wazuh-agent\t' + ('hold' if state['protected'] else 'install') + '\n', '')
         if argv[:2] == ['apt-mark', 'showhold']:
             return subprocess.CompletedProcess(argv, 0, 'wazuh-agent\n' if state['protected'] else '', '')
         if argv[:2] == ['apt-mark', 'hold']:
-            state['protected'] = True; state['protected_version'] = version; save()
-            event('protected', version=version)
+            state['protected'] = True; state['protected_version'] = pkg_version(); save()
+            event('protected', version=pkg_version())
             return subprocess.CompletedProcess(argv, 0, '', '')
         if argv[:2] == ['apt-cache', 'policy']:
-            return subprocess.CompletedProcess(argv, 0, '  Installed: ' + (version or '(none)') + '\n  Candidate: 4.14.9-1\n', '')
+            return subprocess.CompletedProcess(argv, 0, '  Installed: ' + (pkg_version() or '(none)') + '\n  Candidate: 4.14.9-1\n', '')
         if argv[0] == '/var/ossec/bin/wazuh-control':
-            return subprocess.CompletedProcess(argv, 0, 'WAZUH_VERSION="v' + version.rsplit('-', 1)[0] + '"\n', '')
-        if argv[:2] == ['systemctl', 'is-active']:
-            active = state['services'][argv[2]]['active']
-            return subprocess.CompletedProcess(argv, 0 if active else 3, '', '')
+            return subprocess.CompletedProcess(argv, 0, 'WAZUH_VERSION="v' + pkg_version().rsplit('-', 1)[0] + '"\n', '')
+        if argv[:2] == ['rpm', '-q']:
+            return subprocess.CompletedProcess(argv, 0, pkg_version() + '\tx86_64', '') if pkg_version() else subprocess.CompletedProcess(argv, 1, 'package wazuh-agent is not installed\n', '')
         raise AssertionError(argv)
-
-    def json(self, argv, **kwargs):
-        raise AssertionError(argv)
-
-
-class ModelGuard:
-    """EL guard model: the real PackageGuard is covered by its own behavioral tests."""
-    def ownership(self):
-        if state.get('foreign_policy'):
-            raise w.Refused('foreign ownership at the managed native package policy')
-        return {'plugin': {'present': True}}
-
-    def protect(self, package):
-        self.ownership()
-        changed = not (state['protected'] and state['protected_version'] == package)
-        state['protected'], state['protected_version'] = True, package; save()
-        event('protected', version=package)
-        return {'guard': 'dnf-global-versionlock', 'changed': changed}
-
-    def verify(self, package):
-        if not state['protected'] or state['protected_version'] != package:
-            raise w.Refused('native global Wazuh versionlock differs from installed package')
-        return {'guard': 'dnf-global-versionlock'}
-
-
-def coordinate(arguments):
-    """Run the real w.main() over the model; return (rc, stdout)."""
-    native = Native()
-    sys.argv = ['wazuh-transaction.py', *arguments]
-    w.ROOT = Path(settings['root'])
-    mounts = w.MountTable
-    w.MountTable = lambda text=None: mounts('1 0 8:1 / / rw - ext4 /dev/synthetic rw\n' if text is None else text)
-    w.PackageGuard.PREF = settings['preference']
-    w.is_root = lambda: True
-    w.Runner = lambda: native
-    if '--family' in arguments and arguments[arguments.index('--family') + 1] == 'RedHat':
-        w.Agent.guard = lambda self: ModelGuard()
-    captured = io.StringIO()
-    with contextlib.redirect_stdout(captured):
-        rc = w.main()
-    return rc, captured.getvalue()
-
-
-def refuse(text):
-    print(json.dumps(w.typed_error('refused', text)))
-    event('refused', reason=text)
-    sys.exit(1)
-
-
-def main():
-    global action
-    parser = argparse.ArgumentParser()
-    for field in ('family', 'manager', 'version', 'legacy', 'owner', 'packages', 'payload', 'version-map'):
-        parser.add_argument('--' + field, default='')
-    args, passthrough = parser.parse_known_args(rest)
-    event(action)
-    if action in ('agent-check', 'agent-policy-check', 'agent-protect', 'agent-verify'):
-        if action == 'agent-protect' and state.get('fail_protect'):
-            refuse('controlled protection failure')
-        if action == 'agent-verify' and settings.get('fail_verify'):
-            refuse('controlled stable C10 failure')
-        arguments = [action, '--family', args.family]
-        if action == 'agent-check':
-            arguments += ['--manager', args.manager, '--version', args.version]
-        rc, text = coordinate(arguments)
-        value = json.loads(text)
-        if rc:
-            event('refused', reason=value['error'])
-        elif action == 'agent-check':
-            state['plan'] = value; save()
-        print(text, end='')
-        sys.exit(rc)
-    if action == 'manager-version':
-        if settings.get('manager_error'):
-            refuse('operation failed: docker rc=1')
-        print(json.dumps({'version': settings['manager']}))
+native = Native()
+def own():
+    marker = host.active()
+    if not marker: raise w.Refused('native substitute has no writer')
+    return marker['owner']
+def transaction(): return w.Transaction('agent', root=settings['root'], runner=native)
+def install(packages, version=''):
+    for package in packages:
+        if package == 'wazuh-agent':
+            if state['repo'] != 'official' or not state['key']: raise w.Refused('official source/provenance missing before package replacement')
+            if not version or w.version(version.rsplit('-', 1)[0]) > w.version(settings['manager']): raise w.Refused('exact install escaped manager compatibility')
+            state['installed'] = version; state['protected'] = False
+            if settings.get('drift_preference'):
+                Path(settings['preference']).write_text('Package: *\nPin: release a=foreign\nPin-Priority: 900\n')
+                Path(settings['preference']).chmod(0o644)
+            event('install-agent', version=version)
+        else:
+            event('install-prerequisite', package=package)
+    save()
+def runtime(): return {'version': pkg_version().rsplit('-', 1)[0], 'active': state['services']['wazuh-agent']['active'], 'id': '001', 'name': 'localhost'}
+try:
+    action = a.action; event(action)
+    if action == 'writer-claim': result = host.claim(a.owner, a.component, a.mode)
+    elif action == 'writer-resume': result = host.resume(a.owner, a.component, a.mode, a.confirm_previous_stopped)
+    elif action == 'writer-release': result = host.release(a.owner)
+    elif action == 'manager-version':
+        if settings.get('manager_error'): raise w.Refused('operation failed: docker rc=1')
+        with host.reader('central'): result = {'version': settings['manager']}
+    elif action == 'agent-check':
+        result = w.Agent(a.family, root=settings['root'], runner=native).check(a.manager, a.version, a.upgrade, a.owner)
+        state['plan'] = result; save()
+    elif action in ('agent-config-save', 'agent-config-restore'):
+        snapshot = w.ConfigSnapshots(a.owner, a.operation, runner=native, root=settings['root'], paths=settings['paths'])
+        if action == 'agent-config-save':
+            selected = w.ConfigSnapshots.FILES.get(a.resource) if a.path == settings['paths'].get(a.resource) else a.path
+            result = snapshot.save(a.resource, selected)
+        else:
+            result = snapshot.restore(json.loads(a.resources)); event('ordinary-restored', **result)
+    elif action == 'agent-policy-check' and settings.get('real_guard') and a.family == 'Debian':
+        w.PackageGuard.PREF = settings['preference']
+        result = w.Agent(a.family, root=settings['root'], runner=native).policy_ownership(a.owner)
+    elif action == 'agent-protect' and settings.get('real_guard') and a.family == 'Debian':
+        w.PackageGuard.PREF = settings['preference']
+        result = w.Agent(a.family, root=settings['root'], runner=native).protect_package(a.owner)
+        state['protected_version'] = pkg_version(); save()
+    elif action == 'agent-policy-check':
+        with host.guard(a.owner, 'agent'):
+            if state.get('foreign_policy'): raise w.Refused('foreign ownership at managed native package policy')
+            result = {'checked': True, 'prerequisite_plugin_present': True}
+    elif action == 'agent-protect':
+        with host.guard(a.owner, 'agent'):
+            if not pkg_version(): raise w.Refused('cannot protect absent package')
+            # The real coordinator reports `changed` exactly when it changed the native guard (idempotent).
+            changed = not (state['protected'] and state['protected_version'] == pkg_version())
+            state['protected'] = True; state['protected_version'] = pkg_version(); save()
+            if changed: event('protected', version=pkg_version())
+            result = {'guard_verified': True, 'changed': changed}
     elif action == 'agent-rpm-fresh':
-        if state['repo'] != 'official' or not state['key']:
-            refuse('official RPM source/provenance missing')
-        plan = json.loads(sys.stdin.read())
-        event('artifact-provenance', version=plan['package'])
-        print(json.dumps({'package_path': '/private/wazuh-agent-' + plan['package'] + '.x86_64.rpm', 'dnf_conf_file': '/private/identical.conf'}))
-    elif action == 'install-coordinator':
-        print('{}')
+        with host.guard(a.owner, 'agent'):
+            if state['repo'] != 'official' or not state['key']: raise w.Refused('official RPM source/provenance missing')
+            event('artifact-provenance', version=state['plan']['package'])
+            result = {'package_path': '/private/wazuh-agent_' + state['plan']['package'] + '_amd64.deb', 'dnf_conf_file': '/private/identical.conf'}
+    elif action == 'agent-stage':
+        with host.guard(a.owner, 'agent'):
+            plan = json.load(sys.stdin)
+            result = {'ready': True, 'dnf_configs': {v: '/private/identical.conf' for v in (plan['installed'], plan['package'])}}
+    elif action == 'agent-reserve':
+        plan = json.load(sys.stdin)
+        with host.guard(a.owner, 'agent'):
+            if set((plan['installed'], plan['package'])) - set(state['staged']): raise w.Refused('exact old/new artifacts were not staged')
+            with transaction().component_lock():
+                item = transaction().begin(a.owner, dict(plan, previous_protected=state['protected'], original={key: Path(value).read_text() for key, value in settings['paths'].items()}))
+                transaction().write(item, 'staged')
+            result = {'backup': item['backup']}
+    elif action == 'agent-backup':
+        with host.guard(a.owner, 'agent'):
+            item = transaction().owned(a.owner, ('staged',)); transaction().write(item, 'backed-up'); state['services']['wazuh-agent']['active'] = False; save(); result = {}
+    elif action == 'agent-install':
+        with host.guard(a.owner, 'agent'):
+            item = transaction().owned(a.owner, ('backed-up',)); transaction().write(item, 'installing')
+            result = {'package_path': '/private/wazuh-agent_' + item['package'] + '_amd64.deb', 'dnf_conf_file': '/private/identical.conf'}
+    elif action in ('agent-apt-plan', 'agent-hook-prepare', 'agent-hook-cleanup'):
+        with host.guard(a.owner, 'agent'):
+            if not a.stage: transaction().owned(a.owner, ('installing', 'recovering'))
+            result = {'authorized': True}
+    elif action == 'agent-activate':
+        with host.guard(a.owner, 'agent'):
+            transaction().owned(a.owner, ('installing',)); state['services']['wazuh-agent']['active'] = True; save(); result = {}
+    elif action == 'agent-runtime': result = runtime()
+    elif action == 'verify-agent':
+        with host.reader('central'):
+            if not runtime()['active'] or a.version != runtime()['version']: raise w.Refused('native manager identity/version mismatch')
+            result = {'checked': True}
+    elif action == 'agent-commit':
+        with host.guard(a.owner, 'agent'):
+            item = transaction().owned(a.owner, ('installing',))
+            if settings.get('fail_commit'): raise w.Refused('controlled commit failure')
+            if not state['protected'] or pkg_version() != item['package'] or not runtime()['active']: raise w.Refused('commit lacks installed/protected/active target')
+            transaction().finish(item, 'committed'); result = {'committed': True}
+    elif action == 'agent-verify':
+        with host.reader('agent', a.owner):
+            transaction().idle()
+            if settings.get('fail_verify') or not state['protected'] or not runtime()['active']: raise w.Refused('controlled stable C10 failure')
+            result = {'pass': True}
+    elif action == 'agent-recovery':
+        with host.guard(a.owner, 'agent'):
+            item = transaction().owned(a.owner); transaction().write(item, 'recovering')
+            result = {'version': item['installed'], 'reinstall': True, 'restored': False, 'need_commit': True, 'manager_host': 'localhost',
+                      'package_path': '/private/wazuh-agent_' + item['installed'] + '_amd64.deb', 'dnf_conf_file': '/private/identical.conf', 'dnf_action': 'downgrade'}
+    elif action == 'agent-restore':
+        with host.guard(a.owner, 'agent'):
+            item = transaction().owned(a.owner, ('recovering',))
+            for key, text in item['original'].items(): Path(settings['paths'][key]).write_text(text)
+            state['installed'] = item['installed']; state['protected'] = item['previous_protected']; state['services']['wazuh-agent']['active'] = True; save()
+            transaction().write(item, 'restored'); result = {'restored': True}
+    elif action == 'agent-recovery-commit':
+        with host.guard(a.owner, 'agent'):
+            item = transaction().owned(a.owner, ('restored',)); transaction().finish(item, 'recovered'); result = {'restored': True}
     elif action == 'artifact-proof':
-        versions = json.loads(args.version_map or '{}')
+        versions = json.loads(a.version_map or '{}')
         if versions:
-            if state['repo'] != 'official' or not state['key']:
-                refuse('official APT source/provenance missing')
+            if state['repo'] != 'official' or not state['key']: raise w.Refused('official APT source/provenance missing')
             for version in versions.values():
+                if version not in state['staged']: state['staged'].append(version)
                 event('artifact-provenance', version=version)
-        print('[]')
-    elif action == 'package-install':
-        names = json.loads(args.packages)
-        if isinstance(names, str):
-            names = [names]
-        for name in names:
-            if name.startswith('wazuh-agent') or 'wazuh-agent' in name:
-                version = name.split('=', 1)[1] if '=' in name else name.rsplit('wazuh-agent-', 1)[1].removesuffix('.x86_64.rpm')
-                if state['repo'] != 'official' or not state['key']:
-                    refuse('official source/provenance missing before package replacement')
-                if state['installed']:
-                    refuse('the exact install must never replace an installed agent')
-                if w.version(version.rsplit('-', 1)[0]) > w.version(settings['manager'] or '4.14.9'):
-                    refuse('exact install escaped manager compatibility')
-                state['installed'], state['protected'] = version, False
-                if settings.get('drift_preference'):
-                    # A foreign party claims the managed preference path after the first ownership check.
-                    Path(settings['preference']).write_text('Package: *\nPin: release a=foreign\nPin-Priority: 900\n')
-                    Path(settings['preference']).chmod(0o644)
-                state['services']['wazuh-agent']['active'] = settings.get('policy_rc_d_active', False) or state['services']['wazuh-agent']['active']
-                event('install-agent', version=version)
-            else:
-                event('install-prerequisite', package=name)
-        save()
-        print('{}')
-    elif action == 'source':
-        payload = json.loads(args.payload); kind = payload['kind']
-        if kind == 'key':
-            state['key'] = True
-        if kind == 'repo':
-            state['repo'] = 'official'; state['key'] = True if args.family == 'RedHat' else state['key']
-        save(); event('source-ready', kind=kind)
-        print('{}')
-    elif action == 'service-module':
-        payload = json.loads(args.payload); unit = payload['name']
-        service = state['services'][unit]
-        if payload.get('state') == 'restarted' or not service['active']:
-            service['generation'] += 1
-        service['active'] = True; service['enabled'] = 'enabled'
-        save(); event('service', unit=unit, state=payload.get('state'))
-        print('{}')
-    elif action in ('fault-before', 'fault-partial'):
-        if action == 'fault-partial':
-            target = Path(settings['paths'][settings['fault_resource']]); target.write_text(target.read_text() + '\nPARTIAL MUTATION\n')
-        refuse('controlled selected mutator failure')
-    elif action == 'metadata':
-        print('{}')
+            save()
+        result = []
     elif action == 'native-probe':
-        payload = json.loads(args.payload)
+        payload = json.loads(a.payload)
         argv = payload.get('argv', []); text = ''
         if 'apt-cache' in argv:
             text = 'Package: wazuh-agent\nVersion: 4.14.1-1\nArchitecture: amd64\nFilename: synthetic.deb' if 'show' in argv else '  Candidate: 1'
+        elif 'apt-get' in argv and '--no-download' in argv:
+            item = transaction().owned(own(), ('recovering',)); install(['wazuh-agent'], item['installed'])
         elif 'dnf' in argv and '--downloadonly' in argv:
-            event('artifact-provenance', version='downloaded')
-        print(text)
-    else:
-        refuse('unknown selection backend action: ' + action)
-
-
-main()
+            version = next(v for v in (state['plan']['installed'], state['plan']['package']) if 'wazuh-agent-' + v + '.x86_64' in argv)
+            state['staged'].append(version); save(); event('artifact-provenance', version=version)
+        elif 'dnf' in argv and ('reinstall' in argv or 'downgrade' in argv):
+            item = transaction().owned(own(), ('recovering',)); install(['wazuh-agent'], item['installed'])
+        print(text); sys.exit(0)
+    elif action == 'package-install':
+        packages = json.loads(a.packages)
+        if isinstance(packages, str): packages = ['wazuh-agent'] if 'wazuh-agent' in packages else [packages]
+        version = state['plan']['package'] if 'wazuh-agent' in packages else ''
+        item = transaction().active()
+        if item and item['phase'] == 'recovering': version = item['installed']
+        install(packages, version); result = {}
+    elif action == 'source':
+        payload = json.loads(a.payload); kind = payload['kind']
+        if kind == 'key': state['key'] = True
+        if kind == 'repo': state['repo'] = 'official'; state['key'] = True if a.family == 'RedHat' else state['key']
+        save(); event('source-ready', kind=kind); result = {}
+    elif action == 'service-module':
+        payload = json.loads(a.payload); unit = payload['name']
+        if 'enabled' in payload: native.run(['systemctl', 'enable' if payload['enabled'] else 'disable', unit])
+        native.run(['systemctl', 'restart' if payload['state'] == 'restarted' else 'start', unit]); result = {}
+    elif action in ('fault-before', 'fault-partial'):
+        if action == 'fault-partial':
+            target = Path(settings['paths'][settings['fault_resource']]); target.write_text(target.read_text() + '\nPARTIAL MUTATION\n')
+        raise w.Refused('controlled selected mutator failure')
+    elif action == 'metadata': result = {}
+    else: raise w.Refused('unknown selection backend action: ' + action)
+    print(json.dumps(result))
+except w.Refused as error:
+    event('refused', reason=str(error)); print(json.dumps(w.typed_error('refused', str(error)))); sys.exit(1)

@@ -1,0 +1,82 @@
+---
+- name: "Restore only the owned global policy hook after the previous installer has stopped"
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-hook-cleanup, --family, Debian, --owner, "{{ wazuh_agent_transaction_owner }}", --confirm-previous-stopped]
+  changed_when: false
+  when: ansible_os_family == 'Debian'
+
+- name: "Enter recovery for the exact durable agent owner"
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-recovery, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
+  register: wazuh_agent_recovery_result
+  changed_when: false
+
+- name: "Reinstall the retained old Debian agent through the shared APT framework"
+  ansible.builtin.include_tasks:
+    file: apt-package-install.yml
+    apply:
+      tags: [always]
+  vars:
+    pilot_apt_packages: [wazuh-agent]
+    pilot_apt_versions: "{{ {'wazuh-agent': (wazuh_agent_recovery_result.stdout | from_json).version} }}"
+    pilot_apt_allow_downgrade: true
+    pilot_apt_policy_rc_d: 101
+    pilot_apt_policy: offline
+    pilot_apt_recovery_artifact: "{{ (wazuh_agent_recovery_result.stdout | from_json).package_path }}"
+    pilot_apt_wazuh_owner: "{{ wazuh_agent_transaction_owner }}"
+    pilot_apt_reinstall_retained: true
+    pilot_apt_component: wazuh-fim-recovery
+  when:
+    - ansible_os_family == 'Debian'
+    - (wazuh_agent_recovery_result.stdout | from_json).reinstall
+
+- name: "Reinstall the retained signed old RPM agent"
+  ansible.builtin.command:
+    argv: [timeout, --kill-after=30, '900', dnf, -c, "{{ (wazuh_agent_recovery_result.stdout | from_json).dnf_conf_file }}", -y, --disableexcludes=wazuh, --setopt=gpgcheck=1, --setopt=localpkg_gpgcheck=1, "{{ (wazuh_agent_recovery_result.stdout | from_json).dnf_action }}", "{{ (wazuh_agent_recovery_result.stdout | from_json).package_path }}"]
+  register: wazuh_agent_rpm_reinstall
+  # Reported from what dnf did: a transaction that found nothing to do is not a
+  # change. Anything else, including unfamiliar output, stays changed (fail safe).
+  changed_when: (wazuh_agent_rpm_reinstall.stdout | default('')) is not search('(?m)^Nothing to do[.]$')
+  no_log: true
+  when:
+    - ansible_os_family == 'RedHat'
+    - (wazuh_agent_recovery_result.stdout | from_json).reinstall
+
+- name: "Restore cold agent state and verify previous availability and identity"
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-restore, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
+  changed_when: false
+  when: not (wazuh_agent_recovery_result.stdout | from_json).restored
+
+- name: "Observe the restored native agent and original enrollment identity"
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-runtime, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
+  register: wazuh_agent_restored_runtime
+  changed_when: false
+  when: (wazuh_agent_recovery_result.stdout | from_json).need_commit
+
+- name: "Manager must observe the original active identity and version after recovery"
+  ansible.builtin.script:
+    cmd: >-
+      ../files/wazuh-transaction.py verify-agent
+      --agent-id {{ (wazuh_agent_restored_runtime.stdout | from_json).id | quote }}
+      --agent-name {{ (wazuh_agent_restored_runtime.stdout | from_json).name | quote }}
+      --version {{ (wazuh_agent_restored_runtime.stdout | from_json).version | quote }}
+    executable: python3
+  delegate_to: "{{ (wazuh_agent_recovery_result.stdout | from_json).manager_host | default(inventory_hostname, true) }}"
+  register: wazuh_agent_recovered_registry
+  changed_when: false
+  until: wazuh_agent_recovered_registry is succeeded
+  retries: 12
+  delay: 5
+  when:
+    - (wazuh_agent_recovery_result.stdout | from_json).need_commit
+    - (wazuh_agent_recovery_result.stdout | from_json).manager_host | length > 0
+    - (wazuh_agent_restored_runtime.stdout | from_json).active
+    - (wazuh_agent_restored_runtime.stdout | from_json).id is defined
+
+- name: "Commit recovery only after local and applicable central observations"
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-recovery-commit, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_agent_transaction_owner }}"]
+  changed_when: false
+  when: (wazuh_agent_recovery_result.stdout | from_json).need_commit
