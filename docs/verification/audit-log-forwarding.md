@@ -1,6 +1,6 @@
 # Verification Spec — audit-log-forwarding（auditd 稽核規則 + rsyslog 轉送至 SIEM）
 
-> 版本：v2.1
+> 版本：v2.2
 > 對齊規範：pilot 通用 config-only 服務規範；轉送目標為
 > `docs/verification/log-server.md`（rsyslog 中央接收端），兩份 spec 搭配構成
 > 一組 Shape 3（client+server）。
