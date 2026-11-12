@@ -1840,9 +1840,7 @@ Scanned every captured step output for 0 secret-named value(s): no hit among sca
 
 ## Failure paths and arms (fill in)
 
-> Carried over from the record for `fe44f7118c2c`; re-check against this candidate.
-
-Arms A, B, C, E and G ran outside the chain, on single disposable AlmaLinux 9.8 VMs (audit 3.1.5-8, SELinux enforcing, no `service` command), with the pilot built from a clean `git archive` of candidate `2c3bb1e4` (tree `a608bb597dea9219ee1ef89000008941cbcbf0a4`). The chain above tested the later candidate `b84c0059`; `playbooks/**` and `contracts/**` are identical between the two (`git diff` is empty), and the later commits changed only `docs/verification/wazuh-fim.md` text, the C11 row's EL discriminator (an `if` on `command -v rpm` instead of `/etc/redhat-release`), one native capture file and test files. The arms' spec verifies therefore ran the earlier C11 row; the chain ran the final row natively (C11 passes on the EL agent). No arm was repeated after `2c3bb1e4`. BASE is `f1000213`. The journal checks quoted below (auditd reload and agent restart counts, apply 2 and apply 3) were read live from the VM during the run and were not kept as separate artifacts; the recaps, rc, verify rows and state files were kept.
+Arms A, B, C, E and G ran outside the chain, on single disposable AlmaLinux 9.8 VMs (audit 3.1.5-8, SELinux enforcing, no `service` command), with the pilot built from a clean `git archive` of candidate `2c3bb1e4` (tree `a608bb597dea9219ee1ef89000008941cbcbf0a4`). The chain above tested the later candidate `b84c0059`; `playbooks/**` and `contracts/**` are identical between the two (`git diff` is empty), and the later commits changed only `docs/verification/wazuh-fim.md` text, the C11 row's EL discriminator (an `if` on `command -v rpm` instead of `/etc/redhat-release`), one native capture file and test files. The arms' spec verifies therefore ran the earlier C11 row; the chain ran the final row natively (C11 passes on the EL agent). No arm was repeated after `2c3bb1e4`. BASE is `f1000213`. What was kept as an artifact: the apply logs and PLAY RECAPs of every arm; the state files of arms A, A' and B; the verify rows of arms A, B, C (after recovery) and E. Everything else below was read live from the VM during the run and was not kept: the journal checks (auditd reload and agent restart counts, apply 2 and apply 3), arm C's no-endpoint, unchanged `ossec.conf` and agent-not-restarted checks, arm E's `ss`/`auditctl` states (including the empty rule list after `augenrules --load`) and all of arm G's stream and watch states.
 
 | Arm | Start state | What was done | Observed |
 |---|---|---|---|
@@ -1857,8 +1855,6 @@ In the chain itself the three nodes were fresh: the EL agent (`wf244-el`) enroll
 
 ## Not covered / limits (fill in)
 
-> Carried over from the record for `fe44f7118c2c`; re-check against this candidate.
-
 - Ubuntu 22.04 and aarch64 are outside the contract by maintainer decision and were not run, and no EL image other than AlmaLinux 9.8 (audit 3.1.5-8) was run; an EL host whose auditd provides a built-in af_unix listener was exercised only in unit tests with a derived capture.
 - C11 is vacuous on the Debian family by design: no row in this record asserts who-data on Ubuntu. The Ubuntu nodes show only that the apply and the other rows are unchanged.
 - C11 does not require kernel `wazuh_fim` watches (they are required only inside the ensure after its own restart), so a host whose watches were flushed by `audit-log-forwarding` still passes C11. That flush is #324 and was reproduced, not fixed.
@@ -1867,4 +1863,5 @@ In the chain itself the three nodes were fresh: the EL agent (`wf244-el`) enroll
 - The bounds of the ensure (60 s plugin file, 30 s listener, 30 s client grace, 60 s ready) were exercised only at the listener bound, by the deliberate fault of arm C (the refusal came after about 30 s); in arms B, E and G the endpoint and connection appeared within seconds of the single reload and restart. Whether the plugin-file wait or the client grace was exercised was not observed, and no slow host was tested; a host that exceeds one of the bounds gets a typed refusal (or one extra agent restart for the client grace).
 - The native `ss -xHap` captures used by the arms were filtered to the endpoint path, so the `wazuh-syscheckd` client line was not captured natively there; its shape rests on the stored AlmaLinux 9 capture.
 - The unit-test fixtures other than the healthy and HUP-only states are derived or from earlier native captures, and time in the coordinator tests is simulated.
+- The ensure signals auditd through `os.pidfd_open` and `signal.pidfd_send_signal`, which need Python 3.9 or newer on the target; this was exercised only on AlmaLinux 9.8 (Python 3.9). An older interpreter would fail the step visibly with an untyped error (nothing is signalled). No guard was added, to keep the executable content the arms ran.
 - Cleanup: arm VMs and the chain's ephemeral topology were removed; no pre-existing VM was touched.
