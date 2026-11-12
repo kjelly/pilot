@@ -271,6 +271,112 @@ func TestIdentityLockTargetAgreesWithTheHostsThePlaybookRunsOn(t *testing.T) {
 	})
 }
 
+// The tests above call identityLockTarget, the derivation. What takes the lock is
+// productionIdentityLock, whose acquirer builds the derivation's request from its
+// own: an acquirer that dropped req.ExtraArgs (#319 reopened at the last hop)
+// leaves every test above green, because none of them goes through it. This one
+// starts the real acquirer with the real ansible tools, only the ssh program
+// replaced, and reads where the lock was dialed: the target the dialer was built
+// for and the destination of the ssh process the stand-in logged. What it
+// expects is what the fixture file says and what Ansible itself reports for the
+// same arguments, not a second call of the code under test. The rows without
+// arguments dial the inventory's own address, so an acquirer that ignores the
+// arguments and one that honors them cannot both pass.
+func TestProductionIdentityLockDialsWhatTheExtraArgsSay(t *testing.T) {
+	file := func(body string) []string { return []string{"-e", "@" + writeVarsFile(t, body)} }
+	const overrides = "ansible_host: 192.0.2.99\nansible_port: 2222\nansible_user: ops\n"
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		hosts    []string // what the funnel hands over; nil asks the acquirer to resolve them
+		wantHost string   // the inventory name that is locked
+		wantAddr string
+		wantUser string
+		wantPort int
+	}{
+		{"no extra arguments, hosts left to the acquirer (access, decommission)", nil, nil, "ipa-1", "192.0.2.10", "root", 0},
+		{"no extra arguments, hosts handed over (deploy runner)", nil, []string{"ipa-1"}, "ipa-1", "192.0.2.10", "root", 0},
+		{"-e @file overrides address, port and user, hosts handed over", file(overrides), []string{"ipa-1"}, "ipa-1", "192.0.2.99", "ops", 2222},
+		{"-e @file overrides address, port and user, hosts left to the acquirer", file(overrides), nil, "ipa-1", "192.0.2.99", "ops", 2222},
+		{"-e key=value overrides the address", []string{"-e", "ansible_host=192.0.2.77"}, []string{"ipa-1"}, "ipa-1", "192.0.2.77", "root", 0},
+		{"-e @file target_group moves the play, hosts left to the acquirer", file("target_group: other\n"), nil, "ipa-2", "192.0.2.30", "root", 0},
+		{"-e @file target_group moves the play, the host it reaches handed over", file("target_group: other\n"), []string{"ipa-2"}, "ipa-2", "192.0.2.30", "root", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := writeEffectiveInventory(t, effectiveInventory)
+			seam := useLocalLockDialer(t)
+			held, err := productionIdentityLock(identityLockRequest{Inventory: inv, Hosts: tc.hosts, ExtraArgs: tc.args})(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = held.Release() }()
+			if held.Host != tc.wantHost {
+				t.Fatalf("the lock is on %q, want %q", held.Host, tc.wantHost)
+			}
+			targets := seam.started()
+			if len(targets) != 1 {
+				t.Fatalf("started %d ssh dialers, want 1", len(targets))
+			}
+			if got := targets[0]; got.Host != tc.wantAddr || got.Port != tc.wantPort || got.User != tc.wantUser {
+				t.Fatalf("the acquirer dialed %+v, want %s port %d user %s", got, tc.wantAddr, tc.wantPort, tc.wantUser)
+			}
+			destinations := seam.sshDestinations(t)
+			if len(destinations) == 0 {
+				t.Fatal("no ssh process was started for the lock")
+			}
+			for _, destination := range destinations {
+				if destination != tc.wantAddr {
+					t.Fatalf("ssh was started for %q, want %s (all of %q)", destination, tc.wantAddr, destinations)
+				}
+			}
+			if oracle := ansibleHostVar(t, inv, tc.wantHost, "ansible_host", tc.args...); oracle != tc.wantAddr {
+				t.Fatalf("Ansible reports ansible_host %v for the same arguments, the test expects %s", oracle, tc.wantAddr)
+			}
+		})
+	}
+
+	// The refusals the arguments cause happen at the acquirer too, and nothing is
+	// dialed; the same request without the argument is accepted.
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		wantIn []string
+	}{
+		{"a run handed a host the extra vars' target_group does not reach", file("target_group: other\n"), []string{"鎖與 playbook 的目標會不同台", "ipa-1", "other", "ipa-2"}},
+		{"a connection setting only the extra vars carry", file("ansible_ssh_extra_args: \"-o ProxyCommand='nc %h %p'\"\n"), []string{"ProxyCommand"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := writeEffectiveInventory(t, effectiveInventory)
+			seam := useLocalLockDialer(t)
+			request := identityLockRequest{Inventory: inv, Hosts: []string{"ipa-1"}, ExtraArgs: tc.args}
+			_, err := productionIdentityLock(request)(context.Background())
+			if err == nil {
+				t.Fatal("the lock was taken although the playbook's arguments make it the wrong one")
+			}
+			for _, want := range tc.wantIn {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("err = %v, want it to hold %q", err, want)
+				}
+			}
+			if got := seam.started(); len(got) != 0 {
+				t.Fatalf("an ssh dialer was built for a refused lock: %+v", got)
+			}
+			if got := seam.sshDestinations(t); len(got) != 0 {
+				t.Fatalf("an ssh process was started for a refused lock: %q", got)
+			}
+			request.ExtraArgs = nil
+			held, err := productionIdentityLock(request)(context.Background())
+			if err != nil {
+				t.Fatalf("without the argument the same request was refused: %v", err)
+			}
+			defer func() { _ = held.Release() }()
+			if got := seam.started(); len(got) != 1 || got[0].Host != "192.0.2.10" {
+				t.Fatalf("the unrefused request dialed %+v, want the inventory's 192.0.2.10", got)
+			}
+		})
+	}
+}
+
 // The extra-vars layer alone decides target_group (loadEffectiveTargetGroup reads
 // it with ansible-inventory; this is what is made of what it printed): the
 // default when none sets it, the value when one does, an error when the value

@@ -749,17 +749,46 @@ func TestDecommissionPlanWarnsAboutAnUnlockableInventory(t *testing.T) {
 // The precheck and the lock are one decision: for every inventory the precheck
 // refuses, taking the lock refuses with the same reason, and for every one it
 // passes, the lock is taken. (AGENTS.md §5.7: a second copy of a rule drifts.)
+//
+// The rows with extra are the same decision for a run whose playbook gets a
+// `-e @file` (identityLockRequest.ExtraArgs): the precheck and the acquirer each
+// build the derivation's request themselves, so each must carry the arguments,
+// and a pair that dropped them on one side only disagrees on these rows (a
+// connection setting only the file has: the precheck passes, the lock refuses, or
+// the other way round). An accepted row also says where the lock was dialed.
 func TestPrecheckAndLockMakeTheSameDecision(t *testing.T) {
-	cases := append([]struct {
-		name   string
-		vars   string
-		wantIn string
-	}{{"a supported inventory", lockCommonArgs, ""}, {"the full name of the ssh plugin", "          ansible_connection: ansible.builtin.ssh\n", ""}}, refusedByTheLock...)
+	type decisionCase struct {
+		name     string
+		vars     string
+		extra    string // the body of the -e @file the playbook is handed, "" for none
+		wantIn   string // the refusal's text, "" for accepted
+		wantAddr string // for an accepted row: the address the lock is dialed on
+	}
+	cases := []decisionCase{
+		{name: "a supported inventory", vars: lockCommonArgs, wantAddr: "192.0.2.10"},
+		{name: "the full name of the ssh plugin", vars: "          ansible_connection: ansible.builtin.ssh\n", wantAddr: "192.0.2.10"},
+	}
+	for _, refused := range refusedByTheLock {
+		cases = append(cases, decisionCase{name: refused.name, vars: refused.vars, wantIn: refused.wantIn})
+	}
+	cases = append(cases,
+		// The inventory is the supported one above; only the file differs.
+		decisionCase{name: "ProxyCommand only in the -e @file", vars: lockCommonArgs, extra: "ansible_ssh_extra_args: \"-o ProxyCommand='nc %h %p'\"\n", wantIn: "ProxyCommand"},
+		decisionCase{name: "a docker connection only in the -e @file", vars: lockCommonArgs, extra: "ansible_connection: docker\n", wantIn: "ansible_connection 是 docker"},
+		decisionCase{name: "an address override in the -e @file", vars: lockCommonArgs, extra: "ansible_host: 192.0.2.99\n", wantAddr: "192.0.2.99"},
+		decisionCase{name: "a target_group in the -e @file that moves the play to another host", vars: lockCommonArgs, extra: "target_group: freeipa-client\n", wantAddr: "192.0.2.20"},
+	)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newFunnelEnv(t, tc.vars)
 			req := identityLockRequest{Inventory: env.inv}
+			if tc.extra != "" {
+				req.ExtraArgs = []string{"-e", "@" + writeVarsFile(t, tc.extra)}
+			}
 			checkErr := checkIdentityLockTarget(context.Background(), req)
+			if got := env.seam.started(); len(got) != 0 {
+				t.Fatalf("the precheck started an ssh dialer: %+v", got)
+			}
 			held, lockErr := productionIdentityLock(req)(context.Background())
 			if held != nil {
 				defer func() { _ = held.Release() }()
@@ -770,6 +799,9 @@ func TestPrecheckAndLockMakeTheSameDecision(t *testing.T) {
 			if tc.wantIn == "" {
 				if checkErr != nil {
 					t.Fatalf("refused: %v", checkErr)
+				}
+				if got := env.seam.started(); len(got) != 1 || got[0].Host != tc.wantAddr {
+					t.Fatalf("the lock was dialed on %+v, want exactly one dial on %s", got, tc.wantAddr)
 				}
 				return
 			}

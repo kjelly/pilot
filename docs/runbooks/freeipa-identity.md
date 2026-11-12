@@ -327,18 +327,28 @@ ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（�
      **只有 `-e` 那一層算**（`-e target_group=…`、JSON、`-e @file`，含 vault 檔）：Ansible 只用 extra vars
      展開 play 的 `hosts:`，寫在 inventory 的 `target_group`（`all: vars:`、host_vars、group_vars）會出現在
      每台主機的 `ansible-inventory --list`，但不會改變 playbook 的目標（`ansible-playbook --list-hosts`
-     實測），所以鎖也不跟它走；兩邊都有時以 `-e` 為準。deploy 的 scope 原本只讀 `-e target_group=…`，
-     vault 檔或 `-e @file` 裡的 `target_group` 現在也被看到。
+     實測），所以鎖也不跟它走；兩邊都有時以 `-e` 為準。deploy 的 scope（`resolveDeploymentScope`）仍然
+     只讀 `-e key=value` 形式的 `target_group`，看不到 `-e @file` 或 vault 檔裡的；現在改變的是取鎖那一層：
+     它讀 extra vars 那一層，scope 交給它的主機不在 `-e @file`／vault 檔的 `target_group` 所指的主機內時，
+     取鎖前檢查與取鎖都以 `鎖與 playbook 的目標會不同台` 拒絕，不會悄悄取在別台。
    - `ansible.cfg`／環境變數的 `remote_user`、`remote_port`、`private_key_file`、`ssh_common_args`、
      `ssh_extra_args`，在主機與 `-e` 都沒設定時，鎖的 ssh 也採用，與 playbook 一致。
-   - 仍然看不到：只影響檔案傳輸的 `sftp_extra_args`／`scp_extra_args`；`~/.ssh/config` 對兩者同樣生效，不用比對。
-     Go engine（`--engine golang`）自己的 tunnel 仍只讀 inventory（P1 spec §4）。
+   - 仍然看不到：只影響檔案傳輸的 `sftp_extra_args`／`scp_extra_args`／`ansible_ssh_transfer_method`；
+     `~/.ssh/config` 對 Ansible 的 ssh 與鎖的 ssh 同樣生效，不用比對；Go engine 自己的 tunnel（見下一點）。
+   - **`pilot reconcile --engine golang --scope full`（混合執行）：取鎖跟著 `-e @file`／vault 檔的覆寫，Go 的 tunnel
+     不會。** 鎖取在有效的位址（例如 `-e @file` 把 `ansible_host` 改了），Go 的 tunnel 只讀 inventory，
+     所以兩者可能連到不同的主機；這個 PR 沒有處理，另由 kjelly/pilot#322 追蹤。`--scope users-groups --force` 的
+     取鎖和 tunnel 都只讀 inventory，沒有這個差異。要讓兩者一致，連線變數（`ansible_host`、`ansible_port`、
+     `ansible_user`）寫在 inventory，不要只靠 `-e @file` 或 vault 檔提供。
    `ansible_connection` 接受 `ssh` 與 `ansible.builtin.ssh`（同一個外掛），其他（`paramiko`、`smart` 等）一律拒絕。
 4. **`--ask-vault-pass`／`--ask-become-pass`（deploy／reconcile 精靈的答案）在 ansible-playbook 裡的密碼提示
    發生在取鎖之後**：輸入密碼的時間算在持鎖時間裡，別的 pilot 執行要多等。互斥本身不受影響。
    這是已知限制，不是拒絕；要避免就用 `--vault-password-file`。另外，選 `--ask-vault-pass` 時，為了讀
-   `-e` 檔裡的連線變數與 `target_group`，取鎖前檢查與取鎖時各跑兩次 `ansible-inventory`（讀 inventory 的有效
-   變數、只讀 `-e` 的 `target_group`），所以各會多問兩次 vault 密碼。這兩次 `ansible-inventory` 不寫
+   `-e` 檔裡的連線變數與 `target_group`，每一次取鎖目標的推導都跑兩次 `ansible-inventory`（讀 inventory 的有效
+   變數、只讀 `-e` 的 `target_group`），每次各問一次 vault 密碼，所以一次推導問兩次。推導的次數依入口而定：
+   單一元件 `pilot deploy`（沒有 `--component`）是兩次（執行開頭的取鎖前檢查、取鎖時），共多問 4 次；批次
+   （`pilot reconcile`、`pilot deploy --component …`）是三次（顯示計畫之前的批次檢查、該項目執行開頭的檢查、取鎖時），
+   共多問 6 次；`--preview-only` 不取鎖，各少一次推導（單一元件多問 2 次、批次多問 4 次）。這些 `ansible-inventory` 不寫
    `ansible.log`：帶 `-e`／vault 參數時它印出每台主機解密後的變數值，寫進 log 會把值明文留在控制端。
 5. **掉鎖（網路中斷約 45 秒、ssh 結束）時 pilot 只殺 ansible-playbook 的主行程**，不殺它的 process
    group：ansible 的 fork worker 可能在掉鎖**之後**把正在執行的那一個 task 做完，那個 task 沒有鎖的保護

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -59,13 +60,24 @@ type dialerSeam struct {
 	dialers []*lockDialer
 	path    string
 	ssh     string
+	argvLog string
 }
 
 // useLocalLockDialer replaces newIdentityLockDialer for the test.
 func useLocalLockDialer(t *testing.T) *dialerSeam {
 	t.Helper()
-	ssh, _ := localFakeSSH(t)
-	seam := &dialerSeam{path: t.TempDir(), ssh: ssh}
+	ssh, argvLog := localFakeSSH(t)
+	// The lock path has to pass sshdial's lock path check ([A-Za-z0-9._/-]), and
+	// t.TempDir() names its directory after the test: a subtest name with an `@`
+	// or `=` in its first characters (a test of `-e @file`) made the lock refuse
+	// the path, depending on where Go cut the name. A directory of our own does not
+	// depend on the name.
+	lockDir, err := os.MkdirTemp("", "pilot-identity-lock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(lockDir) })
+	seam := &dialerSeam{path: lockDir, ssh: ssh, argvLog: argvLog}
 	prev := newIdentityLockDialer
 	t.Cleanup(func() { newIdentityLockDialer = prev })
 	newIdentityLockDialer = func(target sshdial.Target) identityLockDialer {
@@ -92,6 +104,29 @@ func (s *dialerSeam) started() []sshdial.Target {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]sshdial.Target(nil), s.targets...)
+}
+
+// sshDestinations are the hosts the ssh program was actually started for, read
+// from the argv the stand-in ssh logged (the destination is the word after the
+// `--` that ends the options): what was dialed, as opposed to what the code
+// under test said it would dial.
+func (s *dialerSeam) sshDestinations(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile(s.argvLog)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hosts []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		words := strings.Split(line, "\t")
+		if i := slices.Index(words, "--"); i >= 0 && i+1 < len(words) {
+			hosts = append(hosts, words[i+1])
+		}
+	}
+	return hosts
 }
 
 // held reports, with a second flock on the same path, whether somebody holds

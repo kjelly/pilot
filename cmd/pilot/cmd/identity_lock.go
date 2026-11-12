@@ -71,9 +71,11 @@ hosts: 看不到寫在 inventory 的)讓 playbook 去別台主機時拒絕，並
 哪裡。加密的 -e 檔要讓 ansible-inventory 也讀得到 vault 密碼
 (--vault-password-file 或 ANSIBLE_VAULT_PASSWORD_FILE)。group_vars 有 contract 的明文
 secret、或整份 group_vars 被 vault 加密，同樣會在取鎖前被拒絕(secret 放在
-.vault/main.yaml)。--ask-vault-pass 會讓取鎖前檢查與取鎖時各多問兩次密碼(每次推導跑
+.vault/main.yaml)。--ask-vault-pass 會讓每一次取鎖目標的推導多問兩次密碼(每次推導跑
 兩次 ansible-inventory：讀 inventory 的有效變數、讀 -e 的 target_group；沒有密碼
-檔就無法在 ansible-playbook 之外讀 -e 檔)；--ask-vault-pass／--ask-become-pass 在
+檔就無法在 ansible-playbook 之外讀 -e 檔)：單一元件 deploy 推導兩次(執行開頭的檢查、
+取鎖)，reconcile 與 --component 的批次推導三次(多一次顯示計畫之前的批次檢查)，
+--preview-only 不取鎖而各少一次；--ask-vault-pass／--ask-become-pass 在
 ansible-playbook 內的密碼提示發生在取鎖之後，輸入密碼的時間算在持鎖時間裡。`
 
 // identityLockWaitDefault is how long a funnel waits for another run to give
@@ -246,10 +248,17 @@ var identityLockPrecheck = func(ctx context.Context, req identityLockRequest) er
 // the refusal of `--force`. This runs first, in every funnel, and the lock-time
 // check stays as defence in depth.
 //
-// It starts no ssh and no ansible-playbook. What it cannot see is what the
-// derivation cannot see (the known gaps of spec §4.2): the connection variables
-// that only reach the playbook through `-e @file`, ansible.cfg's ssh_args and
-// the ssh environment.
+// It starts no ssh and no ansible-playbook. The derivation reads what Ansible
+// computes from the run's -e and vault arguments, the inventory, ansible.cfg and
+// the ANSIBLE_* environment (issue #319), so a variable that only arrives through
+// `-e @file`, ansible.cfg's ssh_args or ANSIBLE_SSH_ARGS is seen. What it still
+// cannot see (spec §4.2 and E50, runbook §4.3): the ssh settings only the file
+// transfer uses (sftp_extra_args, scp_extra_args, ansible_ssh_transfer_method);
+// ~/.ssh/config, which applies to Ansible's ssh and to the lock's ssh alike, so
+// there is nothing to compare; and the Go engine's tunnel, which reads the
+// inventory alone: in a mixed run (--engine golang --scope full) the lock follows
+// the -e @file and vault overrides and the tunnel does not, so the two can
+// differ (kjelly/pilot#322).
 func checkIdentityLockTarget(ctx context.Context, req identityLockRequest) error {
 	if err := identityLockPrecheck(ctx, req); err != nil {
 		return fmt.Errorf("取鎖前檢查沒有通過，沒有執行任何 ansible-playbook 或 ssh：%w", err)
