@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -123,4 +124,71 @@ func writeScript(t *testing.T, name, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// argvEnd closes one run in the log argvRecordingPrefix writes.
+const argvEnd = "---END-OF-ARGV---"
+
+// argvRecordingPrefix starts a fake ansible-playbook: it appends the run's
+// argument vector to log, one argument per line and argvEnd after the last (no
+// argument of the runs these tests make holds a newline). The oracle for "the
+// lock reads what the playbook is handed" is what the playbook was really handed,
+// recorded here, not a call to the helper that built the arguments.
+func argvRecordingPrefix(log string) string {
+	return "for a in \"$@\"; do printf '%s\\n' \"$a\" >> '" + log + "'; done\nprintf '%s\\n' '" + argvEnd + "' >> '" + log + "'\n"
+}
+
+// readRecordedArgv is the runs argvRecordingPrefix recorded, in order.
+func readRecordedArgv(t *testing.T, log string) [][]string {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runs [][]string
+	var current []string
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		if line == argvEnd {
+			runs = append(runs, current)
+			current = nil
+			continue
+		}
+		current = append(current, line)
+	}
+	return runs
+}
+
+// indexOfRun is where needle appears in hay as one contiguous run of
+// arguments, or -1 (also for an empty needle: nothing is not a run).
+func indexOfRun(hay, needle []string) int {
+	if len(needle) == 0 {
+		return -1
+	}
+	for i := 0; i+len(needle) <= len(hay); i++ {
+		if slices.Equal(hay[i:i+len(needle)], needle) {
+			return i
+		}
+	}
+	return -1
+}
+
+// isSubsequence reports whether sub appears in hay in order, with anything in
+// between (an empty sub is not a subsequence worth reporting: it asserts nothing).
+func isSubsequence(hay, sub []string) bool {
+	if len(sub) == 0 {
+		return false
+	}
+	next := 0
+	for _, arg := range hay {
+		if arg == sub[next] {
+			next++
+			if next == len(sub) {
+				return true
+			}
+		}
+	}
+	return false
 }

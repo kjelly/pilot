@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -149,4 +150,87 @@ func TestDeployCoreBuildsTheIdentityLockRequest(t *testing.T) {
 			t.Fatal("a component that is not the identity playbook took the lock")
 		}
 	})
+}
+
+// The deploy runner builds two lock requests for one run: the precheck's, before
+// the plan is shown, and the lock's, taken around the apply step. Both read the
+// inventory through the -e and vault arguments the apply step hands to
+// ansible-playbook, because those decide the host and the ssh settings
+// (issue #319); a request built from fewer arguments puts the lock back on the
+// inventory alone with every derivation test still green. The oracle is the argv
+// the fake ansible-playbook recorded for the apply run, not the helper that builds
+// it. The lock-time request is built from the very arguments the apply step gets,
+// so it is one contiguous run of that argv (the run adds arguments of its own
+// around it). The precheck is built before the run's own additions (the values
+// pilot fills in itself, the deferred hosts), so it is an in-order subsequence of
+// the argv instead. Each carries the operator's extra var, the vault file and its
+// password file: dropping any of them is what the test is for.
+func TestDeployCoreHandsTheLockTheArgumentsThePlaybookGets(t *testing.T) {
+	env := newOutboundWorkflowEnv(t, map[string][]string{"freeipa-identity": {"host-a"}, "freeipa-dns": {"host-a"}},
+		eventsYAMLFor(outbound.OperationDeploy, outbound.ResultSuccess), 0)
+	catalog := loadOutboundWorkflowCatalog(t)
+
+	vaultDir := filepath.Join(env.workspace, ".vault")
+	if err := os.MkdirAll(vaultDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	vaultFile := filepath.Join(vaultDir, "main.yaml")
+	passwordFile := filepath.Join(vaultDir, "vault-password")
+	for path, body := range map[string]string{vaultFile: "ipa_admin_password: sentinel-not-a-credential\n", passwordFile: "sentinel-not-a-credential\n"} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	argvLog := filepath.Join(t.TempDir(), "argv.log")
+	runner := newRunnerWithExitCode(t, 0)
+	runner.Binary = writeScript(t, "ansible-playbook", "#!/bin/sh\n"+argvRecordingPrefix(argvLog)+fakePlayRecapScript+"exit 0\n")
+
+	batch := &catalogBatchInputs{
+		extraVars: []string{"lock_arg_marker=1"},
+		vault:     vaultInput{ExtraVarsFile: vaultFile, VaultPasswordFile: passwordFile},
+	}
+	entry := deployPlaybookEntry("freeipa-identity", "freeipa-identity-apply.yml")
+	if err := runCatalogPlaybookDeployEntry(context.Background(), runner, &bytes.Buffer{}, env.inv, "apply", catalog, entry, batch, deployInventorySnapshot{}, false, nil); err != nil {
+		t.Fatalf("runCatalogPlaybookDeployEntry: %v", err)
+	}
+
+	// The apply run: the one that is not the --check preview.
+	var apply []string
+	for _, run := range readRecordedArgv(t, argvLog) {
+		if len(run) > 0 && strings.HasSuffix(run[0], "freeipa-identity-apply.yml") && !slices.Contains(run, "--check") {
+			if apply != nil {
+				t.Fatalf("two apply runs recorded: %q and %q", apply, run)
+			}
+			apply = run
+		}
+	}
+	if apply == nil {
+		t.Fatalf("no apply run of freeipa-identity-apply.yml recorded: %q", readRecordedArgv(t, argvLog))
+	}
+	if !slices.Contains(apply, "@"+vaultFile) || !slices.Contains(apply, "lock_arg_marker=1") {
+		t.Fatalf("the apply run %q was not handed the vault file and the extra var: the oracle shows nothing", apply)
+	}
+
+	prechecks := env.lock.Prechecks()
+	if len(prechecks) != 1 {
+		t.Fatalf("%d prechecks, want the one the run asks before its plan", len(prechecks))
+	}
+	for _, tc := range []struct {
+		name     string
+		got      []string
+		followed func(argv, got []string) bool
+		how      string
+	}{
+		{"the lock-time request", onlyRequest(t, env.lock).ExtraArgs, func(argv, got []string) bool { return indexOfRun(argv, got) >= 0 }, "one contiguous run of"},
+		{"the precheck request", prechecks[0].ExtraArgs, isSubsequence, "an in-order subsequence of"},
+	} {
+		for _, want := range []string{"lock_arg_marker=1", "@" + vaultFile, passwordFile} {
+			if !slices.Contains(tc.got, want) {
+				t.Errorf("%s: ExtraArgs %q lack %q, which the playbook was handed", tc.name, tc.got, want)
+			}
+		}
+		if !tc.followed(apply, tc.got) {
+			t.Errorf("%s: ExtraArgs %q are not %s the apply argv %q", tc.name, tc.got, tc.how, apply)
+		}
+	}
 }

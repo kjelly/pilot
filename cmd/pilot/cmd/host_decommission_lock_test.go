@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -289,6 +290,37 @@ func (e *decommissionLockEnv) fakeLock() *fakeIdentityLock {
 	return lock
 }
 
+// writeWorkspaceVault gives the workspace the main vault file `pilot deploy`
+// passes (.vault/main.yaml, with a fake value), and returns its path.
+func (e *decommissionLockEnv) writeWorkspaceVault() string {
+	e.t.Helper()
+	dir := filepath.Join(e.ws, ".vault")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		e.t.Fatal(err)
+	}
+	path := filepath.Join(dir, "main.yaml")
+	if err := os.WriteFile(path, []byte("ipa_admin_password: sentinel-not-a-credential\n"), 0o600); err != nil {
+		e.t.Fatal(err)
+	}
+	return path
+}
+
+// recordPlaybookArgv puts a wrapper in front of the fake ansible-playbook that
+// logs every run's argument vector (argvRecordingPrefix) and then runs the fake,
+// and returns the log. Call it after newDecommissionLockEnv, which installs the
+// fake the wrapper hands the run to.
+func (e *decommissionLockEnv) recordPlaybookArgv() string {
+	e.t.Helper()
+	fake, err := exec.LookPath("ansible-playbook")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	log := filepath.Join(e.t.TempDir(), "argv.log")
+	wrapper := writeScript(e.t, "ansible-playbook", "#!/bin/sh\n"+argvRecordingPrefix(log)+"exec '"+fake+"' \"$@\"\n")
+	e.t.Setenv("PATH", filepath.Dir(wrapper)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
 // (1) and (5): the lock is taken once, before the uninstall, after the approval,
 // and given back after the converge. The converge takes none of its own.
 func TestDecommissionApplyTakesTheLockOnceBeforeTheFirstStepAndGivesItBackAfterTheLast(t *testing.T) {
@@ -442,12 +474,24 @@ func TestDecommissionApplyInterruptedWhileAnotherRunHoldsTheRealLockThenResumes(
 		t.Fatal("the other run does not hold the lock")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	// The run is interrupted 1.5 s after the precheck has finished, that is, while
+	// it waits for the lock. A deadline that started with apply would also count
+	// the precheck (ansible-inventory, ansible and ansible-config, each of which
+	// starts Python): on a slow runner it used up the whole budget before the
+	// approval was recorded and the run never reached the wait this test is about.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	prevPrecheck := identityLockPrecheck
+	t.Cleanup(func() { identityLockPrecheck = prevPrecheck })
+	identityLockPrecheck = func(c context.Context, req identityLockRequest) error {
+		err := prevPrecheck(c, req)
+		time.AfterFunc(1500*time.Millisecond, cancel)
+		return err
+	}
 	started := time.Now()
 	_, err = env.applyIn(ctx)
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want the wait to end with the context's deadline", err)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the wait to end with the context's cancellation", err)
 	}
 	if time.Since(started) > 25*time.Second {
 		t.Fatalf("the run took %v to give up", time.Since(started))
@@ -566,4 +610,72 @@ func TestDecommissionOfAPlanWithoutTheConvergeStepTakesNoLock(t *testing.T) {
 	if lock.Acquired() != 0 || len(lock.Requests()) != 0 || len(lock.Prechecks()) != 0 {
 		t.Fatalf("acquired %d, requests %d, prechecks %d: a plan with no identity converge step must not touch the lock", lock.Acquired(), len(lock.Requests()), len(lock.Prechecks()))
 	}
+}
+
+// The lock of a decommission reads the inventory through the arguments the
+// converge step's ansible-playbook is handed, because they decide the host and
+// the ssh settings it uses (issue #319): the workspace's main vault file. The
+// oracle is the argv the converge step really ran with, recorded by a wrapper
+// around the fake ansible-playbook: the lock's ExtraArgs must be one contiguous
+// run of it, and must hold the vault file. A lock request without them
+// (hostDecommissionLockRequest losing its ExtraArgs) or a converge step that stops
+// being handed the vault file fails here; without a vault file in the workspace
+// there is nothing to hand either of them.
+func TestDecommissionLockReadsTheArgumentsTheConvergeIsHanded(t *testing.T) {
+	converge := func(runs [][]string) []string {
+		var found []string
+		for _, run := range runs {
+			if slices.ContainsFunc(run, func(arg string) bool { return strings.Contains(arg, "pilot_decommission_retiring_alias") }) {
+				if found != nil {
+					t.Fatalf("two converge runs recorded: %q and %q", found, run)
+				}
+				found = run
+			}
+		}
+		if found == nil {
+			t.Fatalf("no converge run recorded: %q", runs)
+		}
+		return found
+	}
+
+	t.Run("a workspace with a main vault file", func(t *testing.T) {
+		env := newDecommissionLockEnv(t)
+		vault := env.writeWorkspaceVault()
+		argvLog := env.recordPlaybookArgv()
+		lock := env.fakeLock()
+		env.plan()
+		out, err := env.apply()
+		env.completed(out, err)
+
+		got := onlyRequest(t, lock).ExtraArgs
+		if !slices.Contains(got, "@"+vault) {
+			t.Fatalf("the lock's ExtraArgs %q lack the workspace vault file %q", got, vault)
+		}
+		run := converge(readRecordedArgv(t, argvLog))
+		if !slices.Contains(run, "@"+vault) {
+			t.Fatalf("the converge run %q was not handed the vault file: the oracle shows nothing", run)
+		}
+		if indexOfRun(run, got) < 0 {
+			t.Fatalf("the lock's ExtraArgs %q are not one contiguous run of the converge argv %q", got, run)
+		}
+	})
+
+	t.Run("a workspace without one hands neither of them an argument", func(t *testing.T) {
+		env := newDecommissionLockEnv(t)
+		argvLog := env.recordPlaybookArgv()
+		lock := env.fakeLock()
+		env.plan()
+		out, err := env.apply()
+		env.completed(out, err)
+
+		if got := onlyRequest(t, lock).ExtraArgs; len(got) != 0 {
+			t.Fatalf("the lock's ExtraArgs = %q for a workspace with no vault file", got)
+		}
+		run := converge(readRecordedArgv(t, argvLog))
+		for _, arg := range run {
+			if strings.HasPrefix(arg, "@") {
+				t.Fatalf("the converge run %q was handed a file for a workspace with no vault file", run)
+			}
+		}
+	})
 }

@@ -305,19 +305,53 @@ ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（�
    的重新產生。**webhook**：互動式單一元件 `pilot deploy`（沒有 `--component`）無論錯誤出在哪個階段都會發
    一個 `failure` 事件，所以被拒絕也會發一個（沒有元件被執行）；`pilot reconcile`、`pilot deploy
    --component`、`pilot access …`、breakglass 的 CLI 在拒絕時不發事件。
-2. **這些入口現在用 `ansible-inventory --list`（不帶 vault 密碼）讀 inventory。**（行為變更）
+2. **這些入口現在用 `ansible-inventory --list` 讀 inventory。**（行為變更）
    `pilot access`、breakglass、drift 修復與 `pilot host decommission` 原本不經過這一步：group_vars／
    host_vars 裡有 contract 宣告為 `secret: true` 的明文輸入、或整份 group_vars 被 ansible-vault 加密
    （`ansible-inventory` 沒有密碼讀不了，錯誤是 `Attempting to decrypt but no vault secrets found.`），
    現在這些指令在取鎖前就失敗。處理：secret 放 `.vault/main.yaml`，group_vars 不要整份加密。
-3. **檢查看不到只靠下列方式提供的連線設定**：`-e @file`（與 JSON 物件形式的 `-e`）裡的 `ansible_host`、
-   `ansible_user`、`ansible_port`、`target_group`；`ansible.cfg` 的 `ssh_args`、`host_key_checking`；環境變數
-   `ANSIBLE_SSH_ARGS`。最嚴重的後果：`target_group` 或 `ansible_host` 只由 `-e @file` 提供時，鎖可能鎖
-   A 機而 playbook 的目標是 B 機。連線設定請寫在 inventory（host_vars／group_vars）。`ansible_connection`
-   接受 `ssh` 與 `ansible.builtin.ssh`（同一個外掛），其他（`paramiko`、`smart` 等）一律拒絕。
-4. **`--ask-vault-pass`／`--ask-become-pass`（deploy／reconcile 精靈的答案）的密碼提示發生在取鎖之後**，
-   在 ansible-playbook 裡：輸入密碼的時間算在持鎖時間裡，別的 pilot 執行要多等。互斥本身不受影響。
-   這是已知限制，不是拒絕；要避免就用 `--vault-password-file`。
+3. **鎖取在 playbook 實際會執行的那台主機，用它實際會用的連線**（issue #319）。Ansible 的優先序是
+   `-e`（key=value、JSON、`@file`）高於 inventory 的 host／group 變數，高於 `ansible.cfg` 與 `ANSIBLE_*`
+   環境變數；取鎖的推導照這個順序向 Ansible 本身問答，而不是自己重寫：`ansible-inventory` 帶著 playbook
+   會拿到的 `-e` 與 vault 參數（deploy／reconcile 是 `--extra` 與 vault 檔，decommission 是
+   `.vault/main.yaml`），`ansible-config` 讀 `ansible.cfg` 與環境變數的連線設定。所以：
+   - `-e @file` 把 `ansible_host`／`ansible_port`／`ansible_user` 改成別的值是合法的，鎖會跟著取在那裡
+     （含 `.vault/main.yaml` 這種加密檔，前提是 `ansible-inventory` 讀得到 vault 密碼：
+     `--vault-password-file` 或 `ANSIBLE_VAULT_PASSWORD_FILE`；讀不到就在取鎖前拒絕）。
+   - pilot 的 ssh 不能照做的連線設定，不管來自 inventory、`-e`、`ansible.cfg` 還是環境變數，一律拒絕並指出
+     變數與來源：`ProxyCommand`、`ssh_executable`、非 ssh 的 `transport`、`ask_pass`、`-o` 不在
+     allowlist 的選項、`ssh_args` 裡 `ControlMaster`／`ControlPath`／`ControlPersist` 以外的選項。
+     訊息範例：`… ansible_ssh_args <- env: ANSIBLE_SSH_ARGS`。處理：改成 pilot 的 ssh 接受的寫法
+     （`ansible_ssh_common_args` 的 `-o ProxyJump=…` 可以），或移除設定。
+   - `target_group` 讓 playbook 去的主機，要包含這輪要鎖的主機，否則拒絕（`鎖與 playbook 的目標會不同台`）。
+     **只有 `-e` 那一層算**（`-e target_group=…`、JSON、`-e @file`，含 vault 檔）：Ansible 只用 extra vars
+     展開 play 的 `hosts:`，寫在 inventory 的 `target_group`（`all: vars:`、host_vars、group_vars）會出現在
+     每台主機的 `ansible-inventory --list`，但不會改變 playbook 的目標（`ansible-playbook --list-hosts`
+     實測），所以鎖也不跟它走；兩邊都有時以 `-e` 為準。deploy 的 scope（`resolveDeploymentScope`）仍然
+     只讀 `-e key=value` 形式的 `target_group`，看不到 `-e @file` 或 vault 檔裡的；現在改變的是取鎖那一層：
+     它讀 extra vars 那一層，scope 交給它的主機不在 `-e @file`／vault 檔的 `target_group` 所指的主機內時，
+     取鎖前檢查與取鎖都以 `鎖與 playbook 的目標會不同台` 拒絕，不會悄悄取在別台。
+   - `ansible.cfg`／環境變數的 `remote_user`、`remote_port`、`private_key_file`、`ssh_common_args`、
+     `ssh_extra_args`，在主機與 `-e` 都沒設定時，鎖的 ssh 也採用，與 playbook 一致。
+   - 仍然看不到：只影響檔案傳輸的 `sftp_extra_args`／`scp_extra_args`／`ansible_ssh_transfer_method`；
+     `~/.ssh/config` 對 Ansible 的 ssh 與鎖的 ssh 同樣生效，不用比對；Go engine 自己的 tunnel（見下一點）。
+   - **`pilot reconcile --engine golang --scope full`（混合執行）：取鎖跟著 `-e @file`／vault 檔的覆寫，Go 的 tunnel
+     不會。** 鎖取在有效的位址（例如 `-e @file` 把 `ansible_host` 改了），Go 的 tunnel 只讀 inventory，
+     所以兩者可能連到不同的主機；這個 PR 沒有處理，另由 kjelly/pilot#322 追蹤。`--scope users-groups --force` 沒有 `-e`／vault 檔的輸入，所以
+     沒有這個差異，但取鎖讀 `ansible.cfg` 與 `ANSIBLE_*`（`remote_user`、`remote_port`、`private_key_file`、
+     `ProxyJump` 等），tunnel 不讀，兩者在這些設定上仍可能不同，也由 #322 追蹤。要讓兩者一致，連線變數
+     （`ansible_host`、`ansible_port`、`ansible_user`）寫在 inventory，不要只靠 `-e @file`、vault 檔、
+     `ansible.cfg` 或環境變數提供。
+   `ansible_connection` 接受 `ssh` 與 `ansible.builtin.ssh`（同一個外掛），其他（`paramiko`、`smart` 等）一律拒絕。
+4. **`--ask-vault-pass`／`--ask-become-pass`（deploy／reconcile 精靈的答案）在 ansible-playbook 裡的密碼提示
+   發生在取鎖之後**：輸入密碼的時間算在持鎖時間裡，別的 pilot 執行要多等。互斥本身不受影響。
+   這是已知限制，不是拒絕；要避免就用 `--vault-password-file`。另外，選 `--ask-vault-pass` 時，為了讀
+   `-e` 檔裡的連線變數與 `target_group`，每一次取鎖目標的推導都跑兩次 `ansible-inventory`（讀 inventory 的有效
+   變數、只讀 `-e` 的 `target_group`），每次各問一次 vault 密碼，所以一次推導問兩次。推導的次數依入口而定：
+   單一元件 `pilot deploy`（沒有 `--component`）是兩次（執行開頭的取鎖前檢查、取鎖時），共多問 4 次；批次
+   （`pilot reconcile`、`pilot deploy --component …`）是三次（顯示計畫之前的批次檢查、該項目執行開頭的檢查、取鎖時），
+   共多問 6 次；`--preview-only` 不取鎖，各少一次推導（單一元件多問 2 次、批次多問 4 次）。這些 `ansible-inventory` 不寫
+   `ansible.log`：帶 `-e`／vault 參數時它印出每台主機解密後的變數值，寫進 log 會把值明文留在控制端。
 5. **掉鎖（網路中斷約 45 秒、ssh 結束）時 pilot 只殺 ansible-playbook 的主行程**，不殺它的 process
    group：ansible 的 fork worker 可能在掉鎖**之後**把正在執行的那一個 task 做完，那個 task 沒有鎖的保護
    （之後不會有新的 task）。掉鎖後整個 run 一律回報失敗、要重跑。
