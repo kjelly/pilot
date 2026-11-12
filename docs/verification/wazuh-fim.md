@@ -120,25 +120,36 @@ Ubuntu 22.04（auditd 以內建的 `builtin_af_unix` 提供 af_unix plugin，未
 aarch64 不在本契約與 evidence 的涵蓋範圍。由未變更的 admission gate 推論，未以升級嘗試原生執行：
 Ubuntu 22.04 沒有外部的 `audisp-af_unix` listener，受控 agent 升級預期以
 `exact external audit listener is missing or ambiguous` 拒絕。
-已知限制（其他元件）：`audit-log-forwarding` 在 issue #324 之前每次套用都會執行 `augenrules --load`；
-在同機共用的 Ubuntu 24.04 主機上實測它把 kernel 的 `wazuh_fim` watch 由 2 條清為 0（auditd 主程序與連線不變），
-Wazuh 不會自行重新建立（套用後 90 秒、手動 `augenrules --load` 後 10 分鐘仍為 0），一般 FIM 套用也不補回；
-重啟 `wazuh-agent` 後約 2 秒內重新建立。`audit-log-forwarding` 有設定漂移時會重啟 auditd（新的
-MainPID），agent 的連線隨之中斷，watch 在探測的至少 90 秒內持續為 0。由未變更的 admission gate 推論，
-未以升級嘗試原生執行：此狀態下受控 agent 升級預期以 `native Wazuh audit client/watch readiness timed out`
-拒絕，直到執行 `systemctl restart wazuh-agent`。
+已知限制（其他元件）：`audit-log-forwarding` 在 issue #324 之前每次套用都會執行 `augenrules --load`，
+把同機 kernel 稽核清單整份清掉，包括 who-data 的 `wazuh_fim` watch。較早的一次實測（同機 Ubuntu 24.04）：
+watch 由 2 條清為 0，auditd 主程序與連線不變，套用後 90 秒、手動 `augenrules --load` 後 10 分鐘仍為 0；
+`audit-log-forwarding` 有設定漂移時重啟 auditd（新的 MainPID），agent 的連線隨之中斷，watch 在探測的至少
+90 秒內持續為 0；重啟 `wazuh-agent` 後約 2 秒內重新建立。2026-11-12 以 BASE（`f1000213`）在拋棄式
+Ubuntu 24.04.4 VM（同機 log-server、audit-log-forwarding、wazuh-fim 與真實 manager）量到它依賴被清過幾次：
+前兩次清除 Wazuh 記下 `Detected Audit rules manipulation: Audit rules removed.` 並在數秒內自行補回；
+連續第三次起 watch 為 0，listener 仍在、agent 仍為 active，`ossec.log` 出現
+`Real-time file integrity monitoring started`（退回 real-time），之後沒有自行恢復；一次
+`systemctl restart wazuh-agent` 後 3 秒內回到 2 條。由未變更的 admission gate 推論，未以升級嘗試原生執行：
+此狀態下受控 agent 升級預期以 `native Wazuh audit client/watch readiness timed out` 拒絕，直到執行
+`systemctl restart wazuh-agent`。
 `audit-log-forwarding` v2.1（issue #324，其 spec 的 C23）改由該模組負責：只在需要時才載入規則
 （已收斂的主機完全不載入、不重啟 auditd、不重啟 agent）；載入、Debian 上重啟 auditd、或失敗時的重載
-這些擾動之前，先讀本節協調器的唯讀 `writer-inspect`，有 Wazuh writer 或 journal 在進行時拒絕；
-擾動之後，若套用前 agent 為 active 且 kernel 有 `wazuh_fim` watch，等 auditd 與 af_unix listener 回來、
-重啟一次 `wazuh-agent`，再有上限地等 `wazuh_fim` watch 涵蓋套用前的集合，否則以 typed reason 失敗。
-本 spec 的 C1–C10 與 wazuh-fim 的一般套用都沒有改變，仍不補回 watch，也不驗證這件事；驗證在
-`audit-log-forwarding` 的 C23。v2.1 的目標環境實跑結果尚未產生。仍然存在的限制：
+這些擾動之前，先當場重讀 agent 與 kernel 清單，再讀本節協調器的唯讀 `writer-inspect`，有 Wazuh writer
+或 journal 在進行時拒絕；擾動之後，若擾動前 agent 為 active 且 kernel 有 `wazuh_fim` watch，等 auditd 與
+af_unix listener 回來、重啟一次 `wazuh-agent`，再有上限地等 `wazuh_fim` watch 涵蓋擾動前的集合，否則以
+typed reason 失敗。本 spec 的 C1–C10 與 wazuh-fim 的一般套用都沒有改變，仍不補回 watch，也不驗證這件事；
+驗證在 `audit-log-forwarding` 的 C23。仍然存在的限制：
 (a) 被 v2.1 之前的版本清掉 watch、至今沒重啟 agent 的主機不會被自動修復，需要重啟 `wazuh-agent` 一次；
 (b) `writer-inspect` 是檢查不是鎖，檢查與動作之間有一小段空窗；
-(c) EL 上 `audit-log-forwarding` 的 `pkill -HUP -x auditd`（Step 8b）不經過 `augenrules`，
-對已在運作的 Wazuh listener 的影響沒有實測，不視為擾動、不做 re-arm；
-(d) Ubuntu 22.04 與 aarch64 同樣沒有涵蓋。
+(c) EL 上 `audit-log-forwarding` 的 `pkill -HUP -x auditd`（Step 8b）已在 AlmaLinux 9.8 量過：who-data 已 live
+時連續 6 次 SIGHUP，watch、kernel 清單總數、`audisp-af_unix` PID 與連線都不變，因此不視為擾動、不做 re-arm
+（只量過 plugin 設定變更觸發的 HUP 與單純 HUP）；
+(d) Ubuntu 22.04 與 aarch64 同樣沒有涵蓋；
+(e) 既有的 EL 順序缺口，不在 #324 範圍內，沒有修：EL 上 `audit-log-forwarding`（它的 Step 1a 會安裝
+`audispd-plugins`）先於 wazuh-fim 的全新同機鏈，Wazuh agent 套件在 audit-log-forwarding 的 SIGHUP **之後**
+才安裝 `/etc/audit/plugins.d/af_wazuh.conf`，auditd 尚未被告知載入它，所以套用完成後 endpoint 沒有 listener、
+who-data 不是 live（2026-11-12，拋棄式 AlmaLinux 9.8 實測）；之後 `pkill -HUP -x auditd` 才讓 listener 出現、
+who-data 才 live。上面「一般套用只安裝 `audit`」只描述單獨的 wazuh-fim；同機鏈的實測以本條為準。
 套件 staging 目錄及其祖先也須通過型別與 alias 檢查；留存套件只從精確的
 root-only transaction directory 使用，回復不寫回 global package cache。
 Debian 交易同時冷備份 `/usr/sbin/policy-rc.d` 的內容、metadata 或不存在狀態。
@@ -406,3 +417,4 @@ go run ./cmd/pilot vm-target run --name wazuh-fim \
 | 2026-11-09 | Issue #244 (B) | 以已合併的 A（#271）為基底重新整合受控升級（B）：版本契約由 A 負責、B 只加 writer／transaction／reader／preview；未授權的版本變更仍 typed 拒絕，單次 `wazuh_upgrade=true` 才進入受控交易；版本升為 v1.5。未放寬任何 Expected。 | pilot |
 | 2026-11-10 | Issue #244 (B) | 文件補記（無 Expected 變更，C1–C10 不變；不新增、不收緊、不放寬任何 row）：記載 EL 的一般套用不建立 who-data endpoint（缺 `audispd-plugins`）與其後果——受控 agent 升級以 `configured external audit endpoint is unavailable before upgrade` 拒絕、不改動 agent，拒絕後留下 `agent-policy-<owner>` 與約 22 MB 的備份根目錄增長（主要是 staged RPM）；實測過的手動修復順序與順序探測結果；Ubuntu 22.04 與 aarch64 不在涵蓋範圍；`audit-log-forwarding` 的 `augenrules --load` 與 auditd 重啟會清除同機 `wazuh_fim` watch 的既有行為；備份不自動清除的已知限制。這些是已知限制的記載，不是新的保證；一般套用建立 who-data 的設計已自本版範圍移除。 | pilot |
 | 2026-11-12 | Issue #324 | 文件更新（無 Expected 變更，C1–C10 不變）：`audit-log-forwarding` v2.1 改由該模組負責不讓 `augenrules --load`／auditd 重啟清掉同機的 `wazuh_fim` watch（只在需要時載入；擾動前讀本協調器的唯讀 `writer-inspect` 並在 writer 進行中時拒絕；擾動後重啟 `wazuh-agent` 並有上限地等 watch 回來，否則 typed 失敗）。更新「已知限制（其他元件）」與 ownership 契約的例外說明，並列出仍存在的限制。wazuh-fim 的 playbook、coordinator 與 spec row 都沒有改。目標環境實跑結果尚未產生。 | pilot |
+| 2026-11-12 | Issue #324 | 文件修正（無 Expected 變更，C1–C10 不變）：「已知限制（其他元件）」改記 2026-11-12 在拋棄式 Ubuntu 24.04.4 VM 以 BASE 量到的 Wazuh 自癒行為（前兩次清除自行補回、連續第三次起退回 real-time 且不再恢復），EL 9.8 上 Step 8b 的 SIGHUP 已量過不是擾動，並明記既有的 EL 順序缺口（audit-log-forwarding 的 SIGHUP 先於 Wazuh agent 套件安裝 `af_wazuh.conf`，同機全新鏈套用後 endpoint 尚未 live，之後需要 `pkill -HUP -x auditd`；不在 #324 範圍，沒有修）。 | pilot |

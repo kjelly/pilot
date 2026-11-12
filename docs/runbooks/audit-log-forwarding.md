@@ -114,28 +114,37 @@ apply 會先安裝 logrotate，再移除重複的路徑宣告並保留其他 sta
 kernel 的稽核規則清單是同機各元件共用的：Wazuh agent 的 who-data 把 `wazuh_fim` key 的 watch 放在
 同一份清單裡。`augenrules --load`（它讀進來的 `/etc/audit/audit.rules` 以 `-D` 開頭，而且 augenrules
 在回報「No change」時照樣呼叫 `auditctl -R`）與 Ubuntu 24.04 的 auditd 重啟（`ExecStartPost` 也載入規則）
-都會先清掉整份清單。在同機也有 Wazuh agent 的 Ubuntu 24.04 上實測，舊版每次套用都把 `wazuh_fim` watch
-由 2 條清為 0，endpoint 與連線不變，Wazuh 不會自行補回，只有重啟 `wazuh-agent` 才補回（約 2 秒）；
-套用與 C1–C22 全數綠燈，who-data 卻已停止。現在的行為（apply playbook Step 3、Step 8d/8e/8a、Step 10、
-rescue；spec §5 與 §6 有完整說明）：
+都會先清掉整份清單。2026-11-12 在拋棄式 Ubuntu 24.04.4 VM（同機 log-server、audit-log-forwarding、
+wazuh-fim 與真實 manager）以舊版實測：前兩次清除 Wazuh 自行補回（記下 `Detected Audit rules manipulation:
+Audit rules removed.`，watch 數秒內回到 2 條）；連續第三次起 watch 為 0，listener 仍在、agent 仍為 active，
+`ossec.log` 出現 `Real-time file integrity monitoring started`（退回 real-time），之後沒有自行恢復；
+一次 `systemctl restart wazuh-agent` 後 3 秒內回到 2 條。「Wazuh 不會自行補回」只在它的自癒次數用完之後才成立，
+所以不能依賴它。C1–C22 沒有任何一條看得到這個狀態。現在的行為（apply playbook Step 3、Step 8d/8e/8a、
+Step 10、rescue；spec §5 與 §6 有完整說明）：
 
-- 只在需要時才載入：規則檔這次有變、`augenrules --check` 回報有差異或讀不出結果、或 kernel 缺少本模組
-  管理的 rule key。已收斂的主機不載入、不重啟 auditd、不重啟 agent（`changed=0`）。`--tags C3`..`C9`
-  只改檔不載入，之後的完整套用或 `--tags C10` 會補上（kernel 與檔案不同步時下一次一定會載入）。
-- 載入或重啟 auditd 之前，先讀 Wazuh 協調器的唯讀 `writer-inspect`（只在主機有 `wazuh-agent` unit 時）：
-  有 Wazuh writer 或 journal 在進行（例如受控 agent 升級），或讀不到 agent／kernel 狀態，就在改任何東西
-  之前失敗，typed reason 是 `wazuh_writer_active`、`whodata_state_unreadable`。處理方式：等 Wazuh 的操作結束
-  （或用它的 owner token 回復）後重跑。這是檢查不是鎖，檢查到動作之間有一小段空窗。
-- 套用前 agent 為 active 且 kernel 有 `wazuh_fim` watch 的主機：這次 run 的最後一次擾動之後，等 auditd
-  與 `/var/ossec/queue/sockets/audit` 上的 `audisp-af_unix` listener 回來、重啟一次 `wazuh-agent`、再有上限地
-  等 watch 回來（預設 30 秒與 60 秒，可用 `-e audit_whodata_endpoint_timeout=`、
-  `-e audit_whodata_watch_timeout=` 調整）。沒有回來就以 typed reason 失敗：`endpoint_not_ready`、
-  `agent_restart_failed`、`watches_not_restored`、`kernel_unreadable`（錯誤訊息列出還缺的 watch）。這一步失敗
-  不回滾已套用的規則與轉送設定；修好原因後 `systemctl restart wazuh-agent` 並用 C23 確認。
-- agent 不存在、已停止、或套用前 kernel 沒有 `wazuh_fim` watch（例如 EL 沒有 `audispd-plugins`，因此沒有
-  endpoint）的主機：本模組永遠不啟動或重啟 agent。這類主機只會被上面的擾動前檢查拒絕（有 `wazuh-agent`
-  unit、而且 Wazuh writer／journal 在進行中或讀不到 agent／kernel 狀態時；agent 已停止正是受控升級進行中的
-  樣子），拒絕發生在什麼都還沒改之前；沒有 `wazuh-agent` unit 的主機完全不受 Wazuh 影響。
+- 只在需要時才載入：規則檔這次有變、`augenrules --check` 回報有差異或讀不出結果（規則參數被改但 key 不變時
+  只有它看得到）、或 kernel 缺少本模組管理的 rule key。已收斂的主機不載入、不重啟 auditd、不重啟 agent
+  （`changed=0`）。`--tags C3`..`C9` 只改檔不載入，之後的完整套用或 `--tags C10` 會補上（kernel 與檔案不同步時
+  下一次一定會載入）。
+- 載入或重啟 auditd 之前，guard 先當場重讀 agent 與 kernel 清單（不用 play 開始時的快照：Step 1 的套件
+  安裝可能在 play 中途才讓 `auditctl` 出現），再讀 Wazuh 協調器的唯讀 `writer-inspect`（只在主機有
+  `wazuh-agent` unit 時），在 kernel 清單被動到之前失敗：`wazuh_writer_active`（有 Wazuh writer 或 journal
+  在進行，例如受控 agent 升級，或協調器沒有回答）、`whodata_state_unreadable`（讀不到 agent 狀態，或 agent
+  為 active 而 `auditctl -l` 讀不出來）、`wazuh_agent_transitioning`（agent 正在啟動、停止或自動重啟，who-data
+  是否 live 無法判定）。處理方式：等 Wazuh 的操作或 agent 穩定（或用 owner token 回復）後重跑。`auditctl`
+  不存在不是拒絕的理由（那時 who-data 不可能 live）。拒絕之前這次 run 的其他步驟（套件、設定檔）可能已經執行，
+  被還原的只有規則檔。這是檢查不是鎖，檢查到動作之間有一小段空窗。
+- 擾動前 agent 為 active 且 kernel 有 `wazuh_fim` watch 的主機（集合 S，由 guard 在第一次擾動之前當場讀取）：
+  這次 run 的最後一次擾動之後，等 auditd 與 `/var/ossec/queue/sockets/audit` 上的 `audisp-af_unix` listener
+  回來、重啟一次 `wazuh-agent`、再有上限地等 watch 回來（預設 30 秒與 60 秒，可用
+  `-e audit_whodata_endpoint_timeout=`、`-e audit_whodata_watch_timeout=` 調整）。沒有回來就以 typed reason
+  失敗：`endpoint_not_ready`、`agent_restart_failed`、`watches_not_restored`、`kernel_unreadable`（錯誤訊息列出
+  還缺的 watch）。這一步失敗不回滾已套用的規則與轉送設定；修好原因後 `systemctl restart wazuh-agent` 並用 C23
+  確認。
+- agent 不存在、已停止、或擾動前 kernel 沒有 `wazuh_fim` watch（例如 EL 上 endpoint 尚未建立，見下）的主機：
+  本模組永遠不啟動或重啟 agent。這類主機只會被上面的擾動前檢查拒絕（有 `wazuh-agent` unit、而且 Wazuh
+  writer／journal 在進行中、讀不到狀態或 agent 在轉換中時；agent 已停止正是受控升級進行中的樣子），拒絕發生
+  在 kernel 清單被動到之前；沒有 `wazuh-agent` unit 的主機完全不受 Wazuh 影響。
 - 失敗路徑：rescue 只在這次 run 載入過、而且規則檔被還原或移除（或載入本身失敗）時才重載 kernel 清單；
   重載之後重新建立 who-data。最後的錯誤訊息如實說明規則檔、kernel 清單與 who-data 各自的結果。
 
@@ -144,6 +153,21 @@ rescue；spec §5 與 §6 有完整說明）：
 `systemctl is-active wazuh-agent` 為 active 後，執行一次 `sudo systemctl restart wazuh-agent`，再用 spec C23
 確認 watch 回來。
 
-仍然存在的限制：EL 上 Step 8b 的 `pkill -HUP -x auditd` 不經過 `augenrules`，對已在運作的 Wazuh listener
-的影響沒有實測，不視為擾動；Ubuntu 22.04 與 aarch64 沒有實測；Step 8（C18）啟動原本停止的 auditd 不追蹤；
-host decommission 的 `augenrules --load` 是整機退役的一部分，不在範圍內。
+仍然存在的限制：
+
+- EL 上 Step 8b 的 `pkill -HUP -x auditd` 不經過 `augenrules`，已在 AlmaLinux 9.8（Wazuh agent 4.14.x）量過
+  不視為擾動：who-data 已 live 時連續 6 次 SIGHUP（間隔 8 秒），`wazuh_fim` watch 與 kernel 清單總數不變、
+  `audisp-af_unix` 的 PID、連線與 listener 不變；以真實 playbook 在 plugin 設定漂移下重跑結果相同。只量過
+  plugin 設定變更觸發的 HUP 與單純 HUP。
+- EL 的既有順序缺口（wazuh-fim，不在 #324 範圍內，沒有修）：audit-log-forwarding 的 Step 1a 會安裝
+  `audispd-plugins`，但 Wazuh agent 套件在 audit-log-forwarding 的 SIGHUP 之後才安裝
+  `/etc/audit/plugins.d/af_wazuh.conf`，auditd 尚未被告知載入它。2026-11-12 在拋棄式 AlmaLinux 9.8 上，
+  audit-log-forwarding 先於 wazuh-fim 的全新同機鏈套用完成後，endpoint 沒有 listener、who-data 不是 live；
+  之後 `pkill -HUP -x auditd` 才讓 listener 出現。這時 C23 回 0，本模組不碰 agent。who-data 已 live 的 EL 主機被
+  外部 `auditctl -D` 清掉後再套用：watch 被補回（agent 重啟一次），下一次套用 `changed=0`。
+- Ubuntu 22.04 沒有涵蓋、沒有 capture：auditd 內建 af_unix，沒有外部 `audisp-af_unix` 行程。re-arm 與 C23 只認
+  `audisp-af_unix` 在 endpoint 上 LISTEN，所以 who-data 在 22.04 上 live 時，擾動之後 re-arm 以
+  `endpoint_not_ready` 失敗、不重啟 agent（kernel 清單已被清掉，需要手動 `systemctl restart wazuh-agent`），
+  C23 一律回 0。aarch64 同樣沒有實測。
+- Step 8（C18）啟動原本停止的 auditd 不追蹤；host decommission 的 `augenrules --load` 是整機退役的一部分，
+  不在範圍內。
