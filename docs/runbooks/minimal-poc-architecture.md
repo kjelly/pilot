@@ -263,6 +263,12 @@ One-time acceptance recordings and per-run wizard drivers are disposable.
 
 ## 0. Goal
 
+> **2026-11-10 architecture revision, not yet re-run:** the topology file now defines five nodes
+> aligned with `infra-config` staging/prod (§0.6). Everything below §0.6 — the table in this
+> section, §0.5, §3, §4 and the round history — still describes, and its evidence still proves,
+> the **three original nodes**. Treat the two extra nodes and five extra roles as unverified until
+> a clean-room run records evidence for them (§0.6.3).
+
 Rebuild and verify this three-node PoC entirely through sanctioned `pilot` workflows:
 
 | Node | Platform | Purpose |
@@ -358,6 +364,71 @@ automatically renders `/etc/seaweedfs/s3.json` with mode `0600` and starts Seawe
 The standalone [network firewall matrix](../network-firewall-matrix.md) defines the required
 inter-node and controlled outbound connections for this topology.
 
+## 0.6 Target architecture aligned with staging/prod (2026-11-10, **unverified**)
+
+Source of truth for the comparison: the `infra-config/{staging,prod}/hosts.yml` of the
+infrasec-iac-pilot-cfg1 repository (read 2026-11-10, HEAD `6fe7731`). `docs/topologies/minimal-poc-topology.yaml`
+is the machine-readable form of this section and `TestMinimalPoCTopologyMatchesRunbook` locks it.
+No VM was created or deployed for this revision: it is a design change, not a result.
+
+### 0.6.1 Environment → PoC node mapping
+
+| PoC node | staging host | prod host | Roles added by this revision |
+|---|---|---|---|
+| `freeipa-server` | `stg-ipa1` | `freeipa` | none (unchanged) |
+| `freeipa-replica` (new) | `stg-ipa2` | `freeipa02` | `freeipa-server-replica` plus the four common roles (`host-monitoring`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup`) |
+| `nexus` | `stg-nexus` | `it-core` | `agent-controller`, `detection-engine` (both run on it-core in prod; `reverse-proxy` stays here instead of prod's separate `it-proxy`) |
+| `client-vm` | `stg-client1` and `stg-dns1` | n/a | `dns` (the unbound tier; co-located like `dns-tier-topology.yaml`'s `dt-dns-2`) |
+| `bastion` (new) | n/a | `bastion-test` | `freeipa-client`, `pilot-access-gateway`, nothing else, as in prod |
+
+Role families present in staging or prod and deliberately **not** in the PoC: `dcgm-exporter`
+(needs a GPU, cannot be verified on a VM), `snmp-exporter` (no SNMP device to poll), a separate
+`it-proxy` host (same role, different host; costs a VM for no extra role coverage), and
+`pilot-gateway-scope` (a day-2 reconcile that needs a real target hostgroup, add it when the gateway is exercised).
+
+### 0.6.2 Resource budget
+
+| Node | Image | RAM (MiB) | vCPU | Disk (GiB) | Why this size |
+|---|---|---|---|---|---|
+| `freeipa-server` | AlmaLinux 9 | 4608 | 2 | 30 | contract `minRAMMiB` 4096; a guest sees ~95% of the configured value |
+| `freeipa-replica` | AlmaLinux 9 | 4608 | 2 | 30 | same 4096 floor as the primary (`contracts/freeipa-server-replica.yaml`); `freeipa-ha-topology.yaml`'s 3072 would fail `pilot deploy`'s resource gate |
+| `nexus` | Ubuntu 24.04 | 12288 | 6 | 80 | unchanged; the two added roles need 256 MiB and 512 MiB (their contracts) |
+| `client-vm` | Ubuntu 24.04 | 2560 | 2 | 20 | +512 MiB for unbound (`contracts/dns.yaml` `minRAMMiB` 512) |
+| `bastion` | Ubuntu 24.04 | 2048 | 2 | 20 | the size `tx-gw` already runs with; contract floor is 512 MiB |
+| **Total** | | **26112** | **14** | **180** | was 18944 MiB / 10 vCPU / 130 GiB for three nodes |
+
+The lab host that built this revision has 12 cores, about 52 GiB of available RAM and about 211 GiB
+free disk, so the five nodes fit with vCPU overcommit; check `pilot vm-target list` and free
+disk before `topology up` (the disk was at 88%).
+
+Merging decisions and why they are safe to try:
+
+- `dns` on `client-vm` instead of a sixth VM: the contract's only conflicts are `freeipa-server` and
+  `freeipa-server-replica`, and `dt-dns-2` is a recorded `dns` + `freeipa-dns-client` co-location.
+- `pilot-access-gateway` on its own node rather than on `client-vm`: it installs an sshd `ForceCommand`
+  drop-in for portal users, which would change SSH behavior of the shared client host.
+- `agent-controller` and `detection-engine` on `nexus`: both are `hostCardinality: exactly-one`
+  and `detection-engine` needs `thanos-query` and `alertmanager` from the same site.
+
+### 0.6.3 What must be re-run before this section may claim "verified"
+
+1. `pilot vm-target topology up` for the five-node file, then the generated-inventory read-back (§0.1 of
+   `AGENTS.md`): every new group must resolve to the host in the table above.
+2. Site-wide deploy (§3.4) including the new `dns` and `pilot-access-gateway` roles, which `site.yml` runs.
+3. Reconciles that `site.yml` skips because the contracts set `site.include: false`:
+   `freeipa-server-replica` (after `freeipa-server`), `agent-controller` and `detection-engine`
+   (after `thanos-query` and `alertmanager`). Neither the order nor the inputs in
+   [the configuration guide §2.9](minimal-poc-configuration.md) has been run yet.
+4. Specs for the new roles, with the groups the topology header lists: `freeipa-server-replica.md`,
+   `dns.md`, `pilot-access-gateway.md`, `agent-controller.md`, `detection-engine.md`.
+5. The firewall matrix needs new flows that nobody has checked on this topology:
+   primary ↔ replica (LDAP/LDAPS, Kerberos, HTTP/HTTPS, replication), `bastion` → `freeipa-server`/`client-vm`,
+   and Alertmanager → `agent-controller` on `nexus` (8090, same host).
+6. §4 checks that assume one FreeIPA server (for example "HBAC allow from the server") should be
+   repeated against the replica after replication converges.
+
+Until items 1–6 have recorded evidence, keep the §0.5 fact table as the statement of what is verified.
+
 ## 1. Aligned acceptance contracts
 
 The component checks live in these specs and are not duplicated here:
@@ -383,8 +454,11 @@ The component checks live in these specs and are not duplicated here:
 - `docs/verification/reverse-proxy.md`
 - `docs/verification/internal-endpoint.md`
 - `docs/verification/host-monitoring.md`
+- `docs/verification/freeipa-server-replica.md`, `docs/verification/dns.md`,
+  `docs/verification/pilot-access-gateway.md`, `docs/verification/agent-controller.md`,
+  `docs/verification/detection-engine.md` (added 2026-11-10 with §0.6, not yet run on this topology)
 
-The last five were merged in from the retired `delivery-test` skill (2026-08-14) — see §3.7, §3.8,
+The last five of the list above (through `host-monitoring.md`) were merged in from the retired `delivery-test` skill (2026-08-14) — see §3.7, §3.8,
 and §4.5.
 
 **`freeipa-client.md`, `freeipa-identity.md`, and `freeipa-dns.md` do not fully pass `pilot verify`

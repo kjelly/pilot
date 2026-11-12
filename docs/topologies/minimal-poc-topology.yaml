@@ -1,8 +1,21 @@
-# Declarative three-node topology for docs/runbooks/minimal-poc-architecture.md.
+# Declarative five-node topology for docs/runbooks/minimal-poc-architecture.md.
+#
+# 2026-11-10 architecture revision (NOT YET RE-VERIFIED on this exact topology;
+# see the runbook's §0.6): grown from the verified 3-node layout so that every
+# role family that infra-config/staging and infra-config/prod run is present at
+# least once, with the fewest VMs:
+#   freeipa-replica  = staging stg-ipa2 / prod freeipa02 (FreeIPA HA)
+#   client-vm `dns`  = staging stg-dns1 (the unbound tier; co-located with a
+#                      freeipa-dns-client consumer exactly like dns-tier's dt-dns-2)
+#   nexus            = staging stg-nexus / prod it-core (+ agent-controller,
+#                      detection-engine, which both run on it-core in prod)
+#   bastion          = prod bastion-test (pilot-access-gateway)
+# Not represented on purpose: dcgm-exporter (needs a GPU), snmp-exporter
+# (no SNMP device), a separate it-proxy (reverse-proxy stays on nexus).
 # The groups below are the role memberships captured in that runbook's
 # actual inventory snapshot; an empty role group is intentionally omitted.
 #
-# Bring up/render the same three hosts with:
+# Bring up/render the same five hosts with:
 #   pilot vm-target topology up --topology docs/topologies/minimal-poc-topology.yaml
 #   pilot vm-target topology inventory --topology docs/topologies/minimal-poc-topology.yaml
 #
@@ -27,6 +40,15 @@
 #   --verify docs/verification/host-monitoring.md=host-monitoring
 #   --verify docs/verification/freeipa-dns-client.md=freeipa-dns-client
 #   --verify docs/verification/reverse-proxy.md=reverse-proxy
+#   --verify docs/verification/freeipa-server-replica.md=freeipa-server-replica
+#   --verify docs/verification/dns.md=dns
+#   --verify docs/verification/pilot-access-gateway.md=pilot-access-gateway
+#
+# agent-controller and detection-engine are opt-in (contract site.include:
+# false), so site.yml skips them: reconcile them after the site-wide deploy
+# (`pilot reconcile`) and verify docs/verification/agent-controller.md=
+# agent-controller and docs/verification/detection-engine.md=detection-engine.
+# Both need a built dist/ artifact (their *_artifact_path/_sha256 group vars).
 #
 # freeipa-ca-trust is day-2/opt-in and targets the literal `all` inventory
 # group by default (not a named per-host role in this file) — see the
@@ -53,7 +75,7 @@
 # separately before verifying that spec.
 #
 # services: local reuses `pilot services up --profile dev-lite`'s host-local
-# package/image cache across all three nodes (equivalent to `vm-target up
+# package/image cache across all five nodes (equivalent to `vm-target up
 # --services local`, see docs/runbooks/minimal-poc-architecture.md §2). It is
 # fail-closed if that stack isn't running — drop this key for an
 # intentionally uncached run.
@@ -74,9 +96,35 @@ nodes:
       - audit-log-forwarding
       - wazuh-fim
       - restic-backup
+    # ipa-replica-install makes the primary conncheck back to the new replica,
+    # so the primary must resolve the replica's FQDN (freeipa-ha-topology.yaml).
     wire:
       - nexus
       - client-vm=client-vm.ipa.pilot.internal
+      - freeipa-replica=ipa2.ipa.pilot.internal
+      - bastion=bastion.ipa.pilot.internal
+
+  # FreeIPA HA replica (staging stg-ipa2, prod freeipa02). freeipa-server-replica
+  # needs minRAMMiB 4096, and an AlmaLinux guest sees ~95% of what it is given,
+  # so 4608 like the primary (freeipa-ha-topology's 3072 fails that gate in
+  # `pilot deploy`; cmd/pilot/cmd/topology_resources_test.go). It conflicts with
+  # the dns role by contract, so it never shares a host with it.
+  - name: freeipa-replica
+    base_image: almalinux-9
+    memory: 4608
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 3m
+    boot_timeout: 6m
+    groups:
+      - freeipa-server-replica
+      - host-monitoring
+      - audit-log-forwarding
+      - wazuh-fim
+      - restic-backup
+    wire:
+      - freeipa-server=ipa1.ipa.pilot.internal
 
   - name: nexus
     base_image: ubuntu-24.04
@@ -103,13 +151,19 @@ nodes:
       - alertmanager
       - dashboard
       - freeipa-nfs-server
+      - agent-controller
+      - detection-engine
     wire:
       - freeipa-server=ipa1.ipa.pilot.internal
+      - freeipa-replica=ipa2.ipa.pilot.internal
       - client-vm=client-vm.ipa.pilot.internal
 
+  # client-vm also carries the `dns` tier (staging stg-dns1): unbound needs
+  # only 512 MiB (contracts/dns.yaml) and dns-tier-topology.yaml's dt-dns-2
+  # already runs it next to a freeipa-dns-client consumer.
   - name: client-vm
     base_image: ubuntu-24.04
-    memory: 2048
+    memory: 2560
     vcpus: 2
     disk: 20
     ssh_user: root
@@ -124,6 +178,25 @@ nodes:
       - wazuh-fim
       - restic-backup
       - freeipa-nfs-client
+      - dns
     wire:
       - freeipa-server=ipa1.ipa.pilot.internal
       - nexus
+
+  # Access gateway (prod bastion-test): freeipa-client + pilot-access-gateway
+  # only, as in prod. 2048 MiB / 2 vCPU is the size tx-gw already runs with
+  # (pilot-access-transport-topology.yaml); the contract floor is 512 MiB.
+  - name: bastion
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 20
+    ssh_user: root
+    ssh_timeout: 3m
+    boot_timeout: 6m
+    groups:
+      - freeipa-client
+      - pilot-access-gateway
+    wire:
+      - freeipa-server=ipa1.ipa.pilot.internal
+      - client-vm=client-vm.ipa.pilot.internal
