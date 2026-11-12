@@ -42,8 +42,18 @@ const (
 )
 
 var (
-	disturbingCommand = regexp.MustCompile(`(?:\baugenrules\b[^\n|;&]*--load\b|\bauditctl\b[^\n|;&]*\s-[RD]\b|\b(?:pkill|kill)\b[^\n|;&]*-(?:HUP|1|SIGHUP)\b[^\n|;&]*\bauditd\b|\bservice\s+auditd\s+(?:restart|reload|force-reload)\b|\bsystemctl\s+(?:restart|reload|try-restart)\s+auditd\b)`)
-	auditdUnit        = regexp.MustCompile(`^auditd(?:\.service)?$`)
+	// A command that empties or replaces the kernel audit list: augenrules --load, auditctl -R/-D/--reload-rules,
+	// a SIGHUP of auditd, and a service-manager restart or reload of auditd, whatever options come before the
+	// verb (`systemctl -q restart auditd`, `--quiet`, `auditd.service`). A unit whose name only begins with
+	// auditd is another unit.
+	disturbingCommand = regexp.MustCompile(`(?:` +
+		`\baugenrules\b[^\n|;&]*--load\b` +
+		`|\bauditctl\b[^\n|;&]*(?:\s-[RD]\b|\s--reload-rules\b)` +
+		`|\b(?:pkill|kill)\b[^\n|;&]*-(?:HUP|1|SIGHUP)\b[^\n|;&]*\bauditd\b` +
+		`|\bservice\s+auditd\s+(?:restart|reload|force-reload)\b` +
+		`|\bsystemctl\b(?:\s+-{1,2}[A-Za-z][\w=-]*)*\s+(?:restart|reload|try-restart|reload-or-restart|try-reload-or-restart|force-reload)\s+auditd(?:\.service)?(?:[\s;&|]|$)` +
+		`)`)
+	auditdUnit = regexp.MustCompile(`^auditd(?:\.service)?$`)
 )
 
 type auditTaskRef struct {
@@ -431,6 +441,29 @@ func TestAuditDisturbanceLintCases(t *testing.T) {
   tasks:
     - {name: hup, ansible.builtin.command: pkill -HUP -x auditd, when: x}
 `, 1},
+		{"systemctl with an option before the verb", `
+- hosts: all
+  tasks:
+    - {name: quiet, ansible.builtin.command: systemctl -q restart auditd, when: x}
+    - {name: long, ansible.builtin.shell: "systemctl --quiet --no-block restart auditd.service", when: x}
+    - {name: argv, ansible.builtin.command: {argv: [systemctl, -q, reload-or-restart, auditd]}, when: x}
+`, 3},
+		{"auditctl --reload-rules and kill -HUP of the pid", `
+- hosts: all
+  tasks:
+    - {name: reload, ansible.builtin.command: auditctl --reload-rules, when: x}
+    - {name: hup, ansible.builtin.shell: "kill -HUP $(pidof auditd)", when: x}
+`, 2},
+		{"auditd-like unit names and read-only systemctl and auditctl are not disturbances", `
+- hosts: all
+  tasks:
+    - {name: other unit, ansible.builtin.command: systemctl restart auditd-remote.service}
+    - {name: status, ansible.builtin.command: systemctl -q status auditd}
+    - {name: active, ansible.builtin.command: systemctl --quiet is-active auditd}
+    - {name: start, ansible.builtin.command: systemctl -q start auditd}
+    - {name: version, ansible.builtin.command: auditctl --version}
+    - {name: enabled, ansible.builtin.command: auditctl -e 1}
+`, 0},
 		{"auditd started is not a restart", `
 - hosts: all
   tasks:

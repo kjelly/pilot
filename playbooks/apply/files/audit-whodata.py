@@ -6,8 +6,9 @@ agent (who-data keeps `wazuh_fim` watches in it). `augenrules --load` and an
 auditd restart replace that whole list, so this helper lets the playbook
 
   probe  - read, without changing anything, what the list holds (managed keys,
-           the `wazuh_fim` watch set), whether `augenrules --check` sees a
-           difference, and whether wazuh-agent exists and is active;
+           the `wazuh_fim` watch set and `expected`, the set to give back),
+           whether `augenrules --check` sees a difference, and the state of
+           wazuh-agent (absent, inactive, active, transitioning, unknown);
   rearm  - after the playbook disturbed the list: wait (bounded) for auditd and
            the audisp af_unix listener, restart wazuh-agent once, wait (bounded)
            until the kernel holds every `wazuh_fim` watch it held before.
@@ -66,7 +67,14 @@ def unit_properties(unit, names):
 
 
 def agent_state():
-    """absent | inactive | active | unknown for the wazuh-agent unit."""
+    """absent | inactive | active | transitioning | unknown for the wazuh-agent unit.
+
+    absent: no such unit. active: running (a unit that is `reloading` its configuration is running).
+    inactive: stopped or failed. transitioning: systemd is starting, stopping or auto-restarting it
+    (`activating`, `deactivating`): whether who-data is live cannot be told, and the caller must not
+    disturb the kernel audit list under it. unknown: the answer could not be read, or is a value this
+    helper has no meaning for.
+    """
     values = unit_properties('wazuh-agent', ['LoadState', 'ActiveState'])
     if values is None:
         return 'unknown'
@@ -74,8 +82,10 @@ def agent_state():
         return 'absent'
     if values['ActiveState'] in ('active', 'reloading'):
         return 'active'
-    if values['ActiveState'] in ('inactive', 'failed', 'deactivating'):
+    if values['ActiveState'] in ('inactive', 'failed'):
         return 'inactive'
+    if values['ActiveState'] in ('activating', 'deactivating'):
+        return 'transitioning'
     return 'unknown'
 
 
@@ -149,7 +159,12 @@ def augenrules_state():
 
 def probe(args):
     kernel_state, lines = kernel_list()
-    document = {'schema': 1, 'agent': agent_state(), 'kernel': kernel_state, 'watches': watches(lines)}
+    agent = agent_state()
+    document = {'schema': 1, 'agent': agent, 'kernel': kernel_state, 'watches': watches(lines)}
+    # The set a disturbance must give back: who-data is live only for an active agent whose watches a readable
+    # kernel list holds. A list that cannot be read, or no auditctl at all (nothing can hold a who-data watch
+    # without auditd), gives the empty set; the caller decides separately whether that state is a reason to refuse.
+    document['expected'] = document['watches'] if agent == 'active' and kernel_state == 'ok' else []
     if args.rules:
         document['managed'], expected = managed_state(args.rules, kernel_state, lines)
         document['managed_keys'] = sorted(expected)

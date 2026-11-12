@@ -152,6 +152,10 @@
         # The kernel audit list is shared with the Wazuh agent's who-data
         # (spec C23). Facts live across plays of one ansible-playbook run, so
         # none of these may carry over from an earlier play of the same host.
+        # The agent state and the set S of watches to give back are not read
+        # here: tasks/audit-whodata-guard.yml reads them right before a step
+        # that disturbs the list, so no decision rests on a snapshot taken before
+        # the package installs of Step 1 (auditctl may only appear there).
         audit_whodata_agent: unknown
         audit_whodata_kernel: unknown
         audit_whodata_expected: []
@@ -169,39 +173,6 @@
         audit_rescue_whodata_live: false
         audit_rescue_reload_result: {}
       tags: [always]
-
-    # Read-only, before any change of this run: what the Wazuh agent's who-data
-    # holds in the kernel audit list right now (the set S the run must give back
-    # if it disturbs the list, spec C23). check_mode: false: it only reads, and a
-    # preview needs the answer too. A probe that cannot run, or whose output is
-    # not the document the helper prints, fails the play here, before any change.
-    # Tagged with the rows of the two steps that can disturb the list, which are
-    # the only readers outside the rescue (the rescue re-checks that these facts
-    # exist before it uses them).
-    - name: "Probe the kernel audit list and the Wazuh agent before any change (read-only, spec C23)"
-      tags: [C10, C21]
-      ansible.builtin.script:
-        cmd: files/audit-whodata.py probe
-        executable: python3
-      register: audit_whodata_probe
-      changed_when: false
-      failed_when: audit_whodata_probe.rc != 0
-      check_mode: false
-
-    - name: "Record the agent state and the pre-apply who-data watch set S (spec C23)"
-      tags: [C10, C21]
-      ansible.builtin.set_fact:
-        audit_whodata_agent: "{{ audit_whodata_probe_document.agent }}"
-        audit_whodata_kernel: "{{ audit_whodata_probe_document.kernel }}"
-        # S is only a set to give back when who-data was live: an active agent
-        # whose watches the kernel list holds. Never derived from a list that
-        # could not be read.
-        audit_whodata_expected: >-
-          {{ audit_whodata_probe_document.watches
-             if (audit_whodata_probe_document.agent == 'active' and audit_whodata_probe_document.kernel == 'ok')
-             else [] }}
-      vars:
-        audit_whodata_probe_document: "{{ audit_whodata_probe.stdout | from_json }}"
 
     - name: "Gate: RELP mTLS inputs"
       ansible.builtin.include_tasks:
@@ -492,9 +463,11 @@
           vars:
             audit_kernel_probe_document: "{{ audit_kernel_probe.stdout | from_json }}"
 
-        # Only reached when a load is about to happen. Refuses, before anything is
-        # touched, when the Wazuh agent's state cannot be read or a Wazuh writer or
-        # journal is active (tasks/audit-whodata-guard.yml).
+        # Only reached when a load is about to happen. Reads the Wazuh agent and the
+        # kernel list again right now and takes the set S of watches to give back
+        # there, then refuses, before the list is touched, when the agent state cannot
+        # be read or is changing, or a Wazuh writer or journal is active
+        # (tasks/audit-whodata-guard.yml).
         - name: "Step 3c: Refuse to flush the kernel audit list while Wazuh is mid-operation or unreadable (spec C23)"
           tags: [C10]
           ansible.builtin.include_tasks:
@@ -1016,7 +989,8 @@
         # Step 8a replaces the running auditd. Ubuntu 24.04's auditd.service also runs
         # `augenrules --load` in ExecStartPost, so the restart empties the kernel
         # audit list like Step 3 does, and the new auditd's af_unix listener drops
-        # the Wazuh agent's connection (spec C23). Same refusal before it, same
+        # the Wazuh agent's connection (spec C23). Same guard before it (it re-reads the
+        # agent and the list, and keeps the S an earlier guard of this run took), same
         # record that it was attempted, under exactly the condition of Step 8a
         # (TestRegression_AuditDisturbanceGuardsShareTheDisturbancesCondition keeps them equal).
         - name: "Step 8d: Refuse to restart auditd while Wazuh is mid-operation or unreadable (spec C23) — Debian family"

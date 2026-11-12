@@ -4,30 +4,74 @@
 # --load` of Step 3 and the auditd restart of Step 8a. Included with apply: tags
 # equal to the disturbing step's, so --tags cannot skip it.
 #
-# It refuses, before anything is touched, with a typed reason:
+# It reads the state itself, right now, and does not trust anything read earlier
+# in the play: the package installs of Step 1 may be what makes auditctl appear
+# (an agent that is active with no auditd on the host has no who-data to protect,
+# and that is a state, not an error). It sets:
+#   audit_whodata_agent     absent | inactive | active | transitioning | unknown
+#   audit_whodata_kernel    absent (no auditctl) | unreadable | ok
+#   audit_whodata_expected  the set S of `wazuh_fim` watches a disturbance must give
+#                           back: an active agent's watches in a readable list, else
+#                           []. Taken here, before the first disturbance of the run;
+#                           a second guard of the same run (the list was already
+#                           emptied by this run) keeps the first one's S.
+#
+# It then refuses, before the kernel audit list is touched, with a typed reason:
 #   whodata_state_unreadable  the agent state cannot be read, or the agent is active
 #                             and the kernel list cannot be read: the run cannot tell
 #                             whether who-data is live, so it cannot promise to give
 #                             it back;
+#   wazuh_agent_transitioning systemd is starting, stopping or auto-restarting the
+#                             agent: whether who-data is live is not determinable and
+#                             the list must not be emptied under it;
 #   wazuh_writer_active       a Wazuh writer or journal owns this host (for example a
 #                             controlled agent upgrade, which has stopped the agent and
 #                             records auditd's identity), or the coordinator's
 #                             writer-inspect could not answer.
-# It is a check, not a lock: the window between this check and the step is accepted
-# and documented (docs/verification/audit-log-forwarding.md section 5).
-#
-# Reads audit_whodata_agent and audit_whodata_kernel, set by the play's who-data
-# probe, which runs under the same tags as every step that includes this file.
+# Earlier steps of the run (package installs, configuration files) may already have
+# run; what is refused is the disturbance of the kernel audit list. It is a check, not
+# a lock: the window between this check and the step is accepted and documented
+# (docs/verification/audit-log-forwarding.md section 5).
+- name: Read the Wazuh agent and the kernel audit list right before the disturbance
+  ansible.builtin.script:
+    cmd: files/audit-whodata.py probe
+    executable: python3
+  register: audit_whodata_guard_probe
+  changed_when: false
+  failed_when: audit_whodata_guard_probe.rc != 0
+  check_mode: false
+
+- name: Record the agent state, and the who-data watch set S while nothing has been disturbed yet
+  ansible.builtin.set_fact:
+    audit_whodata_agent: "{{ audit_whodata_guard_document.agent }}"
+    audit_whodata_kernel: "{{ audit_whodata_guard_document.kernel }}"
+    audit_whodata_expected: >-
+      {{ audit_whodata_expected
+         if ((audit_kernel_load_attempted | default(false) | bool) or (audit_auditd_restart_attempted | default(false) | bool))
+         else audit_whodata_guard_document.expected }}
+  vars:
+    audit_whodata_guard_document: "{{ audit_whodata_guard_probe.stdout | from_json }}"
+
 - name: "Gate: the Wazuh agent and the kernel audit list can be read (whodata_state_unreadable)"
   ansible.builtin.assert:
     that:
       - audit_whodata_agent != 'unknown'
-      - audit_whodata_agent != 'active' or audit_whodata_kernel == 'ok'
+      - audit_whodata_agent != 'active' or audit_whodata_kernel != 'unreadable'
     fail_msg: >-
       whodata_state_unreadable: cannot read the Wazuh agent state (wazuh-agent={{ audit_whodata_agent }})
       or, with the agent active, the kernel audit list (auditctl={{ audit_whodata_kernel }}).
       Refusing to empty or replace the kernel audit list while it is unknown whether the agent's
-      who-data is live: nothing was changed. Fix systemd/auditctl on the host and re-run.
+      who-data is live: the kernel audit list was not touched. Fix systemd/auditctl on the host and re-run.
+
+- name: "Gate: the Wazuh agent is not starting, stopping or restarting (wazuh_agent_transitioning)"
+  ansible.builtin.assert:
+    that:
+      - audit_whodata_agent != 'transitioning'
+    fail_msg: >-
+      wazuh_agent_transitioning: wazuh-agent is changing state (systemd reports it activating or
+      deactivating, an auto-restart included), so whether its who-data is live cannot be told.
+      Refusing to empty or replace the kernel audit list under it: the kernel audit list was not
+      touched. Wait for the agent to settle (systemctl status wazuh-agent) and re-run.
 
 - name: Inspect the Wazuh host writer before the kernel audit list is disturbed
   ansible.builtin.include_tasks:
@@ -45,5 +89,5 @@
       if audit_whodata_writer.state == 'active'
       else 'the Wazuh coordinator could not report its host writer (' ~ audit_whodata_writer.reason | default('no answer') ~ ')' }}.
       Refusing to empty or replace the kernel audit list while a Wazuh operation may depend on
-      auditd and its endpoint staying as they are: nothing was changed. Wait for the Wazuh
-      operation to finish (or recover it with its owner token) and re-run.
+      auditd and its endpoint staying as they are: the kernel audit list was not touched. Wait for
+      the Wazuh operation to finish (or recover it with its owner token) and re-run.

@@ -128,6 +128,10 @@ const auditWhodataCoordinator = `#!/usr/bin/env python3
 import importlib.util, json, os, pathlib, sys
 with (pathlib.Path(os.environ['AUDIT_TEST_DIR']) / 'writer-calls').open('a') as handle:
     handle.write(' '.join(sys.argv[1:]) + '\n')
+if os.environ.get('AUDIT_TEST_WRITER_REFUSAL'):
+    # The coordinator's own typed refusal (a captured output), standing in for writer-inspect refusing.
+    sys.stdout.write(pathlib.Path(os.environ['AUDIT_TEST_WRITER_REFUSAL']).read_text())
+    sys.exit(1)
 spec = importlib.util.spec_from_file_location('wazuh_transaction', os.environ['AUDIT_TEST_COORDINATOR'])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -147,25 +151,33 @@ type auditScenario struct {
 	family    string // Debian (default) | RedHat
 	check     bool   // ansible-playbook --check
 
-	agent     string // active (default) | inactive | absent
-	wazuh     bool   // the kernel list holds the agent's wazuh_fim watches
-	managed   bool   // the kernel list holds the managed rules
-	flushed   bool   // the kernel list is empty (an external `auditctl -D`)
-	ruleEdit  bool   // the managed rules file on disk differs from what the template renders
-	pluginOff bool   // audisp-syslog is `active = no` and its process is not running
-	auditdOff bool
+	agent    string // active (default) | inactive | absent | activating (synthetic: no capture of a starting agent)
+	wazuh    bool   // the kernel list holds the agent's wazuh_fim watches
+	managed  bool   // the kernel list holds the managed rules
+	flushed  bool   // the kernel list is empty (an external `auditctl -D`)
+	ruleEdit bool   // the managed rules file on disk has an extra rule line (its keys change)
+	// ruleParamEdit: a rule's parameter is edited in the file behind an unchanged set of keys, so the file
+	// still lists every key the kernel holds and only `augenrules --check` can see that the generated
+	// audit.rules no longer matches rules.d.
+	ruleParamEdit bool
+	pluginOff     bool // audisp-syslog is `active = no` and its process is not running
+	auditdOff     bool
 
 	agentRearms       *bool // false: restarting the agent never brings the watches back
 	listenerStaysDown bool  // auditd's listener never comes back after a restart
 	auditctlFails     bool
 	agentShowFails    bool
 	writerActive      bool
+	writerRefuses     bool // the coordinator answers writer-inspect with its typed refusal
+	toolsAppearLate   bool // auditctl, augenrules and ss are not on the host when the play starts; a package install makes them appear before Step 3
 	fresh             bool // a host with none of the tools yet (check mode on a fresh VM)
 	twice             bool // run the play a second time on what the first left behind and observe only that run
 
 	failAfter string // "": no injected failure; "step2": after the render, before any load; "load": right after the load
 	mutate    func(play map[string]any)
-	extraVars []string
+	// mutateTasks rewrites a copy of a task file of playbooks/apply/tasks (by file name) before the run.
+	mutateTasks map[string]func(text string) string
+	extraVars   []string
 }
 
 // auditExpect is what the shared state must show afterwards.
@@ -179,9 +191,12 @@ type auditExpect struct {
 	changed        int // PLAY RECAP changed=, when >= 0
 	managedInList  bool
 	wazuhInList    bool
-	rules          string   // "" any | "template" | "edited": the managed rules file afterwards
-	out            []string // must appear in the ansible output
-	notOut         []string
+	rules          string // "" any | "template" | "edited": the managed rules file afterwards
+	// kernelFollowsFile: the kernel list holds every rule of the managed rules file as it is on disk at the
+	// end, instead of every rule of the template (for a run that loads an edited file).
+	kernelFollowsFile bool
+	out               []string // must appear in the ansible output
+	notOut            []string
 }
 
 type auditObservation struct {
@@ -358,6 +373,20 @@ func runAuditScenario(t *testing.T, sc auditScenario) auditObservation {
 	}
 	apply := filepath.Join(dir, "apply")
 	copyTree(t, "../../playbooks/apply/tasks", filepath.Join(apply, "tasks"))
+	for name, rewrite := range sc.mutateTasks {
+		path := filepath.Join(apply, "tasks", name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rewritten := rewrite(string(data))
+		if rewritten == string(data) {
+			t.Fatalf("the rewrite of %s changed nothing", name)
+		}
+		if err := os.WriteFile(path, []byte(rewritten), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	copyTree(t, "../../playbooks/apply/files", filepath.Join(apply, "files"))
 	copyTree(t, "../../playbooks/templates", filepath.Join(dir, "templates"))
 	coordinator, err := filepath.Abs("../../playbooks/apply/files/wazuh-transaction.py")
@@ -380,6 +409,12 @@ func runAuditScenario(t *testing.T, sc auditScenario) auditObservation {
 	disk := tmpl
 	if sc.ruleEdit {
 		disk = tmpl + editMarker
+	}
+	if sc.ruleParamEdit {
+		disk = strings.Replace(tmpl, "-w /etc/sudoers -p wa -k sudoers_changes", "-w /etc/sudoers -p rwa -k sudoers_changes", 1)
+		if disk == tmpl {
+			t.Fatal("the template has no sudoers watch to edit")
+		}
 	}
 	if !sc.fresh {
 		write(rulesFile, disk, 0o640)
@@ -463,8 +498,9 @@ m.HostWriter(pathlib.Path(sys.argv[2])).claim('a'*32,'agent')`, coordinator, wri
 		t.Fatal(err)
 	}
 	tools := []string{"systemctl", "pgrep", "pkill"}
-	if !sc.fresh {
-		tools = append(tools, "auditctl", "augenrules", "ss")
+	late := []string{"auditctl", "augenrules", "ss"}
+	if !sc.fresh && !sc.toolsAppearLate {
+		tools = append(tools, late...)
 	}
 	for _, tool := range tools {
 		write(filepath.Join(bin, tool), "#!"+python+"\n"+auditWhodataShim, 0o755)
@@ -478,6 +514,13 @@ m.HostWriter(pathlib.Path(sys.argv[2])).claim('a'*32,'agent')`, coordinator, wri
 		"AUDIT_TEST_COORDINATOR":  coordinator,
 		"AUDIT_TEST_WRITER_ROOT":  writerRoot,
 		"PYTHONDONTWRITEBYTECODE": "1",
+	}
+	if sc.writerRefuses {
+		refusal, err := filepath.Abs(filepath.Join("testdata", "native-captures", "wazuh-transaction.writer-claim.invalid-identity.rc1.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		play["environment"].(map[string]any)["AUDIT_TEST_WRITER_REFUSAL"] = refusal
 	}
 	vars := play["vars"].(map[string]any)
 	vars["audit_rules_dest"], vars["audit_syslog_plugin_conf"] = rulesFile, plugin
@@ -495,6 +538,22 @@ m.HostWriter(pathlib.Path(sys.argv[2])).claim('a'*32,'agent')`, coordinator, wri
 	args := template["ansible.builtin.template"].(map[string]any)
 	delete(args, "owner")
 	delete(args, "group")
+	if sc.toolsAppearLate {
+		// What the package installs of Step 1 do to a host that had no auditd: the tools appear in the middle of
+		// the play. Placed right after the render of Step 2, in every selection that reaches a disturbing step.
+		var paths []string
+		for _, tool := range late {
+			paths = append(paths, filepath.Join(bin, tool))
+		}
+		install := map[string]any{
+			"name": "simulated Step 1 package install: auditctl, augenrules and ss appear", "tags": []string{"C10", "C21"}, "check_mode": false,
+			"ansible.builtin.copy": map[string]any{"content": "#!" + python + "\n" + auditWhodataShim, "dest": "{{ item }}", "mode": "0755"},
+			"loop":                 paths,
+		}
+		if !insertAfterTask(t, play, "Step 2: Render audit.rules.j2 (setuid/setgid, sudo, passwd/sudoers watches)", install) {
+			t.Fatal("cannot insert the simulated package install")
+		}
+	}
 	switch sc.failAfter {
 	case "":
 	case "step2":
@@ -628,6 +687,15 @@ func (o auditObservation) verify(t *testing.T, want auditExpect) []string {
 		}
 	}
 	allManaged := managed == len(ruleLines(templateRules(t)))
+	if want.kernelFollowsFile {
+		allManaged = true
+		for _, rule := range ruleLines(o.rulesFile) {
+			if !listed[kernelLine(rule)] {
+				allManaged = false
+			}
+		}
+		want.managedInList = true
+	}
 	allWazuh := wazuh == len(ruleLines(readCapture(t, "auditctl-l.wazuh_fim.ubuntu2404.txt")))
 	if want.managedInList != allManaged {
 		problems = append(problems, fmt.Sprintf("kernel list holds all managed rules=%t, want %t (%v)", allManaged, want.managedInList, o.kernel))
@@ -720,6 +788,43 @@ func auditMatrix() []auditCase {
 	cases = append(cases, auditCase{
 		auditScenario{name: "second apply after an externally flushed list is a no-op", selection: "full", flushed: true, twice: true},
 		auditExpect{changed: 0, managedInList: true, wazuhInList: false}})
+	// F2: a rule's parameter edited behind unchanged keys. Every key is still in the kernel, this run changed
+	// nothing (--tags C10 never renders), so only `augenrules --check` sees the difference. Dropping that
+	// arm of the load decision leaves this host with the old rule for ever.
+	cases = append(cases, auditCase{
+		auditScenario{name: "rule parameter edited behind unchanged keys: only augenrules --check sees it", selection: "C10", wazuh: true, managed: true, ruleParamEdit: true},
+		auditExpect{loads: 1, agentRestarts: 1, writerInspects: 2, changed: -1, kernelFollowsFile: true, wazuhInList: true}})
+	// F1: the tools appear in the middle of the play (a package install on a host that had no auditd). The guard
+	// reads the host right before the disturbance, so neither the absent auditctl at the start nor the install
+	// is a refusal; who-data that is live at that moment is given back, and none that is not live is invented.
+	cases = append(cases, auditCase{
+		auditScenario{name: "auditd tools appear mid-play, agent active with live watches", selection: "C10", wazuh: true, toolsAppearLate: true},
+		auditExpect{loads: 1, agentRestarts: 1, writerInspects: 2, changed: -1, managedInList: true, wazuhInList: true}})
+	cases = append(cases, auditCase{
+		auditScenario{name: "auditd tools appear mid-play, agent active, no who-data live", selection: "full", flushed: true, toolsAppearLate: true},
+		auditExpect{loads: 1, agentRestarts: 0, writerInspects: 1, changed: -1, managedInList: true, wazuhInList: false,
+			notOut: []string{"whodata_state_unreadable: cannot read", "wazuh_agent_transitioning: wazuh-agent", "wazuh_writer_active: a Wazuh", "was not touched"}}})
+	// F1, the other half: with no auditd tools on the host at all (and none appearing) the agent has no who-data
+	// to protect, which is a state and not a reason to refuse. The run goes on and fails where the base fails,
+	// at the missing `augenrules`.
+	cases = append(cases, auditCase{
+		auditScenario{name: "no auditd tools on the host, agent active: not a refusal", selection: "C10", agent: "active", fresh: true},
+		auditExpect{fail: true, loads: 0, agentRestarts: 0, writerInspects: 1, changed: -1, managedInList: false, wazuhInList: false,
+			notOut: []string{"whodata_state_unreadable: cannot read", "wazuh_agent_transitioning: wazuh-agent"}}})
+	// F5: an agent that systemd is starting or auto-restarting cannot be classified: refuse (typed, nothing
+	// touched), and only when a disturbance is planned.
+	cases = append(cases, auditCase{
+		auditScenario{name: "agent starting: a planned disturbance is refused", selection: "C10", agent: "activating", wazuh: true},
+		auditExpect{fail: true, loads: 0, agentRestarts: 0, writerInspects: 0, changed: -1, managedInList: false, wazuhInList: true,
+			out: []string{"wazuh_agent_transitioning: wazuh-agent is changing state", "the kernel audit list was not touched"}, notOut: []string{"whodata_state_unreadable: cannot read"}}})
+	cases = append(cases, auditCase{
+		auditScenario{name: "agent starting but nothing to disturb", selection: "C10", agent: "activating", wazuh: true, managed: true},
+		auditExpect{loads: 0, changed: 0, managedInList: true, wazuhInList: true}})
+	// The coordinator itself refuses to report (its typed refusal): the guard refuses too and says why.
+	cases = append(cases, auditCase{
+		auditScenario{name: "the coordinator refuses to report its writer", selection: "C10", wazuh: true, writerRefuses: true},
+		auditExpect{fail: true, loads: 0, agentRestarts: 0, writerInspects: 1, changed: -1, managedInList: false, wazuhInList: true,
+			out: []string{"wazuh_writer_active: the Wazuh coordinator could not report its host writer (invalid Wazuh writer identity)"}}})
 	// I4: where who-data was not live nothing is started or restarted, and Wazuh never fails the run.
 	cases = append(cases, auditCase{
 		auditScenario{name: "no wazuh-agent on the host", selection: "full", agent: "absent", managed: true, pluginOff: true, ruleEdit: true},
@@ -745,15 +850,15 @@ func auditMatrix() []auditCase {
 	cases = append(cases, auditCase{
 		auditScenario{name: "wazuh writer active refuses before any change", selection: "full", wazuh: true, managed: true, ruleEdit: true, writerActive: true},
 		auditExpect{fail: true, loads: 0, agentRestarts: 0, writerInspects: 1, changed: -1, managedInList: true, wazuhInList: true, rules: "edited",
-			out: []string{"wazuh_writer_active", "owner=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "The rollback did not reload the kernel audit list", "The kernel audit list was not disturbed by this run"}}})
+			out: []string{"wazuh_writer_active: a Wazuh writer or journal owns this host (owner=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "The rollback did not reload the kernel audit list", "The kernel audit list was not disturbed by this run"}}})
 	cases = append(cases, auditCase{
 		auditScenario{name: "kernel list unreadable while the agent is active", selection: "C10", wazuh: true, managed: true, auditctlFails: true},
 		auditExpect{fail: true, loads: 0, changed: -1, managedInList: true, wazuhInList: true,
-			out: []string{"whodata_state_unreadable"}}})
+			out: []string{"whodata_state_unreadable: cannot read the Wazuh agent state", "the kernel audit list was not touched"}, notOut: []string{"nothing was changed"}}})
 	cases = append(cases, auditCase{
 		auditScenario{name: "agent state unreadable and a load needed", selection: "C10", wazuh: true, agentShowFails: true},
 		auditExpect{fail: true, loads: 0, changed: -1, managedInList: false, wazuhInList: true,
-			out: []string{"whodata_state_unreadable"}}})
+			out: []string{"whodata_state_unreadable: cannot read the Wazuh agent state", "the kernel audit list was not touched"}}})
 	cases = append(cases, auditCase{
 		auditScenario{name: "agent state unreadable but nothing to disturb", selection: "C10", wazuh: true, managed: true, agentShowFails: true},
 		auditExpect{loads: 0, changed: 0, managedInList: true, wazuhInList: true}})
@@ -807,7 +912,9 @@ func TestRegression_AuditWhodataSharedKernelListRuntime(t *testing.T) {
 // A matrix that only the fixed playbook passes proves little unless the shapes a lazier fix would take fail it.
 // Each mutant below is the production play with ONE change toward such a shape; the named scenario of the matrix
 // must then fail, for the stated reason (a mutant that fails for another reason, or does not fail, is not a
-// counterexample for the invariant it names).
+// counterexample for the invariant it names). Re-arming a run that disturbed nothing is deliberately not a
+// mutant: the set S is taken by the guard, which only runs before a disturbance, so such a run has no S and
+// the re-arm touches nothing.
 func TestRegression_AuditWhodataCounterexamplesFail(t *testing.T) {
 	requireAnsibleForAudit(t)
 	task := func(t *testing.T, play map[string]any, name string) map[string]any {
@@ -841,6 +948,33 @@ func TestRegression_AuditWhodataCounterexamplesFail(t *testing.T) {
 			facts["audit_load_needed"] = "{{ (audit_rules_result | default({})) is changed }}"
 		}, "rules file differs from the loaded list C10",
 			[]string{"kernel list emptied (augenrules --load / auditctl -R/-D)=0, want 1", "wazuh-agent restarts=0, want 1"}},
+		// One arm of the load decision at a time: each of the three can be the only one that sees a host that needs
+		// a load, so dropping any one of them leaves a host stale for ever.
+		{"load decision without its augenrules --check arm (F2)", func(t *testing.T, play map[string]any) {
+			facts := task(t, play, decide)["ansible.builtin.set_fact"].(map[string]any)
+			facts["audit_load_needed"] = "{{ ((audit_rules_result | default({})) is changed) or (audit_kernel_probe.stdout | from_json).managed != 'present' }}"
+		}, "rule parameter edited behind unchanged keys: only augenrules --check sees it",
+			[]string{"kernel list emptied (augenrules --load / auditctl -R/-D)=0, want 1", "wazuh-agent restarts=0, want 1", "kernel list holds all managed rules=false, want true"}},
+		{"load decision without its kernel-keys arm", func(t *testing.T, play map[string]any) {
+			facts := task(t, play, decide)["ansible.builtin.set_fact"].(map[string]any)
+			facts["audit_load_needed"] = "{{ ((audit_rules_result | default({})) is changed) or (audit_kernel_probe.stdout | from_json).augenrules != 'no_change' }}"
+		}, "managed rules missing from the kernel, wazuh watches live C10",
+			[]string{"kernel list emptied (augenrules --load / auditctl -R/-D)=0, want 1", "kernel list holds all managed rules=false, want true"}},
+		{"load decision without its this-run-changed-the-file arm", func(t *testing.T, play map[string]any) {
+			facts := task(t, play, decide)["ansible.builtin.set_fact"].(map[string]any)
+			facts["audit_load_needed"] = "{{ (audit_kernel_probe.stdout | from_json).augenrules != 'no_change' or (audit_kernel_probe.stdout | from_json).managed != 'present' }}"
+		}, "rules file differs from the loaded list full",
+			[]string{"kernel list emptied (augenrules --load / auditctl -R/-D)=0, want 1", "wazuh-agent restarts=0, want 1"}},
+		{"the attempted-load record dropped (Step 10 and the rescue then see no disturbance)", func(t *testing.T, play map[string]any) {
+			facts := task(t, play, "Step 3d: Record that the kernel audit list is about to be loaded (spec C23)")["ansible.builtin.set_fact"].(map[string]any)
+			facts["audit_kernel_load_attempted"] = false
+		}, "managed rules missing from the kernel, wazuh watches live C10",
+			[]string{"wazuh-agent restarts=0, want 1", "kernel list holds the wazuh_fim watches=false, want true"}},
+		{"the attempted-restart record dropped", func(t *testing.T, play map[string]any) {
+			facts := task(t, play, "Step 8e: Record that auditd is about to be restarted (spec C23) — Debian family")["ansible.builtin.set_fact"].(map[string]any)
+			facts["audit_auditd_restart_attempted"] = false
+		}, "plugin inactive, auditd restarted C21",
+			[]string{"wazuh-agent restarts=0, want 1", "kernel list holds the wazuh_fim watches=false, want true"}},
 		{"load on every run (the base behaviour)", func(t *testing.T, play map[string]any) {
 			facts := task(t, play, decide)["ansible.builtin.set_fact"].(map[string]any)
 			facts["audit_load_needed"] = "{{ true }}"
@@ -850,10 +984,6 @@ func TestRegression_AuditWhodataCounterexamplesFail(t *testing.T) {
 			task(t, play, step10)["when"] = false
 		}, "managed rules missing from the kernel, wazuh watches live C10",
 			[]string{"wazuh-agent restarts=0, want 1", "kernel list holds the wazuh_fim watches=false, want true"}},
-		{"re-arm a run that disturbed nothing", func(t *testing.T, play map[string]any) {
-			task(t, play, step10)["when"] = "{{ not ansible_check_mode }}"
-		}, "converged C10",
-			[]string{"wazuh-agent restarts=1, want 0"}},
 		{"unconditional rescue reload (the base rescue)", func(t *testing.T, play map[string]any) {
 			task(t, play, reload)["when"] = "{{ not ansible_check_mode }}"
 		}, "rescue before any load leaves the list alone",
@@ -871,49 +1001,41 @@ func TestRegression_AuditWhodataCounterexamplesFail(t *testing.T) {
 	for _, tc := range auditMatrix() {
 		byName[tc.sc.name] = tc
 	}
+	// run applies one mutant to its scenario and requires the stated problems; the unmutated control must pass.
+	run := func(t *testing.T, scenario string, mutate func(play map[string]any), files map[string]func(string) string, problems []string) {
+		t.Helper()
+		tc, ok := byName[scenario]
+		if !ok {
+			t.Fatalf("no scenario %q", scenario)
+		}
+		control := runAuditScenario(t, tc.sc)
+		if got := control.verify(t, tc.want); len(got) > 0 {
+			t.Fatalf("the control (unmutated) run already fails: %v\n%s", got, control.out)
+		}
+		sc := tc.sc
+		sc.mutate = mutate
+		sc.mutateTasks = files
+		got := strings.Join(runAuditScenario(t, sc).verify(t, tc.want), "\n")
+		for _, want := range problems {
+			if !strings.Contains(got, want) {
+				t.Errorf("the mutant was not caught for the stated reason %q; problems:\n%s", want, got)
+			}
+		}
+	}
 	for _, mutant := range mutants {
 		mutant := mutant
 		t.Run(mutant.name, func(t *testing.T) {
 			t.Parallel()
-			tc, ok := byName[mutant.scenario]
-			if !ok {
-				t.Fatalf("no scenario %q", mutant.scenario)
-			}
-			// The mutant must pass nothing the fixed playbook fails: first the fixed play, as the control.
-			control := runAuditScenario(t, tc.sc)
-			if problems := control.verify(t, tc.want); len(problems) > 0 {
-				t.Fatalf("the control (unmutated) run already fails: %v\n%s", problems, control.out)
-			}
-			sc := tc.sc
-			sc.mutate = func(play map[string]any) { mutant.mutate(t, play) }
-			obs := runAuditScenario(t, sc)
-			problems := strings.Join(obs.verify(t, tc.want), "\n")
-			for _, want := range mutant.problems {
-				if !strings.Contains(problems, want) {
-					t.Errorf("the mutant was not caught for the stated reason %q; problems:\n%s", want, problems)
-				}
-			}
+			run(t, mutant.scenario, func(play map[string]any) { mutant.mutate(t, play) }, nil, mutant.problems)
 		})
 	}
-}
-
-// The harness lists the managed rules the way kernelLine does. That model must be the real listing: the
-// captured `auditctl -l` of the rules this role renders (Ubuntu 24.04.4 and AlmaLinux 9.8, the same on both)
-// prints watches as `-k <key>` and syscall rules as `-F key=<key>`.
-func TestAuditShimKernelListingMatchesTheRealCapture(t *testing.T) {
-	var want []string
-	for _, rule := range ruleLines(templateRules(t)) {
-		want = append(want, kernelLine(rule))
-	}
-	for _, name := range []string{"auditctl-l.managed-and-wazuh_fim.ubuntu2404.txt", "auditctl-l.managed-and-wazuh_fim.almalinux9.txt"} {
-		var managed []string
-		for _, line := range ruleLines(readCapture(t, name)) {
-			if !strings.Contains(line, "wazuh_fim") {
-				managed = append(managed, line)
-			}
-		}
-		if strings.Join(managed, "\n") != strings.Join(want, "\n") {
-			t.Errorf("%s lists the managed rules as\n%s\nbut the harness model lists them as\n%s", name, strings.Join(managed, "\n"), strings.Join(want, "\n"))
-		}
-	}
+	// Mutants of a task file the play includes.
+	t.Run("a second guard overwrites S with what is left after this run's own flush", func(t *testing.T) {
+		t.Parallel()
+		run(t, "file edited and plugin inactive: one re-arm after both", nil, map[string]func(string) string{
+			"audit-whodata-guard.yml": func(text string) string {
+				return strings.Replace(text, "if ((audit_kernel_load_attempted | default(false) | bool) or (audit_auditd_restart_attempted | default(false) | bool))", "if false", 1)
+			},
+		}, []string{"wazuh-agent restarts=0, want 1", "kernel list holds the wazuh_fim watches=false, want true"})
+	})
 }
