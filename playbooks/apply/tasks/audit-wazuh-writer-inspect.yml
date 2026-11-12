@@ -1,0 +1,51 @@
+---
+# Read-only: is a Wazuh writer or journal active on this host? Included by
+# audit-whodata-guard.yml (before the kernel audit list is disturbed) and by
+# audit-whodata-rearm.yml (before wazuh-agent is restarted).
+#
+# It asks the Wazuh coordinator's own `writer-inspect` action (wazuh-fim-apply.yml
+# claims and releases the same host-wide writer through it), so the answer is the
+# coordinator's, not a second guess at its state files. It runs from the
+# controller's copy (the script module, as wazuh-fim-apply.yml does), so it needs
+# nothing installed on the host. A host with no wazuh-agent unit is not asked: the
+# coordinator would create its state directory there, and there is no who-data to
+# protect.
+#
+# Result in audit_whodata_writer, never a failure of this file:
+#   {state: not_applicable}                      no wazuh-agent on this host
+#   {state: idle}                                no writer, no journal
+#   {state: active, owner, component, journals}  a writer or journal owns the host
+#   {state: error, reason}                       writer-inspect itself was refused
+#                                                (unsafe marker, lock timeout) or did
+#                                                not run: nothing is known
+# The callers treat everything but not_applicable and idle as "do not touch".
+- name: Reset the Wazuh host-writer observation
+  ansible.builtin.set_fact:
+    audit_whodata_writer: {}
+
+- name: Read the Wazuh coordinator's host-writer state (read-only)
+  ansible.builtin.script:
+    cmd: files/wazuh-transaction.py writer-inspect
+    executable: python3
+  register: audit_wazuh_writer_inspect
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: audit_whodata_agent != 'absent'
+
+- name: Record the Wazuh host-writer observation
+  ansible.builtin.set_fact:
+    audit_whodata_writer: >-
+      {{ {'state': 'not_applicable'} if audit_whodata_agent == 'absent' else
+         ({'state': 'error',
+           'reason': (audit_wazuh_writer_inspect.stdout | default('')
+                      | regex_search('"error": "([^"]{1,200})"', '\1')
+                      | default(['writer-inspect did not complete'], true) | first)}
+          if (audit_wazuh_writer_inspect.rc | default(1)) != 0 else
+          ({'state': 'idle'} if (audit_wazuh_writer_document.writer is none and (audit_wazuh_writer_document.journals | length) == 0) else
+           {'state': 'active',
+            'owner': (audit_wazuh_writer_document.writer.owner | default('') if audit_wazuh_writer_document.writer is not none else ''),
+            'component': (audit_wazuh_writer_document.writer.component | default('') if audit_wazuh_writer_document.writer is not none else ''),
+            'journals': (audit_wazuh_writer_document.journals | map(attribute='component') | list)})) }}
+  vars:
+    audit_wazuh_writer_document: "{{ audit_wazuh_writer_inspect.stdout | default('{}', true) | from_json }}"

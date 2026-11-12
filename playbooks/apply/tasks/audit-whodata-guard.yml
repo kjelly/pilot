@@ -1,0 +1,49 @@
+---
+# Before a step that empties or replaces the kernel audit list while the Wazuh
+# agent may hold who-data watches in it (spec C23, issue #324): the `augenrules
+# --load` of Step 3 and the auditd restart of Step 8a. Included with apply: tags
+# equal to the disturbing step's, so --tags cannot skip it.
+#
+# It refuses, before anything is touched, with a typed reason:
+#   whodata_state_unreadable  the agent state cannot be read, or the agent is active
+#                             and the kernel list cannot be read: the run cannot tell
+#                             whether who-data is live, so it cannot promise to give
+#                             it back;
+#   wazuh_writer_active       a Wazuh writer or journal owns this host (for example a
+#                             controlled agent upgrade, which has stopped the agent and
+#                             records auditd's identity), or the coordinator's
+#                             writer-inspect could not answer.
+# It is a check, not a lock: the window between this check and the step is accepted
+# and documented (docs/verification/audit-log-forwarding.md section 5).
+#
+# Reads audit_whodata_agent and audit_whodata_kernel, set by the play's who-data
+# probe, which runs under the same tags as every step that includes this file.
+- name: "Gate: the Wazuh agent and the kernel audit list can be read (whodata_state_unreadable)"
+  ansible.builtin.assert:
+    that:
+      - audit_whodata_agent != 'unknown'
+      - audit_whodata_agent != 'active' or audit_whodata_kernel == 'ok'
+    fail_msg: >-
+      whodata_state_unreadable: cannot read the Wazuh agent state (wazuh-agent={{ audit_whodata_agent }})
+      or, with the agent active, the kernel audit list (auditctl={{ audit_whodata_kernel }}).
+      Refusing to empty or replace the kernel audit list while it is unknown whether the agent's
+      who-data is live: nothing was changed. Fix systemd/auditctl on the host and re-run.
+
+- name: Inspect the Wazuh host writer before the kernel audit list is disturbed
+  ansible.builtin.include_tasks:
+    file: audit-wazuh-writer-inspect.yml
+    apply:
+      tags: [always]
+
+- name: "Gate: no Wazuh writer or journal is active on this host (wazuh_writer_active)"
+  ansible.builtin.assert:
+    that:
+      - audit_whodata_writer.state in ['not_applicable', 'idle']
+    fail_msg: >-
+      wazuh_writer_active: {{ 'a Wazuh writer or journal owns this host (owner=' ~ audit_whodata_writer.owner | default('')
+      ~ ', component=' ~ audit_whodata_writer.component | default('') ~ ', journals=' ~ audit_whodata_writer.journals | default([]) | join(',') ~ ')'
+      if audit_whodata_writer.state == 'active'
+      else 'the Wazuh coordinator could not report its host writer (' ~ audit_whodata_writer.reason | default('no answer') ~ ')' }}.
+      Refusing to empty or replace the kernel audit list while a Wazuh operation may depend on
+      auditd and its endpoint staying as they are: nothing was changed. Wait for the Wazuh
+      operation to finish (or recover it with its owner token) and re-run.

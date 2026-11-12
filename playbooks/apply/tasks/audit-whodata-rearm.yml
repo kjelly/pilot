@@ -1,0 +1,86 @@
+---
+# After the last disturbance of the kernel audit list in this run (spec C23, issue
+# #324): the `augenrules --load` of Step 3, the auditd restart of Step 8a, or the
+# rescue's reload. Each of them empties the list the Wazuh agent's who-data keeps its
+# `wazuh_fim` watches in, and the Wazuh agent does not put them back by itself.
+#
+# audit_whodata_expected is the set S the play's probe read BEFORE any change: the
+# `wazuh_fim` watches of an agent that was active. When it is empty there is nothing
+# to give back and this file touches nothing (no agent that is not installed, not
+# running, or not holding watches is ever started or restarted: EL without the
+# endpoint, a host with no Wazuh, a stopped agent). Otherwise, through the helper's
+# `rearm`: wait (bounded) for auditd and the audisp af_unix listener on the Wazuh
+# endpoint, restart wazuh-agent once, wait (bounded) until the kernel holds every
+# watch of S. It fails with a typed reason (endpoint_not_ready, agent_restart_failed,
+# watches_not_restored, kernel_unreadable, wazuh_writer_active); it never reports
+# success without having seen S again.
+#
+# audit_whodata_rearm_fatal true (the main flow): a failure fails the play here, with
+# nothing rolled back, since the rules and forwarding configuration this run applied are
+# not what failed. false (the rescue): the result is only recorded, so the rest of the
+# rollback still runs and the final message can say whether who-data was restored.
+#
+# Result in audit_whodata_rearm_result: {state: not_needed} | {state: restored, ...} |
+# {state: failed, reason, ...}. The timeouts are defaults, overridable with -e.
+- name: Reset this include's who-data re-arm result
+  ansible.builtin.set_fact:
+    audit_whodata_rearm_result: {}
+
+- name: Who-data was not live before this run, so there is nothing to give back
+  ansible.builtin.set_fact:
+    audit_whodata_rearm_result:
+      state: not_needed
+  when: audit_whodata_expected | length == 0
+
+- name: Give the Wazuh who-data watches back
+  when: audit_whodata_expected | length > 0
+  block:
+    - name: Inspect the Wazuh host writer before wazuh-agent is restarted
+      ansible.builtin.include_tasks:
+        file: audit-wazuh-writer-inspect.yml
+        apply:
+          tags: [always]
+
+    - name: Restart wazuh-agent once the audit endpoint is back and wait for the watches (bounded)
+      ansible.builtin.script:
+        cmd: >-
+          files/audit-whodata.py rearm
+          --expect-json {{ audit_whodata_expected | to_json | quote }}
+          --endpoint-timeout {{ audit_whodata_endpoint_timeout | default(30) | int }}
+          --watch-timeout {{ audit_whodata_watch_timeout | default(60) | int }}
+          --interval {{ audit_whodata_poll_interval | default(1) | float }}
+        executable: python3
+      register: audit_whodata_rearm_run
+      # The helper prints one JSON object whether it succeeded or not. It was
+      # asked to restart the agent exactly when it says so.
+      changed_when: >-
+        audit_whodata_rearm_run.stdout | default('') is search('"restarted": true')
+      failed_when: false
+      timeout: "{{ (audit_whodata_endpoint_timeout | default(30) | int) + (audit_whodata_watch_timeout | default(60) | int) + 180 }}"
+      when: audit_whodata_writer.state in ['not_applicable', 'idle']
+
+    - name: Record the who-data re-arm result
+      ansible.builtin.set_fact:
+        audit_whodata_rearm_result: >-
+          {{ {'state': 'failed', 'reason': 'wazuh_writer_active', 'restarted': false,
+              'detail': (audit_whodata_writer.reason | default(audit_whodata_writer.component | default('a Wazuh writer or journal')))}
+             if audit_whodata_writer.state not in ['not_applicable', 'idle'] else
+             (audit_whodata_rearm_run.stdout | from_json
+              if ((audit_whodata_rearm_run.rc | default(2)) in [0, 1] and (audit_whodata_rearm_run.stdout | default('')) is match('^[{]'))
+              else {'state': 'failed', 'reason': 'rearm_helper_error', 'restarted': false,
+                    'detail': 'audit-whodata.py rearm exited ' ~ (audit_whodata_rearm_run.rc | default('n/a')) ~ ' without a result'}) }}
+
+    - name: "Gate: who-data is back (restored) — otherwise refuse with the typed reason"
+      ansible.builtin.fail:
+        msg: >-
+          whodata_not_restored: this run emptied the kernel audit list, and the Wazuh agent's who-data
+          is not back (reason={{ audit_whodata_rearm_result.reason | default('unknown') }},
+          wazuh-agent restart attempted={{ audit_whodata_rearm_result.restarted | default(false) }}{{ ',
+          still missing watches=' ~ audit_whodata_rearm_result.missing | to_json if audit_whodata_rearm_result.missing is defined else '' }}{{ ',
+          detail=' ~ audit_whodata_rearm_result.detail if audit_whodata_rearm_result.detail is defined else '' }}).
+          The audit rules and forwarding configuration this run applied were not rolled back. Fix the
+          cause, then restart wazuh-agent once (systemctl restart wazuh-agent) and confirm with
+          docs/verification/audit-log-forwarding.md C23.
+      when:
+        - audit_whodata_rearm_fatal | default(false) | bool
+        - audit_whodata_rearm_result.state | default('failed') != 'restored'

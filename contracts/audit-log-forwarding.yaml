@@ -13,7 +13,10 @@ regressionTests:
   - internal/spec/audit_log_forwarding_regression_test.go
   - internal/spec/siem_relp_mtls_regression_test.go
   - internal/spec/audit_forward_backup_order_regression_test.go
+  - internal/spec/audit_whodata_runtime_test.go
+  - internal/spec/audit_whodata_helper_test.go
   - internal/spec/audit_log_forwarding_c23_test.go
+  - internal/spec/audit_kernel_disturbance_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 # A SIEM receiver is optional.  The apply playbook resolves it from
 # log-server first, then wazuh-manager; with neither present it still applies
