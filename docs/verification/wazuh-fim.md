@@ -105,22 +105,28 @@ boot／listener／anchor 改變時保留 journal 並拒絕自動回復，不猜�
 啟用 audit plugin 卻缺少健康 endpoint 的舊主機，須先完成明確的前置修復。
 已知限制（EL 的 who-data endpoint 不由一般套用建立；#244 範圍外，未解決）：EL 的 `audit` 套件不含
 af_unix plugin，`/sbin/audisp-af_unix` 由 `audispd-plugins` 提供；本 repo 的一般套用只安裝 `audit`，
-不安裝 `audispd-plugins`，也不載入 plugin。AlmaLinux 9 實測：缺少 plugin 時 Wazuh 退回 real-time FIM
-（沒有 who-data），並在 `ossec.log` 記錄 `Could not launch command to restart Auditd`。在這樣的
-主機上，受控 agent 升級以 `configured external audit endpoint is unavailable before upgrade` 拒絕，
-不改動 agent；EL 的 stage 在 `agent-reserve` 拒絕之前已完成，所以被拒絕的這次執行會在
-`/var/backups/pilot/wazuh` 留下保留的 root-only `agent-policy-<owner>` 目錄與約 22 MB 的
-`rpm-stage`（已驗證的 RPM），不會自動清除。
-手動修復（全新 AlmaLinux 9 ×3 實測）：安裝 `audispd-plugins`；讓 auditd 載入 plugin——對 auditd 主程序
-送 `kill -HUP <auditd MainPID>`（EL 拒絕 `systemctl restart auditd`），或重新開機；HUP 之後**再**重啟
-`wazuh-agent`。單獨 HUP 只有 endpoint、沒有 `wazuh_fim` watch；單獨重啟 agent 什麼都沒有；單獨安裝
-`audispd-plugins`（不論在 agent 之前或之後）也沒有 endpoint 與 watch；重新開機單獨即生效。
+不安裝 `audispd-plugins`，也不載入 plugin。AlmaLinux 9 實測：一般套用之後 `/var/ossec/queue/sockets/audit`
+不存在，kernel 沒有 `wazuh_fim` watch。在這樣的主機上，受控 agent 升級以
+`configured external audit endpoint is unavailable before upgrade` 拒絕，不改動 agent。拒絕發生在
+`agent-reserve` 之中，早於交易對 staged RPM 的簽章驗證，但 RPM 已先由 stage 下載（經 dnf，repository
+設定 `gpgcheck=1`），所以被拒絕的這次執行使 `/var/backups/pilot/wazuh` 增加約 22 MB，主要是 staged
+RPM：觀察到 `rpm-stage` 在拒絕後至少約 3 分鐘仍存在；保留的 root-only `agent-policy-<owner>` 目錄也留下。
+手動修復的實測順序：在主線鏈的 EL 主機上，依序安裝 `audispd-plugins`、對 auditd 主程序送
+`kill -HUP <auditd MainPID>`、重啟 `wazuh-agent`，之後 4.14.1 → 4.14.9 的受控升級成功。操作者觀察到
+EL 上 `systemctl restart auditd` 被拒絕。全新 AlmaLinux 9 VM 上的順序探測：`audispd-plugins` 與 agent
+同時或先於 agent 安裝（僅安裝）沒有 endpoint、沒有 `wazuh_fim` watch；之後單獨 HUP 有 endpoint 但沒有
+watch（60 秒內持續為 0）；單獨重啟 agent 什麼都沒有；HUP 之後再重啟 agent 兩者皆有；重新開機單獨即生效。
 Ubuntu 22.04（auditd 以內建的 `builtin_af_unix` 提供 af_unix plugin，未安裝 `audispd-plugins`）與
-aarch64 不在本契約與 evidence 的涵蓋範圍。
+aarch64 不在本契約與 evidence 的涵蓋範圍。由未變更的 admission gate 推論，未以升級嘗試原生執行：
+Ubuntu 22.04 沒有外部的 `audisp-af_unix` listener，受控 agent 升級預期以
+`exact external audit listener is missing or ambiguous` 拒絕。
 已知限制（其他元件，既有行為）：`audit-log-forwarding` 每次套用都會執行 `augenrules --load`；在同機
-共用的 Ubuntu 24.04 主機上實測它把 kernel 的 `wazuh_fim` watch 由 2 條清為 0（endpoint 與連線不變），
-Wazuh 不會自行重新建立（90 秒後、手動 `augenrules --load` 後 10 分鐘仍為 0），一般 FIM 套用也不補回；
-重啟 `wazuh-agent` 後約 2 秒內重新建立。
+共用的 Ubuntu 24.04 主機上實測它把 kernel 的 `wazuh_fim` watch 由 2 條清為 0（auditd 主程序與連線不變），
+Wazuh 不會自行重新建立（套用後 90 秒、手動 `augenrules --load` 後 10 分鐘仍為 0），一般 FIM 套用也不補回；
+重啟 `wazuh-agent` 後約 2 秒內重新建立。`audit-log-forwarding` 有設定漂移時會重啟 auditd（新的
+MainPID），agent 的連線隨之中斷，watch 在探測的至少 90 秒內持續為 0。由未變更的 admission gate 推論，
+未以升級嘗試原生執行：此狀態下受控 agent 升級預期以 `native Wazuh audit client/watch readiness timed out`
+拒絕，直到執行 `systemctl restart wazuh-agent`。
 套件 staging 目錄及其祖先也須通過型別與 alias 檢查；留存套件只從精確的
 root-only transaction directory 使用，回復不寫回 global package cache。
 Debian 交易同時冷備份 `/usr/sbin/policy-rc.d` 的內容、metadata 或不存在狀態。
@@ -228,8 +234,8 @@ V ≤ M。
   中央一般套用不產生），不會被後續套用移除，所以隨套用次數線性增加；升級嘗試另留 `agent-<owner>`
   冷備份。只有 `writer-inspect` 顯示沒有 journal 與 writer 時，才可以**以 owner 目錄為單位**手動
   刪除已結束的 `normal-<owner>-*`、`agent-<owner>` 與 `agent-policy-<owner>`；不得刪除 `*.lock`、
-  仍被 journal 引用的目錄或其中的檔案。這個目錄若納入 restic（見 `group_vars/restic-backup.example.yml`），
-  備份體積會隨之增加。
+  仍被 journal 引用的目錄或其中的檔案。這個目錄若納入 restic（見 `group_vars/restic-backup.example.yml`，該範例已建議納入
+  `/var/backups/pilot/wazuh`），備份體積會隨之增加。
 
 | ID  | Category  | Check                                                                 | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|
@@ -384,4 +390,4 @@ go run ./cmd/pilot vm-target run --name wazuh-fim \
 | 2026-11-05 | Issue #244 (A) | 版本相容契約：先讀 manager 原生版本再動 agent、新安裝固定完整版本、相容的既有 agent 保留、任何版本變更與 agent 新於 manager 一律 typed 拒絕；native hold／versionlock 保護；C1 接受 native hold 狀態；新增 C10（原生版本、pin、服務）。升級與回復不在本版範圍。 | pilot |
 | 2026-11-06 | Issue #244 (A) | 原生實跑後修正：安裝的 coordinator 可直接執行（shebang）；enrollment 拒絕的 typed 原因可見；被拒絕的 EL stage 不留私有目錄；明確記載 apt hold 與明確版本安裝的語意、manager 端「從未連線／pre-4.14 agent」fail closed 與移除方式。未放寬任何 Expected。 | pilot |
 | 2026-11-09 | Issue #244 (B) | 以已合併的 A（#271）為基底重新整合受控升級（B）：版本契約由 A 負責、B 只加 writer／transaction／reader／preview；未授權的版本變更仍 typed 拒絕，單次 `wazuh_upgrade=true` 才進入受控交易；版本升為 v1.5。未放寬任何 Expected。 | pilot |
-| 2026-11-10 | Issue #244 (B) | 原生實跑後的文件補記（無 Expected 變更，C1–C10 不變）：記載 EL 的一般套用不建立 who-data endpoint（缺 `audispd-plugins`）與其後果——受控 agent 升級以 `configured external audit endpoint is unavailable before upgrade` 拒絕、不改動 agent，被拒絕的執行留下 `agent-policy-<owner>` 與約 22 MB 的 `rpm-stage`；全新 AlmaLinux 9 實測的手動修復順序；Ubuntu 22.04 與 aarch64 不在涵蓋範圍；`audit-log-forwarding` 的 `augenrules --load` 會清除同機 `wazuh_fim` watch 的既有行為；備份不自動清除的已知限制。這些是已知限制的記載，不是新的保證。未放寬任何 Expected。 | pilot |
+| 2026-11-10 | Issue #244 (B) | 文件補記（無 Expected 變更，C1–C10 不變；不新增、不收緊、不放寬任何 row）：記載 EL 的一般套用不建立 who-data endpoint（缺 `audispd-plugins`）與其後果——受控 agent 升級以 `configured external audit endpoint is unavailable before upgrade` 拒絕、不改動 agent，拒絕後留下 `agent-policy-<owner>` 與約 22 MB 的備份根目錄增長（主要是 staged RPM）；實測過的手動修復順序與順序探測結果；Ubuntu 22.04 與 aarch64 不在涵蓋範圍；`audit-log-forwarding` 的 `augenrules --load` 與 auditd 重啟會清除同機 `wazuh_fim` watch 的既有行為；備份不自動清除的已知限制。這些是已知限制的記載，不是新的保證；一般套用建立 who-data 的設計已自本版範圍移除。 | pilot |

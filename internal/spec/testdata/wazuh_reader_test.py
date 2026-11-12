@@ -861,9 +861,12 @@ class ReaderInspectionTests(unittest.TestCase):
     # than the running rsyslogd. The helper refused it as "not loaded", so the version transaction could not
     # even be admitted (`inspect effective owned reader baseline rc=1`). The helper is called directly: main()
     # masks its message.
-    def stale(self,root,configured,enabled,imfile=False,newer=True):
+    def stale(self,root,configured,enabled,imfile=None,newer=True):
         reader,state,inspect,extra,profile,owner,source,argv,calls=self.fixture(root,configured,enabled)
-        if imfile:(root/'proc/42/maps').write_text(self.engine.maps(imfile=True))
+        # imfile=None keeps the fixture's default (an enabled reader's rsyslogd has loaded imfile). An explicit
+        # value states what the running rsyslogd mapped, so an enabled reader whose rsyslogd never loaded imfile
+        # (imfile=False) is really modeled and not silently given the enabled default mapping.
+        if imfile is not None:(root/'proc/42/maps').write_text(self.engine.maps(imfile=imfile))
         if newer:
             files=[extra]+([profile] if configured else [])
             self.clock['started']=min(Path(name).stat().st_mtime for name in files)-60
