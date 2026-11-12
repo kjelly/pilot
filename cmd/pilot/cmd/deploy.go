@@ -2852,6 +2852,11 @@ func loadDeployInventorySnapshotWithArgs(ctx context.Context, inventory string, 
 		// resolveInventoryVariables.
 		command.Stdin = os.Stdin
 	}
+	if len(extraArgs) > 0 {
+		// With the -e and vault arguments the listing carries their decrypted
+		// values on every host: not into the controller log.
+		keepValuesOutOfAnsibleLog(command)
+	}
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr

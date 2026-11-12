@@ -271,27 +271,29 @@ func TestIdentityLockTargetAgreesWithTheHostsThePlaybookRunsOn(t *testing.T) {
 	})
 }
 
-// A value set in the inventory for one host only cannot say what the play's
-// hosts: resolves to: two different answers are an error, not a pick.
-func TestEffectiveTargetGroup(t *testing.T) {
+// The extra-vars layer alone decides target_group (loadEffectiveTargetGroup reads
+// it with ansible-inventory; this is what is made of what it printed): the
+// default when none sets it, the value when one does, an error when the value
+// is not a plain host pattern.
+func TestTargetGroupFromExtraVars(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		vars    map[string]map[string]any
+		vars    map[string]any
 		want    string
 		wantErr string
 	}{
-		{"unset", map[string]map[string]any{"a": {}, "b": {"x": 1}}, identityDefaultTargetGroup, ""},
-		{"no hosts", map[string]map[string]any{}, identityDefaultTargetGroup, ""},
-		{"nil is unset", map[string]map[string]any{"a": {"target_group": nil}}, identityDefaultTargetGroup, ""},
-		{"one value on every host", map[string]map[string]any{"a": {"target_group": "g"}, "b": {"target_group": "g"}}, "g", ""},
-		{"one host sets it", map[string]map[string]any{"a": {"target_group": " g "}, "b": {}}, "g", ""},
-		{"hosts disagree", map[string]map[string]any{"a": {"target_group": "g"}, "b": {"target_group": "h"}}, "", "不一致(g、h)"},
-		{"not a string", map[string]map[string]any{"a": {"target_group": 3.0}}, "", "非空的字串"},
-		{"blank", map[string]map[string]any{"a": {"target_group": "  "}}, "", "非空的字串"},
-		{"an option", map[string]map[string]any{"a": {"target_group": "-m"}}, "", "以 - 開頭"},
+		{"unset", map[string]any{"x": 1}, identityDefaultTargetGroup, ""},
+		{"no extra vars", nil, identityDefaultTargetGroup, ""},
+		{"nil is unset", map[string]any{"target_group": nil}, identityDefaultTargetGroup, ""},
+		{"a value", map[string]any{"target_group": "g"}, "g", ""},
+		{"a value with blanks around it", map[string]any{"target_group": " g "}, "g", ""},
+		{"not a string", map[string]any{"target_group": 3.0}, "", "非空的字串"},
+		{"a list", map[string]any{"target_group": []any{"g"}}, "", "非空的字串"},
+		{"blank", map[string]any{"target_group": "  "}, "", "非空的字串"},
+		{"an option", map[string]any{"target_group": "-m"}, "", "以 - 開頭"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := effectiveTargetGroup(tc.vars)
+			got, err := targetGroupFromExtraVars(tc.vars)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v, want %q", err, tc.wantErr)
@@ -302,6 +304,243 @@ func TestEffectiveTargetGroup(t *testing.T) {
 				t.Fatalf("got %q, %v, want %q", got, err, tc.want)
 			}
 		})
+	}
+}
+
+// identityPlaybookPath is the real identity apply playbook of the repo.
+func identityPlaybookPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(repoRootForTest(t), deployIdentityPlaybook)
+}
+
+// identityPlaybookHosts is what ansible-playbook itself says the hosts of
+// freeipa-identity-apply.yml's play are for inv and args: --list-hosts evaluates
+// the real playbook's `hosts:` line and runs nothing (ansible-core 2.19.2). It is
+// the oracle the lock's answer is compared with: the lock must be taken on the
+// host this lists, whatever the lock's own reading of the variables says.
+func identityPlaybookHosts(t *testing.T, playbook, inv string, args ...string) []string {
+	t.Helper()
+	out, err := exec.Command("ansible-playbook", append([]string{"-i", inv, playbook, "--list-hosts"}, args...)...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ansible-playbook --list-hosts: %v\n%s", err, out)
+	}
+	var hosts []string
+	listing := false
+	for _, line := range strings.Split(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "hosts ("):
+			listing = true
+		case listing && strings.HasPrefix(line, "      ") && trimmed != "":
+			hosts = append(hosts, trimmed)
+		default:
+			listing = false
+		}
+	}
+	return hosts
+}
+
+// A target_group that only the inventory sets (under `all: vars:`, in one host's
+// variables, or in group_vars next to the inventory) is on every host in
+// ansible-inventory's listing, but the play's `hosts:` is templated with the
+// extra vars alone: the playbook still runs on freeipa-server. The lock followed
+// the listing and was taken on the `other` host while the playbook ran on ipa-1
+// (the failure of issue #319 turned around), and a deploy that handed it ipa-1
+// was refused although the playbook runs there. The oracle is ansible-playbook's
+// own --list-hosts for the real playbook.
+func TestInventoryLevelTargetGroupDoesNotRetargetTheLock(t *testing.T) {
+	const withAllVars = `all:
+  vars:
+    target_group: other
+  children:
+    freeipa-server:
+      hosts:
+        ipa-1:
+          ansible_host: 192.0.2.10
+          ansible_user: root
+    other:
+      hosts:
+        ipa-2:
+          ansible_host: 192.0.2.30
+          ansible_user: root
+`
+	const withHostVars = `all:
+  children:
+    freeipa-server:
+      hosts:
+        ipa-1:
+          ansible_host: 192.0.2.10
+          ansible_user: root
+          target_group: other
+    other:
+      hosts:
+        ipa-2:
+          ansible_host: 192.0.2.30
+          ansible_user: root
+`
+	for _, tc := range []struct {
+		name      string
+		inventory string
+		// groupVars is a group_vars/all.yml next to the inventory, if not "".
+		groupVars string
+	}{
+		{"all: vars:", withAllVars, ""},
+		{"one host's variables", withHostVars, ""},
+		{"group_vars/all.yml next to the inventory", effectiveInventory, "target_group: other\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := writeEffectiveInventory(t, tc.inventory)
+			if tc.groupVars != "" {
+				dir := filepath.Join(filepath.Dir(inv), "group_vars")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "all.yml"), []byte(tc.groupVars), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			playbook := identityPlaybookPath(t)
+			// What makes this test show something: the inventory does say `other`
+			// on the hosts, and the playbook does not follow it.
+			if got := ansibleHostVar(t, inv, "ipa-1", "target_group"); got != "other" {
+				t.Fatalf("the inventory does not set target_group on ipa-1 (%v): this test shows nothing", got)
+			}
+			if want := []string{"ipa-1"}; !reflect.DeepEqual(identityPlaybookHosts(t, playbook, inv), want) {
+				t.Fatalf("ansible-playbook runs on %v, want %v: the premise of this test is wrong", identityPlaybookHosts(t, playbook, inv), want)
+			}
+
+			for _, args := range [][]string{
+				// No extra arguments: the default, and no extra call to Ansible.
+				nil,
+				// Some: target_group is read from them (and from them alone).
+				{"-e", "@" + writeVarsFile(t, "stage: sandbox\n")},
+			} {
+				// A run that resolves its own host (access, decommission): the host
+				// the playbook runs on.
+				host, target, err := lockTargetFor(t, inv, nil, args...)
+				if err != nil {
+					t.Fatalf("args %q: %v", args, err)
+				}
+				if oracle := identityPlaybookHosts(t, playbook, inv, args...); !reflect.DeepEqual(oracle, []string{host}) {
+					t.Fatalf("args %q: the lock is on %s, ansible-playbook runs on %v", args, host, oracle)
+				}
+				if host != "ipa-1" || target.Host != "192.0.2.10" {
+					t.Fatalf("args %q: host = %q, target = %+v, want ipa-1", args, host, target)
+				}
+				// A run handed ipa-1 (the deploy runner): accepted.
+				if host, _, err := lockTargetFor(t, inv, []string{"ipa-1"}, args...); err != nil || host != "ipa-1" {
+					t.Fatalf("args %q: handed ipa-1: host = %q, err = %v", args, host, err)
+				}
+			}
+
+			// An extra var does retarget the play, and the lock follows it: the
+			// same inventory, `-e target_group=…`, in both directions (once: the
+			// source of the inventory-level value does not matter to this).
+			if tc.name == "all: vars:" {
+				for group, want := range map[string]string{"freeipa-server": "ipa-1", "other": "ipa-2"} {
+					args := []string{"-e", "target_group=" + group}
+					host, _, err := lockTargetFor(t, inv, nil, args...)
+					if err != nil {
+						t.Fatalf("args %q: %v", args, err)
+					}
+					if oracle := identityPlaybookHosts(t, playbook, inv, args...); !reflect.DeepEqual(oracle, []string{want}) || host != want {
+						t.Fatalf("args %q: the lock is on %s, ansible-playbook runs on %v, want %s", args, host, oracle, want)
+					}
+				}
+			}
+			// Both at once: the inventory says `other`, the extra var says
+			// freeipa-server, and the extra var is what the play sees.
+			host, _, err := lockTargetFor(t, inv, []string{"ipa-1"}, "-e", "@"+writeVarsFile(t, "target_group: freeipa-server\n"))
+			if err != nil || host != "ipa-1" {
+				t.Fatalf("inventory says other, -e @file says freeipa-server: host = %q, err = %v", host, err)
+			}
+		})
+	}
+}
+
+// The extra vars are read through an inline one-host inventory, and the working
+// directory of a pilot run is a workspace: it has group_vars/ and host_vars/ of
+// its own, which Ansible applies to an inline inventory too. They are not the
+// extra vars, and must not be read as them (checked with ansible-inventory
+// itself: without the isolation the host `localhost` carries the cwd's
+// target_group).
+func TestExtraVarsTargetGroupIgnoresTheWorkingDirectoryVars(t *testing.T) {
+	inv := writeEffectiveInventory(t, effectiveInventory)
+	playbook := identityPlaybookPath(t)
+	cwd := t.TempDir()
+	for name, body := range map[string]string{
+		"group_vars/all.yml":       "target_group: other\n",
+		"group_vars/ungrouped.yml": "target_group: other\n",
+		"host_vars/localhost.yml":  "target_group: other\n",
+	} {
+		path := filepath.Join(cwd, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(cwd)
+	// The premise: an inline inventory in this directory does see the files.
+	if got := ansibleHostVar(t, "localhost,", "localhost", "target_group", "-e", "x=1"); got != "other" {
+		t.Skipf("this Ansible does not apply the working directory's group_vars to an inline inventory (target_group = %v): nothing to isolate", got)
+	}
+
+	args := []string{"-e", "stage=sandbox"}
+	group, err := loadEffectiveTargetGroup(context.Background(), args)
+	if err != nil || group != identityDefaultTargetGroup {
+		t.Fatalf("target_group = %q, err = %v: the working directory's group_vars were read as extra vars", group, err)
+	}
+	host, _, err := lockTargetFor(t, inv, nil, args...)
+	if err != nil || host != "ipa-1" {
+		t.Fatalf("host = %q, err = %v, want ipa-1", host, err)
+	}
+	if oracle := identityPlaybookHosts(t, playbook, inv, args...); !reflect.DeepEqual(oracle, []string{"ipa-1"}) {
+		t.Fatalf("ansible-playbook runs on %v", oracle)
+	}
+	// The twin: an extra var in the same directory is still read.
+	if group, err := loadEffectiveTargetGroup(context.Background(), []string{"-e", "target_group=g"}); err != nil || group != "g" {
+		t.Fatalf("target_group = %q, err = %v, want the extra var's g", group, err)
+	}
+}
+
+// The extra vars are read in the environment of the run, and an environment that
+// restricts the inventory plugins must not make the inline host list unreadable:
+// a listing without the host would have read as "no target_group".
+func TestExtraVarsTargetGroupIsReadWhateverTheEnvironmentEnables(t *testing.T) {
+	inv := writeEffectiveInventory(t, effectiveInventory)
+	t.Setenv("ANSIBLE_INVENTORY_ENABLED", "yaml")
+	host, _, err := lockTargetFor(t, inv, nil, "-e", "target_group=other")
+	if err != nil || host != "ipa-2" {
+		t.Fatalf("host = %q, err = %v, want ipa-2 (the extra var's group)", host, err)
+	}
+}
+
+// With no -e or vault argument target_group is the default and Ansible is not
+// asked about it: the run that is handed its hosts costs no ansible call beyond
+// the inventory listing.
+func TestEffectiveTargetGroupAsksNoAnsibleWithoutArguments(t *testing.T) {
+	bin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "called")
+	script := "#!/bin/sh\ntouch '" + marker + "'\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(bin, "ansible-inventory"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	group, err := loadEffectiveTargetGroup(context.Background(), nil)
+	if err != nil || group != identityDefaultTargetGroup {
+		t.Fatalf("group = %q, err = %v", group, err)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatal("ansible-inventory was run for a lock with no extra arguments")
+	}
+	// The same fake with arguments is asked and its failure refuses.
+	if _, err := loadEffectiveTargetGroup(context.Background(), []string{"-e", "x=1"}); err == nil {
+		t.Fatal("a failing ansible-inventory did not refuse")
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatal("ansible-inventory was not run for a lock with extra arguments")
 	}
 }
 

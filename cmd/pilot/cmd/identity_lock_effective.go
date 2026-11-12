@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 
@@ -25,6 +28,11 @@ import (
 // ansible-config for the last (loadAnsibleConnectionConfig). A setting that
 // pilot's ssh cannot honor is refused with its source named, exactly as it is
 // when the inventory sets it (sshdial.TargetFromHostVars).
+//
+// Which hosts the playbook runs on is a narrower question than which variables
+// it sees: the `hosts:` of the identity playbooks is templated with the extra
+// vars only, so target_group is read from that layer alone
+// (loadEffectiveTargetGroup), not from the merged host variables.
 
 // identityDefaultTargetGroup is the hosts: pattern of the identity playbooks
 // when nothing sets target_group.
@@ -178,39 +186,114 @@ func withConnectionDefaults(hostVars map[string]any, defaults connectionDefaults
 	return merged, applied
 }
 
-// effectiveTargetGroup is the pattern the identity playbooks' `hosts:` resolves
-// to: the target_group the playbook run is going to see, or the default. It is
-// read from the effective host variables (extra vars show up in every host's),
-// so a target_group that arrives through `-e @file` counts like `-e
-// target_group=x`. Hosts that disagree, or a value that is not a plain pattern,
-// leave no single answer for what the playbook will run on, so they are errors.
-func effectiveTargetGroup(hostVars map[string]map[string]any) (string, error) {
-	values := map[string]bool{}
-	for host, vars := range hostVars {
-		value, set := vars["target_group"]
-		if !set || value == nil {
-			continue
-		}
-		group, isString := value.(string)
-		if !isString || strings.TrimSpace(group) == "" {
-			return "", fmt.Errorf("%s 的 target_group 是 %v(%T)；它必須是非空的字串 pattern，否則無法確定 playbook 會對哪些主機執行", host, value, value)
-		}
-		values[strings.TrimSpace(group)] = true
+// extraVarsInventory is the inline one-host inventory the extra vars are read
+// through: ansible-inventory lists a host with exactly the variables Ansible
+// layers over it, so the host's variables are the extra vars of the run and
+// nothing else (extraVarsHost is the name Ansible gives that host).
+const (
+	extraVarsInventory = "localhost,"
+	extraVarsHost      = "localhost"
+)
+
+// keepValuesOutOfAnsibleLog makes the Ansible command write no controller log.
+// ansible-inventory --list with a vault or an `-e @file` prints the decrypted
+// value of every variable on every host, and with the runtime's ANSIBLE_LOG_PATH
+// the whole document lands in ansible.log in clear text: the log's redaction
+// masks only keys that are named like a secret (password, token, ...), so a
+// credential kept under another name would stay. /dev/null is the value that
+// switches the log off for the command and still wins over a log_path of
+// ansible.cfg; an empty value would make Ansible warn that the path is a
+// directory (ansible-core 2.19.2). Call it before ansible.HoldCommandLog, which
+// reads the log path of the command's environment.
+func keepValuesOutOfAnsibleLog(command *exec.Cmd) {
+	if command.Env == nil {
+		command.Env = os.Environ()
 	}
-	groups := make([]string, 0, len(values))
-	for group := range values {
-		groups = append(groups, group)
-	}
-	sort.Strings(groups)
-	switch len(groups) {
-	case 0:
+	// The last entry wins, as for exec.Cmd and ansible.LogPathFromEnv.
+	command.Env = append(command.Env, "ANSIBLE_LOG_PATH="+os.DevNull)
+}
+
+// loadEffectiveTargetGroup is the pattern the identity playbooks' `hosts:`
+// resolves to: the target_group the playbook run is going to see, or the default.
+//
+// Only an extra var counts. Ansible templates a play's `hosts:` with the extra
+// vars (and the play's own vars), not with the inventory's variables: a
+// target_group set under `all: vars:` or in a host's host_vars shows up in
+// `ansible-inventory --list` on every host, and the play still runs on
+// `freeipa-server` (checked with ansible-playbook --list-hosts, ansible-core
+// 2.19.2). Reading it from the merged host variables would lock a host the
+// playbook does not run on. So the value is read from the extra-vars layer alone:
+// extraArgs (the -e and vault arguments the playbook is handed) run through an
+// inline one-host inventory, with the inventory's group_vars and host_vars
+// (including those of the working directory) and the inventory plugins other
+// than the host list switched off. `-e key=value`, JSON and `@file` all work,
+// as does an encrypted file when ansible-inventory can read its vault password.
+// With no arguments the answer is the default and Ansible is not asked.
+//
+// A value that is not a plain pattern leaves no answer for what the playbook
+// will run on, so it is an error, as is anything that keeps Ansible from
+// reading the arguments.
+func loadEffectiveTargetGroup(ctx context.Context, extraArgs []string) (string, error) {
+	if len(extraArgs) == 0 {
 		return identityDefaultTargetGroup, nil
-	case 1:
-		if strings.HasPrefix(groups[0], "-") {
-			return "", fmt.Errorf("target_group %q 以 - 開頭，不是主機 pattern", groups[0])
-		}
-		return groups[0], nil
-	default:
-		return "", fmt.Errorf("各主機的 target_group 不一致(%s)；無法確定 playbook 會對哪些主機執行", strings.Join(groups, "、"))
 	}
+	args := append([]string{"-i", extraVarsInventory, "--list"}, extraArgs...)
+	command := deployAnsibleCommand(ctx, "ansible-inventory", args...)
+	if slices.Contains(extraArgs, "--ask-vault-pass") {
+		// The only prompt that can come from this command, as in
+		// loadDeployInventorySnapshotWithArgs.
+		command.Stdin = os.Stdin
+	}
+	keepValuesOutOfAnsibleLog(command)
+	command.Env = append(command.Env,
+		// No group_vars or host_vars: the working directory of a workspace has them.
+		"ANSIBLE_VARS_ENABLED=",
+		// The inline host list must be parsed, whatever the environment enables.
+		"ANSIBLE_INVENTORY_ENABLED=host_list",
+	)
+	var stdout, stderr strings.Builder
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	release, err := ansible.HoldCommandLog(ctx, command)
+	if err == nil {
+		err = command.Run()
+		release()
+	}
+	if err != nil {
+		return "", fmt.Errorf("ansible-inventory --list (extra vars only): %w: %s", childproc.Cause(ctx, err), strings.TrimSpace(stderr.String()))
+	}
+	var doc struct {
+		Meta struct {
+			HostVars map[string]map[string]any `json:"hostvars"`
+		} `json:"_meta"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &doc); err != nil {
+		return "", fmt.Errorf("parse ansible-inventory output (extra vars only): %w", err)
+	}
+	for host := range doc.Meta.HostVars {
+		if host != extraVarsHost {
+			return "", fmt.Errorf("ansible-inventory (extra vars only) listed host %q; only %q is expected, so it is not the document this reads", host, extraVarsHost)
+		}
+	}
+	return targetGroupFromExtraVars(doc.Meta.HostVars[extraVarsHost])
+}
+
+// targetGroupFromExtraVars is the pattern the `hosts:` of the identity
+// playbooks resolves to given the extra vars of the run: their target_group, or
+// the default when none sets it. A value that is not a non-empty string, or that
+// starts with `-` and so is not a host pattern, is an error.
+func targetGroupFromExtraVars(extraVars map[string]any) (string, error) {
+	value, set := extraVars["target_group"]
+	if !set || value == nil {
+		return identityDefaultTargetGroup, nil
+	}
+	group, isString := value.(string)
+	if !isString || strings.TrimSpace(group) == "" {
+		return "", fmt.Errorf("extra vars 的 target_group 是 %v(%T)；它必須是非空的字串 pattern，否則無法確定 playbook 會對哪些主機執行", value, value)
+	}
+	group = strings.TrimSpace(group)
+	if strings.HasPrefix(group, "-") {
+		return "", fmt.Errorf("target_group %q 以 - 開頭，不是主機 pattern", group)
+	}
+	return group, nil
 }

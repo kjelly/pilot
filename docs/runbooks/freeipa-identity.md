@@ -324,7 +324,11 @@ ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（�
      訊息範例：`… ansible_ssh_args <- env: ANSIBLE_SSH_ARGS`。處理：改成 pilot 的 ssh 接受的寫法
      （`ansible_ssh_common_args` 的 `-o ProxyJump=…` 可以），或移除設定。
    - `target_group` 讓 playbook 去的主機，要包含這輪要鎖的主機，否則拒絕（`鎖與 playbook 的目標會不同台`）。
-     deploy 的 scope 原本只讀 `-e target_group=…`，vault 檔或 `-e @file` 裡的 `target_group` 現在也被看到。
+     **只有 `-e` 那一層算**（`-e target_group=…`、JSON、`-e @file`，含 vault 檔）：Ansible 只用 extra vars
+     展開 play 的 `hosts:`，寫在 inventory 的 `target_group`（`all: vars:`、host_vars、group_vars）會出現在
+     每台主機的 `ansible-inventory --list`，但不會改變 playbook 的目標（`ansible-playbook --list-hosts`
+     實測），所以鎖也不跟它走；兩邊都有時以 `-e` 為準。deploy 的 scope 原本只讀 `-e target_group=…`，
+     vault 檔或 `-e @file` 裡的 `target_group` 現在也被看到。
    - `ansible.cfg`／環境變數的 `remote_user`、`remote_port`、`private_key_file`、`ssh_common_args`、
      `ssh_extra_args`，在主機與 `-e` 都沒設定時，鎖的 ssh 也採用，與 playbook 一致。
    - 仍然看不到：只影響檔案傳輸的 `sftp_extra_args`／`scp_extra_args`；`~/.ssh/config` 對兩者同樣生效，不用比對。
@@ -333,7 +337,9 @@ ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（�
 4. **`--ask-vault-pass`／`--ask-become-pass`（deploy／reconcile 精靈的答案）在 ansible-playbook 裡的密碼提示
    發生在取鎖之後**：輸入密碼的時間算在持鎖時間裡，別的 pilot 執行要多等。互斥本身不受影響。
    這是已知限制，不是拒絕；要避免就用 `--vault-password-file`。另外，選 `--ask-vault-pass` 時，為了讀
-   `-e` 檔裡的連線變數，取鎖前檢查與取鎖時的 `ansible-inventory` 各會多問一次 vault 密碼。
+   `-e` 檔裡的連線變數與 `target_group`，取鎖前檢查與取鎖時各跑兩次 `ansible-inventory`（讀 inventory 的有效
+   變數、只讀 `-e` 的 `target_group`），所以各會多問兩次 vault 密碼。這兩次 `ansible-inventory` 不寫
+   `ansible.log`：帶 `-e`／vault 參數時它印出每台主機解密後的變數值，寫進 log 會把值明文留在控制端。
 5. **掉鎖（網路中斷約 45 秒、ssh 結束）時 pilot 只殺 ansible-playbook 的主行程**，不殺它的 process
    group：ansible 的 fork worker 可能在掉鎖**之後**把正在執行的那一個 task 做完，那個 task 沒有鎖的保護
    （之後不會有新的 task）。掉鎖後整個 run 一律回報失敗、要重跑。

@@ -45,9 +45,10 @@ arguments the playbook gets (deploy and reconcile: the --extra and vault file;
 decommission: .vault/main.yaml), and the connection settings of ansible.cfg and
 the ANSIBLE_* environment through ansible-config. A variable that only arrives
 through -e @file, or a setting in ansible.cfg's ssh_args or ANSIBLE_SSH_ARGS, is
-judged like one in the inventory, and a target_group that sends the playbook to a
-host other than the one to lock is refused, naming the variable and where it
-came from. An encrypted -e file needs its vault password where ansible-inventory
+judged like one in the inventory, and a target_group (given with -e or -e @file:
+the playbook's hosts: does not see one set in the inventory) that sends the
+playbook to a host other than the one to lock is refused, naming the variable
+and where it came from. An encrypted -e file needs its vault password where ansible-inventory
 can read it too (--vault-password-file, or ANSIBLE_VAULT_PASSWORD_FILE). A
 workspace whose group_vars hold a plaintext contract secret, or are encrypted as
 a whole file, is refused as well: keep secrets in .vault/main.yaml.`
@@ -65,11 +66,13 @@ local connection、ProxyCommand、密碼、pilot 的 ssh 不接受的 -o)就拒�
 透過 ansible-inventory 讀 inventory 時帶上 playbook 拿到的 -e 與 vault 參數(--extra
 與 vault 檔)，ansible.cfg 與 ANSIBLE_* 環境變數裡的連線設定則透過 ansible-config
 讀。只靠 -e @file 提供的變數、或 ansible.cfg 的 ssh_args／ANSIBLE_SSH_ARGS，與寫在
-inventory 的同一個設定一樣被檢查；target_group 讓 playbook 去別台主機時拒絕，並指出
-是哪個變數、來自哪裡。加密的 -e 檔要讓 ansible-inventory 也讀得到 vault 密碼
+inventory 的同一個設定一樣被檢查；target_group(用 -e 或 -e @檔案給的才算，playbook 的
+hosts: 看不到寫在 inventory 的)讓 playbook 去別台主機時拒絕，並指出是哪個變數、來自
+哪裡。加密的 -e 檔要讓 ansible-inventory 也讀得到 vault 密碼
 (--vault-password-file 或 ANSIBLE_VAULT_PASSWORD_FILE)。group_vars 有 contract 的明文
 secret、或整份 group_vars 被 vault 加密，同樣會在取鎖前被拒絕(secret 放在
-.vault/main.yaml)。--ask-vault-pass 會讓取鎖前檢查與取鎖時各多問一次密碼(沒有密碼
+.vault/main.yaml)。--ask-vault-pass 會讓取鎖前檢查與取鎖時各多問兩次密碼(每次推導跑
+兩次 ansible-inventory：讀 inventory 的有效變數、讀 -e 的 target_group；沒有密碼
 檔就無法在 ansible-playbook 之外讀 -e 檔)；--ask-vault-pass／--ask-become-pass 在
 ansible-playbook 內的密碼提示發生在取鎖之後，輸入密碼的時間算在持鎖時間裡。`
 
@@ -101,8 +104,9 @@ type identityLockRequest struct {
 	// (the deploy runner has resolved them already, honoring --limit,
 	// target_group and availability). They must be among the hosts the
 	// playbook's own `hosts:` resolves to under ExtraArgs, or the lock refuses.
-	// nil asks the acquirer to resolve that pattern itself: target_group when
-	// the effective variables set it, else `freeipa-server`
+	// nil asks the acquirer to resolve that pattern itself: the target_group of
+	// the extra vars when they set one (an inventory variable does not count:
+	// the play's `hosts:` does not see it), else `freeipa-server`
 	// (accessgrants.applyPlan and the decommission converge pass no limit).
 	Hosts []string
 	// Wait is how long to wait for another holder; 0 fails at once.
@@ -144,12 +148,13 @@ var newIdentityLockDialer = func(t sshdial.Target) identityLockDialer { return &
 // says (issue #319; identity_lock_effective.go): the host variables come from
 // ansible-inventory run with req.ExtraArgs, so `-e @file` and `-e key=value`
 // layer over the inventory as they will for the playbook; the playbook's
-// `hosts:` pattern is the effective target_group, and a host the run was handed
-// that the pattern does not reach is refused; and the connection settings of
-// ansible.cfg and the ANSIBLE_* environment (ansible-config) fill in what the
-// host does not set. Whichever of these the lock cannot read or cannot honor is
-// an error: the playbook is not run without the lock, and not with a lock on
-// another machine.
+// `hosts:` pattern is the target_group of the extra vars alone (Ansible does not
+// template `hosts:` with the inventory's variables, so a target_group in the
+// inventory changes nothing), and a host the run was handed that the pattern
+// does not reach is refused; and the connection settings of ansible.cfg and the
+// ANSIBLE_* environment (ansible-config) fill in what the host does not set.
+// Whichever of these the lock cannot read or cannot honor is an error: the
+// playbook is not run without the lock, and not with a lock on another machine.
 //
 // An inventory it cannot derive an ssh Target from (a docker or local
 // connection, ProxyCommand, a password, an option outside the allowlist of
@@ -163,7 +168,10 @@ func identityLockTarget(ctx context.Context, req identityLockRequest) (string, s
 	if err != nil {
 		return "", sshdial.Target{}, fmt.Errorf("不能讀出 playbook 實際會用的 inventory 變數(ansible-inventory 帶著與 playbook 相同的 -e／vault 參數)，所以不能確定鎖要取在哪台：%w", err)
 	}
-	group, err := effectiveTargetGroup(snapshot.HostVars)
+	// The playbook's `hosts:` sees the extra vars only, so target_group is read
+	// from them alone (an inventory-level target_group is in snapshot.HostVars
+	// on every host and does not retarget the play).
+	group, err := loadEffectiveTargetGroup(ctx, req.ExtraArgs)
 	if err != nil {
 		return "", sshdial.Target{}, fmt.Errorf("不能對 %s 取 FreeIPA 的 %s 鎖：%w", req.Inventory, sshdial.DefaultLockPath, err)
 	}
@@ -180,7 +188,7 @@ func identityLockTarget(ctx context.Context, req identityLockRequest) (string, s
 		if hosts == nil {
 			hosts = playbookHosts
 		} else if outside := hostsOutside(hosts, playbookHosts); len(outside) > 0 {
-			return "", sshdial.Target{}, fmt.Errorf("鎖與 playbook 的目標會不同台，所以不執行：這輪要鎖 %v，但 playbook 的 hosts 是 target_group=%q，只會對 %v 執行(target_group 來自 -e 或 inventory 變數；讓兩者一致，或移除 target_group)", outside, group, playbookHosts)
+			return "", sshdial.Target{}, fmt.Errorf("鎖與 playbook 的目標會不同台，所以不執行：這輪要鎖 %v，但 playbook 的 hosts 是 target_group=%q，只會對 %v 執行(target_group 來自 -e 或 -e @檔案，inventory 的變數不算；讓兩者一致，或移除 target_group)", outside, group, playbookHosts)
 		}
 	}
 	if len(hosts) != 1 {
