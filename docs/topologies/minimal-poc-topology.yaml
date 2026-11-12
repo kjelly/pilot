@@ -80,6 +80,12 @@
 # fail-closed if that stack isn't running — drop this key for an
 # intentionally uncached run.
 services: local
+# 2026-11-12: ask only for the apt and rpm caches. The built-in dev-lite profile
+# defines data probes for those two but none for oci, so with the default
+# (apt+rpm+oci) `topology up` fails closed with "required oci cache is not ready
+# (... data=unknown:missing-descriptor-configure-profile-data_probes)" before any
+# VM exists. Container images are pulled from the public registries instead.
+service_capabilities: [apt, rpm]
 nodes:
   - name: freeipa-server
     base_image: almalinux-9
