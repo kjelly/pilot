@@ -367,6 +367,14 @@ func TestWazuhRetainedReinstallConvergence(t *testing.T) {
 	runWazuhHarness(t, "testdata/wazuh_convergence_test.py", "Wazuh retained reinstall convergence controls")
 }
 
+// The ordinary EL apply's who-data endpoint ensure runs the real coordinator
+// over a temporary /proc and host tree; auditd/systemd/syscheckd reactions are
+// declared models (Issue #323).
+
+func TestWazuhWhodataEnsureBehavior(t *testing.T) {
+	runWazuhHarness(t, "testdata/wazuh_whodata_ensure_test.py", "Wazuh who-data endpoint ensure controls")
+}
+
 // A prerequisite that is missing must stop the harness loudly. Each case puts a
 // shim first on PATH that behaves like the broken environment and checks the
 // probe's message names the fix, so a CI job without PyYAML or the pinned

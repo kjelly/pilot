@@ -1,7 +1,7 @@
 # Runbook — wazuh-fim（Wazuh agent：檔案完整性監控 FIM + auditd who-data）
 
 > 撰寫日期：2026-07-06 (UTC)；v1.1 更新：2026-07-06 (UTC)
-> 對齊：`docs/verification/wazuh-fim.md`（v1.1）、`playbooks/apply/wazuh-fim-apply.yml`
+> 對齊：`docs/verification/wazuh-fim.md`（v1.7）、`playbooks/apply/wazuh-fim-apply.yml`
 > 維護者：sre
 
 ---
@@ -252,20 +252,32 @@ wazuh-syscheckd: INFO: (6003): Monitoring path: '/bin', with options 'size | per
 自己要的行為，風險面比「找到既有行、原地修改」小很多——同樣的技巧也用在
 `wazuh-manager.md` 的 `<syslog_output>`。
 
-### 5.2 who-data 的證據要在 manager 端看，不是 agent 端
+### 5.2 who-data：本機管線在 agent 端可以驗證，事件歸因要在 manager 端看
 
-一開始想在 agent 端本機找 FIM 事件的 who-data 證據（例如翻 agent 自己的
-`/var/ossec/logs/ossec.log`），但 syscheckd 在 agent 端只會記錄「哪個檔案
-被改了、什麼屬性變了」這類本機層級訊息，**真正組裝出 `syscheck.audit`
-（`login_user`/`effective_user`/`process` 完整鏈）的是 manager 端的
-`wazuh-analysisd`**——agent 只負責把原始事件（含 auditd 提供的 raw
-audit 資料）送過去，關聯分析是在 manager 端做的。
+who-data 有兩件事，要分開看：
 
-**結論**：本 spec（C1-C9）刻意只驗證 agent 端「規則設定正確、憑證已拿到」
-這類本機可判定的狀態；真正「who-data 有沒有生效」的證明只能去 manager 端
-的 `alerts.json` 找（見 §4、`wazuh-manager.md` §4），這也是為什麼這個
-spec 沒有嘗試在 agent 端自己實作一條 who-data 功能性檢查——那個證據本來
-就不在這台主機上。
+1. **本機管線有沒有接上（agent 端可觀察）**：agent 的 syscheckd 要連上 auditd 這一側的 who-data endpoint
+   （`/var/ossec/queue/sockets/audit`，一個 af_unix socket）。endpoint 有 listener、且 `wazuh-syscheckd`
+   與它的 server 端互相連線，用 `ss -xHap` 在 agent 主機上就看得到；這不需要 manager。EL 上這是 spec C11
+   （見 `docs/verification/wazuh-fim.md` §2），一般套用的 Step 11a 負責建立它，建不起來就讓套用失敗。
+   原因：EL 的 `audit` 套件不含 af_unix plugin（`/sbin/audisp-af_unix` 由 `audispd-plugins` 提供），agent 首次
+   啟動寫入的 `/etc/audit/plugins.d/af_wazuh.conf`（`active = yes`）也沒有東西讓執行中的 auditd 載入它——EL 的
+   auditd 拒絕 `systemctl restart`、minimal EL9 沒有 `service` 指令，Wazuh 自己的重啟失敗並在 `ossec.log` 記錄
+   `Could not launch command to restart Auditd`，syscheckd 退回 real-time。這時設定文字全部正確、C1–C10 全綠，
+   但沒有 who-data：只看設定與服務狀態會漏掉它（本節先前「那個證據本來就不在這台主機上」的說法不成立，
+   該管線的證據就在這台主機上）。
+2. **事件歸因**：真正組裝出 `syscheck.audit`（`login_user`/`effective_user`/`process` 完整鏈）的是 manager 端的
+   `wazuh-analysisd`；agent 只送出原始事件。「這個檔案是誰改的」的端到端證明仍然只能去 manager 的
+   `alerts.json` 找（見 §4、`wazuh-manager.md` §4）。
+
+C11 的邊界：只涵蓋 EL（RedHat family），Debian family 不斷言；不要求 kernel `wazuh_fim` watch，因為
+`audit-log-forwarding` 每次套用的 `augenrules --load` 會把 watch 清為 0 而 endpoint 與連線不變（#324，未解決），
+要求 watch 會讓同機共用的主機驗收不穩；不辨識 listener 是哪個程序。排查 EL 上 C11 失敗或 Step 11a 失敗時，
+讀 apply 輸出的 typed 原因，再看 `ss -xHap`（endpoint 路徑上的 LISTEN 與 ESTAB、以及 syscheckd 的 ESTAB）、
+`auditctl -l`（有沒有 `wazuh_fim` 規則）與 `/etc/audit/plugins.d/af_wazuh.conf`（是否 `active = yes`）。
+在 EL 上較早 revision 套用的舊主機（沒有 `audispd-plugins`、沒有 endpoint）需要先重跑一次含 Step 11a 的一般
+套用，之後才能帶 `wazuh_upgrade=true`；受控升級本身不會修復它，會以
+`configured external audit endpoint is unavailable before upgrade` 拒絕。
 
 ### 5.3 apt 安裝 `wazuh-agent` 時**不要**用 `WAZUH_MANAGER` 環境變數觸發套件安裝時自動註冊
 
