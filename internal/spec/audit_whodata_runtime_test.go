@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.yaml.in/yaml/v3"
@@ -82,8 +83,16 @@ if name=='auditctl':
 elif name=='augenrules':
  if args==['--check']:
   same=(d/'audit.rules').read_text()==generated()
+  if sc.get('check_unrecognized'):
+   # the script's own line for an empty rules directory (from its source): neither of the two outcomes
+   sys.stdout.write('/usr/sbin/augenrules: No rules\n');sys.exit(0)
   sys.stdout.write((d/('check-no-change.txt' if same else 'check-changed.txt')).read_text())
- elif args==['--load']:augenrules_load()
+ elif args==['--load']:
+  if sc.get('load_fails_always') or (sc.get('load_fails_first') and not (d/'load-failed').exists()):
+   # auditctl -R runs the -D at the top of audit.rules and then stops at a rule it cannot load: the whole
+   # list is gone, nothing is loaded, and augenrules exits non-zero.
+   (d/'load-failed').write_text('1');(d/'audit.rules').write_text(generated());set_kernel([]);sys.exit(1)
+  augenrules_load()
  else:raise RuntimeError('augenrules '+repr(args))
 elif name=='systemctl':
  sub=args[0]
@@ -137,6 +146,12 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 if sys.argv[1:] != ['writer-inspect']:
     sys.exit(2)
+claim_on = os.environ.get('AUDIT_TEST_WRITER_CLAIM_ON_CALL')
+if claim_on:
+    calls = (pathlib.Path(os.environ['AUDIT_TEST_DIR']) / 'writer-calls').read_text().splitlines()
+    if len(calls) == int(claim_on):
+        # Another Wazuh writer claims the host between two of the play's own inspections (the real HostWriter).
+        module.HostWriter(pathlib.Path(os.environ['AUDIT_TEST_WRITER_ROOT'])).claim('a' * 32, 'agent')
 try:
     print(json.dumps(module.HostWriter(pathlib.Path(os.environ['AUDIT_TEST_WRITER_ROOT'])).inspect(), sort_keys=True))
 except module.Refused as exc:
@@ -169,11 +184,24 @@ type auditScenario struct {
 	agentShowFails    bool
 	writerActive      bool
 	writerRefuses     bool // the coordinator answers writer-inspect with its typed refusal
-	toolsAppearLate   bool // auditctl, augenrules and ss are not on the host when the play starts; a package install makes them appear before Step 3
-	fresh             bool // a host with none of the tools yet (check mode on a fresh VM)
-	twice             bool // run the play a second time on what the first left behind and observe only that run
+	// writerAppearsOnCall: another Wazuh writer claims the host just before the coordinator answers its Nth
+	// writer-inspect call of the run (the guard's is the first, the re-arm's the second).
+	writerAppearsOnCall int
+	// loadFailsFirst: the first `augenrules --load` of the run empties the list and then exits 1; loadFailsAlways:
+	// every one does.
+	loadFailsFirst  bool
+	loadFailsAlways bool
+	// checkUnrecognized: `augenrules --check` prints a line that is neither of its two outcomes.
+	checkUnrecognized bool
+	// noRulesFile: the managed rules file does not exist yet (the first apply of the role on this host).
+	noRulesFile     bool
+	toolsAppearLate bool // auditctl, augenrules and ss are not on the host when the play starts; a package install makes them appear before Step 3
+	fresh           bool // a host with none of the tools yet (check mode on a fresh VM)
+	twice           bool // run the play a second time on what the first left behind and observe only that run
 
-	failAfter string // "": no injected failure; "step2": after the render, before any load; "load": right after the load
+	// failAfter: "" no injected failure; "step2" after the render, before any load; "load" right after the
+	// load; "restart" right after the Debian auditd restart (Step 8a).
+	failAfter string
 	mutate    func(play map[string]any)
 	// mutateTasks rewrites a copy of a task file of playbooks/apply/tasks (by file name) before the run.
 	mutateTasks map[string]func(text string) string
@@ -200,17 +228,18 @@ type auditExpect struct {
 }
 
 type auditObservation struct {
-	rc          int
-	out         string
-	changed     int
-	calls       []string
-	kernel      []string
-	rulesFile   string
-	loads       int
-	restarts    int
-	hups        int
-	agentStarts int
-	inspects    int
+	rc              int
+	out             string
+	changed         int
+	calls           []string
+	kernel          []string
+	rulesFile       string
+	rulesFileExists bool
+	loads           int
+	restarts        int
+	hups            int
+	agentStarts     int
+	inspects        int
 }
 
 var auditRecap = regexp.MustCompile(`localhost\s+: ok=(\d+)\s+changed=(\d+)\s+unreachable=\d+\s+failed=(\d+)`)
@@ -292,7 +321,8 @@ func ruleLines(text string) []string {
 }
 
 // kernelLine is how `auditctl -l` lists a rule of the managed file: watches as written, syscall rules with
-// `-F key=` (the documented listing form; the target run supplies the native capture).
+// `-F key=`, as the real listing on Ubuntu 24.04.4 and AlmaLinux 9.8 shows (checked against both captures by
+// TestAuditShimKernelListingMatchesTheRealCapture).
 func kernelLine(rule string) string {
 	if strings.HasPrefix(rule, "-a ") {
 		return regexp.MustCompile(`\s-k\s+(\S+)`).ReplaceAllString(rule, " -F key=$1")
@@ -348,6 +378,52 @@ func insertAfterTask(t *testing.T, node any, name string, fault map[string]any) 
 	}
 	return false
 }
+
+// removeTask takes the named task out of whichever list holds it and returns it.
+func removeTask(node any, name string) map[string]any {
+	switch value := node.(type) {
+	case map[string]any:
+		for key, child := range value {
+			if list, ok := child.([]any); ok {
+				for i, item := range list {
+					if task, ok := item.(map[string]any); ok && task["name"] == name {
+						value[key] = append(append([]any{}, list[:i]...), list[i+1:]...)
+						return task
+					}
+				}
+			}
+			if found := removeTask(child, name); found != nil {
+				return found
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if found := removeTask(child, name); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
+}
+
+// editTaskVar rewrites a substring of one of a task's `vars` expressions and fails when it is not there.
+func editTaskVar(t *testing.T, task map[string]any, name, old, replacement string) {
+	t.Helper()
+	vars, ok := task["vars"].(map[string]any)
+	if !ok {
+		t.Fatalf("task %v has no vars", task["name"])
+	}
+	// A folded YAML scalar keeps line breaks and indentation of its more indented lines; compare on single spaces.
+	text := strings.Join(strings.Fields(vars[name].(string)), " ")
+	if !strings.Contains(text, old) {
+		t.Fatalf("var %s of %v has no %q:\n%s", name, task["name"], old, text)
+	}
+	vars[name] = strings.Replace(text, old, replacement, 1)
+}
+
+// auditVerified remembers the scenarios the matrix test has already passed, so the counterexample test does
+// not run the same unmutated control a second time in one `go test` run.
+var auditVerified sync.Map
 
 // auditRunSlots bounds how many ansible-playbook processes the matrix runs at once: each is a few seconds of
 // CPU, and the matrix is some forty runs in a package whose tests already share the machine.
@@ -416,8 +492,14 @@ func runAuditScenario(t *testing.T, sc auditScenario) auditObservation {
 			t.Fatal("the template has no sudoers watch to edit")
 		}
 	}
-	if !sc.fresh {
+	if !sc.fresh && !sc.noRulesFile {
 		write(rulesFile, disk, 0o640)
+	}
+	if sc.noRulesFile {
+		// The role has never run here: Step 2 will create the file, with no backup of an earlier one.
+		if err := os.MkdirAll(filepath.Dir(rulesFile), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	pluginBody := "active = yes\ndirection = out\nargs = LOG_INFO LOG_LOCAL6\n"
 	if sc.pluginOff {
@@ -452,6 +534,9 @@ func runAuditScenario(t *testing.T, sc auditScenario) auditObservation {
 	// /etc/audit/audit.rules as the last load generated it, from the rules the template renders.
 	generated := "## This file is automatically generated from /etc/audit/rules.d\n-D\n-b 8192\n-f 1\n" +
 		strings.Join(ruleLines(tmpl), "\n") + "\n-e 1\n"
+	if sc.noRulesFile {
+		generated = "## This file is automatically generated from /etc/audit/rules.d\n-D\n-b 8192\n-f 1\n\n-e 1\n"
+	}
 	write(filepath.Join(state, "audit.rules"), generated, 0o600)
 	auditd := "active"
 	if sc.auditdOff {
@@ -478,8 +563,8 @@ func runAuditScenario(t *testing.T, sc auditScenario) auditObservation {
 	if sc.agentRearms != nil {
 		rearms = *sc.agentRearms
 	}
-	scenario := fmt.Sprintf(`{"rules_file": %q, "wazuh_lines": %s, "agent_rearms": %t, "plugin_running": %t, "listener_stays_down": %t, "auditctl_fails": %t, "agent_show_fails": %t}`,
-		rulesFile, quoteList(wazuhLines), rearms, !sc.pluginOff, sc.listenerStaysDown, sc.auditctlFails, sc.agentShowFails)
+	scenario := fmt.Sprintf(`{"rules_file": %q, "wazuh_lines": %s, "agent_rearms": %t, "plugin_running": %t, "listener_stays_down": %t, "auditctl_fails": %t, "agent_show_fails": %t, "load_fails_first": %t, "load_fails_always": %t, "check_unrecognized": %t}`,
+		rulesFile, quoteList(wazuhLines), rearms, !sc.pluginOff, sc.listenerStaysDown, sc.auditctlFails, sc.agentShowFails, sc.loadFailsFirst, sc.loadFailsAlways, sc.checkUnrecognized)
 	write(filepath.Join(state, "scenario.json"), scenario, 0o600)
 	writerRoot := filepath.Join(dir, "writer-root")
 	if sc.writerActive {
@@ -514,6 +599,9 @@ m.HostWriter(pathlib.Path(sys.argv[2])).claim('a'*32,'agent')`, coordinator, wri
 		"AUDIT_TEST_COORDINATOR":  coordinator,
 		"AUDIT_TEST_WRITER_ROOT":  writerRoot,
 		"PYTHONDONTWRITEBYTECODE": "1",
+	}
+	if sc.writerAppearsOnCall > 0 {
+		play["environment"].(map[string]any)["AUDIT_TEST_WRITER_CLAIM_ON_CALL"] = strconv.Itoa(sc.writerAppearsOnCall)
 	}
 	if sc.writerRefuses {
 		refusal, err := filepath.Abs(filepath.Join("testdata", "native-captures", "wazuh-transaction.writer-claim.invalid-identity.rc1.txt"))
@@ -560,6 +648,11 @@ m.HostWriter(pathlib.Path(sys.argv[2])).claim('a'*32,'agent')`, coordinator, wri
 		if !insertAfterTask(t, play, "Step 2: Render audit.rules.j2 (setuid/setgid, sudo, passwd/sudoers watches)",
 			map[string]any{"name": "injected failure before any load", "tags": []string{"always"}, "ansible.builtin.fail": map[string]any{"msg": "INJECTED_BEFORE_LOAD"}}) {
 			t.Fatal("cannot inject after Step 2")
+		}
+	case "restart":
+		if !insertAfterTask(t, play, "Step 8a: Reload auditd if the syslog plugin config changed or isn't actually running (spec C21) — Debian family",
+			map[string]any{"name": "injected failure after the auditd restart", "tags": []string{"always"}, "ansible.builtin.fail": map[string]any{"msg": "INJECTED_AFTER_RESTART"}}) {
+			t.Fatal("cannot inject after Step 8a")
 		}
 	case "load":
 		if !insertAfterTask(t, play, "Step 3: Load the custom rules into the running kernel audit list (spec C10)",
@@ -639,6 +732,7 @@ m.HostWriter(pathlib.Path(sys.argv[2])).claim('a'*32,'agent')`, coordinator, wri
 	}
 	if raw, err := os.ReadFile(rulesFile); err == nil {
 		obs.rulesFile = string(raw)
+		obs.rulesFileExists = true
 	}
 	return obs
 }
@@ -704,6 +798,10 @@ func (o auditObservation) verify(t *testing.T, want auditExpect) []string {
 		problems = append(problems, fmt.Sprintf("kernel list holds the wazuh_fim watches=%t, want %t (%v)", allWazuh, want.wazuhInList, o.kernel))
 	}
 	switch want.rules {
+	case "absent":
+		if o.rulesFileExists {
+			problems = append(problems, "the managed rules file still exists, want it removed")
+		}
 	case "template":
 		if o.rulesFile != templateRules(t) {
 			problems = append(problems, "the managed rules file is not what the template renders")
@@ -749,15 +847,21 @@ func auditMatrix() []auditCase {
 	// I2 + I3: the file is right but the managed rules left the kernel list (an external `auditctl -d` of them):
 	// a file-changed-only trigger never loads them again.
 	for _, selection := range []string{"C10", "full"} {
+		// Under C10 nothing else changes, so the recap is exact: the load and the agent restart are the two
+		// changes a repair reports (a run that repairs must not look like a no-op to the operator or to L6).
+		changed := -1
+		if selection == "C10" {
+			changed = 2
+		}
 		cases = append(cases, auditCase{
 			auditScenario{name: "managed rules missing from the kernel, wazuh watches live " + selection, selection: selection, wazuh: true},
-			auditExpect{loads: 1, agentRestarts: 1, writerInspects: 2, changed: -1, managedInList: true, wazuhInList: true}})
+			auditExpect{loads: 1, agentRestarts: 1, writerInspects: 2, changed: changed, managedInList: true, wazuhInList: true}})
 	}
 	// An external `auditctl -D` took the agent's watches too: no who-data was live at the start of the run, so
 	// the run loads the managed rules and never restarts the agent.
 	cases = append(cases, auditCase{
 		auditScenario{name: "externally flushed list", selection: "C10", flushed: true},
-		auditExpect{loads: 1, writerInspects: 1, changed: -1, managedInList: true, wazuhInList: false}})
+		auditExpect{loads: 1, writerInspects: 1, changed: 1, managedInList: true, wazuhInList: false}})
 	// I2 for a run that stopped after rendering: the file is edited, so the load is needed and the agent comes back.
 	for _, selection := range []string{"full", "C10"} {
 		cases = append(cases, auditCase{
@@ -879,6 +983,72 @@ func auditMatrix() []auditCase {
 		auditScenario{name: "rescue never restarts an agent that held no watches", selection: "C10", flushed: true, failAfter: "load"},
 		auditExpect{fail: true, loads: 1, agentRestarts: 0, writerInspects: 1, changed: -1, managedInList: true, wazuhInList: false,
 			out: []string{"Wazuh who-data was not live before this run"}}})
+	// F9: the failure and rescue paths, one scenario per way the decision can go wrong.
+	//
+	// (a) The first `augenrules --load` empties the list and exits 1 (a rule it cannot load). The failure is the
+	// load itself, so the rescue must reload although it restored no file, and must give who-data back.
+	cases = append(cases, auditCase{
+		auditScenario{name: "the load itself fails after the flush: the rescue reloads and re-arms", selection: "C10", wazuh: true, loadFailsFirst: true},
+		auditExpect{fail: true, loads: 2, agentRestarts: 1, writerInspects: 2, changed: -1, managedInList: true, wazuhInList: true,
+			out:    []string{"The audit rules file was not changed by this run.", "The kernel audit list was reloaded from the restored rules.", "Wazuh who-data was restored"},
+			notOut: []string{"The rollback did not reload", "The kernel audit list reload FAILED"}}})
+	// (b) The run fails after the Debian auditd restart, with who-data live and the rules file already current:
+	// nothing was loaded or restored, but the restart emptied the list, so the rescue re-arms without a reload.
+	cases = append(cases, auditCase{
+		auditScenario{name: "failure after the auditd restart: the rescue re-arms without a reload", selection: "C21", wazuh: true, managed: true, pluginOff: true, failAfter: "restart"},
+		auditExpect{fail: true, loads: 0, auditdRestarts: 1, agentRestarts: 1, writerInspects: 2, changed: -1, managedInList: true, wazuhInList: true,
+			out:    []string{"The rollback did not reload the kernel audit list.", "Wazuh who-data was restored"},
+			notOut: []string{"The kernel audit list was not disturbed"}}})
+	// (c) The rescue's own re-arm never succeeds: it is recorded, the rest of the rescue still runs and the
+	// final message says so, instead of claiming who-data is back or aborting the rollback.
+	cases = append(cases, auditCase{
+		auditScenario{name: "the rescue's own re-arm never succeeds: the rollback finishes and says so", selection: "C10", wazuh: true, agentRearms: boolPtr(false), failAfter: "load"},
+		auditExpect{fail: true, loads: 1, agentRestarts: 1, writerInspects: 2, changed: -1, managedInList: true, wazuhInList: false,
+			out:    []string{"audit-log-forwarding apply failed (see task output above).", "Wazuh who-data was NOT restored (reason: watches_not_restored)"},
+			notOut: []string{"Wazuh who-data was restored", "The kernel audit list was not disturbed", "whodata_not_restored: this run emptied"}}})
+	// (d) The first apply of the role: the run creates the rules file (no backup exists), loads it, then fails.
+	// The rescue removes the file it created, reloads the list from what remains and gives who-data back.
+	cases = append(cases, auditCase{
+		auditScenario{name: "first apply creates the rules file, then fails after the load: the rescue removes it and reloads", selection: "full", wazuh: true, noRulesFile: true, failAfter: "load"},
+		auditExpect{fail: true, loads: 2, agentRestarts: 1, writerInspects: 2, changed: -1, managedInList: false, wazuhInList: true, rules: "absent",
+			out: []string{"The audit rules file was removed because this run created it.", "The kernel audit list was reloaded from the restored rules.", "Wazuh who-data was restored"}}})
+	// (e) A Wazuh writer claims the host after the guard passed and before the re-arm: the re-arm re-checks,
+	// refuses to restart the agent under it and fails with the typed reason.
+	cases = append(cases, auditCase{
+		auditScenario{name: "a Wazuh writer appears between the guard and the re-arm", selection: "C10", wazuh: true, writerAppearsOnCall: 2},
+		auditExpect{fail: true, loads: 1, agentRestarts: 0, writerInspects: 2, changed: -1, managedInList: true, wazuhInList: false,
+			out: []string{"whodata_not_restored: this run emptied the kernel audit list", "reason=wazuh_writer_active"}}})
+	// (f) The rescue's own reload fails too: the message says the list may not match the file, and who-data is
+	// still given back.
+	cases = append(cases, auditCase{
+		auditScenario{name: "the rescue's reload fails too: the message says so", selection: "C10", wazuh: true, loadFailsAlways: true},
+		auditExpect{fail: true, loads: 2, agentRestarts: 1, writerInspects: 2, changed: -1, managedInList: false, wazuhInList: true,
+			out:    []string{"The kernel audit list reload FAILED, so it may not match the rules file.", "Wazuh who-data was restored"},
+			notOut: []string{"The kernel audit list was reloaded from the restored rules"}}})
+	// (g) A converged host that fails later in the run: nothing was disturbed, so the rescue does nothing to the
+	// list or the agent and says so.
+	cases = append(cases, auditCase{
+		auditScenario{name: "converged host, failure later in the run: the rescue touches nothing", selection: "C10", wazuh: true, managed: true, failAfter: "load"},
+		auditExpect{fail: true, loads: 0, agentRestarts: 0, writerInspects: 0, changed: -1, managedInList: true, wazuhInList: true,
+			out: []string{"The rollback did not reload the kernel audit list.", "The kernel audit list was not disturbed by this run."}}})
+	// The load decision fails closed: a text augenrules --check does not use, or a list that cannot be read, is
+	// "cannot say", and cannot say means load.
+	cases = append(cases, auditCase{
+		auditScenario{name: "augenrules --check says something it never says: the list is loaded", selection: "C10", wazuh: true, managed: true, checkUnrecognized: true},
+		auditExpect{loads: 1, agentRestarts: 1, writerInspects: 2, changed: -1, managedInList: true, wazuhInList: true}})
+	cases = append(cases, auditCase{
+		auditScenario{name: "kernel list unreadable and no wazuh-agent: the list is loaded", selection: "C10", agent: "absent", managed: true, auditctlFails: true},
+		auditExpect{loads: 1, agentRestarts: 0, writerInspects: 0, changed: -1, managedInList: true, wazuhInList: false}})
+	// I5 for the failure path and for the guard: a preview that fails touches nothing and says nothing was
+	// disturbed; a preview with a Wazuh writer active does not ask the writer and is not refused.
+	cases = append(cases, auditCase{
+		auditScenario{name: "preview that fails: the rescue touches nothing and says nothing was disturbed", selection: "full", check: true, wazuh: true, failAfter: "load"},
+		auditExpect{fail: true, loads: 0, auditdRestarts: 0, agentRestarts: 0, writerInspects: 0, changed: -1, managedInList: false, wazuhInList: true,
+			out: []string{"The kernel audit list was not disturbed by this run."}}})
+	cases = append(cases, auditCase{
+		auditScenario{name: "preview with a Wazuh writer active and a load needed: not refused, writer not asked", selection: "C10", check: true, wazuh: true, writerActive: true},
+		auditExpect{loads: 0, agentRestarts: 0, writerInspects: 0, changed: -1, managedInList: false, wazuhInList: true,
+			notOut: []string{"wazuh_writer_active: a Wazuh"}}})
 	// I5: a preview never flushes, restarts or asks the writer, on a configured host and on a fresh one.
 	for _, tc := range []auditScenario{
 		{name: "preview converged", selection: "full", wazuh: true, managed: true},
@@ -905,6 +1075,7 @@ func TestRegression_AuditWhodataSharedKernelListRuntime(t *testing.T) {
 			if problems := obs.verify(t, tc.want); len(problems) > 0 {
 				t.Fatalf("%s\n\ncalls:\n%s\n\n%s", strings.Join(problems, "\n"), strings.Join(obs.calls, "\n"), obs.out)
 			}
+			auditVerified.Store(tc.sc.name, true)
 		})
 	}
 }
@@ -931,6 +1102,17 @@ func TestRegression_AuditWhodataCounterexamplesFail(t *testing.T) {
 		step10  = "Step 10: Give the Wazuh who-data watches back after this run disturbed the kernel audit list (spec C23)"
 		reload  = "ROLLBACK — reload kernel audit rules back to the restored state"
 		rescued = "ROLLBACK — put Wazuh who-data back after this run disturbed the kernel audit list (spec C23)"
+		plan    = "ROLLBACK — decide whether the kernel audit list needs a reload and Wazuh who-data a re-arm (spec C23)"
+		failMsg = "ROLLBACK — surface the original failure"
+		record  = "Step 3d: Record that the kernel audit list is about to be loaded (spec C23)"
+		load    = "Step 3: Load the custom rules into the running kernel audit list (spec C10)"
+	)
+	const (
+		scenLoadFails = "the load itself fails after the flush: the rescue reloads and re-arms"
+		scenRestart   = "failure after the auditd restart: the rescue re-arms without a reload"
+		scenRescueArm = "the rescue's own re-arm never succeeds: the rollback finishes and says so"
+		scenFirst     = "first apply creates the rules file, then fails after the load: the rescue removes it and reloads"
+		scenWriter    = "a Wazuh writer appears between the guard and the re-arm"
 	)
 	mutants := []struct {
 		name     string
@@ -938,6 +1120,46 @@ func TestRegression_AuditWhodataCounterexamplesFail(t *testing.T) {
 		scenario string
 		problems []string
 	}{
+		// F9: the failure and rescue paths.
+		{"rescue reload without its load-failed arm (M1)", func(t *testing.T, play map[string]any) {
+			editTaskVar(t, task(t, play, plan), "audit_rescue_reload_value",
+				" or (augenrules_result is defined and (augenrules_result.rc | default(0)) != 0)", "")
+		}, scenLoadFails,
+			[]string{"kernel list emptied (augenrules --load / auditctl -R/-D)=1, want 2", "kernel list holds all managed rules=false, want true", "output lacks \"The kernel audit list was reloaded from the restored rules.\""}},
+		{"rescue reload without its rules-file-removed arm (M2)", func(t *testing.T, play map[string]any) {
+			editTaskVar(t, task(t, play, plan), "audit_rescue_reload_value", " or (audit_rules_remove_result is changed)", "")
+		}, scenFirst,
+			[]string{"kernel list emptied (augenrules --load / auditctl -R/-D)=1, want 2", "kernel list holds all managed rules=true, want false"}},
+		{"rescue reload without its rules-file-restored arm", func(t *testing.T, play map[string]any) {
+			editTaskVar(t, task(t, play, plan), "audit_rescue_reload_value", "(audit_rules_restore_result is changed) or ", "")
+		}, "rescue after a load of a changed file reloads once and re-arms once",
+			[]string{"kernel list emptied (augenrules --load / auditctl -R/-D)=1, want 2", "The kernel audit list was reloaded from the restored rules"}},
+		{"rescue disturbance without its auditd-restart arm (M6)", func(t *testing.T, play map[string]any) {
+			editTaskVar(t, task(t, play, plan), "audit_rescue_disturbed_value",
+				" or (audit_auditd_restart_attempted is defined and audit_auditd_restart_attempted | bool)", "")
+		}, scenRestart,
+			[]string{"wazuh-agent restarts=0, want 1", "kernel list holds the wazuh_fim watches=false, want true"}},
+		{"rescue disturbance without its load arm", func(t *testing.T, play map[string]any) {
+			editTaskVar(t, task(t, play, plan), "audit_rescue_disturbed_value",
+				"(audit_kernel_load_attempted is defined and audit_kernel_load_attempted | bool) or ", "")
+		}, scenRescueArm,
+			[]string{"wazuh-agent restarts=0, want 1"}},
+		{"the attempted-load record moved after the load (M12)", func(t *testing.T, play map[string]any) {
+			moved := removeTask(play, record)
+			if moved == nil || !insertAfterTask(t, play, load, moved) {
+				t.Fatal("cannot move Step 3d after Step 3")
+			}
+		}, scenLoadFails,
+			[]string{"kernel list emptied (augenrules --load / auditctl -R/-D)=1, want 2", "wazuh-agent restarts=0, want 1", "kernel list holds the wazuh_fim watches=false, want true"}},
+		{"final message claims who-data was restored whatever happened (M13)", func(t *testing.T, play map[string]any) {
+			vars := task(t, play, failMsg)["vars"].(map[string]any)
+			vars["audit_rollback_whodata"] = "Wazuh who-data was restored (wazuh-agent restarted, its wazuh_fim watches are back)."
+		}, scenRescueArm,
+			[]string{"output contains \"Wazuh who-data was restored\"", "output lacks \"Wazuh who-data was NOT restored (reason: watches_not_restored)\""}},
+		{"the rescue's re-arm is fatal and aborts the rollback (M17)", func(t *testing.T, play map[string]any) {
+			task(t, play, rescued)["vars"].(map[string]any)["audit_whodata_rearm_fatal"] = true
+		}, scenRescueArm,
+			[]string{"output lacks \"audit-log-forwarding apply failed (see task output above).\"", "output contains \"whodata_not_restored: this run emptied\""}},
 		{"file-changed-only load trigger (misses an emptied list)", func(t *testing.T, play map[string]any) {
 			facts := task(t, play, decide)["ansible.builtin.set_fact"].(map[string]any)
 			facts["audit_load_needed"] = "{{ (audit_rules_result | default({})) is changed }}"
@@ -1008,9 +1230,11 @@ func TestRegression_AuditWhodataCounterexamplesFail(t *testing.T) {
 		if !ok {
 			t.Fatalf("no scenario %q", scenario)
 		}
-		control := runAuditScenario(t, tc.sc)
-		if got := control.verify(t, tc.want); len(got) > 0 {
-			t.Fatalf("the control (unmutated) run already fails: %v\n%s", got, control.out)
+		if _, done := auditVerified.Load(scenario); !done {
+			control := runAuditScenario(t, tc.sc)
+			if got := control.verify(t, tc.want); len(got) > 0 {
+				t.Fatalf("the control (unmutated) run already fails: %v\n%s", got, control.out)
+			}
 		}
 		sc := tc.sc
 		sc.mutate = mutate
@@ -1029,6 +1253,23 @@ func TestRegression_AuditWhodataCounterexamplesFail(t *testing.T) {
 			run(t, mutant.scenario, func(play map[string]any) { mutant.mutate(t, play) }, nil, mutant.problems)
 		})
 	}
+	// Mutants of a task file the play includes: the re-arm-time writer re-check (M10), in each of its two places.
+	t.Run("the re-arm restarts the agent without the writer re-check (M10)", func(t *testing.T) {
+		t.Parallel()
+		run(t, scenWriter, nil, map[string]func(string) string{
+			"audit-whodata-rearm.yml": func(text string) string {
+				return strings.Replace(text, "      when: audit_whodata_writer.state in ['not_applicable', 'idle']\n", "", 1)
+			},
+		}, []string{"wazuh-agent restarts=1, want 0"})
+	})
+	t.Run("the re-arm result has no writer-active branch (M10)", func(t *testing.T) {
+		t.Parallel()
+		run(t, scenWriter, nil, map[string]func(string) string{
+			"audit-whodata-rearm.yml": func(text string) string {
+				return strings.Replace(text, "if audit_whodata_writer.state not in ['not_applicable', 'idle'] else", "if false else", 1)
+			},
+		}, []string{"output lacks \"reason=wazuh_writer_active\""})
+	})
 	// Mutants of a task file the play includes.
 	t.Run("a second guard overwrites S with what is left after this run's own flush", func(t *testing.T) {
 		t.Parallel()
@@ -1038,4 +1279,175 @@ func TestRegression_AuditWhodataCounterexamplesFail(t *testing.T) {
 			},
 		}, []string{"wazuh-agent restarts=0, want 1", "kernel list holds the wazuh_fim watches=false, want true"})
 	})
+}
+
+// The harness lists the managed rules the way kernelLine does. That model must be the real listing: the
+// captured `auditctl -l` of the rules this role renders (Ubuntu 24.04.4 and AlmaLinux 9.8, the same on both)
+// prints watches as `-k <key>` and syscall rules as `-F key=<key>`, in the order of the rules file.
+func TestAuditShimKernelListingMatchesTheRealCapture(t *testing.T) {
+	var want []string
+	for _, rule := range ruleLines(templateRules(t)) {
+		want = append(want, kernelLine(rule))
+	}
+	if len(want) != 6 {
+		t.Fatalf("the template renders %d rules; the captured listings hold 6 managed rules", len(want))
+	}
+	for _, name := range []string{"auditctl-l.managed-and-wazuh_fim.ubuntu2404.txt", "auditctl-l.managed-and-wazuh_fim.almalinux9.txt"} {
+		var managed []string
+		for _, line := range ruleLines(readCapture(t, name)) {
+			if !strings.Contains(line, "wazuh_fim") {
+				managed = append(managed, line)
+			}
+		}
+		if strings.Join(managed, "\n") != strings.Join(want, "\n") {
+			t.Errorf("%s lists the managed rules as\n%s\nbut the harness model lists them as\n%s", name, strings.Join(managed, "\n"), strings.Join(want, "\n"))
+		}
+	}
+}
+
+// TestRegression_AuditRollbackMessageNamesWhatHappened runs the PRODUCTION task "ROLLBACK — surface the
+// original failure" of audit-log-forwarding-apply.yml once per case, in a play of its own with the facts the
+// rescue leaves behind, and compares the whole message it fails with. The message is the only place the
+// operator learns what the rollback did to the rules file, the kernel audit list, Wazuh who-data and the
+// forwarding configuration; it used to say "reverted" whatever had happened (issue #324). Every branch of each
+// of its four pieces has a case here, because the runtime matrix reaches the forwarding-configuration piece
+// only with a SIEM receiver configured, which it does not set up.
+func TestRegression_AuditRollbackMessageNamesWhatHappened(t *testing.T) {
+	requireAnsibleForAudit(t)
+	const (
+		tail = " The siem forward config %s. Runtime recovery is attempted after a service operation changed or failed," +
+			" or TLS rollback changed files, and only when the restored global configuration passes validation." +
+			" Otherwise the current rsyslog process is left untouched. Fix the failing task and re-run."
+		head = "audit-log-forwarding apply failed (see task output above). "
+	)
+	rules := map[string]string{
+		"restored":  "The audit rules file was restored from the backup this run took.",
+		"removed":   "The audit rules file was removed because this run created it.",
+		"unchanged": "The audit rules file was not changed by this run.",
+	}
+	kernel := map[string]string{
+		"reloaded":     "The kernel audit list was reloaded from the restored rules.",
+		"reloadfailed": "The kernel audit list reload FAILED, so it may not match the rules file.",
+		"none":         "The rollback did not reload the kernel audit list.",
+	}
+	whodata := map[string]string{
+		"undisturbed": "The kernel audit list was not disturbed by this run.",
+		"notlive":     "Wazuh who-data was not live before this run, so none was touched.",
+		"restored":    "Wazuh who-data was restored (wazuh-agent restarted, its wazuh_fim watches are back).",
+		"failed":      "Wazuh who-data was NOT restored (reason: watches_not_restored); fix the cause and run systemctl restart wazuh-agent.",
+		"noattempt":   "Wazuh who-data was NOT restored (reason: no re-arm ran); fix the cause and run systemctl restart wazuh-agent.",
+	}
+	siem := map[string]string{
+		"restored":  "was restored from the backup this run took",
+		"removed":   "was removed because this run created it",
+		"unchanged": "was not changed by the rollback",
+	}
+	// The facts of each piece, in the shape the rescue leaves them (registered results are dicts).
+	rulesFacts := map[string]map[string]any{
+		"restored":  {"audit_rules_restore_result": map[string]any{"changed": true}},
+		"removed":   {"audit_rules_remove_result": map[string]any{"changed": true}},
+		"unchanged": {},
+	}
+	kernelFacts := map[string]map[string]any{
+		"reloaded":     {"audit_rescue_reload_needed": true, "audit_rescue_reload_result": map[string]any{"rc": 0}},
+		"reloadfailed": {"audit_rescue_reload_needed": true, "audit_rescue_reload_result": map[string]any{"rc": 1}},
+		"none":         {"audit_rescue_reload_needed": false},
+	}
+	whodataFacts := map[string]map[string]any{
+		"undisturbed": {"audit_rescue_disturbed": false, "audit_rescue_whodata_live": true},
+		"notlive":     {"audit_rescue_disturbed": true, "audit_rescue_whodata_live": false},
+		"restored":    {"audit_rescue_disturbed": true, "audit_rescue_whodata_live": true, "audit_whodata_rearm_result": map[string]any{"state": "restored"}},
+		"failed":      {"audit_rescue_disturbed": true, "audit_rescue_whodata_live": true, "audit_whodata_rearm_result": map[string]any{"state": "failed", "reason": "watches_not_restored"}},
+		"noattempt":   {"audit_rescue_disturbed": true, "audit_rescue_whodata_live": true, "audit_whodata_rearm_result": map[string]any{}},
+	}
+	siemFacts := map[string]map[string]any{
+		"restored":  {"siem_forward_restore_result": map[string]any{"changed": true}},
+		"removed":   {"siem_forward_remove_result": map[string]any{"changed": true}},
+		"unchanged": {},
+	}
+	type message struct{ rules, kernel, whodata, siem string }
+	var cases []message
+	// One piece varies at a time against neutral facts, plus the combinations the rescue produces.
+	for k := range rules {
+		cases = append(cases, message{k, "none", "undisturbed", "unchanged"})
+	}
+	for k := range kernel {
+		cases = append(cases, message{"unchanged", k, "undisturbed", "unchanged"})
+	}
+	for k := range whodata {
+		cases = append(cases, message{"unchanged", "none", k, "unchanged"})
+	}
+	for k := range siem {
+		cases = append(cases, message{"unchanged", "none", "undisturbed", k})
+	}
+	cases = append(cases,
+		message{"restored", "reloaded", "restored", "restored"},
+		message{"removed", "reloadfailed", "failed", "removed"},
+		message{"unchanged", "reloaded", "noattempt", "unchanged"},
+	)
+
+	production := loadFirstPlay(t, "audit-log-forwarding-apply.yml")
+	failure := findTaskDeep(production, "ROLLBACK — surface the original failure")
+	if failure == nil {
+		t.Fatal("the production rescue has no final message task")
+	}
+	dir, err := os.MkdirTemp("", "pilot-rollback-msg-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	var plays []any
+	var want []string
+	for i, c := range cases {
+		facts := map[string]any{
+			// The neutral state, then this case's pieces on top.
+			"audit_rules_restore_result": map[string]any{}, "audit_rules_remove_result": map[string]any{},
+			"audit_rescue_reload_needed": false, "audit_rescue_reload_result": map[string]any{},
+			"audit_rescue_disturbed": false, "audit_rescue_whodata_live": false, "audit_whodata_rearm_result": map[string]any{},
+			"siem_forward_restore_result": map[string]any{}, "siem_forward_remove_result": map[string]any{},
+		}
+		for _, part := range []map[string]any{rulesFacts[c.rules], kernelFacts[c.kernel], whodataFacts[c.whodata], siemFacts[c.siem]} {
+			for k, v := range part {
+				facts[k] = v
+			}
+		}
+		copied := map[string]any{}
+		for k, v := range failure {
+			copied[k] = v
+		}
+		copied["ignore_errors"] = true
+		copied["register"] = "message_result"
+		plays = append(plays, map[string]any{
+			"hosts": "localhost", "gather_facts": false,
+			"tasks": []any{
+				map[string]any{"ansible.builtin.set_fact": facts},
+				copied,
+				map[string]any{"ansible.builtin.copy": map[string]any{"content": "{{ message_result.msg }}", "dest": filepath.Join(dir, fmt.Sprintf("out-%d", i))}},
+			},
+		})
+		want = append(want, head+strings.Join([]string{rules[c.rules], kernel[c.kernel], whodata[c.whodata]}, " ")+fmt.Sprintf(tail, siem[c.siem]))
+	}
+	body, err := yaml.Marshal(plays)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "play.yml")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("ansible-playbook", "-i", "localhost,", "-c", "local", path)
+	command.Env = append(os.Environ(), "ANSIBLE_LOCAL_TEMP="+filepath.Join(dir, "local"), "ANSIBLE_REMOTE_TEMP="+filepath.Join(dir, "remote"),
+		"ANSIBLE_FORKS=1", "ANSIBLE_NOCOLOR=1")
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("ansible-playbook: %v\n%s", err, out)
+	}
+	for i, c := range cases {
+		got, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("out-%d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want[i] {
+			t.Errorf("case %+v\n got: %s\nwant: %s", c, got, want[i])
+		}
+	}
 }

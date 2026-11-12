@@ -65,6 +65,10 @@ func TestRegression_AuditLogForwardingC23States(t *testing.T) {
 		{"flushed while the endpoint is live, AlmaLinux 9", true, whodataOn, "ss-xHap.audit-endpoint.healthy.almalinux9.txt", "auditctl-l.no-rules.almalinux9.txt", "", "1"},
 		// auditd restarted by Step 8a: a new listener with nobody connected and no watches. Still fires.
 		{"restarted auditd: listener without a connection, no watches", true, whodataOn, "ss-xHap.audit-endpoint.agent-stopped.ubuntu2404.txt", "auditctl-l.no-rules.ubuntu2404.txt", "", "1"},
+		// The state right after Step 8a on Ubuntu 24.04: the LISTEN line of the new audisp-af_unix. With the
+		// watches back it passes; without them (the list was emptied by the restart) it must fire.
+		{"after an auditd restart: listener captured, watches back", true, whodataOn, "ss-xHap.audit-endpoint.after-auditd-restart.ubuntu2404.txt", "auditctl-l.wazuh_fim.ubuntu2404.txt", "", "0"},
+		{"after an auditd restart: listener captured, list emptied", true, whodataOn, "ss-xHap.audit-endpoint.after-auditd-restart.ubuntu2404.txt", "auditctl-l.no-rules.ubuntu2404.txt", "", "1"},
 		// Where who-data is not live there is nothing to protect.
 		{"agent stopped (the plugin still listens)", false, whodataOn, "ss-xHap.audit-endpoint.agent-stopped.ubuntu2404.txt", "auditctl-l.no-rules.ubuntu2404.txt", "", "0"},
 		{"agent without whodata configured", true, whodataOff, "ss-xHap.audit-endpoint.healthy.ubuntu2404.txt", "auditctl-l.no-rules.ubuntu2404.txt", "", "0"},

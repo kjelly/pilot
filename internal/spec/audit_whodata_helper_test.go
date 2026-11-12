@@ -317,6 +317,29 @@ func runRearm(t *testing.T, expect []string, kernel []string, listener string, s
 			t.Fatal(err)
 		}
 	}
+	// The listener text `ss` prints: a real capture of a live endpoint, or of one with no listener (the
+	// plugin gone on Ubuntu 24.04, no plugin on AlmaLinux 9: both are empty captures).
+	ssUp, ssDown := "ss-xHap.audit-endpoint.healthy.ubuntu2404.txt", "ss-xHap.audit-endpoint.plugin-gone.ubuntu2404.txt"
+	if v, ok := scenario["ss_up_capture"]; ok {
+		ssUp = v.(string)
+		delete(scenario, "ss_up_capture")
+	}
+	if v, ok := scenario["ss_down_capture"]; ok {
+		ssDown = v.(string)
+		delete(scenario, "ss_down_capture")
+	}
+	ssUpText := readCapture(t, ssUp)
+	if v, ok := scenario["ss_up_text"]; ok {
+		ssUpText = v.(string)
+		delete(scenario, "ss_up_text")
+	}
+	put("ss-up.txt", ssUpText)
+	put("ss-down.txt", readCapture(t, ssDown))
+	auditd := "active"
+	if v, ok := scenario["auditd_state"]; ok {
+		auditd = v.(string)
+		delete(scenario, "auditd_state")
+	}
 	scenario["wazuh_lines"] = expect
 	scenario["rules_file"] = filepath.Join(dir, "none")
 	raw, _ := json.Marshal(scenario)
@@ -326,9 +349,7 @@ func runRearm(t *testing.T, expect []string, kernel []string, listener string, s
 	}
 	kernelJSON, _ := json.Marshal(kernel)
 	put("kernel.json", string(kernelJSON))
-	put("state.json", `{"agent": "active", "auditd": "active", "listener": "`+listener+`"}`)
-	put("ss-up.txt", readCapture(t, "ss-xHap.audit-endpoint.healthy.ubuntu2404.txt"))
-	put("ss-down.txt", readCapture(t, "ss-xHap.audit-endpoint.agent-stopped.ubuntu2404.txt")[:0])
+	put("state.json", `{"agent": "active", "auditd": "`+auditd+`", "listener": "`+listener+`"}`)
 	expectJSON, _ := json.Marshal(expect)
 	command := exec.Command(python, helperPath(t), "rearm", "--expect-json", string(expectJSON),
 		"--endpoint-timeout", "1", "--watch-timeout", "1", "--interval", "0.05")
@@ -365,6 +386,55 @@ func TestAuditWhodataRearmWaitsRestartsOnceAndProves(t *testing.T) {
 	t.Run("restored: one restart, and the watches are seen again", func(t *testing.T) {
 		doc, rc, calls := runRearm(t, watches, nil, "up", map[string]any{})
 		if rc != 0 || doc["state"] != "restored" || doc["restarted"] != true || restarts(calls) != 1 {
+			t.Fatalf("rc=%d doc=%v calls=%v", rc, doc, calls)
+		}
+	})
+	t.Run("the LISTEN line captured after an auditd restart (Ubuntu 24.04) is the endpoint", func(t *testing.T) {
+		doc, rc, calls := runRearm(t, watches, nil, "up", map[string]any{"ss_up_capture": "ss-xHap.audit-endpoint.after-auditd-restart.ubuntu2404.txt"})
+		if rc != 0 || doc["state"] != "restored" || restarts(calls) != 1 {
+			t.Fatalf("rc=%d doc=%v calls=%v", rc, doc, calls)
+		}
+	})
+	t.Run("the AlmaLinux 9 listener capture is the endpoint too", func(t *testing.T) {
+		doc, rc, calls := runRearm(t, watches, nil, "up", map[string]any{"ss_up_capture": "ss-xHap.audit-endpoint.healthy.almalinux9.txt"})
+		if rc != 0 || doc["state"] != "restored" || restarts(calls) != 1 {
+			t.Fatalf("rc=%d doc=%v calls=%v", rc, doc, calls)
+		}
+	})
+	t.Run("the captured state with the listener but nobody connected is still the endpoint", func(t *testing.T) {
+		// What `ss` printed with the agent stopped: the plugin's LISTEN line and nothing else.
+		doc, rc, _ := runRearm(t, watches, nil, "up", map[string]any{"ss_up_capture": "ss-xHap.audit-endpoint.agent-stopped.ubuntu2404.txt"})
+		if rc != 0 || doc["state"] != "restored" {
+			t.Fatalf("rc=%d doc=%v", rc, doc)
+		}
+	})
+	t.Run("a connection on the endpoint is not the listener: the LISTEN line must be there", func(t *testing.T) {
+		// The real healthy capture with its LISTEN lines removed (derived from the capture, not a capture of
+		// its own): the accepted connection of the plugin is on the endpoint path, but nothing listens.
+		var kept []string
+		for _, line := range strings.SplitAfter(readCapture(t, "ss-xHap.audit-endpoint.healthy.ubuntu2404.txt"), "\n") {
+			if !strings.Contains(line, " LISTEN ") {
+				kept = append(kept, line)
+			}
+		}
+		text := strings.Join(kept, "")
+		if strings.Contains(text, "LISTEN") || !strings.Contains(text, "/var/ossec/queue/sockets/audit") {
+			t.Fatalf("the derivation is wrong:\n%s", text)
+		}
+		doc, rc, calls := runRearm(t, watches, nil, "up", map[string]any{"ss_up_text": text})
+		if rc != 1 || doc["reason"] != "endpoint_not_ready" || restarts(calls) != 0 {
+			t.Fatalf("rc=%d doc=%v calls=%v", rc, doc, calls)
+		}
+	})
+	t.Run("auditd that is not active is not ready even if a listener line is still printed", func(t *testing.T) {
+		doc, rc, calls := runRearm(t, watches, nil, "up", map[string]any{"auditd_state": "inactive"})
+		if rc != 1 || doc["reason"] != "endpoint_not_ready" || doc["auditd_active"] != false || restarts(calls) != 0 {
+			t.Fatalf("rc=%d doc=%v calls=%v", rc, doc, calls)
+		}
+	})
+	t.Run("an EL host with no plugin has no listener: the empty capture is not an endpoint", func(t *testing.T) {
+		doc, rc, calls := runRearm(t, watches, nil, "down", map[string]any{"ss_down_capture": "ss-xHap.audit-endpoint.no-plugin.almalinux9.txt"})
+		if rc != 1 || doc["reason"] != "endpoint_not_ready" || restarts(calls) != 0 {
 			t.Fatalf("rc=%d doc=%v calls=%v", rc, doc, calls)
 		}
 	})
@@ -409,4 +479,40 @@ func TestAuditWhodataRearmWaitsRestartsOnceAndProves(t *testing.T) {
 			t.Fatalf("rc=%d doc=%v calls=%v", rc, doc, calls)
 		}
 	})
+}
+
+// The coordinator's writer-inspect output is parsed by tasks/audit-wazuh-writer-inspect.yml. The captures are
+// what the real script printed on a disposable VM (the owner token of the active one is the fixed placeholder
+// the harness uses); the real HostWriter class must still print exactly those documents, in the idle and in
+// the claimed state, so the playbook's parsing keeps meeting the shapes it was written against.
+func TestAuditWhodataWriterInspectOutputMatchesTheCaptures(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip(err)
+	}
+	coordinator, err := filepath.Abs("../../playbooks/apply/files/wazuh-transaction.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "wazuh")
+	inspect := func() string {
+		out, err := exec.Command(python, "-c", `import importlib.util,json,pathlib,sys
+spec=importlib.util.spec_from_file_location('wt',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+print(json.dumps(m.HostWriter(pathlib.Path(sys.argv[2])).inspect(), sort_keys=True))`, coordinator, root).CombinedOutput()
+		if err != nil {
+			t.Fatalf("inspect: %v\n%s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if got, want := inspect(), strings.TrimSpace(readCapture(t, "wazuh-transaction.writer-inspect.idle.rc0.txt")); got != want {
+		t.Errorf("idle writer-inspect prints %s, the capture is %s", got, want)
+	}
+	if out, err := exec.Command(python, "-c", `import importlib.util,pathlib,sys
+spec=importlib.util.spec_from_file_location('wt',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+m.HostWriter(pathlib.Path(sys.argv[2])).claim('a'*32,'agent')`, coordinator, root).CombinedOutput(); err != nil {
+		t.Fatalf("claim: %v\n%s", err, out)
+	}
+	if got, want := inspect(), strings.TrimSpace(readCapture(t, "wazuh-transaction.writer-inspect.active.rc0.txt")); got != want {
+		t.Errorf("claimed writer-inspect prints %s, the capture is %s", got, want)
+	}
 }
