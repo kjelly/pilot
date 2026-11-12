@@ -279,7 +279,9 @@ process 的 `/proc/<pid>/task/*/comm`，確認獨立 queue worker 確實存在�
 >   重啟一次 `wazuh-agent`，再有上限地等 kernel 的 `wazuh_fim` watch 涵蓋 S；沒有涵蓋就以 typed reason
 >   失敗（`endpoint_not_ready`、`agent_restart_failed`、`watches_not_restored`、`kernel_unreadable`），
 >   不會靜默成功。agent 為 inactive／不存在、或 S 為空（例如 EL 沒有 endpoint）的主機，永遠不會
->   被本模組啟動或重啟 agent，也不會因 Wazuh 而失敗。agent 不是 pilot 管理的也一樣處理（清掉 watch 的是本模組）。
+>   被本模組啟動或重啟 agent；這類主機只會因為上一條的兩個擾動前檢查而拒絕（有 `wazuh-agent` unit 時，
+>   Wazuh writer／journal 在進行中，或讀不到 agent／kernel 狀態），拒絕發生在什麼都還沒改之前。
+>   agent 不是 pilot 管理的也一樣處理（清掉 watch 的是本模組）。
 > - 失敗路徑（rescue）只在「這次 run 載入過」且「規則檔被還原或移除，或載入本身失敗」時才重載 kernel
 >   清單，重載後重新建立 who-data；最後的錯誤訊息如實說明規則檔、kernel 清單與 who-data 各自的結果，
 >   不再寫死「已還原」。

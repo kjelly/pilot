@@ -9,7 +9,11 @@
 # controller's copy (the script module, as wazuh-fim-apply.yml does), so it needs
 # nothing installed on the host. A host with no wazuh-agent unit is not asked: the
 # coordinator would create its state directory there, and there is no who-data to
-# protect.
+# protect. Known side effect on a host that has an agent unit but never ran
+# wazuh-fim-apply.yml (an agent installed by hand): writer-inspect takes the
+# coordinator's shared lock, which creates its state root (/var/backups/pilot/wazuh,
+# root, 0700) and lock file on that first call, exactly what wazuh-fim-apply.yml's own
+# writer claim would create.
 #
 # Result in audit_whodata_writer, never a failure of this file:
 #   {state: not_applicable}                      no wazuh-agent on this host

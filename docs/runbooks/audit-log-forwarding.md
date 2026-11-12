@@ -133,7 +133,9 @@ rescue；spec §5 與 §6 有完整說明）：
   `agent_restart_failed`、`watches_not_restored`、`kernel_unreadable`（錯誤訊息列出還缺的 watch）。這一步失敗
   不回滾已套用的規則與轉送設定；修好原因後 `systemctl restart wazuh-agent` 並用 C23 確認。
 - agent 不存在、已停止、或套用前 kernel 沒有 `wazuh_fim` watch（例如 EL 沒有 `audispd-plugins`，因此沒有
-  endpoint）的主機：本模組永遠不啟動或重啟 agent，也不會因為 Wazuh 而失敗。
+  endpoint）的主機：本模組永遠不啟動或重啟 agent。這類主機只會被上面的擾動前檢查拒絕（有 `wazuh-agent`
+  unit、而且 Wazuh writer／journal 在進行中或讀不到 agent／kernel 狀態時；agent 已停止正是受控升級進行中的
+  樣子），拒絕發生在什麼都還沒改之前；沒有 `wazuh-agent` unit 的主機完全不受 Wazuh 影響。
 - 失敗路徑：rescue 只在這次 run 載入過、而且規則檔被還原或移除（或載入本身失敗）時才重載 kernel 清單；
   重載之後重新建立 who-data。最後的錯誤訊息如實說明規則檔、kernel 清單與 who-data 各自的結果。
 
