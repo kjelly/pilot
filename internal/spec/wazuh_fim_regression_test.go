@@ -150,7 +150,7 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 	// audisp-af_unix and auditd's builtin af_unix are both fine: Ubuntu 22.04 passed no exact-listener predicate) and
 	// does not read kernel watches (audit-log-forwarding's augenrules flush leaves 0 of them with a live endpoint,
 	// #324): naming either brings back the predicates that failed a working host or collided with #324.
-	for _, token := range []string{"/etc/redhat-release", "test -S /var/ossec/queue/sockets/audit", "ss -xHap", "LISTEN", "ESTAB", "wazuh-syscheckd", "$6", "$8", "then echo 0", "else echo 1"} {
+	for _, token := range []string{"command -v rpm", "test -S /var/ossec/queue/sockets/audit", "ss -xHap", "LISTEN", "ESTAB", "wazuh-syscheckd", "$6", "$8", "then echo 0", "else echo 1"} {
 		if !strings.Contains(cmd["C11"], token) {
 			t.Errorf("C11 live who-data probe lacks %q: %q", token, cmd["C11"])
 		}
@@ -159,6 +159,12 @@ func TestRegression_WazuhFimSpec(t *testing.T) {
 		if strings.Contains(cmd["C11"], token) {
 			t.Errorf("C11 must stay listener-agnostic and watch-free; it names %q: %q", token, cmd["C11"])
 		}
+	}
+	// The EL discriminator is the one C1/C2 use and the apply's `ansible_os_family == 'RedHat'` gate agrees with (an
+	// rpm host), never /etc/redhat-release: a RedHat-family host without that file runs Step 11a, so the row must
+	// observe it instead of printing 0 without looking.
+	if strings.Contains(cmd["C11"], "/etc/redhat-release") {
+		t.Errorf("C11 must not gate on /etc/redhat-release (a RedHat-family host without it would pass unobserved); use the C2 discriminator `command -v rpm`: %q", cmd["C11"])
 	}
 	for _, row := range s.Rows {
 		if (row.ID == "C10" || row.ID == "C11") && !NeedsBecome(row) {
@@ -255,7 +261,7 @@ type c11State struct {
 	name    string
 	ss      string
 	socket  bool   // the endpoint path is a socket inode
-	redhat  bool   // /etc/redhat-release exists (an EL host)
+	rpm     bool   // an rpm binary is on PATH (an EL host: the C1/C2 discriminator); /etc/redhat-release never exists
 	want    bool   // C11 prints 0
 	derived string // empty: the ss text is an unedited capture from a real host; otherwise how it was MODELED
 }
@@ -303,6 +309,9 @@ func c11States(t *testing.T) []c11State {
 			"AlmaLinux 9 capture with the listening program renamed (no native capture of a builtin listener is committed)"},
 		{"listener only, no stream (agent stopped; Ubuntu 24.04 capture)", stopped, true, true, false, ""},
 		{"no endpoint at all, EL without audispd-plugins (empty AlmaLinux 9 capture)", capture("ss-xHap.audit-endpoint.no-plugin.almalinux9.txt"), false, true, false, ""},
+		// An RPM host without /etc/redhat-release (a derivative or container image) runs Step 11a, so C11 must observe it:
+		// with no endpoint it prints 1. A release-file gate printed 0 here without looking.
+		{"an RPM host without /etc/redhat-release and no endpoint", capture("ss-xHap.audit-endpoint.no-plugin.almalinux9.txt"), false, true, false, ""},
 		{"stale socket file, nothing listens (empty Ubuntu 24.04 capture, plugin gone)", capture("ss-xHap.audit-endpoint.plugin-gone.ubuntu2404.txt"), true, true, false, ""},
 		// Native AlmaLinux 9.8 (audit 3.1.5): auditd sent one SIGHUP with audispd-plugins installed and no agent restart;
 		// the capture is the endpoint-path lines of `ss -xHap` (`grep -F sockets/audit`), trailing column padding stripped.
@@ -316,7 +325,7 @@ func c11States(t *testing.T) []c11State {
 		}), true, true, false, "AlmaLinux 9 capture with the syscheckd stream's inodes changed"},
 		{"connected pair but nothing listens", edit(healthy, dropIf(func(f []string, l string) bool { return isListen(f) })), true, true, false, "AlmaLinux 9 capture without the LISTEN line"},
 		{"the live state, but the endpoint path is not a socket", healthy, false, true, false, ""},
-		{"a Debian host is not covered: 0 whatever the sockets say", stopped, false, false, true, ""},
+		{"a host without rpm (Debian family) is not covered: 0 whatever the sockets say", stopped, false, false, true, ""},
 	}
 }
 
@@ -327,8 +336,10 @@ func c11States(t *testing.T) []c11State {
 // really connected, including the one that made C1-C10 pass on a broken EL (no endpoint at all).
 //
 // The row's shell and matchers are the spec's. The only substitutions are the endpoint path (a private socket, so no
-// /var/ossec is needed) and /etc/redhat-release (a private file). `ss` answers through a PATH shim and no other tool
-// of the target exists on PATH, notably no `auditctl`: a row that needed kernel watches would fail the live states.
+// /var/ossec is needed) and /etc/redhat-release, which is replaced by a private path that never exists, so every state
+// is a RedHat-family or Debian host WITHOUT that file and only `rpm` on PATH says which. `ss` and `rpm` answer through
+// PATH shims and no other tool of the target exists on PATH, notably no `auditctl`: a row that needed kernel watches
+// would fail the live states.
 // The row runs under every awk this machine has because the targets (gawk on EL) and CI differ.
 func TestRegression_WazuhFimC11LiveWhoDataStates(t *testing.T) {
 	s, err := Parse("../../docs/verification/wazuh-fim.md")
@@ -390,8 +401,8 @@ print(json.dumps([w.AuditRuntime.parse_streams(text) for text in json.load(sys.s
 
 	for i, st := range states {
 		// AuditRuntime.connected: the endpoint is a socket with a listener and a connected syscheckd. The coordinator
-		// only ever runs on an EL host (the RedHat-family gate), so a Debian state has no coordinator verdict.
-		if got := st.socket && streams[i]["listening"] && streams[i]["connected"]; st.redhat && got != st.want {
+		// only ever runs on an EL host (the RedHat-family gate), so a state without rpm has no coordinator verdict.
+		if got := st.socket && streams[i]["listening"] && streams[i]["connected"]; st.rpm && got != st.want {
 			t.Errorf("coordinator predicate for %q = %v, want %v (listening=%v connected=%v)", st.name, got, st.want, streams[i]["listening"], streams[i]["connected"])
 		}
 		for awkPath, awkName := range awks {
@@ -411,9 +422,11 @@ print(json.dumps([w.AuditRuntime.parse_streams(text) for text in json.load(sys.s
 					}
 					t.Cleanup(func() { _ = listener.Close() })
 				}
+				// Never created: no state has /etc/redhat-release. A row that still gated on it would print 0 for every
+				// state, including the ones that must print 1.
 				release := filepath.Join(directory, "redhat-release")
-				if st.redhat {
-					if err := os.WriteFile(release, []byte("AlmaLinux release 9\n"), 0o644); err != nil {
+				if st.rpm {
+					if err := os.WriteFile(filepath.Join(directory, "rpm"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 						t.Fatal(err)
 					}
 				}

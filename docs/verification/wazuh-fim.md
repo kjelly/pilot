@@ -139,7 +139,7 @@ RPM：觀察到 `rpm-stage` 在拒絕後至少約 3 分鐘仍存在；保留的 
 之前或同時）沒有 endpoint、沒有 `wazuh_fim` watch；之後單獨對 auditd 主程序 HUP 有 endpoint（`ss -xHap` 只有一筆由 `audisp-af_unix` 持有的 LISTEN，沒有 ESTAB 連線）
 但沒有 watch（60 秒內持續為 0）；單獨重啟 agent 什麼都沒有；HUP 之後再重啟 agent 兩者皆有；重新開機單獨即生效。操作者另觀察到
 EL 上 `systemctl restart auditd` 被拒絕。Ubuntu 22.04（auditd 以內建的 `builtin_af_unix` 提供 af_unix，未安裝
-`audispd-plugins`）與 aarch64 不在本修復與 evidence 的涵蓋範圍（#325）。由未變更的 admission gate 推論，
+`audispd-plugins`）與 aarch64 依維護者決定不在本契約與 evidence 的涵蓋範圍（不要求實跑）。由未變更的 admission gate 推論，
 未以升級嘗試原生執行：Ubuntu 22.04 沒有外部的 `audisp-af_unix` listener，受控 agent 升級預期以
 `exact external audit listener is missing or ambiguous` 拒絕。
 已知限制（其他元件，既有行為，#324 未解決）：`audit-log-forwarding` 每次套用都會執行 `augenrules --load`；在同機
@@ -273,7 +273,7 @@ V ≤ M。
 | C8  | register  | `ossec.conf` 的 `<address>` 指向 `wazuh-manager` 別名                  | 0        | grep -qE '<address>wazuh-manager</address>' /var/ossec/etc/ossec.conf; echo $? |
 | C9  | register  | 已完成向 manager 註冊（`client.keys` 非空）                             | 0        | sh -c 'test -s /var/ossec/etc/client.keys && echo 0 || echo 1' |
 | C10 | functional | 套件與 native agent release 相同、exact package 受 native hold／versionlock 保護、服務 active、沒有未完成交易 | 0 | sh -c 'if test -f /etc/debian_version; then wazuh_family=Debian; elif test -f /etc/redhat-release; then wazuh_family=RedHat; else exit 1; fi; /usr/local/sbin/pilot-wazuh-transaction agent-verify --family "$wazuh_family" >/dev/null && echo 0 || echo 1' |
-| C11 | functional | EL：who-data endpoint 是 socket，有 listener，且 `wazuh-syscheckd` 已連線（endpoint 路徑上有 LISTEN，以及 ESTAB 的 server 端，其 inode 與 `wazuh-syscheckd` 的 ESTAB client 互指；不看 listener 是哪個程序）；Debian family 此列不涵蓋（直接為 0） | 0 | if test -f /etc/redhat-release; then if test -S /var/ossec/queue/sockets/audit && ss -xHap 2>/dev/null | awk -v e=/var/ossec/queue/sockets/audit '$2=="LISTEN" && $5==e {l=1} $2=="ESTAB" && $5==e {s[$6" "$8]=1} $2=="ESTAB" && /wazuh-syscheckd/ {c[$8" "$6]=1} END {if (l) for (k in s) if (k in c) exit 0; exit 1}'; then echo 0; else echo 1; fi; else echo 0; fi |
+| C11 | functional | EL：who-data endpoint 是 socket，有 listener，且 `wazuh-syscheckd` 已連線（endpoint 路徑上有 LISTEN，以及 ESTAB 的 server 端，其 inode 與 `wazuh-syscheckd` 的 ESTAB client 互指；不看 listener 是哪個程序）；非 RPM 主機（Debian family）此列不涵蓋（直接為 0） | 0 | if command -v rpm >/dev/null 2>&1; then if test -S /var/ossec/queue/sockets/audit && ss -xHap 2>/dev/null | awk -v e=/var/ossec/queue/sockets/audit '$2=="LISTEN" && $5==e {l=1} $2=="ESTAB" && $5==e {s[$6" "$8]=1} $2=="ESTAB" && /wazuh-syscheckd/ {c[$8" "$6]=1} END {if (l) for (k in s) if (k in c) exit 0; exit 1}'; then echo 0; else echo 1; fi; else echo 0; fi |
 
 > C1–C11 全部用**正邏輯 rc**（`; echo $?` 或原生 rc），C9 用
 > `sh -c '... && echo 0 || echo 1'` 讓外層指令恆回 0，避免「未註冊」的合法
@@ -307,8 +307,10 @@ V ≤ M。
 > 而判定一台運作中的主機失敗。刻意**不**要求 kernel `wazuh_fim` watch：`audit-log-forwarding` 每次套用的
 > `augenrules --load` 會把 watch 清為 0 而 endpoint 與連線不變（#324，未解決，見 §2 上方），要求 watch 會讓同機
 > 共用的主機在第二次套用後 verify 失敗，也會讓一般套用的 no-op 路徑不再冪等；apply 自己重啟 agent 之後仍要求
-> 至少一條 watch，那是該次修復的證明，不是穩態斷言。Debian family 這列直接印 0，不涵蓋：Debian 的 who-data
-> endpoint 與 watch 沒有任何 row 斷言（見 §2 上方，#325、#324）。C11 讀取 process 名稱與 root 擁有的 socket 路徑，
+> 至少一條 watch，那是該次修復的證明，不是穩態斷言。判斷是否為 EL 用 `command -v rpm`，與 C1／C2 相同，也與 apply 以 `ansible_os_family == 'RedHat'` 決定是否執行 Step 11a
+> 一致（不用 `/etc/redhat-release`：沒有該檔的 RedHat family 主機，Step 11a 會執行，這列就必須真的觀察，不能直接印 0）。
+> 沒有 `rpm` 的主機（Debian family）這列直接印 0，不涵蓋：Debian 的 who-data
+> endpoint 與 watch 沒有任何 row 斷言（見 §2 上方；watch 的既有限制是 #324）。C11 讀取 process 名稱與 root 擁有的 socket 路徑，
 > 需要 verify 時的 privilege escalation（`ss ` 觸發 `spec.NeedsBecome`）。檢查它是否會誤判：用 `pilot verify
 > --probe '<cmd>' -i <inv> -l <host>` 在同一條管線下看實際 rc 與 stdout，不要憑猜測改 Expected。
 
@@ -330,7 +332,7 @@ V ≤ M。
 | C7, C8, C9 | 這三條的前提是套用時提供了 `wazuh_manager_host`（見 §1.5，選填）。若 manager 尚未存在、套用時未帶這個變數，playbook 會跳過 `/etc/hosts` pin 與註冊，C7–C9 在 `pilot verify` 會回報 `fail`——這是**預期行為**，不是 bug：此時應驗證 C1–C6、C10 與 C11（本機 FIM 規則、服務、native version／pin 與 EL 的本機 who-data endpoint），待 manager 就緒、補跑一次 apply 帶上 `wazuh_manager_host` 後再驗全部 11 條 | 無 manager 的獨立部署 / manager 尚未就緒的過渡期 | 補上 `wazuh_manager_host` 並重新 apply 後即解除 |
 | C9 | 本 spec 只驗證「client.keys 非空」（agent 端已取得憑證），**不**驗證「manager 端也認得這把憑證、連線真的建立成功」——那需要去 manager 端跑 `agent_control -l` 或看 `wazuh-remoted` 的連線狀態，屬於跨主機 Shape 3 cross-check，做法見 `docs/runbooks/wazuh-fim.md` §4 | 所有環境 | 永久（設計如此，非暫時偏差） |
 | C5 | 只驗證「至少一個目錄設定 whodata」，不驗證特定站台實際監控的路徑清單是否符合預期（那是逐主機的 `wazuh_fim_directories` 設定責任，見 §1.5）；若要確保某台主機**一定**監控了某個特定路徑，需要另外針對該主機寫查核（例如部署後手動 `grep` 確認），不在本通用 spec 範圍內 | 所有環境 | 永久（設計如此，非暫時偏差） |
-| C11 | 只涵蓋 EL（RedHat family）：Debian family 直接為 0，不斷言任何 who-data 狀態（Ubuntu 22.04 的 `builtin_af_unix` 與 aarch64 見 #325）；不要求 kernel `wazuh_fim` watch（`audit-log-forwarding` 的 `augenrules --load` 會把 watch 清為 0，#324）；不辨識 listener 是哪個程序，只證明 endpoint 的 server 端與 `wazuh-syscheckd` 互相連線 | 所有環境 | #324 決定 watch 的契約、#325 驗證 Debian 路徑之後重新檢討 |
+| C11 | 只涵蓋 EL（RedHat family）：Debian family 直接為 0，不斷言任何 who-data 狀態（Ubuntu 22.04 的 `builtin_af_unix` 與 aarch64 依維護者決定不在涵蓋範圍）；不要求 kernel `wazuh_fim` watch（`audit-log-forwarding` 的 `augenrules --load` 會把 watch 清為 0，#324）；不辨識 listener 是哪個程序，只證明 endpoint 的 server 端與 `wazuh-syscheckd` 互相連線 | 所有環境 | #324 決定 watch 的契約之後重新檢討；Debian family 不由本 row 涵蓋 |
 | — | Enrollment 使用開放式註冊（manager 端 `use_password=no` 出廠預設），見 `wazuh-manager.md` §5 對應說明 | sandbox / demo | 正式站台上線前檢討 |
 
 ## 6. Playbook 對應
