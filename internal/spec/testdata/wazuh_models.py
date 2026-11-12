@@ -31,6 +31,9 @@ class Docker:
         self.project = self.managed / ('wazuh-docker-' + release) / 'single-node'
         self.project.mkdir(parents=True)
         self.compose = self.project / 'docker-compose.yml'
+        # `docker info --format {{.DockerRootDir}}`: a real private directory, as on a host.
+        self.docker_root = root / 'docker-root'
+        self.docker_root.mkdir()
         self.compose.write_text('services: {}\n')
         # id -> release (a connected agent) or {'status': 'Disconnected'|'Never connected', 'release': ...}
         self.agents = {'001': release} if agents is None else agents
@@ -63,7 +66,8 @@ class Docker:
                                     'Labels': {'com.docker.compose.project': 'single-node',
                                                'com.docker.compose.service': row['service'],
                                                'com.docker.compose.project.working_dir': str(self.project),
-                                               'com.docker.compose.project.config_files': str(self.compose)}}})
+                                               'com.docker.compose.project.config_files': str(self.compose)}},
+                         'Mounts': []})
         return rows
 
     def agent_list(self):
@@ -95,7 +99,7 @@ class Docker:
         self.calls.append(argv)
         rc, text = 0, ''
         if argv[:2] == ['docker', 'info']:
-            pass
+            text = str(self.docker_root) if '--format' in argv else ''
         elif argv[:2] == ['docker', 'ps']:
             text = '\n'.join(row['Id'] for row in self.inspect())
         elif argv[-1] == 'info' and 'wazuh-control' in argv[-2]:
@@ -129,7 +133,8 @@ class Docker:
             digests = {True: [repo + '@' + identifier], False: [],
                        'foreign': ['attacker/' + repo.split('/')[1] + '@' + identifier],
                        'malformed': [repo + '@sha256:not-a-digest', repo + ':4.14.1']}[self.repo_digests]
-            return [{'Id': identifier, 'RepoDigests': digests}]
+            # Size: B's discover sums the retained images' sizes for backup capacity.
+            return [{'Id': identifier, 'RepoDigests': digests, 'Size': 1024}]
         if 'curl' in argv:
             return dict(json.loads(capture('indexer-cluster-health.json')), status=self.indexer_status)
         if argv[-1] == '/usr/share/wazuh-dashboard/plugins/wazuh/package.json':

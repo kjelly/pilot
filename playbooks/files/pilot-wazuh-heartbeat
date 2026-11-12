@@ -1,8 +1,11 @@
 #!/usr/bin/python3
 """Bounded Wazuh-only immark ownership, native capability and loaded-state gate."""
 import collections
+import fnmatch
 import glob
+import hashlib
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -206,8 +209,275 @@ def runtime(config, transport, pid):
         raise ValueError('owned heartbeat must be absent for TCP')
 
 
+
+def reader_files(root='/etc/rsyslog.conf'):
+    """Bounded literal include graph. Inspect only; never write a probe/config."""
+    pending, seen, contents, total = [(pathlib.Path(root), 0)], set(), {}, 0
+    while pending:
+        path, depth = pending.pop()
+        if path in seen or depth > 16 or len(seen) >= 256:
+            raise ValueError('unknown reader include closure')
+        if (not path.is_file() or path.is_symlink() or path.resolve() != path.absolute()
+                or path.stat().st_uid != 0 or path.stat().st_nlink != 1
+                or path.stat().st_mode & 0o022):
+            raise ValueError('unsafe reader configuration include')
+        if any(parent.stat().st_uid != 0 or parent.stat().st_mode & 0o022 for parent in path.parents):
+            raise ValueError('reader include has writable or foreign ancestors')
+        seen.add(path)
+        text = path.read_text()
+        total += len(text)
+        if total > 2 * 1024 * 1024:
+            raise ValueError('oversized reader include closure')
+        contents[str(path)] = text
+        for name, attrs in declarations(text):
+            if name not in ('include', '$includeconfig'):
+                continue
+            pattern = attrs.get('file') if name == 'include' else attrs['value']
+            if (not pattern or not pattern.startswith('/') or any(c in pattern for c in '$%\\')
+                    or '..' in pathlib.PurePath(pattern).parts
+                    or (name == 'include' and set(attrs) - {'file', 'mode'})):
+                raise ValueError('unknown reader include')
+            paths = sorted(glob.glob(pattern))
+            if not paths and attrs.get('mode') != 'optional':
+                raise ValueError('missing reader include')
+            pending.extend((pathlib.Path(value), depth + 1) for value in paths)
+    return contents
+
+
+
+def reader_resources(files, root='/etc/rsyslog.conf'):
+    """Typed ordered resource observations, never filesystem authorization."""
+    result, seen, workdirs = [], set(), []
+    workdir = None
+    fields = {'load', 'type', 'file', 'name', 'ruleset', 'statefile.directory',
+              'queue.filename', 'queue.spooldirectory', 'queue.type', 'queue.saveonshutdown',
+              'statefile', 'workdirectory', 'tag', 'facility', 'severity',
+              'persiststateinterval', 'freshstarttail', 'reopenontruncate', 'addmetadata'}
+    def visit(filename, depth=0):
+        nonlocal workdir
+        filename = str(pathlib.Path(filename))
+        if filename not in files or filename in seen or depth > 16:
+            raise ValueError('reader declaration closure changed')
+        seen.add(filename)
+        ts, i = tokens(files[filename]), 0
+        while i < len(ts):
+            kind, name = ts[i];name = name.lower()
+            if kind == 'word' and name in ('$includeconfig', '$workdirectory',
+                    '$actionqueuefilename', '$mainmsgqueuefilename', '$rulesetqueuefilename'):
+                if i + 1 >= len(ts) or ts[i + 1][0] not in ('word', 'string'):
+                    raise ValueError('unknown reader legacy resource')
+                value = ts[i + 1][1];i += 2
+                if name == '$includeconfig':
+                    for path in sorted(glob.glob(value)):
+                        visit(path, depth + 1)
+                elif name == '$workdirectory':
+                    workdir = value;workdirs.append(value)
+                else:
+                    result.append({'kind': 'queue', 'attrs': {'queue.filename': value},
+                                   'workdirectory': workdir, 'file': filename})
+                continue
+            if kind == 'word' and name in ('include', 'module', 'input', 'action',
+                                            'global', 'ruleset', 'main_queue'):
+                if i + 1 >= len(ts) or ts[i + 1][0] != '(':
+                    raise ValueError('unknown reader resource declaration')
+                attrs, i = {}, i + 2
+                while i < len(ts) and ts[i][0] != ')':
+                    if (i + 2 >= len(ts) or ts[i][0] != 'word' or ts[i + 1][0] != '='
+                            or ts[i + 2][0] not in ('word', 'string', 'escaped-string')):
+                        raise ValueError('nonliteral reader resource declaration')
+                    key, value = ts[i][1].lower(), ts[i + 2][1]
+                    if key in attrs:
+                        raise ValueError('duplicate reader resource parameter')
+                    if key in fields and ts[i + 2][0] == 'escaped-string':
+                        raise ValueError('escaped reader resource identity')
+                    attrs[key] = value;i += 3
+                if i >= len(ts):
+                    raise ValueError('unterminated reader resource declaration')
+                i += 1
+                if name == 'include':
+                    for path in sorted(glob.glob(attrs.get('file', ''))):
+                        visit(path, depth + 1)
+                elif name == 'global' and 'workdirectory' in attrs:
+                    workdir = attrs['workdirectory'];workdirs.append(workdir)
+                # Do not export unrelated action credentials or config bytes.
+                selected = {key: value for key, value in attrs.items() if key in fields}
+                if ((name == 'input' and attrs.get('type', '').lower() == 'imfile')
+                        or (name == 'module' and pathlib.Path(attrs.get('load', '')).name in ('imfile', 'imfile.so'))):
+                    # Preserve EVERY semantic parameter name so a coordinator
+                    # cannot bless unsupported read modes by a loose subset.
+                    # Unknown values may be secrets; never export those bytes.
+                    selected.update({key: '<unqualified>' for key in attrs if key not in fields})
+                if name != 'include':
+                    result.append({'kind': name, 'attrs': selected,
+                                   'workdirectory': workdir, 'file': filename})
+                continue
+            if kind == 'word' and name.startswith(('$actionqueue', '$mainmsgqueue', '$rulesetqueue')):
+                # Unknown legacy resource builders cannot imply absence.
+                if 'directory' in name or 'filename' in name:
+                    raise ValueError('unknown legacy queue namespace context')
+                field = 'queue.saveonshutdown' if name.endswith('saveonshutdown') else (
+                    'queue.type' if name.endswith('type') else None)
+                if field:
+                    if i + 1 >= len(ts) or ts[i + 1][0] not in ('word', 'string'):
+                        raise ValueError('unknown legacy queue resource')
+                    result.append({'kind':'queue','attrs':{field:ts[i + 1][1]},
+                                   'workdirectory':workdir,'file':filename})
+                    i += 2
+                    continue
+            i += 1
+        if len(result) > 2048:
+            raise ValueError('reader resource observations exceed bound')
+    visit(root)
+    if seen != set(files) or len(set(workdirs)) > 1:
+        raise ValueError('ambiguous inherited reader work directory')
+    return result
+
+
+def inspect_reader(cold=False):
+    """Private typed metadata, not a delivery/graceful-save certificate."""
+    profile = OWNER.parent / 'pilot-wazuh/profile.json'
+    files = reader_files() if pathlib.Path('/etc/rsyslog.conf').exists() else {}
+    calls = [(name, attrs, filename) for filename, text in files.items()
+             for name, attrs in declarations(text, ('module', 'input', 'action', 'global'))]
+    # Legacy imfile has a process-global mutable input builder. Its
+    # $InputFile*/$InputRunFileMonitor state is not represented by modern
+    # input() declarations, so it cannot prove absence or cursor exclusivity.
+    # Do not migrate it, infer a namespace, or treat it as never configured.
+    for text in files.values():
+        if any(kind == 'word' and (word.lower().startswith('$inputfile')
+                                  or word.lower() == '$inputrunfilemonitor')
+               for kind, word in tokens(text)):
+            raise ValueError('unknown legacy imfile input ownership')
+    if any(name == '$modload' and pathlib.PurePath(attrs['value']).name.lower() in ('imfile', 'imfile.so')
+           for name, attrs, _ in calls):
+        raise ValueError('unknown legacy imfile module ownership')
+    resources = reader_resources(files) if files else []
+    owned_text = files.get(str(OWNER), '')
+    inputs = [(attrs, filename) for name, attrs, filename in calls
+              if name == 'input' and attrs.get('type', '').lower() == 'imfile']
+    owned_inputs = [(attrs, filename) for attrs, filename in inputs
+                    if filename == str(OWNER) or attrs.get('ruleset') == 'pilotWazuhForward']
+    actions = [attrs for name, attrs, filename in calls
+               if name == 'action' and (attrs.get('name') == 'wazuh_alerts'
+                                       or attrs.get('queue.filename') == 'wazuh_alerts'
+                                       or filename == str(OWNER))]
+    modules = [attrs for name, attrs, filename in calls
+               if name == 'module' and pathlib.PurePath(attrs.get('load', '')).name in ('imfile', 'imfile.so')]
+    loaded_pid = subprocess.run(['systemctl', 'show', 'rsyslog.service', '-p', 'MainPID', '--value'],
+                                capture_output=True, text=True, timeout=15)
+    if loaded_pid.returncode:
+        raise ValueError('reader runtime probe unavailable')
+    pid = loaded_pid.stdout.strip()
+    if not pid.isdecimal():
+        raise ValueError('unknown reader runtime PID')
+    # Whether the running rsyslogd may be missing configuration that is on disk. A running reader
+    # must have loaded it, but a disabled or never-configured host legitimately has a profile or
+    # include newer than the process: an ordinary apply records that state without restarting
+    # rsyslog (it restarts only when it forwards). There the live process is the authority: no
+    # imfile.so mapping means no owned input was ever loaded by it (the owned configuration always
+    # loads imfile), so a newer file cannot be unloaded owned state.
+    stale = imfile_loaded = False
+    if int(pid) > 0:
+        argv = pathlib.Path('/proc/' + pid + '/cmdline').read_bytes().rstrip(b'\0').split(b'\0')
+        if argv not in ([b'/usr/sbin/rsyslogd', b'-n', b'-iNONE'],
+                        [b'/usr/sbin/rsyslogd', b'-n']):
+            raise ValueError('unknown actual reader default-config selection')
+        if not cold:
+            stamp = subprocess.run(['systemctl', 'show', '--timestamp=us', '-p',
+                                    'ActiveEnterTimestamp', '--value', 'rsyslog.service'],
+                                   capture_output=True, text=True, timeout=15)
+            epoch = subprocess.run(['date', '-d', stamp.stdout.strip(), '+%s.%N'],
+                                   capture_output=True, text=True, timeout=15)
+            if stamp.returncode or epoch.returncode:
+                raise ValueError('unknown loaded reader configuration time')
+            latest = [pathlib.Path(filename).stat().st_mtime for filename in files]
+            if profile.exists():
+                latest.append(profile.stat().st_mtime)
+            stale = bool(latest) and max(latest) > float(epoch.stdout)
+            imfile_loaded = 'imfile.so' in pathlib.Path('/proc/' + pid + '/maps').read_text()
+    hashes = {filename: hashlib.sha256(text.encode()).hexdigest() for filename, text in files.items()}
+    base = {'schema': 2, 'files': hashes, 'pid': int(pid), 'imfile_inputs': [{'file': attrs.get('file', '')} for attrs, _ in inputs],
+            'resources': resources, 'authorization': 'UNVALIDATED_OBSERVATIONS'}
+    if not profile.exists() and not profile.is_symlink():
+        if OWNER.exists() or OWNER.is_symlink() or owned_text or owned_inputs or actions:
+            raise ValueError('Wazuh reader without owned profile')
+        if stale and imfile_loaded:
+            raise ValueError('reader profile/include changes are not loaded')
+        return dict(base, mode_candidate='never', profile=None)
+    if (profile.is_symlink() or not profile.is_file() or profile.resolve() != profile.absolute()
+            or profile.stat().st_uid != 0 or profile.stat().st_nlink != 1
+            or profile.stat().st_mode & 0o022):
+        raise ValueError('unsafe Wazuh reader profile')
+    if any(parent.stat().st_uid != 0 or parent.stat().st_mode & 0o022 for parent in profile.parents):
+        raise ValueError('unsafe Wazuh reader profile ancestors')
+    value = json.loads(profile.read_text())
+    if (type(value.get('enabled')) is not bool or value.get('transport') not in ('tcp', 'relp')
+            or not isinstance(value.get('source'), str)):
+        raise ValueError('unknown Wazuh reader profile shape')
+    value = {key: value[key] for key in ('enabled', 'transport', 'source', 'heartbeat_interval') if key in value}
+    base.update(profile=value, profile_sha256=hashlib.sha256(profile.read_bytes()).hexdigest())
+    if not value['enabled']:
+        if owned_text or owned_inputs or actions:
+            raise ValueError('disabled profile still has Wazuh input/action/cursor access')
+        if stale and imfile_loaded:
+            raise ValueError('reader profile/include changes are not loaded')
+        # Loaded FDs are independently inspected by the transaction against
+        # the actual central volume; profile strings alone cannot prove absence.
+        return dict(base, mode_candidate='disabled')
+    if stale:
+        raise ValueError('reader profile/include changes are not loaded')
+    if (not owned_text.startswith(HEADER + '\n') or len(owned_inputs) != 1
+            or len(inputs) != 1 or len(actions) != 1 or len(modules) != 1):
+        raise ValueError('Wazuh cursor is not an exclusive owned imfile namespace')
+    source, action = owned_inputs[0][0], actions[0]
+    if (owned_inputs[0][1] != str(OWNER)
+            or source.get('file') != value['source'] + '/alerts/alerts.json'
+            or action.get('name') != 'wazuh_alerts'
+            or action.get('target') != 'siem-log-server'
+            or action.get('queue.filename') != 'wazuh_alerts'
+            or action.get('queue.spooldirectory') != '/var/spool/rsyslog/pilot-wazuh'
+            or action.get('queue.type') != 'LinkedList'
+            or action.get('queue.saveonshutdown') != 'on'
+            or action.get('queue.discardseverity') != '8'
+            or action.get('queue.maxdiskspace') != '256m'
+            or action.get('queue.size') != '10000'):
+        raise ValueError('unsupported owned reader input/action semantics')
+    if not int(pid) and not cold:
+        raise ValueError('enabled reader has no live native invocation')
+    # The qualified fixed build defaults to an8192-byte message bound.
+    # Larger/unknown overrides invalidate the queue memory-save/capacity bound.
+    for text in files.values():
+        ts = tokens(text)
+        for offset, (kind, word) in enumerate(ts):
+            if kind == 'word' and word.lower() == '$maxmessagesize':
+                if offset + 1 >= len(ts) or ts[offset + 1][1].lower() not in ('8192', '8k'):
+                    raise ValueError('unqualified reader maximum message size')
+    if any(name == 'global' and attrs.get('maxmessagesize', '8192').lower() not in ('8192', '8k')
+           for name, attrs, _ in calls):
+        raise ValueError('unqualified reader maximum message size')
+    expected = 'omrelp' if value['transport'] == 'relp' else 'omfwd'
+    if action.get('type') != expected:
+        raise ValueError('reader transport differs from profile')
+    ownership('/etc/rsyslog.conf', OWNER, not cold and int(pid) > 0 and
+              'immark.so' in pathlib.Path('/proc/' + pid + '/maps').read_text())
+    if not cold:
+        runtime(OWNER, value['transport'], pid)
+    native('/etc/rsyslog.conf')
+    observed_action = {key: action[key] for key in (
+        'name', 'type', 'target', 'port', 'queue.filename', 'queue.spooldirectory',
+        'queue.type', 'queue.saveonshutdown', 'queue.discardseverity', 'queue.maxdiskspace',
+        'queue.size', 'queue.diskqueuetype', 'tls.permittedpeer', 'action.writeallmarkmessages')
+        if key in action}
+    return dict(base, mode_candidate='enabled', action=observed_action,
+                config_sha256=hashlib.sha256(owned_text.encode()).hexdigest())
+
 def main():
     mode = sys.argv[1]
+    if mode == 'inspect-reader':
+        if sys.argv[2:] not in ([], ['--cold']):
+            raise ValueError('unknown reader inspection arguments')
+        print(json.dumps(inspect_reader(cold=bool(sys.argv[2:])), sort_keys=True))
+        return
     if mode == 'preflight':
         transport = sys.argv[2]
         if transport not in ('relp', 'retire'):
@@ -238,5 +508,6 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, IndexError, subprocess.SubprocessError) as error:
-        print('Wazuh heartbeat refused: ' + str(error), file=sys.stderr)
+        detail = 'reader inspection failed; no state was changed' if sys.argv[1:2] == ['inspect-reader'] else str(error)
+        print('Wazuh heartbeat refused: ' + detail, file=sys.stderr)
         sys.exit(1)

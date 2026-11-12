@@ -1,0 +1,15 @@
+716f43129000-716f4312b000 r--p 00000000 fd:01 6448                       /usr/lib/x86_64-linux-gnu/rsyslog/imklog.so
+716f4312b000-716f4312e000 r-xp 00002000 fd:01 6448                       /usr/lib/x86_64-linux-gnu/rsyslog/imklog.so
+716f4312e000-716f4312f000 r--p 00005000 fd:01 6448                       /usr/lib/x86_64-linux-gnu/rsyslog/imklog.so
+716f4312f000-716f43130000 r--p 00005000 fd:01 6448                       /usr/lib/x86_64-linux-gnu/rsyslog/imklog.so
+716f43130000-716f43131000 rw-p 00006000 fd:01 6448                       /usr/lib/x86_64-linux-gnu/rsyslog/imklog.so
+716f43131000-716f43133000 r--p 00000000 fd:01 6455                       /usr/lib/x86_64-linux-gnu/rsyslog/imuxsock.so
+716f43133000-716f43138000 r-xp 00002000 fd:01 6455                       /usr/lib/x86_64-linux-gnu/rsyslog/imuxsock.so
+716f43138000-716f4313a000 r--p 00007000 fd:01 6455                       /usr/lib/x86_64-linux-gnu/rsyslog/imuxsock.so
+716f4313a000-716f4313b000 r--p 00008000 fd:01 6455                       /usr/lib/x86_64-linux-gnu/rsyslog/imuxsock.so
+716f4313b000-716f4313c000 rw-p 00009000 fd:01 6455                       /usr/lib/x86_64-linux-gnu/rsyslog/imuxsock.so
+716f4313c000-716f4313e000 r--p 00000000 fd:01 6456                       /usr/lib/x86_64-linux-gnu/rsyslog/lmnet.so
+716f4313e000-716f43142000 r-xp 00002000 fd:01 6456                       /usr/lib/x86_64-linux-gnu/rsyslog/lmnet.so
+716f43142000-716f43144000 r--p 00006000 fd:01 6456                       /usr/lib/x86_64-linux-gnu/rsyslog/lmnet.so
+716f43144000-716f43145000 r--p 00007000 fd:01 6456                       /usr/lib/x86_64-linux-gnu/rsyslog/lmnet.so
+716f43145000-716f43146000 rw-p 00008000 fd:01 6456                       /usr/lib/x86_64-linux-gnu/rsyslog/lmnet.so
