@@ -361,6 +361,99 @@ func TestDeployAndReconcileRefuseAnUnlockableInventoryBeforeAnything(t *testing.
 	})
 }
 
+// The identity apply playbook is handed its connection variables from three
+// places: the inventory, the vault file (`-e @.vault/main.yaml`) and a plain `-e`.
+// The precheck of every deploy and reconcile entry reads the inventory through
+// the arguments the playbook gets, so a variable the lock cannot honor is refused
+// whichever of the three carries it. Each source goes through each real entry,
+// not through precheckIdentityDeploy: the single run (deploy, and the one request
+// of a reconcile that is already authorized) and the batch, whose own precheck
+// comes before the plan is shown (precheckIdentityBatch). The refusal must come
+// before anything ran, and the batch's before its plan: the inner precheck of the
+// single run is a second guard that would still refuse after the plan was shown,
+// so the plan is what tells the two prechecks apart. Every source has its twin,
+// the same source with a variable the lock accepts, which goes past the precheck.
+func TestDeployAndReconcilePrecheckReadsEverySourceOfTheConnectionVariables(t *testing.T) {
+	const playbook = "playbooks/apply/freeipa-identity-apply.yml"
+	proxyVault := func(t *testing.T) vaultInput {
+		return vaultInput{ExtraVarsFile: writeVarsFile(t, "ansible_ssh_extra_args: \"-o ProxyCommand='nc %h %p'\"\nipa_admin_password: sentinel-not-a-credential\n")}
+	}
+	cleanVault := func(t *testing.T) vaultInput {
+		return vaultInput{ExtraVarsFile: writeVarsFile(t, "ipa_admin_password: sentinel-not-a-credential\n")}
+	}
+	type source struct {
+		name       string
+		serverVars string
+		vault      func(t *testing.T) vaultInput
+		extraVars  []string
+	}
+	refused := []struct {
+		source
+		wantIn string
+	}{
+		{source{name: "the inventory", serverVars: proxyCommandVars}, "ProxyCommand"},
+		{source{name: "the vault file", vault: proxyVault}, "ProxyCommand"},
+		{source{name: "an extra var", extraVars: []string{"ansible_port=not-a-port"}}, "ansible_port"},
+	}
+	accepted := map[string]source{
+		"the inventory":  {name: "the inventory", serverVars: lockCommonArgs},
+		"the vault file": {name: "the vault file", vault: cleanVault},
+		"an extra var":   {name: "an extra var", extraVars: []string{"ansible_port=2222"}},
+	}
+	entries := []struct {
+		name string
+		run  func(t *testing.T, env *funnelEnv, src source, out *bytes.Buffer) error
+	}{
+		{"a single run", func(t *testing.T, env *funnelEnv, src source, out *bytes.Buffer) error {
+			var vault vaultInput
+			if src.vault != nil {
+				vault = src.vault(t)
+			}
+			_, err := executeRecordedDeploymentWithAuthorizationResult(context.Background(), ansible.NewRunner(), out, playbook, env.inv, "", "", src.extraVars, vault, "sandbox", []string{"freeipa-identity"}, nil, nil)
+			return err
+		}},
+		{"a batch", func(t *testing.T, env *funnelEnv, src source, out *bytes.Buffer) error {
+			request := catalogDeploymentRequest{playbook: playbook, inv: env.inv, stage: "sandbox", extraVars: src.extraVars, componentHints: []string{"freeipa-identity"}, workspaceDir: filepath.Dir(env.inv)}
+			if src.vault != nil {
+				request.vault = src.vault(t)
+			}
+			return executeCatalogReconcileBatch(context.Background(), ansible.NewRunner(), out, []catalogDeploymentRequest{request})
+		}},
+	}
+	setup := func(t *testing.T, serverVars string) *funnelEnv {
+		env := newFunnelEnv(t, serverVars)
+		t.Setenv("PILOT_ROOT", repoRootForTest(t))
+		oldPrompt := activePromptAutomation
+		activePromptAutomation = &promptAutomation{useDefaults: true, previewOnly: true}
+		t.Cleanup(func() { activePromptAutomation = oldPrompt })
+		stubDeploymentAvailabilityAllReachable(t)
+		return env
+	}
+	for _, entry := range entries {
+		for _, refusal := range refused {
+			t.Run(entry.name+"/"+refusal.name+" is refused before anything runs", func(t *testing.T) {
+				env := setup(t, refusal.serverVars)
+				var out bytes.Buffer
+				err := entry.run(t, env, refusal.source, &out)
+				env.assertRefused(err, out.String(), refusal.wantIn)
+				if strings.Contains(out.String(), "batch execution plan") || strings.Contains(out.String(), "Deployment execution plan") {
+					t.Fatalf("the plan was shown before the refusal:\n%s", out.String())
+				}
+			})
+			t.Run(entry.name+"/"+refusal.name+" twin: a variable the lock accepts goes on", func(t *testing.T) {
+				twin := accepted[refusal.name]
+				env := setup(t, twin.serverVars)
+				var out bytes.Buffer
+				err := entry.run(t, env, twin, &out)
+				env.assertWentOn(err)
+				if got := env.ran(); len(got) == 0 {
+					t.Fatalf("the run never reached its playbook (err = %v)\n%s", err, out.String())
+				}
+			})
+		}
+	}
+}
+
 func loadRepoCatalogForPrecheck(t *testing.T) contract.Catalog {
 	t.Helper()
 	loader, err := contract.NewLoader(repoRootForTest(t))
