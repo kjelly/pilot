@@ -1,6 +1,0 @@
-active = yes
-direction = out
-path = /sbin/audisp-af_unix
-type = always
-args = 0640 /var/ossec/queue/sockets/audit
-format = string

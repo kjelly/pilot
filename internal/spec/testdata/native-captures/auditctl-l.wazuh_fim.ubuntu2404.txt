@@ -1,2 +1,0 @@
--w /boot -p wa -k wazuh_fim
--w /etc -p wa -k wazuh_fim

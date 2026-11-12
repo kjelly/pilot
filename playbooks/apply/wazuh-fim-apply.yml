@@ -461,13 +461,10 @@
                 - ansible_os_family == 'RedHat'
                 - not ansible_check_mode
 
-            # audispd-plugins ships /sbin/audisp-af_unix on EL (the Debian auditd package ships it itself); without it
-            # the af_wazuh plugin is `active = yes` but no who-data endpoint ever exists and wazuh-syscheckd falls back
-            # to real-time with no kernel watch (spec C2/C11).
-            - name: "Step 4: Install audit provider, its af_unix plugin and the native versionlock prerequisite (RedHat dnf; spec C2)"
+            - name: "Step 4: Install audit provider and native versionlock prerequisite (RedHat dnf; spec C2)"
               tags: [C1, C2]
               ansible.builtin.dnf:
-                name: [audit, audispd-plugins, python3-dnf-plugin-versionlock]
+                name: [audit, python3-dnf-plugin-versionlock]
                 state: present
                 update_cache: "{{ (wazuh_yum_repo | default({})) is changed }}"
               register: dnf_wazuh_agent
@@ -723,33 +720,6 @@
                         (wazuh_fim_conf_result | default({})) is changed
                         or (wazuh_address_result | default({})) is changed
                         or (wazuh_agent_auth_result is defined and wazuh_agent_auth_result is changed)
-
-                # Last agent-service change of an ordinary apply: Step 11 restarts the agent when its configuration
-                # changed, and a restarted wazuh-syscheckd needs a moment to reconnect and re-arm the kernel watches.
-                # This step makes sure the who-data endpoint exists (installing the plugin does not load it into an
-                # already running auditd) and waits until the whole path is live, so the end state is what spec C11
-                # observes. The version transaction owns its own audit proof, so it is skipped for those runs.
-                - name: "Own selected Step 11a resource changes"
-                  tags: [C11]
-                  when: not (wazuh_agent_transaction_reserved | default(false) | bool)
-                  block:
-                    - name: "Snapshot agent-service before its selected mutation"
-                      ansible.builtin.command:
-                        argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-config-save, --owner, "{{ wazuh_writer_owner }}", --operation, "{{ wazuh_config_operation }}", --resource, agent-service]
-                      changed_when: false
-                    - name: "Snapshot audit-service before its selected mutation"
-                      ansible.builtin.command:
-                        argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-config-save, --owner, "{{ wazuh_writer_owner }}", --operation, "{{ wazuh_config_operation }}", --resource, audit-service]
-                      changed_when: false
-                    - name: "Record only this invocation's selected attempted resources"
-                      ansible.builtin.set_fact:
-                        wazuh_ordinary_resources: "{{ ((wazuh_ordinary_resources | default([])) + ['agent-service', 'audit-service']) | unique | list }}"
-                    - name: "Step 11a: Ensure the who-data endpoint is live and connected (spec C11)"
-                      tags: [C11]
-                      ansible.builtin.command:
-                        argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-whodata-ensure, --owner, "{{ wazuh_writer_owner }}"]
-                      register: wazuh_whodata_ensure
-                      changed_when: wazuh_whodata_ensure.rc == 0 and ((wazuh_whodata_ensure.stdout | from_json).changed | default(false) | bool)
 
                 - name: "Step 11b: Inspect native agent version and enrollment after all selected operations"
                   ansible.builtin.command:
