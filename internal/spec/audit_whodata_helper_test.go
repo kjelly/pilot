@@ -12,34 +12,19 @@ import (
 )
 
 // Tests of playbooks/apply/files/audit-whodata.py on its own: what `probe` reads, what `rearm` waits for and
-// the typed reasons it fails with. The system tools are PATH shims; the data they print is, where it exists,
-// a real capture from a disposable Ubuntu 24.04 or AlmaLinux 9 VM (testdata/native-captures). Three kinds of
-// text have no real capture in the tree yet and are modelled from the native tools' own source and
-// documentation instead; each is named pendingCapture... so a reader never takes it for evidence, and the
-// target run supplies the real ones (see the runbook, section 5.6):
+// the typed reasons it fails with. The system tools are PATH shims; the data they print is a real capture from
+// a disposable Ubuntu 24.04.4 or AlmaLinux 9.8 VM (testdata/native-captures: `augenrules --check` in both
+// outcomes, `auditctl -l` with the managed rules and the Wazuh watches, `systemctl show wazuh-agent` for
+// active/inactive/not-found, the audisp-af_unix LISTEN line after an auditd restart, the coordinator's
+// writer-inspect output), 2026-11-12. Text for states nobody captured is synthetic and named as such:
 //
-//   - `augenrules --check`, both outcomes: modelled from the augenrules script of audit 3.1.2/3.0.7 and
-//     EL9's audit package (it exits 0 either way and prints "<path>: No change" or
-//     "<path>: Rules have changed and should be updated");
-//   - `auditctl -l` of the rules this role renders (the syscall rules list their key as `-F key=...`);
-//   - `systemctl show wazuh-agent --property=LoadState --property=ActiveState`.
+//   - `activating`/`deactivating`/`reloading` ActiveState values and a `systemctl` that cannot connect to the
+//     bus (the shapes systemd documents; no VM was put in them);
+//   - the `augenrules --check` line for an empty rules directory (from the script source), and an
+//     `auditctl -l` failure text (only its non-zero exit matters).
 //
 // The probe is built so that none of them can make it read a failure as "nothing there": an unrecognised
 // text or a non-zero exit is reported as such.
-
-const (
-	pendingCaptureAugenrulesNoChange = "/usr/sbin/augenrules: No change\n"
-	pendingCaptureAugenrulesChanged  = "/usr/sbin/augenrules: Rules have changed and should be updated\n"
-	pendingCaptureAuditctlManaged    = "-w /usr/bin/sudo -p x -k privileged-sudo\n" +
-		"-w /etc/passwd -p wa -k identity\n" +
-		"-w /etc/sudoers -p wa -k sudoers_changes\n" +
-		"-a always,exit -F arch=b64 -S execve -C uid!=euid -F euid=0 -F key=setuid_setgid_exec\n" +
-		"-a always,exit -F arch=b64 -S execve -C gid!=egid -F egid=0 -F key=setuid_setgid_exec\n" +
-		"-a always,exit -F arch=b64 -S chmod,fchmod,fchmodat -F key=setuid_setgid_change\n"
-	pendingCaptureAgentActive   = "LoadState=loaded\nActiveState=active\n"
-	pendingCaptureAgentInactive = "LoadState=loaded\nActiveState=inactive\n"
-	pendingCaptureAgentAbsent   = "LoadState=not-found\nActiveState=inactive\n"
-)
 
 type probeShims struct {
 	auditctl   string // stdout of `auditctl -l`; "-" = no auditctl on the host
@@ -121,6 +106,20 @@ func TestAuditWhodataProbeReadsEveryStateWithoutGuessing(t *testing.T) {
 	wazuh := readCapture(t, "auditctl-l.wazuh_fim.ubuntu2404.txt")
 	wazuhEL := readCapture(t, "auditctl-l.wazuh_fim.almalinux9.txt")
 	noRules := readCapture(t, "auditctl-l.no-rules.ubuntu2404.txt")
+	// Real captures of both outcomes of `augenrules --check` and of the agent unit's states.
+	augenNoChange := readCapture(t, "augenrules-check.no-change.ubuntu2404.rc0.txt")
+	augenChanged := readCapture(t, "augenrules-check.rules-changed.ubuntu2404.rc0.txt")
+	agentActive := readCapture(t, "systemctl-show-wazuh-agent.active.ubuntu2404.rc0.txt")
+	agentInactive := readCapture(t, "systemctl-show-wazuh-agent.inactive.almalinux9.rc0.txt")
+	agentAbsent := readCapture(t, "systemctl-show-wazuh-agent.not-found.ubuntu2404.rc0.txt")
+	// The real `auditctl -l` of the managed rules and the Wazuh watches: the managed lines alone, and both.
+	managedAndWazuh := readCapture(t, "auditctl-l.managed-and-wazuh_fim.ubuntu2404.txt")
+	managedListing := ""
+	for _, line := range strings.SplitAfter(managedAndWazuh, "\n") {
+		if !strings.Contains(line, "wazuh_fim") {
+			managedListing += line
+		}
+	}
 	cases := []struct {
 		name  string
 		shims probeShims
@@ -128,64 +127,70 @@ func TestAuditWhodataProbeReadsEveryStateWithoutGuessing(t *testing.T) {
 		want  map[string]any
 	}{
 		{"agent active holding watches, Ubuntu capture",
-			probeShims{auditctl: wazuh, augenrules: pendingCaptureAugenrulesNoChange, agent: pendingCaptureAgentActive}, "",
+			probeShims{auditctl: wazuh, augenrules: augenNoChange, agent: agentActive}, "",
 			map[string]any{"agent": "active", "kernel": "ok", "watches": []any{"-w /boot -p wa -k wazuh_fim", "-w /etc -p wa -k wazuh_fim"}}},
 		{"agent active holding watches, EL capture",
-			probeShims{auditctl: wazuhEL, augenrules: pendingCaptureAugenrulesNoChange, agent: pendingCaptureAgentActive}, "",
+			probeShims{auditctl: wazuhEL, augenrules: augenNoChange, agent: agentActive}, "",
 			map[string]any{"agent": "active", "kernel": "ok", "watches": []any{"-w /boot -p wa -k wazuh_fim", "-w /etc -p wa -k wazuh_fim"}}},
 		{"`No rules` is a readable, empty list, not a failure",
-			probeShims{auditctl: noRules, augenrules: pendingCaptureAugenrulesNoChange, agent: pendingCaptureAgentActive}, "",
+			probeShims{auditctl: noRules, augenrules: augenNoChange, agent: agentActive}, "",
 			map[string]any{"agent": "active", "kernel": "ok", "watches": []any{}}},
 		{"auditctl failing is unreadable, never an empty list",
-			probeShims{auditctl: "Error - audit support not in kernel\n", auditctlRC: 1, augenrules: pendingCaptureAugenrulesNoChange, agent: pendingCaptureAgentActive}, "",
+			probeShims{auditctl: "Error - audit support not in kernel\n", auditctlRC: 1, augenrules: augenNoChange, agent: agentActive}, "",
 			map[string]any{"agent": "active", "kernel": "unreadable", "watches": []any{}}},
 		{"no auditctl on the host (a fresh VM before the package)",
-			probeShims{auditctl: "-", augenrules: "-", agent: pendingCaptureAgentAbsent}, "",
+			probeShims{auditctl: "-", augenrules: "-", agent: agentAbsent}, "",
 			map[string]any{"agent": "absent", "kernel": "absent", "watches": []any{}}},
+		{"EL capture: agent active, rules unchanged, managed rules and watches present",
+			probeShims{auditctl: readCapture(t, "auditctl-l.managed-and-wazuh_fim.almalinux9.txt"), augenrules: readCapture(t, "augenrules-check.no-change.almalinux9.rc0.txt"), agent: readCapture(t, "systemctl-show-wazuh-agent.active.almalinux9.rc0.txt")}, template,
+			map[string]any{"agent": "active", "kernel": "ok", "managed": "present", "augenrules": "no_change", "watches": []any{"-w /boot -p wa -k wazuh_fim", "-w /etc -p wa -k wazuh_fim"}}},
+		{"EL capture: rules changed after a rules.d edit",
+			probeShims{auditctl: noRules, augenrules: readCapture(t, "augenrules-check.rules-changed.almalinux9.rc0.txt"), agent: readCapture(t, "systemctl-show-wazuh-agent.not-found.almalinux9.rc0.txt")}, template,
+			map[string]any{"agent": "absent", "managed": "missing", "augenrules": "changed"}},
 		{"agent installed but stopped",
-			probeShims{auditctl: noRules, augenrules: pendingCaptureAugenrulesNoChange, agent: pendingCaptureAgentInactive}, "",
+			probeShims{auditctl: noRules, augenrules: augenNoChange, agent: agentInactive}, "",
 			map[string]any{"agent": "inactive"}},
 		{"agent state that cannot be read is unknown",
-			probeShims{auditctl: wazuh, augenrules: pendingCaptureAugenrulesNoChange, agent: "Failed to connect to bus\n", agentRC: 1}, "",
+			probeShims{auditctl: wazuh, augenrules: augenNoChange, agent: "Failed to connect to bus\n", agentRC: 1}, "",
 			map[string]any{"agent": "unknown"}},
 		{"agent state that is not the two properties asked for is unknown",
-			probeShims{auditctl: wazuh, augenrules: pendingCaptureAugenrulesNoChange, agent: "SomethingElse=1\n"}, "",
+			probeShims{auditctl: wazuh, augenrules: augenNoChange, agent: "SomethingElse=1\n"}, "",
 			map[string]any{"agent": "unknown"}},
 		{"a starting agent is unknown, not active",
-			probeShims{auditctl: wazuh, augenrules: pendingCaptureAugenrulesNoChange, agent: "LoadState=loaded\nActiveState=activating\n"}, "",
+			probeShims{auditctl: wazuh, augenrules: augenNoChange, agent: "LoadState=loaded\nActiveState=activating\n"}, "",
 			map[string]any{"agent": "unknown"}},
 		{"managed rules all in the kernel, augenrules sees no change",
-			probeShims{auditctl: pendingCaptureAuditctlManaged + wazuh, augenrules: pendingCaptureAugenrulesNoChange, agent: pendingCaptureAgentActive}, template,
+			probeShims{auditctl: managedAndWazuh, augenrules: augenNoChange, agent: agentActive}, template,
 			map[string]any{"managed": "present", "augenrules": "no_change"}},
 		{"augenrules reports a difference",
-			probeShims{auditctl: pendingCaptureAuditctlManaged, augenrules: pendingCaptureAugenrulesChanged, agent: pendingCaptureAgentAbsent}, template,
+			probeShims{auditctl: managedListing, augenrules: augenChanged, agent: agentAbsent}, template,
 			map[string]any{"managed": "present", "augenrules": "changed"}},
 		{"kernel list emptied behind an unchanged file",
-			probeShims{auditctl: noRules, augenrules: pendingCaptureAugenrulesNoChange, agent: pendingCaptureAgentAbsent}, template,
+			probeShims{auditctl: noRules, augenrules: augenNoChange, agent: agentAbsent}, template,
 			map[string]any{"managed": "missing", "augenrules": "no_change"}},
 		{"a key listed fewer times than the file declares it is missing (two setuid_setgid_exec rules)",
-			probeShims{auditctl: strings.Replace(pendingCaptureAuditctlManaged, "-a always,exit -F arch=b64 -S execve -C gid!=egid -F egid=0 -F key=setuid_setgid_exec\n", "", 1), augenrules: pendingCaptureAugenrulesNoChange, agent: pendingCaptureAgentAbsent}, template,
+			probeShims{auditctl: strings.Replace(managedListing, "-a always,exit -F arch=b64 -S execve -C gid!=egid -F egid=0 -F key=setuid_setgid_exec\n", "", 1), augenrules: augenNoChange, agent: agentAbsent}, template,
 			map[string]any{"managed": "missing"}},
 		{"the -k form of a key counts as well as -F key=",
-			probeShims{auditctl: strings.ReplaceAll(pendingCaptureAuditctlManaged, "-F key=", "-k "), augenrules: pendingCaptureAugenrulesNoChange, agent: pendingCaptureAgentAbsent}, template,
+			probeShims{auditctl: strings.ReplaceAll(managedListing, "-F key=", "-k "), augenrules: augenNoChange, agent: agentAbsent}, template,
 			map[string]any{"managed": "present"}},
 		{"an unreadable kernel list is unknown, never present",
-			probeShims{auditctl: "boom\n", auditctlRC: 1, augenrules: pendingCaptureAugenrulesNoChange, agent: pendingCaptureAgentAbsent}, template,
+			probeShims{auditctl: "boom\n", auditctlRC: 1, augenrules: augenNoChange, agent: agentAbsent}, template,
 			map[string]any{"managed": "unknown"}},
 		{"no rules file to compare (a preview on a host this role has not rendered)",
-			probeShims{auditctl: noRules, augenrules: pendingCaptureAugenrulesNoChange, agent: pendingCaptureAgentAbsent}, "",
+			probeShims{auditctl: noRules, augenrules: augenNoChange, agent: agentAbsent}, "",
 			map[string]any{"kernel": "ok"}},
 		{"augenrules text it does not know is unrecognized",
-			probeShims{auditctl: noRules, augenrules: "/usr/sbin/augenrules: No rules\n", agent: pendingCaptureAgentAbsent}, template,
+			probeShims{auditctl: noRules, augenrules: "/usr/sbin/augenrules: No rules\n", agent: agentAbsent}, template,
 			map[string]any{"augenrules": "unrecognized"}},
 		{"both outcomes at once is unrecognized",
-			probeShims{auditctl: noRules, augenrules: pendingCaptureAugenrulesNoChange + pendingCaptureAugenrulesChanged, agent: pendingCaptureAgentAbsent}, template,
+			probeShims{auditctl: noRules, augenrules: augenNoChange + augenChanged, agent: agentAbsent}, template,
 			map[string]any{"augenrules": "unrecognized"}},
 		{"augenrules failing is unreadable",
-			probeShims{auditctl: noRules, augenrules: "boom\n", augenRC: 1, agent: pendingCaptureAgentAbsent}, template,
+			probeShims{auditctl: noRules, augenrules: "boom\n", augenRC: 1, agent: agentAbsent}, template,
 			map[string]any{"augenrules": "unreadable"}},
 		{"no augenrules on the host",
-			probeShims{auditctl: noRules, augenrules: "-", agent: pendingCaptureAgentAbsent}, template,
+			probeShims{auditctl: noRules, augenrules: "-", agent: agentAbsent}, template,
 			map[string]any{"augenrules": "absent"}},
 	}
 	for _, tc := range cases {

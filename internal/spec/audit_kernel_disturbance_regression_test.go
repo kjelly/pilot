@@ -33,7 +33,7 @@ import (
 // entry that no longer matches a disturbing task fails, so the list cannot go stale.
 var kernelAuditListDisturberAllowlist = map[string]string{
 	"playbooks/decommission/audit-log-forwarding-decommission.yml::Reload the kernel audit rule list (custom rules removed)":                                          "host retirement: the decommission removes the whole host's Wazuh agent with it, and runs only for a host being retired",
-	"playbooks/apply/audit-log-forwarding-apply.yml::Step 8b: Reload auditd if the syslog plugin config changed or isn't actually running (spec C21) — RedHat family": "EL SIGHUP only re-reads auditd's configuration and does not run augenrules; its effect on an already running Wazuh listener has not been measured on a target, so it is a documented limit (docs/verification/audit-log-forwarding.md section 5), not yet a handled disturbance",
+	"playbooks/apply/audit-log-forwarding-apply.yml::Step 8b: Reload auditd if the syslog plugin config changed or isn't actually running (spec C21) — RedHat family": "measured not to be a disturbance: on AlmaLinux 9.8 (Wazuh agent 4.14.x, 2026-11-12) with who-data live, 6 consecutive SIGHUPs to auditd 8 s apart left the wazuh_fim watches (2), the kernel list size (8), the audisp-af_unix PID, its established connection and its listener unchanged and logged no `Audit rules removed`, and the real playbook's HUP path with a drifted syslog plugin config did the same without touching the agent; measured only for plugin-config-change and plain HUPs on EL 9.8 (docs/verification/audit-log-forwarding.md section 5)",
 }
 
 const (

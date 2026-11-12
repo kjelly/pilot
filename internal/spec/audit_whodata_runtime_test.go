@@ -24,11 +24,15 @@ import (
 //     ExecStartPost loads rules) empty it and load the managed rules; `systemctl restart wazuh-agent` adds the
 //     agent's `wazuh_fim` watches back only when auditd is active and its af_unix listener is up (the native
 //     behaviour in the history of this issue); nothing else changes it;
-//   - `augenrules --check`: compares the rules file against the generated /etc/audit/audit.rules.
+//   - `augenrules --check`: compares the rules file against the generated /etc/audit/audit.rules and prints
+//     one of the two captured texts (testdata/native-captures/augenrules-check.*); `systemctl show wazuh-agent`
+//     prints the captured text of the state (active/inactive/not-found).
 //
-// What it does NOT cover (VM-only): real auditd/audisp/Wazuh processes, the real format of
-// `augenrules --check` and of the syscall rules in `auditctl -l` (modelled from the native script and the
-// documented `-F key=` form; the target run supplies the captures), SELinux, and the steps of the play that
+// The listing of the managed rules in `auditctl -l` is modelled by kernelLine and checked against the real
+// capture by TestAuditShimKernelListingMatchesTheRealCapture. What stays synthetic is named where it is used
+// (the transitional agent states).
+//
+// What it does NOT cover (VM-only): real auditd/audisp/Wazuh processes, SELinux, and the steps of the play that
 // no selected tag reaches: "full" below is the union of the audit rows' tags (C3-C10, C18, C21), not the whole
 // play, whose package installs and rsyslog steps are other rows' business.
 //
@@ -78,7 +82,7 @@ if name=='auditctl':
 elif name=='augenrules':
  if args==['--check']:
   same=(d/'audit.rules').read_text()==generated()
-  print('/usr/sbin/augenrules: '+('No change' if same else 'Rules have changed and should be updated'))
+  sys.stdout.write((d/('check-no-change.txt' if same else 'check-changed.txt')).read_text())
  elif args==['--load']:augenrules_load()
  else:raise RuntimeError('augenrules '+repr(args))
 elif name=='systemctl':
@@ -86,6 +90,10 @@ elif name=='systemctl':
  if sub=='show':
   unit=args[1];props=[a.split('=',1)[1] for a in args[2:] if a.startswith('--property=')]
   if unit=='wazuh-agent' and sc.get('agent_show_fails'):sys.exit(1)
+  if unit=='wazuh-agent' and props==['LoadState','ActiveState']:
+   f={'active':'agent-active.txt','inactive':'agent-inactive.txt','absent':'agent-absent.txt'}.get(state()['agent'])
+   if f:
+    sys.stdout.write((d/f).read_text());sys.exit(0)
   values=info(unit)
   for k in (props or list(values)):
    if k in values:print(k+'='+values[k])
@@ -419,6 +427,16 @@ func runAuditScenario(t *testing.T, sc auditScenario) auditObservation {
 		listener = "down"
 	}
 	write(filepath.Join(state, "state.json"), fmt.Sprintf(`{"agent": %q, "auditd": %q, "listener": %q}`, agent, auditd, listener), 0o600)
+	// What the shims print for `augenrules --check` and `systemctl show wazuh-agent ...` is the captured text.
+	for name, capture := range map[string]string{
+		"check-no-change.txt": "augenrules-check.no-change.ubuntu2404.rc0.txt",
+		"check-changed.txt":   "augenrules-check.rules-changed.ubuntu2404.rc0.txt",
+		"agent-active.txt":    "systemctl-show-wazuh-agent.active.ubuntu2404.rc0.txt",
+		"agent-inactive.txt":  "systemctl-show-wazuh-agent.inactive.almalinux9.rc0.txt",
+		"agent-absent.txt":    "systemctl-show-wazuh-agent.not-found.ubuntu2404.rc0.txt",
+	} {
+		write(filepath.Join(state, name), readCapture(t, capture), 0o600)
+	}
 	write(filepath.Join(state, "ss-up.txt"), readCapture(t, "ss-xHap.audit-endpoint.healthy.ubuntu2404.txt"), 0o600)
 	write(filepath.Join(state, "ss-down.txt"), readCapture(t, "ss-xHap.audit-endpoint.plugin-gone.ubuntu2404.txt"), 0o600)
 	rearms := true
@@ -876,5 +894,26 @@ func TestRegression_AuditWhodataCounterexamplesFail(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The harness lists the managed rules the way kernelLine does. That model must be the real listing: the
+// captured `auditctl -l` of the rules this role renders (Ubuntu 24.04.4 and AlmaLinux 9.8, the same on both)
+// prints watches as `-k <key>` and syscall rules as `-F key=<key>`.
+func TestAuditShimKernelListingMatchesTheRealCapture(t *testing.T) {
+	var want []string
+	for _, rule := range ruleLines(templateRules(t)) {
+		want = append(want, kernelLine(rule))
+	}
+	for _, name := range []string{"auditctl-l.managed-and-wazuh_fim.ubuntu2404.txt", "auditctl-l.managed-and-wazuh_fim.almalinux9.txt"} {
+		var managed []string
+		for _, line := range ruleLines(readCapture(t, name)) {
+			if !strings.Contains(line, "wazuh_fim") {
+				managed = append(managed, line)
+			}
+		}
+		if strings.Join(managed, "\n") != strings.Join(want, "\n") {
+			t.Errorf("%s lists the managed rules as\n%s\nbut the harness model lists them as\n%s", name, strings.Join(managed, "\n"), strings.Join(want, "\n"))
+		}
 	}
 }
