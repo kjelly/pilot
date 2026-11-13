@@ -335,7 +335,7 @@ V ≤ M。
 > 至少一條 watch，那是該次修復的證明，不是穩態斷言。判斷是否為 EL 用 `command -v rpm`，與 C1／C2 相同，也與 apply 以 `ansible_os_family == 'RedHat'` 決定是否執行 Step 11a
 > 一致（不用 `/etc/redhat-release`：沒有該檔的 RedHat family 主機，Step 11a 會執行，這列就必須真的觀察，不能直接印 0）。
 > 沒有 `rpm` 的主機（Debian family）這列直接印 0，不涵蓋：Debian 的 who-data
-> endpoint 與 watch 沒有任何 row 斷言（見 §2 上方；watch 在 #324 之前被 `audit-log-forwarding` 清掉的問題，見 §2 上方）。C11 讀取 process 名稱與 root 擁有的 socket 路徑，
+> endpoint 與 watch 沒有任何 row 斷言（見 §2 上方，含 watch 在 #324 之前被 `audit-log-forwarding` 清掉的問題）。C11 讀取 process 名稱與 root 擁有的 socket 路徑，
 > 需要 verify 時的 privilege escalation（`ss ` 觸發 `spec.NeedsBecome`）。檢查它是否會誤判：用 `pilot verify
 > --probe '<cmd>' -i <inv> -l <host>` 在同一條管線下看實際 rc 與 stdout，不要憑猜測改 Expected。
 
