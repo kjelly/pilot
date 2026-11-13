@@ -1556,6 +1556,11 @@
       when: not ansible_check_mode
       tags: [AG_service, AG06]
 
+    # The probe cannot fail on its own (failed_when: false, so the acceptance
+    # rule can read a degraded gateway's 503 body), so this gate is the only task
+    # that reports a gateway that is down. It and the notice below read the
+    # probe's result and carry every tag the probe carries, AG06 included:
+    # `--tags AG06` must be able to fail (TestRegression_GatewayHealthReadersCarryTheProbeTags).
     - name: "Step 17: gate — health probe reports ok"
       ansible.builtin.assert:
         that:
@@ -1566,7 +1571,7 @@
           A degraded answer is accepted only when ForceCommand is not being installed
           and the single missing piece is pilot-target-{{ gateway_scope }}.
       when: not ansible_check_mode
-      tags: [AG_service]
+      tags: [AG_service, AG06]
 
     - name: "Step 17: pilot-target-<scope> is not published yet (ForceCommand not requested)"
       ansible.builtin.debug:
@@ -1580,7 +1585,7 @@
         - not ansible_check_mode
         - (gateway_health_probe.stdout | default('') | trim).startswith('{')
         - (gateway_health_probe.stdout | from_json).get('status') != 'ok'
-      tags: [AG_service]
+      tags: [AG_service, AG06]
 
     # AG82, after the new gateway passed its health check: remove the former
     # token files recorded before Step 11. stat runs again here because
