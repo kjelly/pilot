@@ -12,6 +12,7 @@
 package hotfix
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
@@ -27,6 +28,24 @@ const WazuhSkewPlaybook = "playbooks/apply/wazuh-fim-agent-skew-hotfix.yml"
 // read-only play, which is how the plan is produced before anything is asked.
 const ObserveModeVar = "pilot_hotfix_mode=observe"
 
+// ConfirmedHostsVar is the playbook variable that restricts an apply run to the hosts the operator
+// confirmed. It travels as a JSON object value (`-e '{"pilot_hotfix_confirmed_hosts": [...]}'`): an
+// extra var written key=[...] reaches Ansible as a string, not a list.
+const ConfirmedHostsVar = "pilot_hotfix_confirmed_hosts"
+
+// ConfirmedHostsExtraVar renders the `-e` value for the hosts the operator confirmed. The playbook refuses
+// before it changes anything when a host it would change is not in the list.
+func ConfirmedHostsExtraVar(hosts []string) (string, error) {
+	if hosts == nil {
+		hosts = []string{}
+	}
+	data, err := json.Marshal(map[string][]string{ConfirmedHostsVar: hosts})
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 // Outcome values the playbook reports for a host's removal.
 const (
 	OutcomeRemoved     = "removed"
@@ -41,8 +60,12 @@ var (
 	// The marker lines are printed by ansible.builtin.debug, so each sits inside a JSON
 	// string: the value tokens never contain a quote, and the character class stops at one.
 	managerMarker = regexp.MustCompile(`PILOT_HOTFIX_MANAGER host=([^\s"]+) version=([^\s"]+)`)
-	stateMarker   = regexp.MustCompile(`PILOT_HOTFIX_STATE host=([^\s"]+) installed=([^\s"]+) skewed=(true|false) registration=([^\s"]+)`)
-	resultMarker  = regexp.MustCompile(`PILOT_HOTFIX_RESULT host=([^\s"]+) outcome=([^\s"]+) registration=([^\s"]+)`)
+	stateMarker   = regexp.MustCompile(`PILOT_HOTFIX_STATE host=([^\s"]+) installed=([^\s"]+) skewed=(true|false) residue=(true|false) registration=([^\s"]+)`)
+	// stateLine finds every state marker, well formed or not, so a line that lacks a field (a playbook
+	// that does not report residue) is refused by name instead of being read as "no such host".
+	stateLine    = regexp.MustCompile(`PILOT_HOTFIX_STATE host=([^\s"]+)`)
+	resultMarker = regexp.MustCompile(`PILOT_HOTFIX_RESULT host=([^\s"]+) outcome=([^\s"]+) residue=(true|false) registration=([^\s"]+)`)
+	resultLine   = regexp.MustCompile(`PILOT_HOTFIX_RESULT host=([^\s"]+)`)
 )
 
 // HostState is what the read-only play observed on one agent host.
@@ -50,9 +73,16 @@ type HostState struct {
 	Host      string
 	Installed string // installed wazuh-agent package version; "" when none
 	Skewed    bool   // true when the installed release is newer than the manager's
+	// Residue is true when no agent package is installed but the audit plugin an earlier removal left is
+	// still running. It is never true together with Skewed: a skewed host has a package.
+	Residue bool
 	// Registration is "<id>:<name>" from the host's client.keys, "" when it has none.
 	Registration string
 }
+
+// Actionable is whether the hotfix would change this host: it is newer than the manager, or it is the
+// residue of an earlier removal.
+func (h HostState) Actionable() bool { return h.Skewed || h.Residue }
 
 // Observation is the whole read-only play: the one manager and every host it judged.
 type Observation struct {
@@ -63,8 +93,10 @@ type Observation struct {
 
 // Result is what the removal play reported for one host.
 type Result struct {
-	Host         string
-	Outcome      string
+	Host    string
+	Outcome string
+	// Residue is true when the host was a residue host (no package; only its audit plugin was cleaned).
+	Residue      bool
 	Registration string
 }
 
@@ -94,9 +126,19 @@ func ParseObservation(stdout string) (Observation, error) {
 	if obs.ManagerHost == "" {
 		return Observation{}, fmt.Errorf("the playbook did not report the manager version (no PILOT_HOTFIX_MANAGER line)")
 	}
+	wellFormed := map[string]int{}
+	for _, m := range stateMarker.FindAllStringSubmatch(text, -1) {
+		wellFormed[m[1]]++
+	}
+	for _, m := range stateLine.FindAllStringSubmatch(text, -1) {
+		if wellFormed[m[1]] == 0 {
+			return Observation{}, fmt.Errorf("the state line of host %s is malformed or lacks a field (expected installed, skewed, residue and registration)", m[1])
+		}
+		wellFormed[m[1]]--
+	}
 	seen := map[string]HostState{}
 	for _, m := range stateMarker.FindAllStringSubmatch(text, -1) {
-		state := HostState{Host: m[1], Installed: noneIsEmpty(m[2]), Skewed: m[3] == "true", Registration: noneIsEmpty(m[4])}
+		state := HostState{Host: m[1], Installed: noneIsEmpty(m[2]), Skewed: m[3] == "true", Residue: m[4] == "true", Registration: noneIsEmpty(m[5])}
 		if prev, dup := seen[state.Host]; dup {
 			if prev != state {
 				return Observation{}, fmt.Errorf("host %s was reported twice with different states", state.Host)
@@ -110,8 +152,13 @@ func ParseObservation(stdout string) (Observation, error) {
 		return Observation{}, fmt.Errorf("the playbook judged no agent host (no PILOT_HOTFIX_STATE line); check --limit and the wazuh-fim group")
 	}
 	for _, h := range obs.Hosts {
-		if h.Skewed && h.Installed == "" {
+		switch {
+		case h.Skewed && h.Residue:
+			return Observation{}, fmt.Errorf("host %s is reported both newer than the manager and as residue; a skewed host has a package and a residue host has none", h.Host)
+		case h.Skewed && h.Installed == "":
 			return Observation{}, fmt.Errorf("host %s is reported newer than the manager but with no installed agent", h.Host)
+		case h.Residue && h.Installed != "":
+			return Observation{}, fmt.Errorf("host %s is reported as residue but has an installed agent (%s)", h.Host, h.Installed)
 		}
 	}
 	return obs, nil
@@ -138,6 +185,32 @@ func (o Observation) SkewedHosts() []string {
 	return names
 }
 
+// ResidueHosts returns the names of the hosts that have no agent package but still run the audit plugin
+// an earlier removal left, sorted. They are not "skewed" and are never described as such.
+func (o Observation) ResidueHosts() []string {
+	var names []string
+	for _, h := range o.Hosts {
+		if h.Residue {
+			names = append(names, h.Host)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ActionableHosts returns the names of every host the hotfix would change (skewed or residue), sorted.
+// It is the list the operator confirms and the one the apply run is restricted to.
+func (o Observation) ActionableHosts() []string {
+	var names []string
+	for _, h := range o.Hosts {
+		if h.Actionable() {
+			names = append(names, h.Host)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 // RenderPlan prints the host table of the plan the operator is asked to confirm.
 func (o Observation) RenderPlan(w io.Writer) {
 	fmt.Fprintf(w, "manager %s 的 Wazuh 版本：%s\n\n", o.ManagerHost, o.ManagerVersion)
@@ -159,6 +232,9 @@ func (o Observation) RenderPlan(w io.Writer) {
 			if h.Registration == "" {
 				action = "移除 agent（沒有 enrollment，manager 不需動）"
 			}
+		case h.Residue:
+			version = "（未安裝）"
+			action = "清除遺留的 audit plugin（套件已不在）"
 		case h.Installed == "":
 			version = "（未安裝）"
 			action = "不動"
@@ -185,65 +261,73 @@ func Refusals(output string) []string {
 	return out
 }
 
-// ParseResults reads the per-host removal outcomes of the apply run.
-func ParseResults(stdout string) []Result {
+// ParseResults reads the per-host removal outcomes of the apply run. A result line that lacks a field is
+// refused by name (a playbook that does not report residue must not be read as "removed").
+func ParseResults(stdout string) ([]Result, error) {
+	text := clean(stdout)
+	wellFormed := map[string]int{}
+	for _, m := range resultMarker.FindAllStringSubmatch(text, -1) {
+		wellFormed[m[1]]++
+	}
+	for _, m := range resultLine.FindAllStringSubmatch(text, -1) {
+		if wellFormed[m[1]] == 0 {
+			return nil, fmt.Errorf("the result line of host %s is malformed or lacks a field (expected outcome, residue and registration)", m[1])
+		}
+		wellFormed[m[1]]--
+	}
 	var out []Result
 	seen := map[string]bool{}
-	for _, m := range resultMarker.FindAllStringSubmatch(clean(stdout), -1) {
+	for _, m := range resultMarker.FindAllStringSubmatch(text, -1) {
 		if seen[m[1]] {
 			continue
 		}
 		seen[m[1]] = true
-		out = append(out, Result{Host: m[1], Outcome: m[2], Registration: noneIsEmpty(m[3])})
+		out = append(out, Result{Host: m[1], Outcome: m[2], Residue: m[3] == "true", Registration: noneIsEmpty(m[4])})
 	}
-	return out
+	return out, nil
 }
 
 // Summary is what an apply run really did, built only from the markers the run printed.
 type Summary struct {
-	Removed       []string // hosts that reported outcome=removed
-	Compatible    []string // hosts the run judged not newer than the manager (left untouched)
-	Incomplete    []string // judged newer, but the run never reported them removed
-	UnexpectedNew []string // removed although the plan did not list them (state changed in between)
+	Removed    []string // skewed hosts that reported outcome=removed
+	Cleaned    []string // residue hosts (no package) whose leftover audit plugin was retired
+	Compatible []string // hosts the run judged neither newer than the manager nor residue (left untouched)
+	Incomplete []string // judged actionable, but the run never reported them done
 }
 
-// Summarize judges an apply run against the plan that was confirmed. A host the
-// confirmed plan listed and the run did not report removed is Incomplete, which the
-// caller turns into a failure: success is only ever derived from what was reported.
+// Summarize judges an apply run against the plan that was confirmed. A host the confirmed plan listed and
+// the run did not report done is Incomplete, which the caller turns into a failure: success is only ever
+// derived from what was reported. (A host that became actionable after the plan cannot be changed: the
+// playbook refuses before any change when it is not in the confirmed list.)
 func Summarize(plan Observation, apply Observation, results []Result) Summary {
-	removed := map[string]bool{}
+	done := map[string]bool{}
 	for _, r := range results {
 		if r.Outcome == OutcomeRemoved {
-			removed[r.Host] = true
+			done[r.Host] = true
 		}
-	}
-	planned := map[string]bool{}
-	for _, h := range plan.SkewedHosts() {
-		planned[h] = true
 	}
 	var s Summary
 	for _, h := range apply.Hosts {
 		switch {
-		case h.Skewed && removed[h.Host]:
+		case h.Actionable() && done[h.Host] && h.Skewed:
 			s.Removed = append(s.Removed, h.Host)
-			if !planned[h.Host] {
-				s.UnexpectedNew = append(s.UnexpectedNew, h.Host)
-			}
-		case h.Skewed:
+		case h.Actionable() && done[h.Host]:
+			s.Cleaned = append(s.Cleaned, h.Host)
+		case h.Actionable():
 			s.Incomplete = append(s.Incomplete, h.Host)
 		default:
 			s.Compatible = append(s.Compatible, h.Host)
 		}
 	}
-	for h := range planned {
-		if !removed[h] && !contains(s.Incomplete, h) && !contains(s.Compatible, h) {
+	for _, h := range plan.ActionableHosts() {
+		if !done[h] && !contains(s.Incomplete, h) && !contains(s.Compatible, h) {
 			s.Incomplete = append(s.Incomplete, h)
 		}
 	}
 	sort.Strings(s.Removed)
+	sort.Strings(s.Cleaned)
 	sort.Strings(s.Compatible)
 	sort.Strings(s.Incomplete)
-	sort.Strings(s.UnexpectedNew)
 	return s
 }
 
@@ -261,13 +345,13 @@ func (s Summary) Render(w io.Writer) {
 	if len(s.Removed) > 0 {
 		fmt.Fprintf(w, "✅ 已移除 agent：%s\n", strings.Join(s.Removed, ", "))
 	}
+	if len(s.Cleaned) > 0 {
+		fmt.Fprintf(w, "✅ 已清除遺留的 audit plugin（套件先前已移除）：%s\n", strings.Join(s.Cleaned, ", "))
+	}
 	if len(s.Compatible) > 0 {
 		fmt.Fprintf(w, "↪ 版本相容或未安裝，沒有動：%s\n", strings.Join(s.Compatible, ", "))
 	}
-	if len(s.UnexpectedNew) > 0 {
-		fmt.Fprintf(w, "ℹ️  下列主機在確認計畫之後才變成「比 manager 新」，套用時重新偵測並一併移除：%s\n", strings.Join(s.UnexpectedNew, ", "))
-	}
 	if len(s.Incomplete) > 0 {
-		fmt.Fprintf(w, "❌ 計畫要移除、但這次沒有回報完成：%s\n", strings.Join(s.Incomplete, ", "))
+		fmt.Fprintf(w, "❌ 計畫要處理、但這次沒有回報完成：%s\n", strings.Join(s.Incomplete, ", "))
 	}
 }

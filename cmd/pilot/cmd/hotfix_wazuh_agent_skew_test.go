@@ -14,8 +14,11 @@ import (
 
 // hotfixSkewHarness runs the real `pilot hotfix wazuh-agent-skew` entry point against a fake
 // ansible-playbook. The playbook's stdout is the real ansible capture of the playbook's own
-// marker expressions (internal/hotfix/testdata), so the whole path from the cobra flags through
-// the parse to the exit status is exercised, not just the parser.
+// marker tasks (internal/hotfix/testdata, kept equal to the playbook by internal/spec
+// TestWazuhAgentHotfixMarkersAreTheRealCapture), so the whole path from the cobra flags through
+// the parse to the exit status is exercised, not just the parser. The capture has four agent hosts:
+// agent-new (newer than the manager), agent-ok (compatible), agent-none (no agent) and agent-left
+// (no package, audit plugin still running: residue).
 type hotfixSkewHarness struct {
 	t       *testing.T
 	argsLog string
@@ -36,7 +39,7 @@ func newHotfixSkewHarness(t *testing.T, observeOut, applyOut string, observeExit
 	apply := write("apply.out", applyOut)
 	argsLog := filepath.Join(work, "args.log")
 	inventory := `{"_meta":{"hostvars":{}},"all":{"children":["wazuh-fim","wazuh-manager"]},` +
-		`"wazuh-fim":{"hosts":["agent-new","agent-ok","agent-none"]},"wazuh-manager":{"hosts":["mgr-1"]}}`
+		`"wazuh-fim":{"hosts":["agent-new","agent-ok","agent-none","agent-left"]},"wazuh-manager":{"hosts":["mgr-1"]}}`
 	files := map[string]string{
 		"ansible-inventory": "#!/bin/sh\nprintf '%s\\n' '" + inventory + "'\n",
 		"ansible-playbook": `#!/bin/sh
@@ -138,7 +141,8 @@ func TestHotfixSkewPreviewOnlyPlansAndChangesNothing(t *testing.T) {
 	if !strings.Contains(calls[0], "playbooks/apply/wazuh-fim-agent-skew-hotfix.yml") {
 		t.Errorf("wrong playbook: %q", calls[0])
 	}
-	for _, want := range []string{"agent-new", "4.14.9-1", "1 台主機需要處理", "沒有變更任何東西"} {
+	for _, want := range []string{"agent-new", "4.14.9-1", "agent-left", "清除遺留的 audit plugin（套件已不在）",
+		"2 台主機需要處理（移除 agent 1 台、清除遺留 audit plugin 1 台）", "沒有變更任何東西"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -146,7 +150,7 @@ func TestHotfixSkewPreviewOnlyPlansAndChangesNothing(t *testing.T) {
 }
 
 func TestHotfixSkewNothingNewerAsksNothingAndRunsNothing(t *testing.T) {
-	markers := strings.ReplaceAll(realHotfixMarkers(t), "skewed=true", "skewed=false")
+	markers := strings.ReplaceAll(strings.ReplaceAll(realHotfixMarkers(t), "skewed=true", "skewed=false"), "residue=true", "residue=false")
 	h := newHotfixSkewHarness(t, markers, markers, 0, 0)
 	hotfixSkewForceFlag = true
 	out, err := h.run()
@@ -154,7 +158,7 @@ func TestHotfixSkewNothingNewerAsksNothingAndRunsNothing(t *testing.T) {
 		t.Fatalf("error = %v\n%s", err, out)
 	}
 	if calls := h.calls(); len(calls) != 1 {
-		t.Fatalf("calls = %q, want only the observe run when nothing is newer", calls)
+		t.Fatalf("calls = %q, want only the observe run when nothing needs the hotfix", calls)
 	}
 	if !strings.Contains(out, "什麼都不需要做") {
 		t.Errorf("output lacks the nothing-to-do message:\n%s", out)
@@ -178,6 +182,79 @@ func TestHotfixSkewForceObservesThenAppliesWithTheStage(t *testing.T) {
 	}
 	if !strings.Contains(out, "已移除 agent：agent-new") || !strings.Contains(out, "pilot deploy") {
 		t.Errorf("output lacks the result and the redeploy hint:\n%s", out)
+	}
+	// the residue host is reported on its own line and is not counted among the removed agents
+	if !strings.Contains(out, "已清除遺留的 audit plugin（套件先前已移除）：agent-left") || strings.Contains(out, "已移除 agent：agent-left") {
+		t.Errorf("the residue host is not reported as cleaned:\n%s", out)
+	}
+}
+
+// What the operator confirmed (every actionable host of the plan, skewed and residue alike) is handed to the
+// apply run as a JSON object value, so a host that became actionable after the plan refuses the run before
+// anything is changed; the read-only observe run carries no such restriction (and no stage flags).
+func TestHotfixSkewHandsTheConfirmedHostsToTheApplyRunOnly(t *testing.T) {
+	markers := realHotfixMarkers(t)
+	h := newHotfixSkewHarness(t, markers, markers, 0, 0)
+	hotfixSkewForceFlag = true
+	if out, err := h.run(); err != nil {
+		t.Fatalf("error = %v\n%s", err, out)
+	}
+	calls := h.calls()
+	if len(calls) != 2 {
+		t.Fatalf("calls = %q", calls)
+	}
+	const want = `{"pilot_hotfix_confirmed_hosts":["agent-left","agent-new"]}`
+	if !strings.Contains(calls[1], "-e "+want) {
+		t.Errorf("the apply call does not carry the confirmed hosts as a JSON object value %s: %q", want, calls[1])
+	}
+	if strings.Contains(calls[0], "pilot_hotfix_confirmed_hosts") {
+		t.Errorf("the observe call must not carry the confirmed hosts: %q", calls[0])
+	}
+	if strings.Contains(calls[1], "pilot_hotfix_confirmed_hosts=") {
+		t.Errorf("the confirmed hosts must never be passed as key=[...]: %q", calls[1])
+	}
+}
+
+// Only a residue host needs the hotfix: it is planned, confirmed and reported as a cleanup, never as a
+// removed agent, and the prompt does not tell the operator a package will be uninstalled.
+func TestHotfixSkewResidueOnlyIsPlannedAndReportedAsACleanup(t *testing.T) {
+	markers := strings.ReplaceAll(realHotfixMarkers(t), "skewed=true", "skewed=false")
+	h := newHotfixSkewHarness(t, markers, markers, 0, 0)
+	hotfixSkewForceFlag = true
+	out, err := h.run()
+	if err != nil {
+		t.Fatalf("error = %v\n%s", err, out)
+	}
+	calls := h.calls()
+	if len(calls) != 2 || !strings.Contains(calls[1], `{"pilot_hotfix_confirmed_hosts":["agent-left"]}`) {
+		t.Fatalf("calls = %q, want observe then an apply for the residue host alone", calls)
+	}
+	if strings.Contains(out, "已移除 agent：") {
+		t.Errorf("a residue host is reported as a removed agent:\n%s", out)
+	}
+	if !strings.Contains(out, "已清除遺留的 audit plugin") || !strings.Contains(out, "agent-left") {
+		t.Errorf("the cleanup is not reported:\n%s", out)
+	}
+	if text := hotfixSkewConfirmText(0, 1); strings.Contains(text, "卸載") || !strings.Contains(text, "audit plugin") {
+		t.Errorf("the prompt for a residue-only plan is wrong: %q", text)
+	}
+	if text := hotfixSkewConfirmText(2, 0); !strings.Contains(text, "不可復原") || strings.Contains(text, "audit plugin") {
+		t.Errorf("the prompt for a skewed-only plan is wrong: %q", text)
+	}
+	if text := hotfixSkewConfirmText(2, 1); !strings.Contains(text, "3 台") || !strings.Contains(text, "audit plugin") || !strings.Contains(text, "不可復原") {
+		t.Errorf("the prompt for a mixed plan is wrong: %q", text)
+	}
+}
+
+// An apply run whose report cannot be read (a playbook that does not say whether a host was residue) is
+// refused, never taken as success.
+func TestHotfixSkewRefusesAnApplyReportItCannotRead(t *testing.T) {
+	markers := realHotfixMarkers(t)
+	h := newHotfixSkewHarness(t, markers, strings.ReplaceAll(markers, " residue=true", ""), 0, 0)
+	hotfixSkewForceFlag = true
+	out, err := h.run()
+	if err == nil || !strings.Contains(err.Error(), "不當作成功") {
+		t.Fatalf("error = %v, want a refusal to count an unreadable report as success\n%s", err, out)
 	}
 }
 
@@ -216,8 +293,8 @@ func TestHotfixSkewFailsWhenAHostIsNotReportedRemoved(t *testing.T) {
 	h := newHotfixSkewHarness(t, markers, noResult, 0, 0)
 	hotfixSkewForceFlag = true
 	out, err := h.run()
-	if err == nil || !strings.Contains(err.Error(), "agent-new") {
-		t.Fatalf("error = %v, want a failure naming agent-new\n%s", err, out)
+	if err == nil || !strings.Contains(err.Error(), "agent-new") || !strings.Contains(err.Error(), "agent-left") {
+		t.Fatalf("error = %v, want a failure naming agent-new and agent-left\n%s", err, out)
 	}
 	if !strings.Contains(out, "沒有回報完成") {
 		t.Errorf("output does not say the host was not reported done:\n%s", out)

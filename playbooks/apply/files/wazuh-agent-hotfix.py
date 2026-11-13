@@ -12,12 +12,28 @@ pilot-owned package policy left" so a later `pilot deploy` installs M.
 
 Actions
   inspect   read-only: installed release, whether it is newer than M (the ONLY
-            place that comparison is made), pilot-owned package policy, and the
-            enrollment ID/name from client.keys (never the key itself)
+            place that comparison is made), whether the host is "residue" (see
+            below), pilot-owned package policy, and the enrollment ID/name from
+            client.keys (never the key itself)
   quiesce   stop and disable wazuh-agent (reversible; nothing is deleted)
-  remove    release pilot's hold/versionlock/apt preference, purge the package,
-            drop client.keys, and retire the audit plugin the package left running
-  verify    the end state checks of the spec (C1-C5), fail-closed
+  remove    in this order: release pilot's hold/versionlock/apt preference, drop
+            client.keys, purge the package, retire the audit plugin the package left
+            running
+  verify    the end state checks of the spec (C1-C5, C8), fail-closed
+
+Resumability. A removal has no rollback (a purged package cannot be put back), so what
+matters is what a rerun can still see. `skewed` is only ever true while the package is
+installed, and the purge is the one step that makes it false; every step before the purge
+therefore leaves the package installed and the host still `skewed`, and a rerun selects it.
+After the purge the only thing a failure can still strand is the plugin auditd keeps running,
+which is the single post-purge state `inspect` reports as `residue`: no package installed AND
+the audit plugin orphaned. A host that merely lacks the package (stale client.keys, a pilot
+policy file, ...) is not residue and is never touched. Whatever the purge and the retirement
+need is checked by `inspect` while the package is still installed (`ss`, and on EL the auditd
+legacy restart action), so a skewed host that could not finish is refused before any change.
+The one case this cannot cover is a purge that is itself killed half way: dpkg or rpm may then
+report a half-removed package, which `inspect` refuses by name as an unknown package state
+(repair it by hand, then rerun).
 
 Every action re-inspects first and refuses on anything it does not recognise.
 Refusals are typed JSON ({"error", "error_kind"}) with exit 1; tool stderr is
@@ -240,9 +256,30 @@ class Host:
         # Only a host that is going to be changed needs a well-formed enrollment; a compatible
         # host's client.keys is none of this hotfix's business and must not make the run refuse.
         registration = self.registration() if skewed else None
+        if skewed:
+            self.require_removal_prerequisites()
+        orphaned = self.audit_plugin_orphaned()
+        # The one state a removal can strand a host in: the package is gone (the purge is the last
+        # step that can fail before it) but auditd still runs the plugin the package left. It is
+        # defined by exactly those two facts; a host that merely has no package is not residue.
+        residue = (not installed) and orphaned
         return {'family': self.family, 'installed': installed, 'release': release, 'manager': manager,
-                'skewed': skewed, 'enrolled': enrolled, 'registration': registration, 'policy': policy,
-                'audit_orphaned': self.audit_plugin_orphaned()}
+                'skewed': skewed, 'residue': residue, 'enrolled': enrolled, 'registration': registration,
+                'policy': policy, 'audit_orphaned': orphaned}
+
+    def require_removal_prerequisites(self):
+        """Refuse, while the package is still installed, what the removal could otherwise only discover
+        after the purge, when a failure would strand the host with no package to select it by.
+
+        After the purge the removal asks `ss -xl` whether the audit plugin is orphaned, and on EL restarts
+        auditd through its legacy action; a host where either is unavailable is refused up front.
+        """
+        try:
+            self.stale_audit_listener()
+        except Refused as exc:
+            raise Refused('the unix listener probe (ss -xl) the removal needs after the purge does not work on this host') from exc
+        if self.family == 'RedHat' and not AUDIT_LEGACY_RESTART.exists():
+            raise Refused('this host has no supported way to restart auditd; refusing before the package is removed')
 
     def stale_audit_listener(self):
         """Whether a unix socket is still listening on the Wazuh who-data endpoint.
@@ -308,12 +345,11 @@ class Host:
     # -- mutation ---------------------------------------------------------------------
 
     def require_actionable(self, manager, owner):
-        """Re-read the state; only a skewed host, or one a previous hotfix half cleaned, may be changed."""
+        """Re-read the state; only a skewed host, or the residue of an earlier removal, may be changed."""
         if not owner:
             raise Refused('a mutating action requires the owner of this hotfix\'s Wazuh writer claim')
         state = self.inspect(manager, owner)
-        residue = (not state['installed']) and (state['policy']['owned'] or state['enrolled'] or state['audit_orphaned'])
-        if not state['skewed'] and not residue:
+        if not state['skewed'] and not state['residue']:
             raise Refused('this host is not newer than the manager; refusing to change it')
         return state
 
@@ -335,6 +371,25 @@ class Host:
     def remove(self, manager, owner=''):
         state = self.require_actionable(manager, owner)
         changed = False
+        if state['skewed']:
+            # The order is the resumability guarantee: nothing before the purge changes whether the
+            # package is installed, so an interruption anywhere up to it leaves the host `skewed` and a
+            # rerun selects it. The purge goes last because it is the step that makes `skewed` false.
+            if self.release_policy(state):
+                changed = True
+            if self.drop_client_keys():
+                changed = True
+            self.purge_package()
+            changed = True
+        # A skewed host reaches this after its purge; a residue host (no package, orphaned plugin) is
+        # only here for this, and nothing else of it is touched.
+        if self.retire_audit_plugin():
+            changed = True
+        return {'changed': changed}
+
+    def release_policy(self, state):
+        """Release pilot's own hold, apt preference or versionlock block. Foreign content never reaches here."""
+        changed = False
         if self.family == 'Debian':
             if state['policy']['held']:
                 self.r.run(['apt-mark', 'unhold', PACKAGE], operation='release the agent hold')
@@ -342,27 +397,28 @@ class Host:
             if state['policy']['owned']:
                 os.unlink(PREF)
                 changed = True
-            if state['installed']:
-                # purge, not remove: a package left in "deinstall ok config-files" is refused as an
-                # unknown state by wazuh-transaction.py's Agent.installed() and blocks the redeploy.
-                self.r.run(['apt-get', 'purge', '-y', '-o', 'DPkg::Lock::Timeout=300', PACKAGE],
-                           timeout=900, operation='purge the agent package')
-                changed = True
-        else:
-            if state['policy']['owned']:
-                text = self.read_policy_file(LOCKS)
-                _, foreign = self.split_locks(text)
-                self.atomic_write(LOCKS, foreign)
-                changed = True
-            if state['installed']:
-                self.r.run(['dnf', 'remove', '-y', PACKAGE], timeout=900, operation='remove the agent package')
-                changed = True
+        elif state['policy']['owned']:
+            text = self.read_policy_file(LOCKS)
+            _, foreign = self.split_locks(text)
+            self.atomic_write(LOCKS, foreign)
+            changed = True
+        return changed
+
+    @staticmethod
+    def drop_client_keys():
         if CLIENT_KEYS.exists() or CLIENT_KEYS.is_symlink():
             os.unlink(CLIENT_KEYS)
-            changed = True
-        if self.retire_audit_plugin():
-            changed = True
-        return {'changed': changed}
+            return True
+        return False
+
+    def purge_package(self):
+        if self.family == 'Debian':
+            # purge, not remove: a package left in "deinstall ok config-files" is refused as an
+            # unknown state by wazuh-transaction.py's Agent.installed() and blocks the redeploy.
+            self.r.run(['apt-get', 'purge', '-y', '-o', 'DPkg::Lock::Timeout=300', PACKAGE],
+                       timeout=900, operation='purge the agent package')
+        else:
+            self.r.run(['dnf', 'remove', '-y', PACKAGE], timeout=900, operation='remove the agent package')
 
     @staticmethod
     def atomic_write(path, text):

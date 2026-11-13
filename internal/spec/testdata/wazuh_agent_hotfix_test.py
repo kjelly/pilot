@@ -37,17 +37,54 @@ class Result:
         self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
 
+class Crash(Exception):
+    """A simulated kill of the helper between two effects (not something the helper can catch)."""
+
+
+class Faults:
+    """Counts every effect the removal has on the host and crashes before the crash_at-th one."""
+    def __init__(self, crash_at=0):
+        self.crash_at, self.count, self.crashed_on = crash_at, 0, None
+
+    def tick(self, what):
+        self.count += 1
+        if self.count == self.crash_at:
+            self.crashed_on = what
+            raise Crash(what)
+
+
+def is_mutation(argv):
+    return (argv[0] in ('apt-get', 'dnf') or argv[0] == str(hotfix.AUDIT_LEGACY_RESTART)
+            or argv[:2] in (['apt-mark', 'unhold'], ['systemctl', 'stop'], ['systemctl', 'disable'], ['systemctl', 'restart']))
+
+
 class FakeRunner:
-    """Answers the native probes from a table and records every other argv in order."""
-    def __init__(self, dpkg=None, rpm=None, held=(), unit=('inactive', 'disabled'), listener=False, stuck_listener=False):
+    """Answers the native probes from a table and records every other argv in order.
+
+    A purge or removal really changes what the probes answer afterwards (the package is gone, and
+    with it the audit plugin's config), so a rerun on the same fake sees what a rerun on a host would.
+    fail_on lists argv prefixes that fail like a native tool that returned non-zero; faults crashes the
+    helper before one chosen effect.
+    """
+    def __init__(self, dpkg=None, rpm=None, held=(), unit=('inactive', 'disabled'), listener=False, stuck_listener=False,
+                 no_ss=False, fail_on=(), faults=None, keeps_plugin_config=False):
         self.dpkg, self.rpm, self.held, self.unit = dpkg, rpm, list(held), list(unit)
         self.listener, self.stuck_listener = listener, stuck_listener
+        self.no_ss, self.fail_on, self.faults = no_ss, [list(prefix) for prefix in fail_on], faults or Faults()
+        self.keeps_plugin_config = keeps_plugin_config
         self.calls = []
+        self.at_purge = []
 
     def run(self, argv, allowed=(0,), timeout=120, operation=None):
         argv = [str(a) for a in argv]
         self.calls.append(argv)
         tool = argv[0]
+        if tool == 'ss' and self.no_ss:
+            raise hotfix.Refused('operation unavailable or timed out: ' + (operation or tool))
+        if is_mutation(argv):
+            self.faults.tick(argv)
+            if any(argv[:len(prefix)] == prefix for prefix in self.fail_on):
+                raise hotfix.Refused('operation failed: ' + (operation or tool) + ' rc=1')
         if tool == 'dpkg-query':
             return self.dpkg
         if tool == 'rpm':
@@ -67,6 +104,17 @@ class FakeRunner:
             if not self.stuck_listener:
                 self.listener = False
             return Result()
+        if tool in ('apt-get', 'dnf'):
+            # at the moment of the purge: what is still left that a rerun would have to finish?
+            self.at_purge.append({'pref': hotfix.PREF.exists(), 'keys': hotfix.CLIENT_KEYS.exists(), 'held': list(self.held),
+                                  'owned_lock': hotfix.BEGIN in (hotfix.LOCKS.read_text() if hotfix.LOCKS.exists() else '')})
+            # the package and its conffile (the audit plugin config) go; the plugin process auditd started stays
+            if tool == 'apt-get':
+                self.dpkg = ABSENT_DEB
+            else:
+                self.rpm = ABSENT_RPM
+            if not self.keeps_plugin_config:
+                hotfix.AUDIT_PLUGIN.unlink(missing_ok=True)
         if tool == 'systemctl' and argv[1] == 'stop':
             self.unit[0] = 'inactive'
         if tool == 'systemctl' and argv[1] == 'disable':
@@ -76,8 +124,7 @@ class FakeRunner:
         return Result()
 
     def mutations(self):
-        return [call for call in self.calls
-                if call[0] in ('apt-get', 'dnf') or call[0].endswith('/restart') or call[:2] in (['apt-mark', 'unhold'], ['systemctl', 'stop'], ['systemctl', 'disable'], ['systemctl', 'restart'])]
+        return [call for call in self.calls if is_mutation(call)]
 
 
 def installed_deb(version='4.14.9-1', status='install ok installed'):
@@ -317,6 +364,136 @@ class HotfixTests(unittest.TestCase):
         self.assertFalse(hotfix.PREF.exists())
         self.assertFalse(hotfix.CLIENT_KEYS.exists())
 
+    def test_the_purge_is_the_last_step_that_can_strand_a_host(self):
+        # By the time the package is purged everything else a rerun could not see any more is already
+        # gone: the hold or versionlock block, the apt preference and client.keys. What is left after
+        # the purge is only the audit plugin, which a rerun still finds (see residue below).
+        self.claim()
+        hotfix.PREF.write_text(PREF_OWNED)
+        hotfix.CLIENT_KEYS.write_text(CLIENT_KEYS)
+        deb = self.deb(dpkg=installed_deb(status='hold ok installed'), held=['wazuh-agent'])
+        deb.remove('4.14.1', OWNER)
+        self.assertEqual(deb.r.at_purge, [{'pref': False, 'keys': False, 'held': [], 'owned_lock': False}])
+        hotfix.CLIENT_KEYS.write_text(CLIENT_KEYS)
+        hotfix.LOCKS.write_text('foo-0:1.0-1.x86_64\n' + hotfix.BEGIN + 'wazuh-agent-0:4.14.9-1.x86_64\n' + hotfix.END)
+        rpm = self.rpm_host(rpm=Result(stdout='4.14.9-1\tx86_64'))
+        rpm.remove('4.14.1', OWNER)
+        self.assertEqual(rpm.r.at_purge, [{'pref': False, 'keys': False, 'held': [], 'owned_lock': False}])
+        self.assertEqual(hotfix.LOCKS.read_text(), 'foo-0:1.0-1.x86_64\n')
+
+    def build(self, family, listener, faults=None, **runner):
+        """A skewed host in the shape the fixture makes: held, pilot policy, enrolled, plugin config and listener."""
+        self.claim()
+        hotfix.CLIENT_KEYS.write_text(CLIENT_KEYS)
+        if listener:
+            hotfix.AUDIT_PLUGIN.write_text('active = yes\n')
+        if family == 'Debian':
+            hotfix.PREF.write_text(PREF_OWNED)
+            return self.deb(dpkg=installed_deb(status='hold ok installed'), held=['wazuh-agent'], listener=listener,
+                            faults=faults, **runner)
+        hotfix.LOCKS.write_text('foo-0:1.0-1.x86_64\n' + hotfix.BEGIN + 'wazuh-agent-0:4.14.9-1.x86_64\n' + hotfix.END)
+        return self.rpm_host(rpm=Result(stdout='4.14.9-1\tx86_64'), listener=listener, faults=faults, **runner)
+
+    def reset(self):
+        for path in (hotfix.PREF, hotfix.LOCKS, hotfix.CLIENT_KEYS, hotfix.AUDIT_PLUGIN):
+            path.unlink(missing_ok=True)
+
+    def release(self):
+        """No writer claim: what a read-only inspect (the observation) runs under."""
+        (hotfix.ROOT / 'writer-active.json').unlink(missing_ok=True)
+
+    def act(self, host, action):
+        """Run one helper action the way the playbook does: inspect read-only, the others under our own claim."""
+        if action == 'inspect':
+            self.release()
+            return host.inspect('4.14.1')
+        self.claim()
+        return getattr(host, action)('4.14.1', OWNER)
+
+    def test_a_crash_between_any_two_effects_leaves_a_host_the_rerun_selects_and_finishes(self):
+        # The resume claim, proved for every point at once: kill the helper before each of its effects
+        # in turn (policy release, client.keys, the purge, the auditd restart), then rerun on what that
+        # left. Every time the host must still be selected (skewed while the package is installed,
+        # residue once only the audit plugin is left) and the rerun must reach the verified end state.
+        for family in ('Debian', 'RedHat'):
+            for listener in (True, False):
+                points = 0
+                for crash_at in range(1, 20):
+                    with self.subTest(family=family, listener=listener, crash_at=crash_at):
+                        self.reset()
+                        faults = Faults(crash_at)
+                        host = self.build(family, listener, faults=faults)
+                        real_unlink, real_write = os.unlink, hotfix.Host.atomic_write
+
+                        def unlink(path, *a, **k):
+                            if str(path) in (str(hotfix.PREF), str(hotfix.CLIENT_KEYS)):
+                                faults.tick(('unlink', str(path)))
+                            return real_unlink(path, *a, **k)
+
+                        def write(path, text):
+                            faults.tick(('atomic_write', str(path)))
+                            return real_write(path, text)
+
+                        with unittest.mock.patch.object(hotfix.os, 'unlink', unlink), \
+                                unittest.mock.patch.object(hotfix.Host, 'atomic_write', staticmethod(write)):
+                            try:
+                                host.remove('4.14.1', OWNER)
+                                crashed = False
+                            except Crash:
+                                crashed = True
+                        if not crashed:
+                            break
+                        points += 1
+                        purged = host.r.dpkg is ABSENT_DEB or host.r.rpm is ABSENT_RPM
+                        # the rerun sees only what is on the host: a fresh helper, the same fake host
+                        again = hotfix.Host(family, host.r)
+                        host.r.faults = Faults()
+                        state = again.inspect('4.14.1', OWNER)
+                        if not purged:
+                            self.assertTrue(state['skewed'], 'a crash before the purge must leave the package installed and skewed')
+                            self.assertFalse(state['residue'])
+                        else:
+                            self.assertTrue(state['residue'] and not state['skewed'], 'after the purge only the audit plugin may be left')
+                            self.assertEqual(state['audit_orphaned'], listener)
+                        if state['skewed'] or state['residue']:
+                            again.remove('4.14.1', OWNER)
+                        self.assertEqual(again.verify(), {'removed': True})
+                        self.assertFalse(host.r.listener)
+                # Debian: unhold, preference, keys, purge (+ restart); RedHat: versionlock, keys, dnf (+ restart)
+                self.assertEqual(points, {'Debian': 4, 'RedHat': 3}[family] + (1 if listener else 0),
+                                 'the sweep must reach every effect of the removal')
+
+    def test_a_removal_that_purges_first_would_strand_the_host(self):
+        # The control for the sweep above, on the order this change replaced: purge first, then the policy
+        # release and client.keys. Run the same crash (after the purge, before client.keys) against it:
+        # no package, no orphaned plugin, only a stale client.keys left, which a rerun never selects.
+        self.claim()
+        hotfix.CLIENT_KEYS.write_text(CLIENT_KEYS)
+        host = self.rpm_host(rpm=Result(stdout='4.14.9-1\tx86_64'))
+        host.purge_package()
+        again = hotfix.Host('RedHat', host.r)
+        state = again.inspect('4.14.1', OWNER)
+        self.assertFalse(state['skewed'] or state['residue'], 'nothing selects a host that has no package and no orphaned plugin')
+        self.assertTrue(state['enrolled'], 'yet its client.keys is still there: this is the stranded host')
+        with self.assertRaisesRegex(hotfix.Refused, 'not newer than the manager'):
+            again.remove('4.14.1', OWNER)
+        with self.assertRaisesRegex(hotfix.Refused, 'client.keys'):
+            again.verify()
+
+    def test_a_purge_that_fails_leaves_the_package_installed_and_a_rerun_finishes(self):
+        for family, tool in (('Debian', 'apt-get'), ('RedHat', 'dnf')):
+            with self.subTest(family=family):
+                self.reset()
+                host = self.build(family, True, fail_on=[[tool]])
+                with self.assertRaisesRegex(hotfix.Refused, 'purge|remove the agent package'):
+                    host.remove('4.14.1', OWNER)
+                state = hotfix.Host(family, host.r).inspect('4.14.1', OWNER)
+                self.assertTrue(state['skewed'] and state['installed'])
+                self.assertIsNone(state['registration'], 'client.keys went before the purge, the manager was already told')
+                host.r.fail_on = []
+                hotfix.Host(family, host.r).remove('4.14.1', OWNER)
+                self.assertEqual(hotfix.Host(family, host.r).verify(), {'removed': True})
+
     def test_redhat_removal_keeps_foreign_versionlock_rules(self):
         self.claim()
         hotfix.LOCKS.write_text('foo-0:1.0-1.x86_64\n' + hotfix.BEGIN + 'wazuh-agent-0:4.14.9-1.x86_64\n' + hotfix.END + 'bar-0:2-1.x86_64\n')
@@ -325,19 +502,83 @@ class HotfixTests(unittest.TestCase):
         self.assertEqual(hotfix.LOCKS.read_text(), 'foo-0:1.0-1.x86_64\nbar-0:2-1.x86_64\n')
         self.assertEqual(host.r.mutations(), [['dnf', 'remove', '-y', 'wazuh-agent']])
 
-    def test_a_rerun_after_a_partial_removal_finishes_it(self):
-        # package already purged, but the preference and client.keys are still there
+    # -- residue: the only post-purge state a removal can strand ---------------------------
+
+    def test_residue_is_no_package_and_an_orphaned_plugin_and_nothing_else(self):
+        for name, host, prepare, residue in (
+                ('no package, orphaned plugin', self.deb(dpkg=ABSENT_DEB, listener=True), lambda: None, True),
+                ('known-not-installed record, orphaned plugin', self.deb(dpkg=KNOWN_NOT_INSTALLED_DEB, listener=True), lambda: None, True),
+                ('rpm: no package, orphaned plugin', self.rpm_host(rpm=ABSENT_RPM, listener=True), lambda: None, True),
+                ('no package, no listener', self.deb(dpkg=ABSENT_DEB), lambda: None, False),
+                ('no package, listener but the plugin config is back (someone owns it)', self.deb(dpkg=ABSENT_DEB, listener=True),
+                 lambda: hotfix.AUDIT_PLUGIN.write_text('active = yes\n'), False),
+                ('no package, stale client.keys only', self.deb(dpkg=ABSENT_DEB), lambda: hotfix.CLIENT_KEYS.write_text(CLIENT_KEYS), False),
+                ('no package, pilot preference only', self.deb(dpkg=ABSENT_DEB), lambda: hotfix.PREF.write_text(PREF_OWNED), False),
+                ('installed and compatible, listener', self.deb(dpkg=installed_deb('4.14.1-1'), listener=True), lambda: None, False),
+                ('installed and skewed, listener', self.deb(dpkg=installed_deb(), listener=True), lambda: None, False)):
+            with self.subTest(name):
+                self.reset()
+                prepare()
+                state = host.inspect('4.14.1')
+                self.assertIs(state['residue'], residue)
+                self.assertFalse(state['residue'] and state['skewed'], 'residue never means newer than the manager')
+
+    def test_a_residue_host_is_actionable_and_only_its_audit_plugin_is_retired(self):
         self.claim()
-        hotfix.PREF.write_text(PREF_OWNED)
+        host = self.rpm_host(rpm=ABSENT_RPM, listener=True)
+        self.assertEqual(host.remove('4.14.1', OWNER), {'changed': True})
+        self.assertFalse(host.r.listener)
+        self.assertEqual(host.r.mutations(), [[str(hotfix.AUDIT_LEGACY_RESTART)]])
+        self.assertEqual(host.verify(), {'removed': True})
+        # quiesce has nothing to stop on a host with no package, and says so
+        self.assertEqual(self.rpm_host(rpm=ABSENT_RPM, listener=True).quiesce('4.14.1', OWNER), {'changed': False, 'registration': None})
+        # and with nothing at all left the rerun is refused, not a silent no-op that hides a wrong target
+        with self.assertRaisesRegex(hotfix.Refused, 'not newer than the manager'):
+            self.rpm_host(rpm=ABSENT_RPM).remove('4.14.1', OWNER)
+
+    def test_a_host_that_merely_lacks_the_package_is_never_touched(self):
+        # stale client.keys / a pilot policy file without a package and without an orphaned plugin is not a
+        # state this hotfix produces any more, and a host that never had the agent must not be changed
+        for action in ('quiesce', 'remove'):
+            with self.subTest(action=action):
+                self.reset()
+                self.claim()
+                hotfix.CLIENT_KEYS.write_text(CLIENT_KEYS)
+                hotfix.PREF.write_text(PREF_OWNED)
+                host = self.deb(dpkg=ABSENT_DEB)
+                with self.assertRaisesRegex(hotfix.Refused, 'not newer than the manager'):
+                    getattr(host, action)('4.14.1', OWNER)
+                self.assertEqual(host.r.mutations(), [])
+                self.assertTrue(hotfix.CLIENT_KEYS.exists() and hotfix.PREF.exists())
+
+    def test_a_residue_host_keeps_what_is_not_the_audit_plugin(self):
+        # the residue branch retires the plugin only; a stale client.keys on such a host is reported by
+        # verify (a named refusal), not silently deleted by a branch that was selected for another reason
+        self.claim()
         hotfix.CLIENT_KEYS.write_text(CLIENT_KEYS)
-        host = self.deb(dpkg=KNOWN_NOT_INSTALLED_DEB)
-        self.assertTrue(host.remove('4.14.1', OWNER)['changed'])
-        self.assertFalse(hotfix.PREF.exists())
-        self.assertFalse(hotfix.CLIENT_KEYS.exists())
-        self.assertFalse(any(call[0] == 'apt-get' for call in host.r.calls), 'nothing left to purge')
-        # and once nothing is left, a further rerun is refused (not a silent no-op that hides a wrong target)
-        with self.assertRaises(hotfix.Refused):
-            self.deb(dpkg=KNOWN_NOT_INSTALLED_DEB).remove('4.14.1', OWNER)
+        host = self.deb(dpkg=ABSENT_DEB, listener=True)
+        host.remove('4.14.1', OWNER)
+        self.assertTrue(hotfix.CLIENT_KEYS.exists())
+        with self.assertRaisesRegex(hotfix.Refused, 'client.keys'):
+            host.verify()
+
+    def test_a_failed_retirement_after_the_purge_leaves_residue_and_the_rerun_finishes(self):
+        for family in ('Debian', 'RedHat'):
+            for name, runner in (('listener survives the restart', dict(stuck_listener=True)),
+                                 ('the restart itself fails', dict(fail_on=[['systemctl', 'restart', 'auditd'] if family == 'Debian' else [str(hotfix.AUDIT_LEGACY_RESTART)]]))):
+                with self.subTest(family=family, failure=name):
+                    self.reset()
+                    host = self.build(family, True, **runner)
+                    with self.assertRaises(hotfix.Refused):
+                        host.remove('4.14.1', OWNER)
+                    # the package is gone, the policy and keys are gone, the plugin is not
+                    self.assertFalse(hotfix.CLIENT_KEYS.exists() or hotfix.PREF.exists())
+                    self.assertFalse(hotfix.LOCKS.exists() and hotfix.BEGIN in hotfix.LOCKS.read_text())
+                    state = hotfix.Host(family, host.r).inspect('4.14.1', OWNER)
+                    self.assertEqual((state['installed'], state['skewed'], state['residue']), ('', False, True))
+                    host.r.stuck_listener, host.r.fail_on = False, []
+                    hotfix.Host(family, host.r).remove('4.14.1', OWNER)
+                    self.assertEqual(hotfix.Host(family, host.r).verify(), {'removed': True})
 
     # -- the audit plugin the RPM removal leaves running (EL) ---------------------------
 
@@ -366,7 +607,7 @@ class HotfixTests(unittest.TestCase):
     def test_auditd_is_left_alone_when_nothing_is_orphaned(self):
         self.claim()
         cases = {
-            'config still present (someone owns it)': (dict(listener=True), lambda: hotfix.AUDIT_PLUGIN.write_text('active = yes\n')),
+            'config still present (someone owns it)': (dict(listener=True, keeps_plugin_config=True), lambda: hotfix.AUDIT_PLUGIN.write_text('active = yes\n')),
             'no listener': (dict(listener=False), lambda: None),
         }
         for name, (kwargs, prepare) in cases.items():
@@ -378,27 +619,57 @@ class HotfixTests(unittest.TestCase):
                 host.remove('4.14.1', OWNER)
                 self.assertEqual(self.restarts(host), [])
 
-    def test_a_missing_legacy_action_refuses_instead_of_guessing(self):
+    def test_a_missing_legacy_action_refuses_a_skewed_host_before_anything_changes(self):
+        # EL needs auditd's legacy restart action after the purge. Found out only then, it would strand
+        # the host with no package; inspect refuses while the package is still installed.
+        hotfix.AUDIT_LEGACY_RESTART.unlink()
+        for action in ('inspect', 'quiesce', 'remove'):
+            with self.subTest(action=action):
+                host = self.rpm_host(rpm=Result(stdout='4.14.9-1\tx86_64'), listener=True)
+                with self.assertRaisesRegex(hotfix.Refused, 'no supported way to restart auditd'):
+                    self.act(host, action)
+                self.assertEqual(host.r.mutations(), [])
+
+    def test_the_restart_capability_is_only_demanded_where_it_can_matter(self):
+        hotfix.AUDIT_LEGACY_RESTART.unlink()
+        # twins of the refusal above: a compatible EL host, a Debian host (systemctl restart, not the legacy
+        # action) and a skewed EL host that does have the action are all judged normally
+        self.assertFalse(self.rpm_host(rpm=Result(stdout='4.14.1-1\tx86_64')).inspect('4.14.1')['skewed'])
+        self.assertTrue(self.deb(dpkg=installed_deb()).inspect('4.14.1')['skewed'])
+        hotfix.AUDIT_LEGACY_RESTART.write_text('#!/bin/sh\n')
+        self.assertTrue(self.rpm_host(rpm=Result(stdout='4.14.9-1\tx86_64')).inspect('4.14.1')['skewed'])
+
+    def test_a_residue_host_without_the_legacy_action_is_refused_when_it_would_need_it(self):
+        # nothing is left to strand once the package is gone, so the refusal comes at the retirement and is typed
         self.claim()
         hotfix.AUDIT_LEGACY_RESTART.unlink()
+        host = self.rpm_host(rpm=ABSENT_RPM, listener=True)
         with self.assertRaisesRegex(hotfix.Refused, 'no supported way to restart auditd'):
-            self.rpm_host(rpm=Result(stdout='4.14.9-1\tx86_64'), listener=True).remove('4.14.1', OWNER)
+            host.remove('4.14.1', OWNER)
+        self.assertEqual(host.r.mutations(), [])
+
+    def test_a_missing_ss_refuses_a_skewed_host_before_anything_changes(self):
+        # ss is what tells the removal whether the audit plugin was orphaned; a purge done on a host where it
+        # does not run could not finish the job
+        hotfix.CLIENT_KEYS.write_text(CLIENT_KEYS)
+        for family in ('Debian', 'RedHat'):
+            for action in ('inspect', 'quiesce', 'remove'):
+                with self.subTest(family=family, action=action):
+                    host = (self.deb(dpkg=installed_deb(), no_ss=True) if family == 'Debian'
+                            else self.rpm_host(rpm=Result(stdout='4.14.9-1\tx86_64'), no_ss=True))
+                    with self.assertRaisesRegex(hotfix.Refused, 'ss -xl'):
+                        self.act(host, action)
+                    self.assertEqual(host.r.mutations(), [])
+                    self.assertTrue(hotfix.CLIENT_KEYS.exists())
+        # twin: the same hosts with a working ss are judged
+        self.assertTrue(self.act(self.deb(dpkg=installed_deb()), 'inspect')['skewed'])
+        self.assertTrue(self.act(self.rpm_host(rpm=Result(stdout='4.14.9-1\tx86_64')), 'inspect')['skewed'])
 
     def test_a_listener_that_survives_the_restart_refuses(self):
         self.claim()
         host = self.rpm_host(rpm=Result(stdout='4.14.9-1\tx86_64'), listener=True, stuck_listener=True)
         with self.assertRaisesRegex(hotfix.Refused, 'still present after restarting auditd'):
             host.remove('4.14.1', OWNER)
-
-    def test_a_rerun_finishes_a_retirement_the_first_run_did_not(self):
-        # package and keys already gone, only the orphaned plugin is left: still actionable
-        self.claim()
-        host = self.rpm_host(rpm=ABSENT_RPM, listener=True)
-        self.assertTrue(host.remove('4.14.1', OWNER)['changed'])
-        self.assertFalse(host.r.listener)
-        # and with nothing at all left the rerun is refused, not a silent no-op
-        with self.assertRaisesRegex(hotfix.Refused, 'not newer than the manager'):
-            self.rpm_host(rpm=ABSENT_RPM).remove('4.14.1', OWNER)
 
     def test_verify_fails_while_the_endpoint_listener_remains(self):
         with self.assertRaisesRegex(hotfix.Refused, 'who-data endpoint'):

@@ -1,10 +1,12 @@
 package spec
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -125,6 +127,54 @@ func TestWazuhAgentHotfixConstantsMatchTheTransactionCoordinator(t *testing.T) {
 	if pyConst(t, hot, "MANAGER_RELEASE") != pyConst(t, tx, "VERSION") {
 		t.Error("the hotfix's manager release grammar differs from the coordinator's VERSION")
 	}
+	// The who-data endpoint, the audit plugin config the agent writes and the enrollment file each live in
+	// more than one file (the helper, audit-whodata.py, the coordinator, wazuh-fim-apply.yml); the helper's
+	// copies must be the same paths, or its notion of "orphaned plugin" or "enrolled" drifts from the
+	// playbooks that create them.
+	bare := func(v string) string {
+		return strings.Trim(strings.TrimSuffix(strings.TrimPrefix(v, "Path("), ")"), "'\"")
+	}
+	capture := func(source, pattern, what string) string {
+		m := regexp.MustCompile(pattern).FindStringSubmatch(source)
+		if m == nil {
+			t.Fatalf("cannot find %s", what)
+		}
+		return m[1]
+	}
+	endpoint := bare(pyConst(t, hot, "AUDIT_ENDPOINT"))
+	whodata := readHotfixFile(t, "../../playbooks/apply/files/audit-whodata.py")
+	for label, other := range map[string]string{
+		"audit-whodata.py ENDPOINT":               bare(pyConst(t, whodata, "ENDPOINT")),
+		"wazuh-transaction.py Central.endpoint()": capture(tx, `def endpoint\(\): return Path\('([^']+)'\)`, "the coordinator's endpoint()"),
+	} {
+		if other != endpoint {
+			t.Errorf("AUDIT_ENDPOINT %s differs from %s %s", endpoint, label, other)
+		}
+	}
+	if got, want := bare(pyConst(t, hot, "AUDIT_PLUGIN")), capture(tx, `def plugin\(\): return Path\('([^']+)'\)`, "the coordinator's plugin()"); got != want {
+		t.Errorf("AUDIT_PLUGIN %s differs from wazuh-transaction.py plugin() %s", got, want)
+	}
+	// and spec C8 (and C5, for client.keys) name the same paths the helper acts on
+	spec, err := Parse(hotfixSpecPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range spec.Rows {
+		switch row.ID {
+		case "C8":
+			if !strings.Contains(row.Command, strings.TrimPrefix(endpoint, "/var/")) {
+				t.Errorf("spec C8 does not look for the endpoint %s the helper retires: %s", endpoint, row.Command)
+			}
+		case "C5":
+			if !strings.Contains(row.Command, bare(pyConst(t, hot, "CLIENT_KEYS"))) {
+				t.Errorf("spec C5 does not check the client.keys path the helper removes: %s", row.Command)
+			}
+		}
+	}
+	fim := readHotfixFile(t, "../../playbooks/apply/wazuh-fim-apply.yml")
+	if got, want := bare(pyConst(t, hot, "CLIENT_KEYS")), capture(fim, `(?m)^\s+wazuh_client_keys: (\S+)`, "wazuh-fim-apply.yml wazuh_client_keys"); got != want {
+		t.Errorf("CLIENT_KEYS %s differs from wazuh-fim-apply.yml wazuh_client_keys %s", got, want)
+	}
 }
 
 // Every action the playbook invokes on either script must exist there.
@@ -155,6 +205,7 @@ type hotfixPlay struct {
 	Hosts          string           `yaml:"hosts"`
 	AnyErrorsFatal bool             `yaml:"any_errors_fatal"`
 	Serial         int              `yaml:"serial"`
+	Vars           map[string]any   `yaml:"vars"`
 	PreTasks       []map[string]any `yaml:"pre_tasks"`
 	Tasks          []map[string]any `yaml:"tasks"`
 }
@@ -171,6 +222,16 @@ func hotfixPlays(t *testing.T) []hotfixPlay {
 	return plays
 }
 
+// taskTags are the tags a task declares itself.
+func taskTags(task map[string]any) []string {
+	var out []string
+	tags, _ := task["tags"].([]any)
+	for _, tag := range tags {
+		out = append(out, tag.(string))
+	}
+	return out
+}
+
 // The whole-run fail-closed guarantee lives in the structure: the read-only play stops the entire
 // run on its first error, and the mutating play sees only hosts that play judged, one at a time,
 // stopping at the first failure.
@@ -183,50 +244,88 @@ func TestWazuhAgentHotfixPlaybookStructureGivesFailClosed(t *testing.T) {
 	if !remove.AnyErrorsFatal || remove.Serial != 1 {
 		t.Errorf("the remove play must be serial 1 and any_errors_fatal (got serial=%d fatal=%v)", remove.Serial, remove.AnyErrorsFatal)
 	}
-	if !strings.Contains(remove.Hosts, "pilot_hotfix_skewed") || !strings.Contains(remove.Hosts, "pilot_hotfix_mode") {
+	if !strings.Contains(remove.Hosts, "pilot_hotfix_actionable") || !strings.Contains(remove.Hosts, "pilot_hotfix_mode") {
 		t.Errorf("the remove play must target only the hosts the observe play collected, and only in apply mode: %q", remove.Hosts)
 	}
-	text := readHotfixFile(t, hotfixPlaybookPath)
-	observeText := text[:strings.Index(text, "- name: Wazuh agent skew hotfix — remove")]
-	for _, mutating := range []string{"quiesce", "remove --family", "writer-claim", "writer-release", "manage_agents -r", "apt-get", "dnf remove"} {
-		if strings.Contains(observeText, mutating) {
+	var observeText strings.Builder
+	for _, task := range observe.PreTasks {
+		observeText.WriteString(taskText(t, task))
+	}
+	for _, task := range observe.Tasks {
+		observeText.WriteString(taskText(t, task))
+	}
+	for _, mutating := range []string{"quiesce", "remove --family", "writer-claim", "writer-release", "manage_agents -r", "apt-get", "dnf remove", "wazuh-agent-hotfix-deregister"} {
+		if strings.Contains(observeText.String(), mutating) {
 			t.Errorf("the read-only play contains %q", mutating)
 		}
 	}
-	if !strings.Contains(observeText, "group_by") {
-		t.Error("the observe play no longer collects the skewed hosts for the remove play")
+	if !strings.Contains(observeText.String(), "key: pilot_hotfix_actionable") {
+		t.Error("the observe play no longer collects the actionable hosts for the remove play")
 	}
 }
 
-// The complete stage gate of AGENTS.md section 4.3 sits in the mutating play, tagged always, and
-// the manager the run deregisters from is held to the same stage as the agent host.
+// Every refusal that does not need a change first is made in Play A, tagged always, evaluated only in apply
+// mode and only for the hosts that run would change (the observation must be able to plan a mixed-stage
+// inventory); Play B keeps the same stage gates as defence in depth. The behaviour is proved by
+// wazuh_agent_hotfix_playbook_test.go; this locks the shape so an edit that moves a gate back is seen here.
 func TestWazuhAgentHotfixStageGate(t *testing.T) {
-	remove := hotfixPlays(t)[1]
-	var gates []string
-	for _, task := range remove.PreTasks {
-		if _, ok := task["ansible.builtin.assert"]; !ok {
+	plays := hotfixPlays(t)
+	gatesOf := func(tasks []map[string]any, name string) (gates []string, byName map[string]map[string]any) {
+		byName = map[string]map[string]any{}
+		for _, task := range tasks {
+			if _, ok := task["ansible.builtin.assert"]; !ok {
+				continue
+			}
+			if tags := taskTags(task); len(tags) != 1 || tags[0] != "always" {
+				t.Errorf("%s gate %q is not tagged always: a --tags run would skip it", name, task["name"])
+			}
+			gates = append(gates, task["name"].(string))
+			byName[task["name"].(string)] = task
+		}
+		return gates, byName
+	}
+	wantStage := []string{"explicit confirm", "environment group", "manager this run", "staging attestation"}
+	playBGates, _ := gatesOf(plays[1].PreTasks, "Play B")
+	joinedB := strings.Join(playBGates, "\n")
+	for _, want := range wantStage {
+		if !strings.Contains(joinedB, want) {
+			t.Errorf("Play B lost its defence-in-depth gate: %s\n%s", want, joinedB)
+		}
+	}
+	playAGates, byName := gatesOf(plays[0].Tasks, "Play A")
+	joinedA := strings.Join(playAGates, "\n")
+	for _, want := range append(append([]string{}, wantStage...), "in the plan the operator confirmed", "pilot_hotfix_mode is apply or observe") {
+		if !strings.Contains(joinedA, want) {
+			t.Errorf("Play A (before any change) lacks the gate: %s\n%s", want, joinedA)
+		}
+	}
+	for name, task := range byName {
+		if !strings.HasPrefix(name, "Gate: staging") && !strings.Contains(name, "environment group") && !strings.Contains(name, "manager this run") &&
+			!strings.Contains(name, "attestation") && !strings.Contains(name, "plan the operator confirmed") {
 			continue
 		}
-		tags, _ := task["tags"].([]any)
-		if len(tags) != 1 || tags[0] != "always" {
-			t.Errorf("gate %q is not tagged always: a --tags run would skip it", task["name"])
-		}
-		gates = append(gates, task["name"].(string))
-	}
-	joined := strings.Join(gates, "\n")
-	for _, want := range []string{"explicit confirm", "environment group", "manager this run deregisters", "staging attestation"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("missing stage gate: %s\n%s", want, joined)
+		when := fmt.Sprint(task["when"])
+		if !strings.Contains(when, "hotfix_apply_mode") || !strings.Contains(when, "hotfix_actionable") {
+			t.Errorf("Play A gate %q must be evaluated only in apply mode and only for the hosts this run would change: when = %s", name, when)
 		}
 	}
 	text := readHotfixFile(t, hotfixPlaybookPath)
-	if !strings.Contains(text, "hostvars[hotfix_manager_host].group_names") {
-		t.Error("the manager's environment group is not checked against the stage")
+	if strings.Count(text, "hostvars[hotfix_manager_host].group_names") < 6 {
+		t.Error("the manager's environment group is not checked against the stage in both plays")
 	}
+	for _, task := range plays[0].Tasks {
+		if task["name"] == "Check the manager's registry against this host's recorded enrollment (read-only; refuses before any change)" {
+			return
+		}
+	}
+	t.Error("Play A no longer checks the manager registry before any change")
 }
 
-// Mutation and rollback semantics: no rollback by design, but the writer is always released and a
-// failure is never turned into success.
+// Resumability by order: the steps that make a host unselectable by a rerun come last. Play B's block runs the
+// writer claim, quiesce, the deregistration (which re-checks the registry), the single remove action, the
+// verification and the outcome report in that order, then releases the writer. And the tags follow
+// AGENTS.md section 4.4's reverse direction: every step that must precede a mutation carries the tags of every
+// mutation after it, so a --tags run never reaches one without the steps guarding it.
 func TestWazuhAgentHotfixBlockReleasesTheWriterAndKeepsFailures(t *testing.T) {
 	remove := hotfixPlays(t)[1]
 	var block map[string]any
@@ -257,29 +356,86 @@ func TestWazuhAgentHotfixBlockReleasesTheWriterAndKeepsFailures(t *testing.T) {
 	if !strings.Contains(release["name"].(string), "Release") || release["when"] == nil {
 		t.Error("the always section must release the writer, only when this play claimed it")
 	}
-	// the manager registration is removed before the package, so an interruption never loses
-	// the enrollment record (the only copy of the agent ID is in client.keys, removed last)
-	text := readHotfixFile(t, hotfixPlaybookPath)
-	order := []string{"writer-claim", "quiesce", "wazuh-agent-hotfix-deregister.yml", "remove --family", "verify --family", "writer-release"}
+	// the order of the steps: claim, quiesce, deregister, remove, verify
+	steps := []struct{ label, marker string }{
+		{"claim", "writer-claim"}, {"quiesce", "wazuh-agent-hotfix.py quiesce"}, {"deregister", "wazuh-agent-hotfix-deregister.yml"},
+		{"remove", "wazuh-agent-hotfix.py remove"}, {"verify", "wazuh-agent-hotfix.py verify"},
+	}
+	tasks, _ := block["block"].([]any)
+	position := map[string]int{}
+	tagsOf := map[string][]string{}
+	for i, item := range tasks {
+		task := item.(map[string]any)
+		text := taskText(t, task)
+		for _, step := range steps {
+			if strings.Contains(text, step.marker) {
+				if _, dup := position[step.label]; dup {
+					t.Errorf("step %s appears twice", step.label)
+				}
+				position[step.label] = i
+				tagsOf[step.label] = taskTags(task)
+			}
+		}
+	}
 	prev := -1
-	for _, step := range order {
-		idx := strings.Index(text, step)
-		if idx < 0 || idx < prev {
-			t.Errorf("step %q is missing or out of order (claim, quiesce, deregister, remove, verify, release)", step)
+	for _, step := range steps {
+		idx, ok := position[step.label]
+		if !ok || idx < prev {
+			t.Errorf("step %q is missing or out of order (claim, quiesce, deregister, remove, verify)", step.label)
 		}
 		prev = idx
 	}
+	// the reverse-direction tag rule: a mutation's tags are carried by every step before it
+	mutations := []string{"claim", "quiesce", "deregister", "remove"}
+	for i, before := range mutations {
+		for _, after := range mutations[i+1:] {
+			for _, tag := range tagsOf[after] {
+				if !slices.Contains(tagsOf[before], tag) {
+					t.Errorf("step %s (tags %v) runs before %s (tags %v) but lacks tag %s: --tags %s would reach the later mutation without it",
+						before, tagsOf[before], after, tagsOf[after], tag, tag)
+				}
+			}
+		}
+	}
+	for _, own := range []struct{ step, tag string }{{"quiesce", "C2"}, {"deregister", "C6"}, {"claim", "C7"}} {
+		if !slices.Contains(tagsOf[own.step], own.tag) {
+			t.Errorf("step %s lost its own row tag %s: %v", own.step, own.tag, tagsOf[own.step])
+		}
+	}
+	for _, tag := range []string{"C1", "C3", "C4", "C5", "C8"} {
+		if !slices.Contains(tagsOf["remove"], tag) {
+			t.Errorf("the remove step lost row tag %s: %v", tag, tagsOf["remove"])
+		}
+	}
 }
 
-// The deregistration only acts on an ID whose recorded name matches, and treats "already gone"
-// as success so a rerun after an interruption finishes.
+// The registry check refuses a recorded enrollment the manager contradicts (another name under the ID, or the
+// name under another ID) and reads case-insensitively; the deregistration only acts on an ID the check found
+// exactly once, and treats "already gone" as success so a rerun after an interruption finishes. The behaviour
+// is proved in wazuh_agent_hotfix_playbook_test.go; this locks the expressions so an edit is seen here.
 func TestWazuhAgentHotfixDeregisterIsExactAndIdempotent(t *testing.T) {
-	text := readHotfixFile(t, hotfixTasksPath)
+	check := readHotfixFile(t, "../../playbooks/apply/tasks/wazuh-agent-hotfix-registry-check.yml")
 	for _, want := range []string{
 		"selectattr('0', 'equalto', hotfix_state.registration.id)",
-		"(hotfix_registry_match[0][1] | lower) == (hotfix_state.registration.name | lower)",
+		"selectattr('1', 'equalto', hotfix_state.registration.name | lower)",
+		"rejectattr('0', 'equalto', hotfix_state.registration.id)",
+		"hotfix_registry_by_id[0][1] == (hotfix_state.registration.name | lower)",
+		"hotfix_registry_elsewhere | length == 0",
+		"hotfix_registry_listing.stdout | lower",
+		"check_mode: false",
+	} {
+		if !strings.Contains(check, want) {
+			t.Errorf("registry check lacks %q", want)
+		}
+	}
+	if regexp.MustCompile(`(?m)^\s+(ansible\.builtin\.)?(shell|command|script):.*manage_agents -r`).MatchString(check) {
+		t.Error("the registry check must be read-only; the deregistration lives in the deregister file")
+	}
+	text := readHotfixFile(t, hotfixTasksPath)
+	for _, want := range []string{
+		"file: wazuh-agent-hotfix-registry-check.yml",
 		"'does not exist' not in",
-		"hotfix_registry_match | length == 1",
+		"hotfix_registry_by_id | length == 1",
 		"set -o pipefail",
 		"executable: /bin/bash",
 	} {
@@ -287,8 +443,10 @@ func TestWazuhAgentHotfixDeregisterIsExactAndIdempotent(t *testing.T) {
 			t.Errorf("deregister tasks lack %q", want)
 		}
 	}
-	if regexp.MustCompile(`(?i)(hostname|inventory_hostname)\s*(in|==)`).MatchString(text) {
-		t.Error("the deregistration must never match by hostname; only by the recorded ID and name")
+	for name, body := range map[string]string{"check": check, "deregister": text} {
+		if regexp.MustCompile(`(?i)(hostname|inventory_hostname)\s*(in|==)`).MatchString(body) {
+			t.Errorf("the %s tasks must never match by hostname; only by the recorded ID and name", name)
+		}
 	}
 }
 
@@ -342,6 +500,91 @@ func TestWazuhAgentHotfixSpecRowsPrintALoneIntegerEvenWhenToolsAreMissing(t *tes
 				t.Errorf("C6 printed %q on a host with a manager stack but no coordinator; that must FAIL the row", withManager)
 			}
 		}
+	}
+	// C8 with no `ss` at all on PATH (only sh and grep): still a lone integer, and 1 (FAIL), not the 0 a
+	// missing tool used to give. TestWazuhAgentHotfixSpecC8FailsWhenSsCannotAnswer has the other ss cases.
+	noSS := t.TempDir()
+	for _, name := range []string{"sh", "grep"} {
+		path, lookErr := exec.LookPath(name)
+		if lookErr != nil {
+			t.Fatal(lookErr)
+		}
+		if err := os.Symlink(path, filepath.Join(noSS, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("sh", "-c", s.Rows[7].Command)
+	cmd.Env = []string{"PATH=" + noSS}
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil || strings.TrimSpace(string(out)) != "1" {
+		t.Errorf("C8 on a host with no ss printed %q (err %v); it must be a lone 1", strings.TrimSpace(string(out)), runErr)
+	}
+}
+
+// C8 asks whether any unix socket still listens on Wazuh's who-data endpoint, which only `ss -xl` can say. A
+// host where ss is missing, or where it fails, has not said "no listener", so the row must FAIL there (print
+// 1) instead of passing because grep found nothing in an empty answer. The ss outputs are the real AlmaLinux
+// 9.8 `ss -xl` shapes (the helper's own control uses the same ones); every failing case has its passing twin.
+func TestWazuhAgentHotfixSpecC8FailsWhenSsCannotAnswer(t *testing.T) {
+	s, err := Parse(hotfixSpecPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row Row
+	for _, r := range s.Rows {
+		if r.ID == "C8" {
+			row = r
+		}
+	}
+	if row.ID == "" {
+		t.Fatal("no C8 row")
+	}
+	tools := map[string]string{}
+	for _, name := range []string{"grep", "sh"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Skipf("%s not found: %v", name, err)
+		}
+		tools[name] = path
+	}
+	const header = "Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:Port\n" +
+		"u_str LISTEN 0      4096               /run/systemd/private 12 * 0\n"
+	const listener = "u_str LISTEN 0      1                  /var/ossec/queue/sockets/audit 41824             * 0\n"
+	for _, tc := range []struct {
+		name string
+		ss   string // the fake ss script body; "" means no ss on PATH at all
+		want string
+	}{
+		{"ss is missing", "", "1"},
+		{"ss fails with no output", "exit 1\n", "1"},
+		{"ss fails after printing a header", "printf '%s' '" + header + "'\nexit 1\n", "1"},
+		{"twin: ss answers and nothing listens on the endpoint", "printf '%s' '" + header + "'\n", "0"},
+		{"ss answers and the stale listener is there", "printf '%s' '" + header + listener + "'\n", "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			for name, path := range tools {
+				if err := os.Symlink(path, filepath.Join(bin, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.ss != "" {
+				if err := os.WriteFile(filepath.Join(bin, "ss"), []byte("#!/bin/sh\n"+tc.ss), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("sh", "-c", row.Command)
+			// only sh, grep and (maybe) ss on PATH: every other tool the row uses must be a shell builtin, which
+			// is also what makes "ss missing" real here instead of depending on the machine running the test
+			cmd.Env = []string{"PATH=" + bin}
+			out, runErr := cmd.CombinedOutput()
+			if runErr != nil {
+				t.Errorf("sh exited non-zero: %v (the row must absorb its own failure into the printed integer)", runErr)
+			}
+			if got := strings.TrimSpace(string(out)); got != tc.want {
+				t.Errorf("C8 printed %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

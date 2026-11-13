@@ -30,11 +30,16 @@ var hotfixWazuhAgentSkewCmd = &cobra.Command{
 
   1. 唯讀偵測：讀 manager 的原生版本 M，與每台 wazuh-fim 主機實際安裝的 agent 版本比較。
   2. 印出計畫（只有版本比 M 新的主機會被動）並確認。
-  3. 逐台：停 agent → 在 manager 依記錄的 ID 與名稱取消登記 → 解除 pilot 加的 hold／
-     versionlock → 卸載套件 → 移除 client.keys。每一步冪等，中斷後重跑即可。
+  3. 先重新偵測，並在變更任何主機之前做完所有拒絕判斷（stage 確認與環境 group、manager 的
+     登記表、你確認過的主機清單）。
+  4. 逐台：停 agent → 在 manager 依記錄的 ID 與名稱取消登記 → 解除 pilot 加的 hold／
+     versionlock → 移除 client.keys → 卸載套件 → 清除套件遺留的 audit plugin。每一步冪等，
+     卸載是最後一個會讓主機「看起來沒事」的步驟，所以某一步失敗後重跑即可接續；controller
+     被殺掉後殘留的 writer marker、卸載動作本身被殺掉，要先依 runbook 手動處理。
 
 M 讀不到、版本無法判定、有進行中的 Wazuh 交易等任何無法確定的情況，整次在變更之前
-拒絕，不做部分移除。版本相容或沒裝 agent 的主機完全不動。
+拒絕，不做部分移除。版本相容或沒裝 agent 的主機完全不動。上一次移除在卸載之後才失敗，
+留下的只剩還在跑的 audit plugin 時，那台主機也會列在計畫裡（「清除遺留的 audit plugin」）。
 
 完成後用 pilot deploy 重新安裝（版本取 wazuh_version，未設定時為 M）。`,
 	Args: cobra.NoArgs,
@@ -132,13 +137,14 @@ func runHotfixWazuhAgentSkew(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintln(out)
 	plan.RenderPlan(out)
 	fmt.Fprintln(out)
-	skewed := plan.SkewedHosts()
-	if len(skewed) == 0 {
-		fmt.Fprintln(out, "✅ 沒有任何 agent 比 manager 新，什麼都不需要做。")
+	actionable := plan.ActionableHosts()
+	if len(actionable) == 0 {
+		fmt.Fprintln(out, "✅ 沒有任何 agent 比 manager 新，也沒有需要清除的遺留 audit plugin，什麼都不需要做。")
 		return nil
 	}
+	skewed, residue := plan.SkewedHosts(), plan.ResidueHosts()
 	if hotfixSkewPreviewOnlyFlag {
-		fmt.Fprintf(out, "✅ --preview-only：偵測完成，%d 台主機需要處理，沒有變更任何東西。\n", len(skewed))
+		fmt.Fprintf(out, "✅ --preview-only：偵測完成，%d 台主機需要處理（移除 agent %d 台、清除遺留 audit plugin %d 台），沒有變更任何東西。\n", len(actionable), len(skewed), len(residue))
 		return nil
 	}
 
@@ -146,13 +152,13 @@ func runHotfixWazuhAgentSkew(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return abortOrErr(err)
 	}
-	if !runConfirmPrompt(promptExecutionConfirmApply, fmt.Sprintf("要移除上面 %d 台主機的 Wazuh agent 嗎？（不可復原：套件會被卸載、manager 的登記會被刪除）", len(skewed)), false) {
+	if !runConfirmPrompt(promptExecutionConfirmApply, hotfixSkewConfirmText(len(skewed), len(residue)), false) {
 		fmt.Fprintln(out, "已取消，沒有變更任何東西。")
 		return nil
 	}
 
 	fmt.Fprintln(out, "→ 套用（先重新偵測，再逐台處理）…")
-	apply, results, err := hotfixSkewApply(ctx, runner, out, inv, vault, decision)
+	apply, results, err := hotfixSkewApply(ctx, runner, out, inv, vault, decision, actionable)
 	if err != nil {
 		return err
 	}
@@ -160,12 +166,23 @@ func runHotfixWazuhAgentSkew(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintln(out)
 	summary.Render(out)
 	if len(summary.Incomplete) > 0 {
-		return fmt.Errorf("hotfix 沒有完成：%v 沒有回報移除完成", summary.Incomplete)
+		return fmt.Errorf("hotfix 沒有完成：%v 沒有回報處理完成", summary.Incomplete)
 	}
-	if len(summary.Removed) > 0 {
+	if len(summary.Removed) > 0 || len(summary.Cleaned) > 0 {
 		fmt.Fprintln(out, "\n接著用 pilot deploy 單一元件 wazuh-fim 重新安裝，版本取 wazuh_version（未設定時為 manager 的版本）。")
 	}
 	return nil
+}
+
+// hotfixSkewConfirmText is the question the operator answers (default No) for what the plan lists.
+func hotfixSkewConfirmText(skewed, residue int) string {
+	switch {
+	case residue == 0:
+		return fmt.Sprintf("要移除上面 %d 台主機的 Wazuh agent 嗎？（不可復原：套件會被卸載、manager 的登記會被刪除）", skewed)
+	case skewed == 0:
+		return fmt.Sprintf("要清除上面 %d 台主機遺留的 audit plugin 嗎？（這些主機的 agent 套件已經不在，只會重啟 auditd）", residue)
+	}
+	return fmt.Sprintf("要處理上面 %d 台主機嗎？（移除 %d 台的 Wazuh agent，不可復原：套件會被卸載、manager 的登記會被刪除；另清除 %d 台遺留的 audit plugin）", skewed+residue, skewed, residue)
 }
 
 // checkHotfixSkewInventory refuses early, with a plain message, an inventory the
@@ -198,7 +215,7 @@ func runHotfixSkewPlaybook(ctx context.Context, runner *ansible.Runner, args []s
 		return res, err
 	}
 	if res.ExitCode != 0 {
-		return res, fmt.Errorf("ansible-playbook 結束碼 %d：沒有任何主機被變更之前的失敗代表整次拒絕；若是套用中途失敗，重跑同一個指令即可接續（每一步冪等）", res.ExitCode)
+		return res, fmt.Errorf("ansible-playbook 結束碼 %d：在逐台變更開始之前的失敗代表整次拒絕、沒有變更任何東西；若是逐台變更中途失敗，重跑同一個指令即可接續（每一步冪等；若主機已卸載 agent，重跑會把它列為「清除遺留的 audit plugin」）；被殺掉的 run 殘留的 writer marker 或卸載到一半的套件，先依 runbook 處理", res.ExitCode)
 	}
 	return res, nil
 }
@@ -215,8 +232,16 @@ func hotfixSkewObserve(ctx context.Context, runner *ansible.Runner, inv string, 
 	return obs, nil
 }
 
-func hotfixSkewApply(ctx context.Context, runner *ansible.Runner, out io.Writer, inv string, vault vaultInput, decision stageDecision) (hotfix.Observation, []hotfix.Result, error) {
+// hotfixSkewApply runs the apply play. It hands the playbook the hosts the operator confirmed, so a host
+// that became actionable after the plan was shown refuses the run before anything is changed instead of
+// being changed without having been confirmed.
+func hotfixSkewApply(ctx context.Context, runner *ansible.Runner, out io.Writer, inv string, vault vaultInput, decision stageDecision, confirmed []string) (hotfix.Observation, []hotfix.Result, error) {
+	hostsVar, err := hotfix.ConfirmedHostsExtraVar(confirmed)
+	if err != nil {
+		return hotfix.Observation{}, nil, err
+	}
 	extra := append([]string{"stage=" + decision.Stage}, decision.ConfirmVars...)
+	extra = append(extra, hostsVar)
 	applyRunner := *runner
 	applyRunner.StdoutWriter = out
 	res, err := runHotfixSkewPlaybook(ctx, &applyRunner, hotfixSkewArgs(inv, extra, vault))
@@ -227,7 +252,11 @@ func hotfixSkewApply(ctx context.Context, runner *ansible.Runner, out io.Writer,
 	if err != nil {
 		return hotfix.Observation{}, nil, fmt.Errorf("套用結束了，但無法判讀它的回報，不當作成功：%w", err)
 	}
-	return obs, hotfix.ParseResults(res.Stdout), nil
+	results, err := hotfix.ParseResults(res.Stdout)
+	if err != nil {
+		return hotfix.Observation{}, nil, fmt.Errorf("套用結束了，但無法判讀它的回報，不當作成功：%w", err)
+	}
+	return obs, results, nil
 }
 
 func hotfixSkewFailure(res *ansible.Result, err error) error {

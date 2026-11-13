@@ -11,27 +11,36 @@ ok: [agent-new] => {
 ok: [agent-none] => {
     "msg": "PILOT_HOTFIX_MANAGER host=mgr-1 version=4.14.1"
 }
+ok: [agent-left] => {
+    "msg": "PILOT_HOTFIX_MANAGER host=mgr-1 version=4.14.1"
+}
 
 TASK [ansible.builtin.debug] ***************************************************
+ok: [agent-ok] => {
+    "msg": "PILOT_HOTFIX_STATE host=agent-ok installed=4.14.1-1 skewed=false residue=false registration=002:agent-ok"
+}
 ok: [agent-new] => {
-    "msg": "PILOT_HOTFIX_STATE host=agent-new installed=4.14.9-1 skewed=true registration=003:agent-new"
+    "msg": "PILOT_HOTFIX_STATE host=agent-new installed=4.14.9-1 skewed=true residue=false registration=003:agent-new"
 }
 ok: [agent-none] => {
-    "msg": "PILOT_HOTFIX_STATE host=agent-none installed=none skewed=false registration=none"
+    "msg": "PILOT_HOTFIX_STATE host=agent-none installed=none skewed=false residue=false registration=none"
 }
-ok: [agent-ok] => {
-    "msg": "PILOT_HOTFIX_STATE host=agent-ok installed=4.14.1-1 skewed=false registration=002:agent-ok"
+ok: [agent-left] => {
+    "msg": "PILOT_HOTFIX_STATE host=agent-left installed=none skewed=false residue=true registration=none"
 }
 
 TASK [ansible.builtin.debug] ***************************************************
+skipping: [agent-ok]
 ok: [agent-new] => {
-    "msg": "PILOT_HOTFIX_RESULT host=agent-new outcome=removed registration=003:agent-new"
+    "msg": "PILOT_HOTFIX_RESULT host=agent-new outcome=removed residue=false registration=003:agent-new"
 }
 skipping: [agent-none]
-skipping: [agent-ok]
+ok: [agent-left] => {
+    "msg": "PILOT_HOTFIX_RESULT host=agent-left outcome=removed residue=true registration=none"
+}
 
 PLAY RECAP *********************************************************************
+agent-left                 : ok=3    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
 agent-new                  : ok=3    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
 agent-none                 : ok=2    changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0
 agent-ok                   : ok=2    changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0
-
