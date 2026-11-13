@@ -47,6 +47,10 @@ pilot hotfix wazuh-agent-skew --dir <workspace> -i inventory.yml
 pilot hotfix wazuh-agent-skew --dir <workspace> -i inventory.yml --force [--stage staging|prod ...]
 ```
 
+`pilot hotfix` 會把確認過的主機清單交給套用的 `ansible-playbook`（`-e '{"pilot_hotfix_confirmed_hosts": [...]}'`），
+playbook 本身是內部入口，不給 operator 直接跑；直接用 `ansible-playbook` 只在 vm-target 驗收或診斷時，沒有確認清單、
+也沒有計畫與確認提示。
+
 旗標與 `pilot deploy` 同語意：`--dir`、`-i/--inventory`、`--timeout`、`--limit`、`--stage`、
 `--staging-attested-within-hours`、`--force`、`--preview-only`。`--limit` 只限縮要偵測與處理的 agent 主機，
 manager 一律會被讀取。完成後：
@@ -60,14 +64,43 @@ pilot deploy --dir <workspace> -i inventory.yml --component wazuh-fim --limit <�
 1. **唯讀偵測**：`wazuh-manager` group 必須恰好一台；讀它的原生版本 M，與每台 `wazuh-fim` 主機實際安裝的 agent
    版本比。版本比較**只在** `playbooks/apply/files/wazuh-agent-hotfix.py inspect` 做一次，嚴格大於 M 才算 skewed；
    Go 只讀 playbook 印出的 marker。版本相容或沒裝 agent 的主機一律不動。
-2. **整次 fail closed**：M 讀不到、版本無法解析、套件狀態未知、有進行中的 Wazuh writer 或未完成 journal、
-   pilot 的 hold 檔內容不是 pilot 自己寫的格式……任何一台無法判定，整次在變更任何主機之前拒絕並指名原因。
+   另有一種**residue** 主機：沒有 agent 套件、但套件遺留的 audit plugin 還在跑（上一次移除在卸載之後才失敗）；定義只有這一個
+   （沒有套件**且** audit plugin 孤立），只有套件不在或殘留 `client.keys` 的主機**不是** residue、不會被動。
+   residue 主機在計畫裡的動作是「清除遺留的 audit plugin（套件已不在）」，只重啟 auditd，不會被說成 skewed。
+2. **整次 fail closed，而且拒絕都在變更之前**：M 讀不到、版本無法解析、套件狀態未知、有進行中的 Wazuh writer 或未完成
+   journal、pilot 的 hold 檔內容不是 pilot 自己寫的格式……任何一台無法判定，整次在變更任何主機之前拒絕並指名原因。
+   同一個階段（Play A，唯讀）還做完所有「不需要先變更才能判斷」的拒絕，因為逐台變更的 play 是 `serial: 1`，放在那裡的檢查對
+   第二台會在第一台已被卸載之後才執行：stage／confirm、主機與 manager 的環境 group、prod attestation、你確認過的主機清單
+   （計畫確認之後才變成 actionable 的主機會被拒絕，重新 plan 即可）、manager 登記表與主機 `client.keys` 的比對
+   （記錄的 ID 下是別的 name，或記錄的 name 以另一個 ID 登記，都拒絕，不猜；登記表比對也在偵測階段做，所以
+   `--preview-only` 看得到）。逐台變更的 play 在取消登記之前再比對一次，因為兩者之間登記表可能變。
+   **硬性依賴**：每台 skewed 主機要有 `ss`（判斷 audit plugin 有沒有孤立），EL 還要有 auditd 套件的 legacy restart
+   action（`/usr/libexec/initscripts/legacy-actions/auditd/restart`）；沒有就在套件還裝著時拒絕，不會等卸載之後才發現。
 3. **逐台變更**（`serial: 1`，第一個失敗就停）：取得 Wazuh writer → 停 agent → 在 manager 依**記錄的 ID 與名稱**
-   取消登記（名稱對不上就拒絕，不猜）→ 解除 pilot 的 hold／versionlock → 卸載套件 → 移除 `client.keys` →
-   讓 auditd 放掉遺留的 audit plugin → 事後驗證 → 釋放 writer。
-4. **沒有 rollback**（套件卸載無法放回原位），但每一步冪等、順序保證任何中斷都留在重跑能完成的狀態：
-   停了但完整的 agent（取消登記之前），或已取消登記但還裝著的 agent（卸載之前）。**重跑同一個指令即可接續。**
+   取消登記（名稱對不上就拒絕，不猜）→ 解除 pilot 的 hold／versionlock → 移除 `client.keys` → **卸載套件（最後一個
+   會讓主機看起來沒事的步驟）** → 讓 auditd 放掉遺留的 audit plugin → 事後驗證 → 釋放 writer。
+4. **沒有 rollback**（套件卸載無法放回原位），但每一步冪等，順序讓卸載之前與之後的失敗都留在重跑接得上的狀態：
+   卸載是唯一讓「agent 比 manager 新」不再成立的步驟，所以卸載之前的每一步（停服務、取消登記、解除 hold、移除
+   `client.keys`）被中斷後，套件仍在、主機仍會被選到；卸載之後唯一可能殘留的是 audit plugin，也就是上面的 residue 主機，
+   重跑同樣會選到。**重跑同一個指令即可接續。** 不在這個保證內的兩件事見下一節。
 5. 在 manager 上刪除登記、卸載套件**不可復原**；確認提示明說這點。
+
+### 中斷之後
+
+先重跑同一個指令（`--preview-only` 先看計畫也可以）；計畫會列出還在的 skewed 主機，以及卸載之後才失敗的 residue 主機。
+下面兩種情況不會自己接續：
+
+- **writer marker 殘留**：controller 被殺掉或逾時，逐台變更 play 的 `always` 區段來不及釋放 Wazuh writer，
+  `/var/backups/pilot/wazuh/writer-active.json` 留著，之後 `inspect` 會以
+  `a Wazuh writer or unfinished transaction is active on this host (writer-active.json)` 拒絕整次 run。
+  `wazuh-transaction.py` 的設計是 marker 不會逾時或以 pid 推斷作廢，只能明確釋放。處理：先確認那台主機上沒有 pilot 或
+  Wazuh 的 run 還在進行（沒有 `ansible`／`wazuh-agent-hotfix.py`／`wazuh-transaction.py` 程序，也沒有別的 session 在
+  操作），再讀 marker（`component` 應為 `agent`、`mode` 為 `apply`，`owner` 是 32 位十六進位），確定是這次 hotfix 留下的才手動
+  移除它；`agent-active.json`／`central-active.json` 是未完成的 transaction journal，不是 hotfix 的東西，要走既有的
+  recovery，不要刪。**這段手動復原只有本機單元／整合測試涵蓋（marker 被拒絕、`always` 區段釋放），沒有在 target 上實跑。**
+- **卸載本身被殺掉**：dpkg／rpm 可能留下半移除的套件狀態，`inspect` 會以 `unknown agent package state` 按名拒絕；
+  要先用該平台的套件管理員把 `wazuh-agent` 收尾成「已安裝」或「已移除」其中一個明確的狀態，再重跑。這一段同樣沒有在
+  target 上實跑，所以這裡不列指令。
 
 ### 範圍與限制
 
