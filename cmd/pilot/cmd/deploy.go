@@ -33,6 +33,7 @@ import (
 	"github.com/kjelly/pilot/internal/childproc"
 	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/factcache"
 	"github.com/kjelly/pilot/internal/identitylock"
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/outbound"
@@ -119,7 +120,9 @@ func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
 	root := filepath.Join(dir, "ansible")
 	home := filepath.Join(root, "home")
 	tmp := filepath.Join(root, "tmp")
-	factCache := filepath.Join(root, "fact-cache")
+	// factcache owns this location: vm-target and docker-target drop the
+	// cached facts of hosts they recreate from the same directory.
+	factCache := factcache.RuntimeDir(dir)
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return deployAnsibleRuntime{}, fmt.Errorf("create Ansible data directory %s: %w", root, err)
 	}
@@ -136,29 +139,34 @@ func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
 	if err != nil {
 		return deployAnsibleRuntime{}, err
 	}
+	env := []string{
+		"ANSIBLE_HOME=" + home,
+		"ANSIBLE_LOCAL_TEMP=" + tmp,
+	}
+	// The cache plugin and directory (<data-dir>/ansible/fact-cache) are
+	// spelled out only in factcache, whose DropAll cleans the same
+	// directory when vm-target or docker-target recreate a host.
+	env = append(env, factcache.RuntimeEnv(dir)...)
+	env = append(env,
+		"ANSIBLE_LOG_PATH="+logPath,
+		"ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath="+strconv.Quote(sshcontrol.ControlPath(sshControl))+" -o ControlPersist=60s",
+		"ANSIBLE_RETRY_FILES_ENABLED=False",
+		// Collapses each task to one SSH round-trip instead of a
+		// separate sftp-and-exec per task; safe because every target
+		// image pilot provisions has no sudoers `requiretty`.
+		"ANSIBLE_PIPELINING=True",
+		// Default forks is 5, which serializes host 6+ behind the
+		// first batch on any play targeting a full topology (site.yml)
+		// or a wide overlay group. Only widens per-play SSH
+		// concurrency — task/role order (e.g. FreeIPA server before
+		// client, Wazuh manager before agent) is unaffected.
+		"ANSIBLE_FORKS=20",
+	)
 	return deployAnsibleRuntime{
 		TempDir:       tmp,
 		SSHControlDir: sshControl,
 		LogPath:       logPath,
-		Env: []string{
-			"ANSIBLE_HOME=" + home,
-			"ANSIBLE_LOCAL_TEMP=" + tmp,
-			"ANSIBLE_CACHE_PLUGIN=jsonfile",
-			"ANSIBLE_CACHE_PLUGIN_CONNECTION=" + factCache,
-			"ANSIBLE_LOG_PATH=" + logPath,
-			"ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath=" + strconv.Quote(sshcontrol.ControlPath(sshControl)) + " -o ControlPersist=60s",
-			"ANSIBLE_RETRY_FILES_ENABLED=False",
-			// Collapses each task to one SSH round-trip instead of a
-			// separate sftp-and-exec per task; safe because every target
-			// image pilot provisions has no sudoers `requiretty`.
-			"ANSIBLE_PIPELINING=True",
-			// Default forks is 5, which serializes host 6+ behind the
-			// first batch on any play targeting a full topology (site.yml)
-			// or a wide overlay group. Only widens per-play SSH
-			// concurrency — task/role order (e.g. FreeIPA server before
-			// client, Wazuh manager before agent) is unaffected.
-			"ANSIBLE_FORKS=20",
-		},
+		Env:           env,
 	}, nil
 }
 
