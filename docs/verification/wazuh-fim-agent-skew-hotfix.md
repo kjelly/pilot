@@ -1,6 +1,6 @@
 # Verification Spec — wazuh-fim-agent-skew-hotfix（`pilot hotfix wazuh-agent-skew`）
 
-> 版本：v0.1（草稿：已在拋棄式 VM 上做過探索性實跑〔結果與踩到的雷見 [runbook](../runbooks/hotfix-wazuh-agent-skew.md)〕，但尚未凍結 candidate，沒有正式 evidence record）
+> 版本：v0.1（實跑日期、tested revision 與 verdict 只記在 evidence；操作流程與踩過的雷見 [runbook](../runbooks/hotfix-wazuh-agent-skew.md)）
 > 對齊規範：`docs/verification/wazuh-fim.md` §「共用 manager 相容性 gate」（agent 版本 V 高於
 > manager 版本 M 一律 typed 拒絕、沒有降級路徑）與 `docs/verification/wazuh-manager.md` C12
 > （已註冊 agent 不得高於 manager）。本 spec 是這兩份 fail-closed 的**出口**：把「agent 比 manager
@@ -133,8 +133,7 @@ schema 的 `deploy`／`reconcile` action 上，新增 `hotfix` action 需要另�
 - 實跑：`pilot vm-target topology test`（`--ephemeral`）對 `docs/topologies/wazuh-agent-skew-topology.yaml`
   執行，內含製造 skew 的 fixture（`playbooks/test/fixtures/wazuh-agent-skew-fixtures.yml`）。
 - 原始輸出：gitignored `.verification/` 或 pilot evidence store；不貼完整 transcript。
-- Sanitized 摘要：`docs/evidence/wazuh-fim-agent-skew-hotfix/<change>.md`；目前尚無正式 evidence record（探索性實跑的
-  摘要在 runbook §0.5），所以這份 spec 標為草稿（見版本）。
+- Sanitized 摘要：`docs/evidence/wazuh-fim-agent-skew-hotfix/<change>.md`；runbook §0.5 連到最新的一份。
 - Row 數：8（等於 checklist row 數）。
 
 ## 4. PASS / FAIL 規則
