@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -375,6 +376,25 @@ func TestWazuhAgentHotfixBlockReleasesTheWriterAndKeepsFailures(t *testing.T) {
 				position[step.label] = i
 				tagsOf[step.label] = taskTags(task)
 			}
+		}
+	}
+	// an include's tasks only run under the tags `apply` gives them, so they must be the include's own tags
+	for _, item := range tasks {
+		task := item.(map[string]any)
+		include, ok := task["ansible.builtin.include_tasks"].(map[string]any)
+		if !ok {
+			continue
+		}
+		apply, _ := include["apply"].(map[string]any)
+		var applied []string
+		for _, tag := range apply["tags"].([]any) {
+			applied = append(applied, tag.(string))
+		}
+		own := taskTags(task)
+		sort.Strings(applied)
+		sort.Strings(own)
+		if strings.Join(applied, ",") != strings.Join(own, ",") {
+			t.Errorf("include %q applies tags %v to its tasks but carries %v itself: a --tags run would select one and skip the other", task["name"], applied, own)
 		}
 	}
 	prev := -1
