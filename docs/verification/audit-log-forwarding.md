@@ -313,7 +313,9 @@ process 的 `/proc/<pid>/task/*/comm`，確認獨立 queue worker 確實存在�
 >   `pkill -HUP -x auditd`（EL 的 auditd 拒絕 `systemctl restart`）listener 才出現，who-data 才 live。這段
 >   期間 C23 回 0（前提不成立），本模組也不會碰 agent。#323 的 wazuh-fim Step 11a 之後會在 agent 最後一次服務變更後建立 endpoint，
 >   含 #323 的鏈套用完成後 EL 的 who-data 是 live 的，本模組的 guard 與 re-arm 隨之適用（見 `docs/evidence/audit-log-forwarding/LATEST.md`）。who-data 已 live 的 EL 主機被外部 `auditctl -D` 清掉
->   後再套用：watch 被補回（agent 重啟一次），下一次套用 `changed=0`。
+>   後再套用：只有 guard 取得 S 時 kernel 已有 `wazuh_fim` watch（Wazuh 已在套用前自行補回），watch 才會被補回（agent
+>   重啟一次），下一次套用 `changed=0`；套用前 watch 已是 0 時 S 為空，本模組不重啟 agent，C23 回 1，之後的套用
+>   `changed=0` 也不會修復，需要手動重啟 `wazuh-agent` 一次（見 runbook §5.6 的一次性處理）。
 > - Ubuntu 22.04 沒有涵蓋，也沒有 capture：它的 auditd 內建 af_unix（`builtin_af_unix`），沒有外部
 >   `audisp-af_unix` 行程。re-arm 與 C23 的 listener 前提都只認 `audisp-af_unix` 在 endpoint 上 LISTEN，所以
 >   在 22.04 上，若 who-data 是 live 的，擾動之後 re-arm 以 `endpoint_not_ready` 失敗、不重啟 agent
@@ -421,3 +423,4 @@ go run ./cmd/pilot vm-target run --name audit-log-forwarding \
 | 2026-10-20 | v2.0 | RELP/mTLS opt-in：精確 peer 名稱、CA/cert/key、TLS 失敗保留 queue、固定 classic engine 並拒絕格式自動轉換；C22 驗證真實 daemon 與 RELP ACK。驗收見本輪 evidence 摘要 | pilot |
 | 2026-11-12 | v2.1 | issue #324：新增 C23（與同機 Wazuh who-data 共存：kernel 稽核清單在 agent active、已設 whodata、listener 存在時必須仍有 `wazuh_fim` watch）。起因：Step 3 每次套用都無條件 `augenrules --load`（audit.rules 以 `-D` 開頭，且 `augenrules --load` 在「No change」時照樣 `auditctl -R`），Ubuntu 24.04 的 auditd 重啟也會載入，兩者都清掉 Wazuh 的 who-data watch 而 C1–C22 全綠。apply 端：Step 3 只在需要時載入（規則檔本次有變、`augenrules --check` 有差異或讀不出、kernel 缺少本模組管理的 key）；擾動前讀 Wazuh 協調器的唯讀 `writer-inspect` 並在 writer 進行中時失敗；擾動後（Step 3、Step 8a、rescue 的重載）有上限地等 auditd/listener 回來、重啟一次 `wazuh-agent`、再有上限地等 `wazuh_fim` watch 涵蓋套用前的集合，否則 typed 失敗；rescue 只在載入過且規則檔被還原或載入失敗時重載，最後訊息如實說明結果。沒有放寬或移除任何既有 Expected；C1–C22 不變。**目標環境實跑結果尚未產生**，由後續 evidence-only commit 記錄 | pilot |
 | 2026-11-12 | v2.2 | issue #324 獨立 review 與拋棄式 VM 實測後的修正（沒有放寬或移除任何 Expected，C1–C23 不變）：guard 改為在擾動前當場重讀 agent 與 kernel 清單並在那一刻讀取 S（原本用 play 開始時的快照，auditctl 在 Step 1 之後才出現時會誤拒絕）；`auditctl` 不存在是 who-data 不可能 live，不是拒絕；agent 狀態明確分成 absent/inactive/active/transitioning/unknown，`activating` 等轉換中以 `wazuh_agent_transitioning` 拒絕；補上 `augenrules --check` 這個載入條件的測試與反例；§5 以 2026-11-12 的實測取代未註明來源的描述（BASE 的 Wazuh 自癒次數有限、EL 9.8 的 SIGHUP 不是擾動、EL 同機鏈 endpoint 尚未 live 的既有順序缺口），並明列 Ubuntu 22.04 的行為（`endpoint_not_ready`，未涵蓋） | pilot |
+| 2026-11-13 | Issue #333 | 文件修正（無 Expected 變更，C1–C23 不變，不新增、不收緊、不放寬任何 row）：§5「外部 auditctl -D 後再套用會補回 watch」補上前提（guard 取得 S 時 kernel 已有 wazuh_fim watch）；S 為空時不重啟 agent、C23 回 1，需手動重啟一次 | pilot |
