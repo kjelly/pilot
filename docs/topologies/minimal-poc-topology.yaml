@@ -136,7 +136,7 @@ nodes:
     base_image: ubuntu-24.04
     memory: 12288
     vcpus: 6
-    disk: 80
+    disk: 120   # wazuh-manager's CVE feed alone is ~31 GiB and its preflight wants 50 GiB free (runbook 3.10, 6.1)
     ssh_user: root
     ssh_timeout: 3m
     boot_timeout: 6m

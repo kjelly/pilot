@@ -28,9 +28,11 @@ func TestMinimalPoCTopologyMatchesRunbook(t *testing.T) {
 		// The replica needs the same 4608 MiB as the primary: its contract's
 		// minRAMMiB is 4096 and an AlmaLinux guest sees ~95% of what it is given.
 		"freeipa-replica": {"almalinux-9", 4608, 2, 30, []string{"freeipa-server-replica", "host-monitoring", "audit-log-forwarding", "wazuh-fim", "restic-backup"}},
-		"nexus":           {"ubuntu-24.04", 12288, 6, 80, []string{"freeipa-client", "freeipa-dns-client", "reverse-proxy", "host-monitoring", "docker", "audit-log-forwarding", "log-server", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server", "agent-controller", "detection-engine"}},
-		"client-vm":       {"ubuntu-24.04", 2560, 2, 20, []string{"freeipa-client", "freeipa-dns-client", "host-monitoring", "docker", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client", "dns"}},
-		"bastion":         {"ubuntu-24.04", 2048, 2, 20, []string{"freeipa-client", "pilot-access-gateway"}},
+		// 2026-11-13: 80 -> 120 GiB. wazuh-manager's vulnerability-detector feed grows to
+		// ~31 GiB and its preflight needs 50 GiB free (runbook §3.10, §6.1).
+		"nexus":     {"ubuntu-24.04", 12288, 6, 120, []string{"freeipa-client", "freeipa-dns-client", "reverse-proxy", "host-monitoring", "docker", "audit-log-forwarding", "log-server", "wazuh-manager", "wazuh-fim", "seaweedfs-s3", "restic-backup", "prometheus", "thanos-query", "alertmanager", "dashboard", "freeipa-nfs-server", "agent-controller", "detection-engine"}},
+		"client-vm": {"ubuntu-24.04", 2560, 2, 20, []string{"freeipa-client", "freeipa-dns-client", "host-monitoring", "docker", "audit-log-forwarding", "wazuh-fim", "restic-backup", "freeipa-nfs-client", "dns"}},
+		"bastion":   {"ubuntu-24.04", 2048, 2, 20, []string{"freeipa-client", "pilot-access-gateway"}},
 	}
 	for _, node := range spec.Nodes {
 		got, ok := want[node.Name]
