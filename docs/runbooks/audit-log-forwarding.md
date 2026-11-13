@@ -159,7 +159,7 @@ Step 10、rescue；spec §5 與 §6 有完整說明）：
   不視為擾動：who-data 已 live 時連續 6 次 SIGHUP（間隔 8 秒），`wazuh_fim` watch 與 kernel 清單總數不變、
   `audisp-af_unix` 的 PID、連線與 listener 不變；以真實 playbook 在 plugin 設定漂移下重跑結果相同。只量過
   plugin 設定變更觸發的 HUP 與單純 HUP。
-- EL 的既有順序缺口（wazuh-fim，不在 #324 範圍內，沒有修）：audit-log-forwarding 的 Step 1a 會安裝
+- EL 的順序缺口（#324 之前量到，已由 Issue #323 的 wazuh-fim Step 11a 修復，不屬於 #324）：audit-log-forwarding 的 Step 1a 會安裝
   `audispd-plugins`，但 Wazuh agent 套件在 audit-log-forwarding 的 SIGHUP 之後才安裝
   `/etc/audit/plugins.d/af_wazuh.conf`，auditd 尚未被告知載入它。2026-11-12 在拋棄式 AlmaLinux 9.8 上，
   audit-log-forwarding 先於 wazuh-fim 的全新同機鏈套用完成後，endpoint 沒有 listener、who-data 不是 live；

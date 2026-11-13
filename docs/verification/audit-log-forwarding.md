@@ -306,12 +306,13 @@ process 的 `/proc/<pid>/task/*/comm`，確認獨立 queue worker 確實存在�
 >   與 listener 都不變，`ossec.log` 沒有 `Audit rules removed`；以真實 playbook 在 syslog plugin 設定
 >   漂移（Step 8b 的 HUP 路徑）下重跑，結果相同，agent 未被碰。涵蓋範圍只有：plugin 設定變更觸發的 HUP
 >   與單純的 HUP、EL 9.8、Wazuh agent 4.14.x；其他組合沒有量過。
-> - 已知限制（既有的 wazuh-fim 順序缺口，不在本修正範圍，沒有修）：EL 的 Step 1a 會安裝 `audispd-plugins`，
+> - 既有的 wazuh-fim 順序缺口（#324 之前量到，已由 Issue #323 修復，不屬於本修正）：EL 的 Step 1a 會安裝 `audispd-plugins`，
 >   但 Wazuh agent 套件在 audit-log-forwarding 的 SIGHUP **之後**才裝 `/etc/audit/plugins.d/af_wazuh.conf`，
 >   auditd 還沒被告知載入它。2026-11-12 在拋棄式 AlmaLinux 9.8 上實測：audit-log-forwarding 先於 wazuh-fim 的
 >   全新同機鏈套用完成後，`/var/ossec/queue/sockets/audit` 沒有 listener，who-data 不是 live；之後
 >   `pkill -HUP -x auditd`（EL 的 auditd 拒絕 `systemctl restart`）listener 才出現，who-data 才 live。這段
->   期間 C23 回 0（前提不成立），本模組也不會碰 agent。who-data 已 live 的 EL 主機被外部 `auditctl -D` 清掉
+>   期間 C23 回 0（前提不成立），本模組也不會碰 agent。#323 的 wazuh-fim Step 11a 之後會在 agent 最後一次服務變更後建立 endpoint，
+>   含 #323 的鏈套用完成後 EL 的 who-data 是 live 的，本模組的 guard 與 re-arm 隨之適用（見 evidence）。who-data 已 live 的 EL 主機被外部 `auditctl -D` 清掉
 >   後再套用：watch 被補回（agent 重啟一次），下一次套用 `changed=0`。
 > - Ubuntu 22.04 沒有涵蓋，也沒有 capture：它的 auditd 內建 af_unix（`builtin_af_unix`），沒有外部
 >   `audisp-af_unix` 行程。re-arm 與 C23 的 listener 前提都只認 `audisp-af_unix` 在 endpoint 上 LISTEN，所以

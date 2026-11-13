@@ -461,10 +461,14 @@
                 - ansible_os_family == 'RedHat'
                 - not ansible_check_mode
 
-            - name: "Step 4: Install audit provider and native versionlock prerequisite (RedHat dnf; spec C2)"
+            # audispd-plugins provides /sbin/audisp-af_unix on EL: without it the af_wazuh plugin the agent writes is
+            # `active = yes` but no who-data endpoint can ever exist and wazuh-syscheckd falls back to real-time (spec
+            # C2/C11). Installing it does not load it into the running auditd; Step 11a does that. RedHat family only:
+            # Debian's list stays [auditd] (who-data is live on Ubuntu 24.04 with it, spec section 2).
+            - name: "Step 4: Install audit provider, its af_unix plugin and the native versionlock prerequisite (RedHat dnf; spec C2)"
               tags: [C1, C2]
               ansible.builtin.dnf:
-                name: [audit, python3-dnf-plugin-versionlock]
+                name: [audit, audispd-plugins, python3-dnf-plugin-versionlock]
                 state: present
                 update_cache: "{{ (wazuh_yum_repo | default({})) is changed }}"
               register: dnf_wazuh_agent
@@ -720,6 +724,37 @@
                         (wazuh_fim_conf_result | default({})) is changed
                         or (wazuh_address_result | default({})) is changed
                         or (wazuh_agent_auth_result is defined and wazuh_agent_auth_result is changed)
+
+                # Last agent-service change of an ordinary RedHat-family apply (Issue #323). Step 11 restarts the agent
+                # when its configuration changed; a restarted wazuh-syscheckd needs a moment to reconnect. EL's auditd
+                # refuses `systemctl restart`, so nothing else ever loads the af_wazuh plugin the agent writes: this
+                # step makes the endpoint exist (one SIGHUP to auditd, then one agent restart, only when needed) and
+                # proves it is connected, or fails the apply with a typed reason. A version transaction owns its own
+                # audit proof; the Debian family is not changed by this step (see the spec); --check is skipped by
+                # the enclosing block. The rescue below never restarts auditd and does not undo the SIGHUP.
+                - name: "Own selected Step 11a resource changes"
+                  tags: [C11]
+                  when:
+                    - ansible_os_family == 'RedHat'
+                    - not (wazuh_agent_transaction_reserved | default(false) | bool)
+                  block:
+                    - name: "Snapshot agent-service before its selected mutation"
+                      ansible.builtin.command:
+                        argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-config-save, --owner, "{{ wazuh_writer_owner }}", --operation, "{{ wazuh_config_operation }}", --resource, agent-service]
+                      changed_when: false
+                    - name: "Snapshot audit-service before its selected mutation"
+                      ansible.builtin.command:
+                        argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-config-save, --owner, "{{ wazuh_writer_owner }}", --operation, "{{ wazuh_config_operation }}", --resource, audit-service]
+                      changed_when: false
+                    - name: "Record only this invocation's selected attempted resources"
+                      ansible.builtin.set_fact:
+                        wazuh_ordinary_resources: "{{ ((wazuh_ordinary_resources | default([])) + ['agent-service', 'audit-service']) | unique | list }}"
+                    - name: "Step 11a: Ensure the who-data endpoint is live and connected (RedHat; spec C11)"
+                      tags: [C11]
+                      ansible.builtin.command:
+                        argv: [/usr/local/sbin/pilot-wazuh-transaction, agent-whodata-ensure, --family, "{{ ansible_os_family }}", --owner, "{{ wazuh_writer_owner }}"]
+                      register: wazuh_whodata_ensure
+                      changed_when: wazuh_whodata_ensure.rc == 0 and ((wazuh_whodata_ensure.stdout | from_json).changed | default(false) | bool)
 
                 - name: "Step 11b: Inspect native agent version and enrollment after all selected operations"
                   ansible.builtin.command:
