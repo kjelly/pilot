@@ -52,17 +52,32 @@ for `i336-t2` remained until its own expiry.
 
 ## Failure paths observed
 
+* The new fail-closed gate fired on a real target: with a scratch data directory
+  whose `ansible/fact-cache` was made a regular file, `vm-target up --name i336-gate`
+  from the candidate exited 1 with `vmtarget: drop cached Ansible facts for
+  [i336-gate]: drop the deploy fact cache: read fact cache directory …/ansible/fact-cache:
+  … not a directory`. After it `vm-target list` was empty and there was no libvirt
+  domain, overlay directory or network reservation for `i336-gate`.
 * The first attempt at the docker-target run called `pilot deploy` and stopped in
   the preflight (`ansible_host = "i336-d"` is not a valid IPv4). That is the existing
   preflight rule, unrelated to this change; the entry was then written as described
   under "How the cache was filled".
 * A first attempt to read `ansible_machine_id` from the cache file failed because
   Ansible 2.19 stores the facts as a JSON string in `__payload__`. The comparison
-  used `ansible_default_ipv4` instead. The golden image gives every VM the same
-  machine-id, so it cannot tell a rebuilt VM apart.
+  used `ansible_default_ipv4` instead. The golden image was observed to give a
+  rebuilt VM the same machine-id, so the machine-id was not used to tell them apart.
 
 ## Not covered
 
+* Every inventory in these runs came from `vm-target show-inventory`,
+  `topology inventory` or `docker-target show-inventory`, so each host key equals the
+  target's own name. The removal matches cache file names against the target name
+  and its `--hosts` aliases; a hand-written inventory (for example a `hosts.yml` in
+  the minimal PoC flow) whose host key differs from the target's name is not cleared,
+  and this run neither exercised nor proved that case.
+* The ambient `ansible.cfg` cache purge was not exercised on a real target: every
+  candidate lifecycle command ran from a directory without `ansible.cfg`. That half is
+  covered only by the tests of the change, and by the unchanged earlier behavior.
 * `pilot host decommission` and `vm-target reset`/`rollback` still do not drop any
   fact cache (unchanged by this candidate; tracked separately).
 * A `pilot deploy` run with a different data directory than the lifecycle command
@@ -73,3 +88,11 @@ for `i336-t2` remained until its own expiry.
 * The AlmaLinux image, `--services local`, and a `~` or relative `data_dir` were not run.
 * The real-Ansible unit test (`TestDropAll_RealAnsibleDeployRuntime`) skips where
   `ansible` is not installed; CI installs ansible-core only for the `spec` shard.
+
+## Record notes
+
+Hand-written: `vm-target test --evidence-record` does not apply to this flow (no
+playbook or spec changed). Redaction: neighbour names are synthetic, addresses are
+shown as their last octet, and the raw outputs and binaries stayed outside Git.
+Run date 2026-11-13 (local time); the addresses quoted above come from the libvirt
+pool shared with other sessions' VMs, so they are not stable between runs.
