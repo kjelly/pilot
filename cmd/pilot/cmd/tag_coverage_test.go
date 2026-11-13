@@ -53,6 +53,7 @@ var specTagMap = []specTagMapping{
 		exemptRows: map[string]string{
 			"C11": "functional probe (run sudo, assert audit.log recorded it) — verify-only outcome of the C1..C10 auditd config",
 			"C22": "functional probe (send a local6 message, assert rsyslogd's TCP connection to the forward port) — verify-only outcome of C15..C17 and the SELinux port label",
+			"C23": "effective-state probe (the Wazuh agent's wazuh_fim watches are still in the kernel audit list while who-data is live) — the watches are Wazuh's own; the apply keeps them by guarding and re-arming around the disturbing steps (tags C10, C21), it never creates them, so no task implements the row",
 		}},
 	{spec: "core-infra-provider.md", playbook: "core-infra-provider-apply.yml",
 		prefixes: []string{"ntp"}},

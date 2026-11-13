@@ -1,0 +1,23 @@
+---
+# Real ordering for issue #324: receiver and forwarding first, then the central
+# Wazuh stack, then the agents, so who-data is live when the idempotency
+# re-apply of audit-log-forwarding (the run that used to flush it) happens.
+- name: Install the manager's Docker prerequisite first
+  ansible.builtin.import_playbook: ../apply/docker-apply.yml
+  tags: [docker]
+
+- name: Deploy the real SIEM receiver
+  ansible.builtin.import_playbook: ../apply/log-server-apply.yml
+  tags: [log-server]
+
+- name: Configure audit forwarding on every client
+  ansible.builtin.import_playbook: ../apply/audit-log-forwarding-apply.yml
+  tags: [log-server, audit-log-forwarding]
+
+- name: Deploy the central Wazuh stack
+  ansible.builtin.import_playbook: ../apply/wazuh-manager-apply.yml
+  tags: [wazuh-manager]
+
+- name: Deploy the Wazuh agents (who-data)
+  ansible.builtin.import_playbook: ../apply/wazuh-fim-apply.yml
+  tags: [wazuh-fim]

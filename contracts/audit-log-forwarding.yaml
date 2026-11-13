@@ -13,6 +13,10 @@ regressionTests:
   - internal/spec/audit_log_forwarding_regression_test.go
   - internal/spec/siem_relp_mtls_regression_test.go
   - internal/spec/audit_forward_backup_order_regression_test.go
+  - internal/spec/audit_whodata_runtime_test.go
+  - internal/spec/audit_whodata_helper_test.go
+  - internal/spec/audit_log_forwarding_c23_test.go
+  - internal/spec/audit_kernel_disturbance_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 # A SIEM receiver is optional.  The apply playbook resolves it from
 # log-server first, then wazuh-manager; with neither present it still applies
@@ -42,5 +46,6 @@ traceability:
   exemptions:
     "docs/verification/audit-log-forwarding.md#C11": {kind: verifyOnly, reason: functional audit probe}
     "docs/verification/audit-log-forwarding.md#C22": {kind: verifyOnly, reason: functional TCP connection or mTLS RELP ACK probe}
+    "docs/verification/audit-log-forwarding.md#C23": {kind: verifyOnly, reason: "effective-state probe of the Wazuh agent's wazuh_fim watches in the shared kernel audit list; the apply keeps them by guarding and re-arming around the disturbing steps (tags C10, C21), it never creates them"}
 verification: {autoDeploy: false}
 site: {include: true, order: 90, vars: {}, tags: [security, audit-log-forwarding], optIn: false}

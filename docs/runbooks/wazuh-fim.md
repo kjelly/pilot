@@ -271,8 +271,8 @@ who-data 有兩件事，要分開看：
    `alerts.json` 找（見 §4、`wazuh-manager.md` §4）。
 
 C11 的邊界：只涵蓋 EL（RedHat family），Debian family 不斷言；不要求 kernel `wazuh_fim` watch，因為
-`audit-log-forwarding` 每次套用的 `augenrules --load` 會把 watch 清為 0 而 endpoint 與連線不變（#324，未解決），
-要求 watch 會讓同機共用的主機驗收不穩；不辨識 listener 是哪個程序。排查 EL 上 C11 失敗或 Step 11a 失敗時，
+`audit-log-forwarding` 在 #324 之前每次套用的 `augenrules --load` 會把 watch 清為 0 而 endpoint 與連線不變（現在只在需要時載入並由該模組 re-arm，驗證在它的 C23），
+本列仍不要求 watch：穩態 no-op 與驗收不依賴它；不辨識 listener 是哪個程序。排查 EL 上 C11 失敗或 Step 11a 失敗時，
 讀 apply 輸出的 typed 原因，再看 `ss -xHap`（endpoint 路徑上的 LISTEN 與 ESTAB、以及 syscheckd 的 ESTAB）、
 `auditctl -l`（有沒有 `wazuh_fim` 規則）與 `/etc/audit/plugins.d/af_wazuh.conf`（是否 `active = yes`）。
 在 EL 上較早 revision 套用的舊主機（沒有 `audispd-plugins`、沒有 endpoint）需要先重跑一次含 Step 11a 的一般

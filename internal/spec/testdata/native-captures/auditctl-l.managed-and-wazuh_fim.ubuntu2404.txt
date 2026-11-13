@@ -1,0 +1,8 @@
+-w /usr/bin/sudo -p x -k privileged-sudo
+-w /etc/passwd -p wa -k identity
+-w /etc/sudoers -p wa -k sudoers_changes
+-a always,exit -F arch=b64 -S execve -C uid!=euid -F euid=0 -F key=setuid_setgid_exec
+-a always,exit -F arch=b64 -S execve -C gid!=egid -F egid=0 -F key=setuid_setgid_exec
+-a always,exit -F arch=b64 -S chmod,fchmod,fchmodat -F key=setuid_setgid_change
+-w /boot -p wa -k wazuh_fim
+-w /etc -p wa -k wazuh_fim
