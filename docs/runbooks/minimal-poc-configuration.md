@@ -212,8 +212,10 @@ agent_controller_webhook_secret: <agent-controller 的 Alertmanager webhook bear
 Minimal PoC 使用本專案自建的 signed SeaweedFS S3 時，restic 與 Thanos 必須共用同一組
 S3 identity。`restic_password` 是 repository 加密密碼，不能用 S3 secret 代替。
 
-`alertmanager_config` 可使用 `group_vars/alertmanager.yml` 的 sandbox `null` receiver；
-只有需要真實通知 receiver 時才另加 vault/group-var 設定。
+`group_vars/alertmanager.yml` 不需要任何生效中的設定:沒設 `alertmanager_receiver_mode` 也沒有
+`alertmanager_config` 時,playbook 套用內建的 sandbox `null` receiver(帶 issue #11 的兩條 inhibit
+規則)。只有需要真實通知 receiver 時才另加 vault/group-var 設定;`alertmanager_config` 一旦定義
+(沒有 mode 時視為 legacy `custom`)就會整份取代內建設定,必須自帶那兩條規則。
 
 不要把以下內容誤當成已完成設定：
 
