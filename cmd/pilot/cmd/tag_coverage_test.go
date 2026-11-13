@@ -161,7 +161,7 @@ var specTagMap = []specTagMapping{
 	{spec: "pilot-gateway-scope.md", playbook: "gateway-scope-apply.yml"},
 	{spec: "pilot-access-gateway.md", playbook: "pilot-access-gateway-apply.yml",
 		exemptRows: map[string]string{
-			"AG19": "no local DB/state under /var/lib/pilot is a structural absence (no task ever writes there) — nothing to tag",
+			"AG19": "no local DB/state of the gateway (its own directories, no StateDirectory in its units) is a structural absence (no task ever creates one) — nothing to tag",
 			"AG30": "idempotent second-apply changed=0 is a multi-run property recorded in the Phase 7 evidence doc, not a single tagged task — same reasoning as freeipa-dns.md's own C12",
 			"AG83": "recording precedence is the pure resolver's TestResolveRecordingMode, not a playbook task",
 			"AG84": "unknown/invalid/reserved host policy denial is TestConnectAuthorize_RecordingPolicyDenies, not a playbook task",

@@ -148,7 +148,7 @@ AG45–AG73 見 §8（captive transport 的 Go 測試與拓樸實跑）。
   category: "stateless"
   check: "沒有 local DB/state"
   probe: |
-    test ! -d /var/lib/pilot
+    sh -c 'if systemctl cat pilot-access-gateway.service pilot-access-gateway.socket | grep -Eq "^(StateDirectory|CacheDirectory)="; then exit 1; fi; test ! -e /var/lib/pilot-access-gateway && test ! -e /var/lib/pilot/access-gateway'
     
   expect: {exitCode: 0}
 - id: AG30
@@ -368,6 +368,8 @@ AG45–AG73 見 §8（captive transport 的 Go 測試與拓樸實跑）。
 - **2026-09-24 per-host SSH session recording L1–L22**（candidate `ad7c463`，見 [`docs/evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md`](../evidence/pilot-access-gateway/2026-09-24-per-host-session-recording.md)）：Directory handoff 與互動式 Portal 對標記 `terminal_output` 的主機都會錄影（notice、`complete: true`、replay 看得到 marker），未標記主機維持 metadata；policy 無效、重複、大小寫變體、保留值 `terminal_io` 一律 deny 且 target 沒有任何登入；store 停止時不建立 SSH；store 中途不可達或磁碟滿時 fail_closed 在約 `failure_grace` 後結束 session，且觸發後不再轉送任何未錄影的 I/O；閒置超過 20 分鐘的錄影 session 仍然 `complete: true`；token 不能跨 session／跨使用者使用；`pilot access recording show` 對真實 FreeIPA 回報正確；回滾程序可還原。全新 VM 上本 spec 的 verify 為 35/35。
 
 ## 5. Gotcha 記錄
+
+- **AG19 只驗 gateway 自己的狀態（2026-11-13 修正）**：原本的 `test ! -d /var/lib/pilot` 會把別的元件放在共用目錄 `/var/lib/pilot` 底下的檔案當成 gateway 的狀態——`freeipa-dns-client` 的 resolver baseline 會在 `/var/lib/pilot/freeipa-dns-client/pre-apply` 留下 rollback 快照，`internal-endpoint` 對整個 fleet 套用 baseline 時 bastion 也會有，所以任何跑過 `internal-endpoint` 的拓樸上 AG19 都 fail（2026-10-15 與 minimal-PoC 五節點實跑兩度遇到）。現在改成 gateway 的 unit 沒有宣告 `StateDirectory=`/`CacheDirectory=`，且 gateway 自己的目錄（`/var/lib/pilot-access-gateway`、`/var/lib/pilot/access-gateway`）不存在，與 `pilot-access-directory.md` AD17 同一種寫法。Expected 沒有放寬：仍然要求「沒有 local DB/state」，只是不再把別人的檔案算在 gateway 頭上。
 
 - **2026-09-15：`site.include` 改成 `true`，`pilot-access-gateway` 不再是 single-component-only**——一路上發現兩次真的問題：全站部署（`playbooks/site.yml`）從架構上就無法跑到這個元件（從沒被 `import_playbook` 進去），`pilot deploy` 的 wizard 卻仍然把它列進「已選擇/已部署」，一次還被記成 delivery 歷史的 `success` run，實際上主機從沒被真的套用過。討論後拍板：與其永遠維持「single-component-only、每次都要單獨呼叫」，改成跟其他角色一致的語意——`hosts.yml` 把 `pilot-access-gateway` 加進某台主機的 roles 清單，本身就是操作者的核准動作,之後每次全站部署都會照常套用。`site.yml` 已補上 `import_playbook: apply/pilot-access-gateway-apply.yml`（`tags: [freeipa, pilot-access-gateway]`，緊接在 `freeipa-client` 之後,對應 sameHosts 依賴）;`contracts/pilot-access-gateway.yaml` 的 `site` 區塊改成 `{include: true, order: 52, tags: [pilot-access-gateway], optIn: false}`。**§0 G4/§55.1 的規則沒有變，只是核准時機點改變**：把 role 加進 `hosts.yml` 之前,仍然要先在該主機或同等 disposable vm-target 上跑過鎖定回歸測試——加了 role 之後,之後每次全站部署都不會再重新問一次。`cmd/pilot/cmd/site_yml_consistency_test.go` 的 `TestSiteYMLImportsEveryReachableComponent` 會鎖住這個 `site.include`/`site.yml` 一致性,避免第三次重演同一種落差。
 - **2026-09-15：`freeipa_servers`/`ipa_realm` 改成 `required: false`，會自動推導**——真實站台實測時發現：`group_vars/pilot-access-gateway.yml` 若還是原始範本的 `freeipa_servers: []`/`ipa_realm: ""`，contract 的 `required: true` 會讓 `pilot deploy` 在連 ansible 都還沒跑之前就直接擋下（`requires input "freeipa_servers"`），即使該站台的 `group_vars/freeipa.yml` 早就正確設好 `freeipa_domain`。已改成比照 `freeipa-client-apply.yml` 自己的既有慣例：`gateway_effective_ipa_realm`/`gateway_effective_freeipa_servers` 依序檢查「明確填的 `ipa_realm`/`freeipa_servers`」→「`freeipa_realm`/`freeipa_server_fqdn`」→「`freeipa_domain` 推導成 `大寫(domain)`/`ipa1.<domain>`」，跟同一份 inventory 上其他 freeipa-client 主機使用的是同一條推導路徑，不需要重複填一次已經在 `group_vars/freeipa.yml` 設定過的資訊。`default(X, true)` 讓「明確設成空字串/空陣列」（範本沒填完就直接套用的常見情況）也一起走推導，不會被誤判成「使用者刻意覆寫成空」。

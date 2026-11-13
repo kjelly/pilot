@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kjelly/pilot/internal/store"
@@ -97,7 +98,9 @@ func (t Transaction) RunResult(ctx context.Context) (result Result, err error) {
 		if t.Writer == nil {
 			return
 		}
-		finishErr := t.Writer.Finish(ctx, store.RunFinished{Outcome: string(result.Outcome), ExitCode: outcomeExitCode(result.Outcome)})
+		finishErr := RetryTransientEvidence(ctx, func(c context.Context) error {
+			return t.Writer.Finish(c, store.RunFinished{Outcome: string(result.Outcome), ExitCode: outcomeExitCode(result.Outcome)})
+		})
 		if finishErr != nil && err == nil {
 			result.Outcome = OutcomeEvidenceFailed
 			result.FailedStep = "evidence"
@@ -227,6 +230,52 @@ func (t Transaction) failWithRollbackResult(ctx context.Context, step string, ca
 // the outcome into evidence_failed. It is the 5 seconds RunWriter.Finish already uses.
 const stepEvidenceTimeout = 5 * time.Second
 
+// The evidence store is one SQLite file shared by every pilot process of the user
+// (and by the other agent sessions on the same host). Under heavy CPU or disk
+// load another writer can hold it longer than SQLite's 5 s busy timeout, and a
+// single 5 s attempt then turned a deploy that had already applied everything into
+// evidence_failed with exit 1 (minimal-PoC five-node run, 2026-11-13, finding F7,
+// seen twice at a load average of 11 and 36 on 12 cores). A transient failure is
+// retried within a bounded budget; the append and the terminal write are idempotent
+// for the same operation id, so a retry after a late commit is safe. A store that
+// keeps failing, or any failure that is not transient, still ends the run as
+// evidence_failed.
+var (
+	evidenceRetryBudget = 60 * time.Second
+	evidenceRetryPause  = 500 * time.Millisecond
+)
+
+// RetryTransientEvidence runs one evidence write, retrying a transient store failure
+// within the bounded budget described above. Callers outside a Transaction that
+// finish a run themselves (pilot verify) use it for the same reason.
+func RetryTransientEvidence(ctx context.Context, op func(context.Context) error) error {
+	detached := context.WithoutCancel(ctx)
+	deadline := time.Now().Add(evidenceRetryBudget)
+	for {
+		actx, cancel := context.WithTimeout(detached, stepEvidenceTimeout)
+		err := op(actx)
+		cancel()
+		if err == nil || !transientEvidenceError(err) || time.Now().Add(evidenceRetryPause).After(deadline) {
+			return err
+		}
+		time.Sleep(evidenceRetryPause)
+	}
+}
+
+// transientEvidenceError reports whether the store may succeed if asked again: the
+// attempt ran out of time, or SQLite reported the file busy or locked. Conflicts, a
+// finished run and every other error are final.
+func transientEvidenceError(err error) bool {
+	if errors.Is(err, store.ErrRunFinished) || errors.Is(err, store.ErrEvidenceConflict) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "sqlite_busy") || strings.Contains(msg, "context deadline exceeded")
+}
+
 func (t Transaction) runStep(ctx context.Context, name string, fn StepFunc) error {
 	if fn == nil {
 		return nil
@@ -239,10 +288,14 @@ func (t Transaction) runStep(ctx context.Context, name string, fn StepFunc) erro
 		}
 		// Not ctx: see stepEvidenceTimeout. A store that is really failing still
 		// fails here, and that is evidence_failed as before.
-		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stepEvidenceTimeout)
-		defer cancel()
-		if appendErr := t.Writer.AppendEvent(actx, store.Event{OperationID: "step-" + name, Type: store.EventStepFinished, Step: name, Payload: map[string]any{"status": stepStatus(err)}, ExitCode: &exit}); appendErr != nil {
-			return fmt.Errorf("persist %s evidence: %w", name, fmt.Errorf("%w: %v", errEvidencePersistence, appendErr))
+		event := store.Event{OperationID: "step-" + name, Type: store.EventStepFinished, Step: name, Payload: map[string]any{"status": stepStatus(err)}, ExitCode: &exit}
+		if appendErr := RetryTransientEvidence(ctx, func(c context.Context) error { return t.Writer.AppendEvent(c, event) }); appendErr != nil {
+			note := ""
+			if err == nil {
+				// Say what happened: the step did its work, only its record is missing.
+				note = fmt.Sprintf(" (the %s step itself finished successfully; only its evidence record could not be written)", name)
+			}
+			return fmt.Errorf("persist %s evidence%s: %w", name, note, fmt.Errorf("%w: %v", errEvidencePersistence, appendErr))
 		}
 	}
 	return err
