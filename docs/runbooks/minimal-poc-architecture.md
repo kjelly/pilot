@@ -1,14 +1,15 @@
 # Runbook — Minimal PoC Architecture: FreeIPA + Wazuh + Grafana 3-VM Rebuild
 
-> **Round 32 (2026-11-13) — five-node topology, partially verified.** The five-node layout of §0.6
+> **Round 33 (2026-11-13) — five-node topology, verified from zero.** The five-node layout of §0.6
 > (primary + replica FreeIPA, `nexus` with `agent-controller`/`detection-engine`, `client-vm` with the
-> `dns` tier, `bastion` with `pilot-access-gateway`) was rebuilt from zero and driven end to end on
-> candidate `164dafa3`: every deploy, reconcile and idempotency step reached `failed=0` and the second
-> site-wide rerun was `changed=0` on all five hosts. Not everything passed: the shipped
-> Alertmanager example config lacks the issue-#11 inhibit rules, and several spec rows are fixture-bound
-> or time dependent. The Grafana FQDN first failed to resolve from `nexus`, `client-vm` and `bastion`
-> (finding F2: the `dns` tier lacked `dns_freeipa_zones`); adding the input afterwards fixed it, verified
-> incrementally rather than by a from-zero rebuild (§3.10). Details, findings F1–F9 and the evidence deficiencies:
+> `dns` tier, `bastion` with `pilot-access-gateway`) was rebuilt from zero in one pass on candidate `56e6734a`,
+> which carries the fixes for the round 32 findings (F1–F10), `dns_freeipa_zones` from the start and a 120 GiB
+> `nexus`. Every deploy, reconcile and idempotency step reached `failed=0`; **both site-wide reruns were
+> `changed=0` on all five hosts**; runbook §4.1–§4.5 all passed, including the Grafana FQDN from every host
+> (F2). Remaining failures are fixture-bound or by-design spec rows, and one open product finding, G1 (the
+> teardown cleans a different Ansible fact-cache directory than `pilot deploy` reads, §3.10). Details and the
+> evidence deficiencies: [round 33 record](../evidence/minimal-poc-architecture/2026-11-13-round-33.md). The
+> previous run, with the findings that led to these fixes, is the
 > [round 32 record](../evidence/minimal-poc-architecture/2026-11-13-round-32.md). The three-node history
 > below is unchanged.
 >
@@ -278,7 +279,7 @@ One-time acceptance recordings and per-run wizard drivers are disposable.
 > **Five-node architecture, run on 2026-11-13 (§0.6, §3.10):** the topology file defines five nodes
 > aligned with `infra-config` staging/prod. The table in this section, §0.5 and the older round
 > history still describe the three original nodes; the five-node results, including what failed, are
-> in §0.6.3, §3.10 and the [round 32 record](../evidence/minimal-poc-architecture/2026-11-13-round-32.md).
+> in §0.6.3, §3.10 and the [round 33 record](../evidence/minimal-poc-architecture/2026-11-13-round-33.md).
 
 Rebuild and verify this three-node PoC entirely through sanctioned `pilot` workflows:
 
@@ -316,17 +317,17 @@ component-specific values.
 The last run used ephemeral lab IPs. Never copy an address from old evidence; read the current
 addresses and generated inventory before each rebuild.
 
-### 0.5a Five-node facts (round 32, 2026-11-13)
+### 0.5a Five-node facts (round 33, 2026-11-13)
 
 | Item | Value |
 |---|---|
-| Tested candidate | commit `164dafa30a6d9eefca63c2a8dd6a663facfcb32d`, tree `c9c5705eac62180cfd8246d06deb0c304a79b30d` |
-| Targets | `freeipa-server`, `freeipa-replica` (AlmaLinux 9, 4608 MiB), `nexus` (12288 MiB), `client-vm` (2560 MiB), `bastion` (2048 MiB); 14 vCPU, 26112 MiB in total |
-| Site-wide apply (gateway without ForceCommand) | `failed=0` on all five hosts (bastion ok=347 changed=49, client-vm ok=592 changed=77, freeipa-replica ok=175 changed=47, freeipa-server ok=234 changed=62, nexus ok=994 changed=167) |
-| Day-2 | gateway-scope reconcile, ForceCommand on, replica, identity, nfs-server, dns, dns-client, ca-trust, reverse-proxy, internal-endpoint, agent-controller, detection-engine: all `failed=0` (§3.10) |
-| Idempotency | second site-wide rerun `changed=0` on all five hosts; the first rerun had `client-vm changed=2` (unbound config) |
-| Specs | 28 in scope, 27 ran, 17 clean; the rest are fixture-bound, dcgm (not applicable), or findings F1/F2/F4/F5; `thanos-query` C13 and `prometheus` C22 only pass after the first Thanos block exists (about 3 h after the apply) |
-| §4 | 4.1–4.3 pass, 4.4 passes (its first reconcile recording is incomplete, F7), **4.5 fails** (F2) |
+| Tested candidate | commit `56e6734ac857d6e0f049d41fe85b134dd507f695`, tree `5d1de35389221e07a406c73452b74dfee3866504` |
+| Targets | `freeipa-server`, `freeipa-replica` (AlmaLinux 9, 4608 MiB), `nexus` (12288 MiB, 120 GiB disk), `client-vm` (2560 MiB), `bastion` (2048 MiB); 14 vCPU, 26112 MiB in total |
+| Site-wide apply (gateway without ForceCommand) | `failed=0` on all five hosts (bastion ok=347 changed=49, client-vm ok=592 changed=77, freeipa-replica ok=175 changed=47, freeipa-server ok=234 changed=62, nexus ok=993 changed=167); 25 minutes |
+| Day-2 | gateway-scope reconcile, ForceCommand on, replica, identity, nfs-server, dns, `dns_freeipa_zones` + dns deploy (twice), dns-client, ca-trust, reverse-proxy, internal-endpoint, agent-controller, detection-engine: all `failed=0` (§3.10) |
+| Idempotency | both site-wide reruns `changed=0` on all five hosts |
+| Specs | 28 in scope, 27 ran; the rest are fixture-bound, dcgm (not applicable) or restic-backup C5 until the first backup window; `thanos-query` 13/13 and `prometheus` C22 pass about 3 h after the apply |
+| §4 | 4.1–4.5 all pass (4.4's removal reconcile exits 0 with the F7 retry) |
 
 ### Required role placement
 
@@ -433,7 +434,7 @@ Merging decisions and why they are safe to try:
 - `agent-controller` and `detection-engine` on `nexus`: both are `hostCardinality: exactly-one`
   and `detection-engine` needs `thanos-query` and `alertmanager` from the same site.
 
-### 0.6.3 Verification status of the five-node design (round 32, 2026-11-13)
+### 0.6.3 Verification status of the five-node design (round 33, 2026-11-13)
 
 | # | Item | Status |
 |---|---|---|
@@ -444,7 +445,7 @@ Merging decisions and why they are safe to try:
 | 5 | Firewall flows | primary↔replica proven by the replication segment and the replica's own `hbactest`; bastion→FreeIPA and bastion→targets by the gateway spec rows; Alertmanager→agent-controller **not exercised** (the Alertmanager config has no such receiver, F1) |
 | 6 | §4 checks repeated against the replica | `ipa hbactest` and the replicated user checked on the replica; the Grafana FQDN check from the replica passes |
 
-What still fails or is open is listed as findings F1–F10 in the round 32 record and in §6.1.
+The findings of round 32 (F1–F10) are fixed and re-verified from zero in round 33; the one open finding, G1, is in the round 33 record and §3.10.
 
 ## 1. Aligned acceptance contracts
 
@@ -1343,12 +1344,14 @@ that is not in a table there was observed in that run.
 **Before the first deploy on rebuilt VMs (run hygiene).**
 
 - `ansible.cfg` sets `gathering = smart` with a one-hour `jsonfile` fact cache keyed by inventory host
-  name (`~/.local/share/pilot/ansible/fact-cache/s1_<host>`). A VM rebuilt under the same name within
-  the hour keeps its old facts and a preview can stop on a stale address (`dns service address ... is
-  not an IPv4 address of client-vm`). Remove the cache entries of this run's host names first.
-  `pilot vm-target up` and teardown already drop the entries of the VM names they create or remove, so
-  this only bites when a workspace inventory uses other host names, or when facts were cached after
-  the VMs were created; round 32 hit it once and could not reproduce the cause from its record.
+  name. A VM rebuilt under the same name within the hour keeps its old facts and a preview can stop on
+  a stale address (`dns service address ... is not an IPv4 address of client-vm`). **Finding G1 (round 33):
+  `pilot vm-target up` and teardown do not clean the cache that `pilot deploy`/`pilot reconcile` read.** They
+  clean the directory `ansible-config` reports for the working directory (`~/.ansible/pilot-factcache`);
+  deploy and reconcile use `<data-dir>/ansible/fact-cache` (default `~/.local/share/pilot/ansible/fact-cache`).
+  Round 33 saw the five entries of the previous run survive a `topology down` and `topology up`. Until
+  this is fixed, remove this run's host names from that directory before the first deploy
+  (`rm -f ~/.local/share/pilot/ansible/fact-cache/s1_<host>` for each of the five inventory names).
 - libvirt hands out recycled DHCP addresses, so `~/.ssh/known_hosts` keeps stale keys for them. The
   preview still passes (Ansible does not check host keys here) but `pilot reconcile`'s `/etc/ipa` lock
   step uses strict checking and stops before the apply. Remove the entries of the run's addresses
@@ -1402,12 +1405,12 @@ only the FreeIPA domain; `it.pilot.internal` (the zone `freeipa-dns` and `intern
 single component → DNS cache tier; the plan is one playbook (preview, then apply), `changed=2` on `client-vm`
 only, and a second run is `changed=0`. Round 32 added it after the evidence run on the user's decision and verified
 it incrementally (dns spec 17 pass / 0 fail, §4.5 pass, `freeipa-dns-client` and `internal-endpoint` reconciles and a
-site-wide rerun all `changed=0`); the next clean-room run should carry it from this step on.
+site-wide rerun all `changed=0`); round 33 carried it from this step on: the dns deploy was `changed=2` on `client-vm` only, the second run `changed=0`, and §4.5 passed.
 
 **`nexus` disk (finding F9).** The wazuh-manager vulnerability-detector feed grows to about 31 GiB over the first
 hours, so a rebuild with the old 80 GiB disk stops its site-wide idempotency rerun in the preflight (§6.1). The topology
 now sizes `nexus` at 120 GiB. An existing VM can be grown online with `pilot vm-target resize-disk --name nexus --disk 120`
-followed by `growpart /dev/vda 1 && resize2fs /dev/vda1` inside the guest (done in round 32: 72 GiB free afterwards).
+followed by `growpart /dev/vda 1 && resize2fs /dev/vda1` inside the guest (done in round 32: 72 GiB free afterwards). Round 33 built `nexus` with 120 GiB from the start.
 
 ## 4. Verification procedure
 
@@ -1628,6 +1631,11 @@ not the inventory/topology alias — the same "real hostname, not the alias" got
 documents for Loki's `host` label. Grepping the snapshot list for the literal string
 `freeipa-server` to confirm coverage finds nothing; use `ipa1.ipa.pilot.internal` instead.
 
+**First backup window (round 33).** The timer fires at 02:00 plus up to one hour, so a fresh rebuild has no
+snapshot for the rest of the day and `restic-backup.md` C5 fails on every host until then (36/4 about 50 minutes
+after the apply). The spec documents this as an eventually consistent state. The "trigger a backup" step above
+(`systemctl start restic-backup.service` on each host) creates the snapshot, and the spec then passes 40/40.
+
 ### 4.4 Identity reconciler cycle
 
 1. Remove the allowed user's HBAC/role-group membership from the roster and reconcile. Per §2's
@@ -1841,8 +1849,9 @@ automatically).
 
 ## 7. Latest verified evidence
 
-The latest record is [round 32, five-node topology](../evidence/minimal-poc-architecture/2026-11-13-round-32.md)
-(candidate `164dafa3`, 2026-11-13). The table below is round 30's record for the original three-node
+The latest record is [round 33, five-node topology](../evidence/minimal-poc-architecture/2026-11-13-round-33.md)
+(candidate `56e6734a`, 2026-11-13); the findings it fixed come from the
+[round 32 record](../evidence/minimal-poc-architecture/2026-11-13-round-32.md). The table below is round 30's record for the original three-node
 topology and is kept as history.
 
 | Field | Round 30 record |
