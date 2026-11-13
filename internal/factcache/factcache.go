@@ -3,6 +3,13 @@
 // `gathering = smart` with a jsonfile cache and a 3600 s timeout, so a
 // disposable target recreated under the same name within the hour would
 // otherwise be served the facts (addresses, OS) of the one it replaced.
+//
+// Two caches can hold such entries. One is whatever Ansible resolves from
+// the working directory and environment of this process (the repo's
+// ansible.cfg points it at ~/.ansible/pilot-factcache). The other is the
+// one pilot's own Ansible commands (`pilot deploy`, `reconcile`, the MCP
+// server, ...) are pinned to under the data directory: RuntimeDir and
+// RuntimeEnv are its single definition. DropAll cleans both.
 package factcache
 
 import (
@@ -28,6 +35,32 @@ var ansibleConfigBin = "ansible-config"
 // resolveTimeout bounds each ansible-config call (it reads local files only;
 // a real call takes well under a second).
 const resolveTimeout = 30 * time.Second
+
+// runtimeCachePlugin is the cache plugin pilot's Ansible commands pin.
+const runtimeCachePlugin = "jsonfile"
+
+// RuntimeDir is the fact-cache directory pilot's own Ansible commands use
+// under dataDir: <dataDir>/ansible/fact-cache. dataDir is made absolute
+// against the working directory once, here, so the directory Ansible is
+// told about and the directory DropAll cleans are the same path whatever
+// each of them is later run from.
+func RuntimeDir(dataDir string) string {
+	if abs, err := filepath.Abs(dataDir); err == nil {
+		dataDir = abs
+	}
+	return filepath.Join(dataDir, "ansible", "fact-cache")
+}
+
+// RuntimeEnv is the environment that points Ansible at RuntimeDir(dataDir),
+// in KEY=value form for appending to a command's environment. It is the
+// only place the deploy runtime's cache location is spelled out; the
+// lifecycle commands that drop facts are bound to the same RuntimeDir.
+func RuntimeEnv(dataDir string) []string {
+	return []string{
+		"ANSIBLE_CACHE_PLUGIN=" + runtimeCachePlugin,
+		"ANSIBLE_CACHE_PLUGIN_CONNECTION=" + RuntimeDir(dataDir),
+	}
+}
 
 // Store is the fact cache Ansible would use when started from this process:
 // same working directory, same environment, so the same ansible.cfg.
@@ -124,30 +157,88 @@ func (s Store) Purge(hosts []string) ([]string, error) {
 	return removed, errors.Join(errs...)
 }
 
-// Drop resolves the fact cache and removes the entries of hosts. Without
-// ansible-config on PATH no Ansible run can read a cache from this process
-// either, so there is nothing to drop. A cache plugin other than jsonfile
-// or memory is reported but not cleaned.
+// Drop resolves the fact cache this process's Ansible would use and removes
+// the entries of hosts. Without ansible-config on PATH no Ansible run can
+// read a cache from this process either, so there is nothing to drop. A
+// cache plugin other than jsonfile or memory is reported but not cleaned.
+//
+// Drop does not touch the cache under the data directory that pilot's own
+// Ansible commands use (RuntimeDir); callers that recreate or remove
+// hosts use DropAll.
 func Drop(ctx context.Context, hosts []string) error {
+	_, err := dropAmbient(ctx, hosts)
+	return err
+}
+
+// DropAll removes the entries of hosts from both caches a later pilot
+// command could read: the one this process's Ansible resolves (Drop) and
+// RuntimeDir(dataDir), where `pilot deploy` and the other pilot Ansible
+// commands keep theirs. The second is cleaned without ansible-config and
+// from any working directory, since its location is fixed by dataDir; a
+// directory that does not exist is left alone, not created. The errors of
+// the two are joined, so a failure in one does not skip the other.
+//
+// A pilot deploy run with a different data directory than dataDir reads a
+// different cache; this cannot see it.
+func DropAll(ctx context.Context, dataDir string, hosts []string) error {
+	if dataDir == "" {
+		return errors.New("factcache: the data directory is required to find the deploy fact cache")
+	}
+	ambient, ambientErr := dropAmbient(ctx, hosts)
+	runtime := Store{Plugin: runtimeCachePlugin, Dir: RuntimeDir(dataDir)}
+	// The deploy runtime inherits this process's environment and
+	// ansible.cfg and only pins the plugin and its directory, so its file
+	// name prefix is the one the ambient jsonfile cache resolved to.
+	if isJSONFile(ambient.Plugin) {
+		runtime.Prefix = ambient.Prefix
+	}
+	var runtimeErr error
+	// An operator who exports the deploy directory as the ambient one is
+	// already cleaned by the first pass (same directory means same prefix).
+	if filepath.Clean(ambient.Dir) != runtime.Dir {
+		var removed []string
+		removed, runtimeErr = runtime.Purge(hosts)
+		if len(removed) > 0 {
+			slog.Debug("dropped cached facts", "files", removed)
+		}
+		if runtimeErr != nil {
+			runtimeErr = fmt.Errorf("drop the deploy fact cache: %w", runtimeErr)
+		}
+	}
+	return errors.Join(ambientErr, runtimeErr)
+}
+
+// Dropper returns DropAll bound to dataDir, the shape vm-target and
+// docker-target keep as their fact-cache cleanup.
+func Dropper(dataDir string) func(ctx context.Context, hosts []string) error {
+	return func(ctx context.Context, hosts []string) error {
+		return DropAll(ctx, dataDir, hosts)
+	}
+}
+
+// dropAmbient is Drop; it also returns the cache it resolved (the zero
+// Store when there was none) so DropAll can reuse its prefix and skip a
+// second pass over the same directory.
+func dropAmbient(ctx context.Context, hosts []string) (Store, error) {
 	store, err := Resolve(ctx)
 	if errors.Is(err, exec.ErrNotFound) {
 		slog.Debug("ansible-config not found; no fact cache to drop", "hosts", hosts)
-		return nil
+		return Store{}, nil
 	}
 	if err != nil {
-		return fmt.Errorf("resolve the Ansible fact cache: %w", err)
+		return Store{}, fmt.Errorf("resolve the Ansible fact cache: %w", err)
 	}
 	if store.Dir == "" {
 		if !isMemory(store.Plugin) {
 			slog.Warn("fact cache plugin keeps no files pilot can clean; cached facts of recreated hosts may be stale", "plugin", store.Plugin, "hosts", hosts)
 		}
-		return nil
+		return store, nil
 	}
 	removed, err := store.Purge(hosts)
 	if len(removed) > 0 {
 		slog.Debug("dropped cached facts", "files", removed)
 	}
-	return err
+	return store, err
 }
 
 type setting struct {

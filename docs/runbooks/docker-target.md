@@ -306,8 +306,12 @@ container 之前被拒絕。`all`、`ungrouped` 是 Ansible 內建 group，不�
 alias group。
 
 `up` 會先刪掉 Ansible fact cache 裡這個名稱與每個 alias 的舊紀錄（刪不掉就
-不啟動），`down` 也會刪；cache 位置用跟 playbook 執行時相同的 `ansible.cfg`
-與環境變數解析（`ansible-config dump`）。
+不啟動），`down` 也會刪。要清的 cache 有兩個：`ansible.cfg` 與環境變數解析出的
+目錄（`ansible-config dump`，從執行 `up`/`down` 的目錄看），以及
+`pilot deploy`／`reconcile` 讀的 `<data-dir>/ansible/fact-cache`（只由 data dir
+決定，不需要 `ansible-config`，目錄不存在就略過）。`up`/`down` 要用跟之後
+`pilot deploy` 相同的 data dir（`--data-dir`、`PILOT_DATA_DIR`、config 的
+`data_dir`），否則清到的是另一個 data dir 的 cache。
 
 ### 8.3 Snapshot / Rollback（`snapshot` / `rollback`）
 
