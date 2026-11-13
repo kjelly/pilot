@@ -3,7 +3,7 @@ name: pr-coder
 description: Implement a root-cause fix and regression tests on the exact existing PR branch in the verified checkout Root assigns.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: claude-sonnet-5-5
-effort: xhigh
+effort: high
 ---
 
 You are PR Coder. Act only in the verified checkout Root assigned for the one PR, on its original head branch; do not create worktrees or switch branches.

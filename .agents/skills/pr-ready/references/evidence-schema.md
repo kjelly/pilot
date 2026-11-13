@@ -32,9 +32,16 @@ Create one evidence file *per PR per latest HEAD*. A new commit invalidates old 
   },
   "unrelated_failing_checks": [],
   "disputed_review_comments": [],
+  "agent_runs": [
+    {"role": "pr-coder", "model": "claude-sonnet-5-5", "effort": "high", "head_sha": "89abcdef0123456789abcdef0123456789abcdef", "round": 1},
+    {"role": "pr-reviewer", "model": "claude-sonnet-5-5", "effort": "xhigh", "head_sha": "89abcdef0123456789abcdef0123456789abcdef", "round": 1, "findings": {"P2": 1, "P3": 2}},
+    {"role": "pr-reviewer", "model": "claude-sonnet-5-5", "effort": "xhigh", "head_sha": "0123456789abcdef0123456789abcdef01234567", "round": 2, "findings": {}}
+  ],
   "target_validation": {"decision": "not-needed", "reason": "Docs and skill-only change; no playbook, spec, contract, inventory or Go code touched.", "artifact": "", "tested_revision": ""}
 }
 ```
+
+`agent_runs` (optional) records which model and effort each dispatched role ran at, so effort levels can be compared across PRs. One entry per role run: `role` is `pr-sa`, `pr-coder` or `pr-reviewer`; `model` and `effort` (`low`, `medium`, `high`, `xhigh`, `max`) are copied from the role's native definition (or the transcript), never guessed; `head_sha` is the HEAD that run worked on or reviewed; `round` counts review rounds from 1; `findings` (reviewer runs only) maps `P0`..`P4` to the number that run reported. Unlike the rest of the evidence it is cumulative: when a new HEAD needs a new evidence file, carry the earlier entries over. The gate does not require it, but rejects a malformed entry (a typo would silently drop the run from the comparison). `scripts/effort_report.py [evidence.json ...]` (default `.pr-ready/*/evidence.json`) prints runs per role/model/effort and PR cohorts by Coder effort with mean reviewer rounds and P0-P2 findings; it lists evidence files that lack the field.
 
 `target_validation` is read only when the base branch's `.github/pr-evidence.json` requires a record (see [Repository-required target evidence](#repository-required-target-evidence)); the gate ignores it otherwise. A `required` decision names the committed `artifact` and the full `tested_revision` SHA instead.
 
