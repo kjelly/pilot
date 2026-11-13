@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 
-# The same pattern text as AuditRuntime.ready in wazuh-transaction.py, which is
+# The same pattern text as AuditRuntime.watch_lines in wazuh-transaction.py, which is
 # the coordinator's own definition of "a Wazuh who-data watch".
 # TestRegression_WhodataWatchPatternHasOneSource keeps the two (and the
 # `auditctl -l | grep` of spec row C23) from drifting apart.

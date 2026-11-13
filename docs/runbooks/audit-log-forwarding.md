@@ -141,7 +141,7 @@ Step 10、rescue；spec §5 與 §6 有完整說明）：
   失敗：`endpoint_not_ready`、`agent_restart_failed`、`watches_not_restored`、`kernel_unreadable`（錯誤訊息列出
   還缺的 watch）。這一步失敗不回滾已套用的規則與轉送設定；修好原因後 `systemctl restart wazuh-agent` 並用 C23
   確認。
-- agent 不存在、已停止、或擾動前 kernel 沒有 `wazuh_fim` watch（例如 EL 上 endpoint 尚未建立，見下）的主機：
+- agent 不存在、已停止、或擾動前 kernel 沒有 `wazuh_fim` watch（例如 Issue #323 之前套用的 EL 舊主機，endpoint 尚未建立，見下）的主機：
   本模組永遠不啟動或重啟 agent。這類主機只會被上面的擾動前檢查拒絕（有 `wazuh-agent` unit、而且 Wazuh
   writer／journal 在進行中、讀不到狀態或 agent 在轉換中時；agent 已停止正是受控升級進行中的樣子），拒絕發生
   在 kernel 清單被動到之前；沒有 `wazuh-agent` unit 的主機完全不受 Wazuh 影響。

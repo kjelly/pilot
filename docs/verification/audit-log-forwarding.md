@@ -188,11 +188,11 @@ process 的 `/proc/<pid>/task/*/comm`，確認獨立 queue worker 確實存在�
 > C1–C22 沒有任何一條看得到這個狀態。
 > C23 把這個外部可觀察的結果獨立成一條：who-data 有三個前提（agent 為 active、`ossec.conf`
 > 設了 whodata、af_unix plugin 的 listener 在 endpoint 上），三者都成立時 kernel 就必須有
-> `wazuh_fim` watch。三者缺一，who-data 本來就不是 live（例如 EL 上 auditd 還沒被告知載入 Wazuh
-> agent 套件的 `af_wazuh.conf`，因此 endpoint 尚未建立，見 §5 的已知限制；或 `ss` 看得到的 socket
+> `wazuh_fim` watch。三者缺一，who-data 本來就不是 live（例如 Issue #323 之前套用的 EL 主機，auditd 還沒被告知載入 Wazuh
+> agent 套件的 `af_wazuh.conf`，因此 endpoint 尚未建立，見 §5；或 `ss` 看得到的 socket
 > 檔仍在，listener 卻已經不在；或 Ubuntu 22.04 的內建 af_unix，沒有外部 `audisp-af_unix` 行程，見 §5），
 > C23 不適用，回 0，不把別的元件的缺口算在本 spec 頭上。`ss` 不存在而前三個前提成立時回 1：無法證明就不能算通過。
-> 比對 `wazuh_fim` 的樣式與 `wazuh-transaction.py` 的 `AuditRuntime.ready` 相同（同樣的字面
+> 比對 `wazuh_fim` 的樣式與 `wazuh-transaction.py` 的 `AuditRuntime.watch_lines` 相同（同樣的字面
 > 樣式，`TestRegression_WhodataWatchPatternHasOneSource` 鎖住三處一致）。
 > apply 端對應的行為見 §6 與 `docs/runbooks/audit-log-forwarding.md` §5.6。
 
@@ -294,7 +294,7 @@ process 的 `/proc/<pid>/task/*/comm`，確認獨立 queue worker 確實存在�
 >   的 rescue 重載），等 auditd 與 af_unix listener 回來（有上限），重啟一次 `wazuh-agent`，再有上限地等
 >   kernel 的 `wazuh_fim` watch 涵蓋 S；沒有涵蓋就以 typed reason 失敗（`endpoint_not_ready`、
 >   `agent_restart_failed`、`watches_not_restored`、`kernel_unreadable`），不會靜默成功。agent 為
->   inactive／不存在、或 S 為空（例如 EL 上 endpoint 尚未建立）的主機，永遠不會被本模組啟動或重啟 agent；
+>   inactive／不存在、或 S 為空（例如 Issue #323 之前套用的 EL 舊主機，endpoint 尚未建立）的主機，永遠不會被本模組啟動或重啟 agent；
 >   這類主機只會因為上一條的擾動前檢查而拒絕。agent 不是 pilot 管理的也一樣處理（清掉 watch 的是本模組）。
 > - 失敗路徑（rescue）只在「這次 run 載入過」且「規則檔被還原或移除，或載入本身失敗」時才重載 kernel
 >   清單，重載後重新建立 who-data；最後的錯誤訊息如實說明規則檔、kernel 清單與 who-data 各自的結果，
@@ -312,7 +312,7 @@ process 的 `/proc/<pid>/task/*/comm`，確認獨立 queue worker 確實存在�
 >   全新同機鏈套用完成後，`/var/ossec/queue/sockets/audit` 沒有 listener，who-data 不是 live；之後
 >   `pkill -HUP -x auditd`（EL 的 auditd 拒絕 `systemctl restart`）listener 才出現，who-data 才 live。這段
 >   期間 C23 回 0（前提不成立），本模組也不會碰 agent。#323 的 wazuh-fim Step 11a 之後會在 agent 最後一次服務變更後建立 endpoint，
->   含 #323 的鏈套用完成後 EL 的 who-data 是 live 的，本模組的 guard 與 re-arm 隨之適用（見 evidence）。who-data 已 live 的 EL 主機被外部 `auditctl -D` 清掉
+>   含 #323 的鏈套用完成後 EL 的 who-data 是 live 的，本模組的 guard 與 re-arm 隨之適用（見 `docs/evidence/audit-log-forwarding/LATEST.md`）。who-data 已 live 的 EL 主機被外部 `auditctl -D` 清掉
 >   後再套用：watch 被補回（agent 重啟一次），下一次套用 `changed=0`。
 > - Ubuntu 22.04 沒有涵蓋，也沒有 capture：它的 auditd 內建 af_unix（`builtin_af_unix`），沒有外部
 >   `audisp-af_unix` 行程。re-arm 與 C23 的 listener 前提都只認 `audisp-af_unix` 在 endpoint 上 LISTEN，所以

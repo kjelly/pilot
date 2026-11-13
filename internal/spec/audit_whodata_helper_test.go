@@ -230,7 +230,7 @@ func TestAuditWhodataProbeReadsEveryStateWithoutGuessing(t *testing.T) {
 	}
 }
 
-// The watch pattern is one text in three places: the Wazuh coordinator's AuditRuntime.ready (its own definition
+// The watch pattern is one text in three places: the Wazuh coordinator's AuditRuntime.watch_lines (its own definition
 // of "a who-data watch"), this role's helper, and the `auditctl -l | grep` of spec row C23. A copy that drifts
 // would make the role give back watches the coordinator does not count, or the row pass on lines it ignores.
 func TestRegression_WhodataWatchPatternHasOneSource(t *testing.T) {
