@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // TestRegression_AlertmanagerSpec locks the structure of
@@ -289,6 +291,63 @@ func TestRegression_AlertmanagerSpec(t *testing.T) {
 	for _, id := range wantIDs {
 		if !covered[id] {
 			t.Errorf("spec row %s is not covered by any generated task", id)
+		}
+	}
+}
+
+// The shipped group_vars example must not carry a live alertmanager_config.
+// `pilot inventory generate` copies group_vars/alertmanager.example.yml into
+// the workspace as group_vars/alertmanager.yml, and a defined
+// alertmanager_config without alertmanager_receiver_mode is read as the legacy
+// `custom` mode, which replaces the whole built-in configuration. The example
+// used to ship a live stub with only a `null` receiver, so every workspace
+// built from the skeleton lost the two issue-#11 inhibit rules that C10 checks
+// (minimal-PoC five-node clean-room acceptance, 2026-11-13, finding F1).
+func TestRegression_AlertmanagerExampleDoesNotOverrideTheBuiltInConfig(t *testing.T) {
+	raw, err := os.ReadFile("../../group_vars/alertmanager.example.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("the example no longer parses as YAML: %v", err)
+	}
+	for _, key := range []string{"alertmanager_config", "alertmanager_receiver_mode"} {
+		if _, live := doc[key]; live {
+			t.Errorf("group_vars/alertmanager.example.yml carries a live %s; a copy of it would replace the built-in Alertmanager configuration (and its inhibit rules) in every workspace built from the skeleton. Show it as a comment instead", key)
+		}
+	}
+}
+
+// The configurations the playbook builds itself must keep both issue-#11
+// inhibit rules, since the example no longer supplies a config: the default
+// (`null` receiver) one and the Teams one.
+func TestRegression_AlertmanagerBuiltInConfigsCarryTheInhibitRules(t *testing.T) {
+	raw, err := os.ReadFile("../../playbooks/apply/alertmanager-apply.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, name := range []string{"alertmanager_default_config:", "alertmanager_teams_config:"} {
+		i := strings.Index(text, name)
+		if i < 0 {
+			t.Fatalf("%s not found in the playbook", name)
+		}
+		block := text[i+len(name):]
+		if j := strings.Index(block, "\n  pre_tasks:"); j >= 0 {
+			block = block[:j]
+		}
+		if k := strings.Index(block, "\n    alertmanager_teams_config:"); k >= 0 && name == "alertmanager_default_config:" {
+			block = block[:k]
+		}
+		for _, must := range []string{
+			`source_matchers: ['alertname="HostMetricsMissing"']`,
+			`source_matchers: ['alertname="PilotLoginProbeStale"']`,
+			"inhibit_rules:",
+		} {
+			if !strings.Contains(block, must) {
+				t.Errorf("%s lost %q", name, must)
+			}
 		}
 	}
 }

@@ -79,3 +79,46 @@ func TestAlertmanagerReceiverStatusTreatsLegacyConfigAsCustom(t *testing.T) {
 		t.Fatalf("status = %q, want legacy custom", got)
 	}
 }
+
+// F10 (minimal-PoC five-node run): the screen read the vault only. A workspace built
+// from the old skeleton carries a live alertmanager_config in group_vars, which the
+// playbook applies as the legacy `custom` configuration, and the screen said "null".
+// Each case follows the playbook's resolution rules.
+func TestAlertmanagerReceiverStatusFollowsThePlaybookResolution(t *testing.T) {
+	const legacyGroupVars = "alertmanager_config: |\n  route:\n    receiver: 'null'\n"
+	for _, tc := range []struct {
+		name      string
+		vault     string
+		groupVars string // empty: no group_vars/alertmanager.yml at all
+		want      string
+	}{
+		{"nothing anywhere", "---\n", "", "null"},
+		{"comment-only group_vars (the current skeleton)", "---\n", "---\n# alertmanager_config: |\n#   ...\n", "null"},
+		{"live config in group_vars only", "---\n", legacyGroupVars, "custom（legacy，來自 group_vars/alertmanager.yml）"},
+		{"live config in the vault only", "alertmanager_config: |\n  route:\n    receiver: x\n", "---\n", "custom（legacy）"},
+		{"an empty config in group_vars says nothing", "---\n", "alertmanager_config: \"\"\n", "null"},
+		{"explicit null beats a live group_vars config", "alertmanager_receiver_mode: null\n", legacyGroupVars, "null"},
+		{"explicit null beats a leftover vault config", "alertmanager_receiver_mode: \"null\"\nalertmanager_config: |\n  route:\n    receiver: x\n", "---\n", "null"},
+		{"mode from group_vars", "---\n", "alertmanager_receiver_mode: Teams\n", "teams"},
+		{"the vault mode beats the group_vars mode", "alertmanager_receiver_mode: custom\n", "alertmanager_receiver_mode: teams\n", "custom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.groupVars != "" {
+				if err := os.MkdirAll(filepath.Join(dir, "group_vars"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "group_vars", "alertmanager.yml"), []byte(tc.groupVars), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			doc, err := vaultfile.Parse([]byte(tc.vault))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := alertmanagerReceiverStatusIn(doc, readAlertmanagerGroupVars(dir)); got != tc.want {
+				t.Fatalf("status = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

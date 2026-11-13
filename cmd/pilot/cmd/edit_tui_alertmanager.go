@@ -51,21 +51,67 @@ func validateAlertmanagerReceiver(mode, value string) error {
 	}
 }
 
+// alertmanagerGroupVars is what the workspace's group_vars/alertmanager.yml says
+// about the receiver: the playbook reads it too, so the screen has to.
+type alertmanagerGroupVars struct {
+	mode      string
+	hasConfig bool
+}
+
+// readAlertmanagerGroupVars reads <dir>/group_vars/alertmanager.yml. A missing or
+// unreadable file, or one with only comments, says nothing.
+func readAlertmanagerGroupVars(dir string) alertmanagerGroupVars {
+	data, err := os.ReadFile(filepath.Join(dir, "group_vars", "alertmanager.yml"))
+	if err != nil {
+		return alertmanagerGroupVars{}
+	}
+	var vars map[string]any
+	if err := yaml.Unmarshal(data, &vars); err != nil {
+		return alertmanagerGroupVars{}
+	}
+	var gv alertmanagerGroupVars
+	if mode, ok := vars[alertmanagerReceiverModeKey].(string); ok {
+		gv.mode = strings.ToLower(strings.TrimSpace(mode))
+	}
+	if cfg, ok := vars[alertmanagerCustomConfigKey].(string); ok && strings.TrimSpace(cfg) != "" {
+		gv.hasConfig = true
+	}
+	return gv
+}
+
+// alertmanagerReceiverStatus is the receiver mode a vault alone selects.
 func alertmanagerReceiverStatus(doc *vaultfile.Doc) string {
-	mode := alertmanagerReceiverModeNull
+	return alertmanagerReceiverStatusIn(doc, alertmanagerGroupVars{})
+}
+
+// alertmanagerReceiverStatusIn follows the playbook (alertmanager-apply.yml,
+// "Resolve the requested Alertmanager receiver mode"): an explicit
+// alertmanager_receiver_mode wins (the vault is passed with -e, so it beats
+// group_vars); only without any mode does a defined alertmanager_config mean the
+// legacy `custom`, wherever it is defined. The screen used to read the vault only
+// and said "null" for a workspace whose group_vars carried a live alertmanager_config,
+// which is the custom configuration that was actually applied (minimal-PoC five-node
+// run, finding F10); it also called an explicit `null` "custom（legacy）" whenever a
+// leftover alertmanager_config was still in the vault.
+func alertmanagerReceiverStatusIn(doc *vaultfile.Doc, gv alertmanagerGroupVars) string {
 	for _, entry := range doc.ScalarEntries() {
 		if entry.Key == alertmanagerReceiverModeKey && strings.TrimSpace(entry.Value.Value) != "" {
-			mode = strings.TrimSpace(entry.Value.Value)
-			break
+			return strings.ToLower(strings.TrimSpace(entry.Value.Value))
 		}
 	}
-	if mode == alertmanagerReceiverModeNull && doc.HasKey(alertmanagerCustomConfigKey) {
-		// Old workspaces used alertmanager_config without a mode. Keep that
-		// established configuration active until an operator explicitly picks a
-		// mode in this screen.
-		mode = alertmanagerReceiverModeCustom + "（legacy）"
+	if gv.mode != "" {
+		return gv.mode
 	}
-	return mode
+	// Old workspaces used alertmanager_config without a mode. Keep that
+	// established configuration active until an operator explicitly picks a
+	// mode in this screen.
+	if doc.HasKey(alertmanagerCustomConfigKey) {
+		return alertmanagerReceiverModeCustom + "（legacy）"
+	}
+	if gv.hasConfig {
+		return alertmanagerReceiverModeCustom + "（legacy，來自 group_vars/alertmanager.yml）"
+	}
+	return alertmanagerReceiverModeNull
 }
 
 func saveAlertmanagerReceiver(dir, mode, value string) error {
@@ -116,7 +162,7 @@ func pushAlertmanagerReceiverManager(r *editRouterModel, dir, banner string) tea
 	if err != nil || !doc.EditableWithPreservedNestedMappings(monitoring.SNMPCredentialsKey) {
 		return pushTopMenu(r, dir, "⚠️  Alertmanager vault 必須是可編輯的 top-level scalar YAML。")
 	}
-	status := alertmanagerReceiverStatus(doc)
+	status := alertmanagerReceiverStatusIn(doc, readAlertmanagerGroupVars(dir))
 	choices := []tui.Choice{
 		{ID: "alertmanager.receiver.teams", Label: "設定 Teams webhook（單一 receiver）"},
 		{ID: "alertmanager.receiver.custom", Label: "設定 custom Alertmanager YAML"},

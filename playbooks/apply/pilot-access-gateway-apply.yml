@@ -144,6 +144,42 @@
     # having actually been run there.
     pilot_access_gateway_effective_install_forcecommand: "{{ pilot_access_gateway_install_forcecommand | default(true) }}"
 
+    # Step 17's acceptance rule for /v1/health (read by its retry condition and
+    # by its gate, so the two can never disagree). `ok` is always accepted. A
+    # gateway that will NOT install the ForceCommand drop-in additionally
+    # accepts exactly one degraded shape: FreeIPA reachable, the gateway's own
+    # credential ok, and only pilot-target-<scope> missing. That is the state
+    # of every first site-wide deploy: the hostgroup is published by the
+    # day-2 `pilot gateway-scope reconcile`, which needs the FreeIPA server
+    # this same run builds, and the ownership ledger it keeps on that server
+    # refuses a hostgroup created any other way (names never prove ownership,
+    # freeipa-gateway-scope.py), so this playbook must not create it either.
+    # Without ForceCommand no session is redirected into the portal, so an
+    # empty scope harms nothing. When ForceCommand is requested the rule stays
+    # strict: that is the case the spec §9.5 fail-closed requirement protects,
+    # and the ForceCommand gate below repeats the check before the drop-in.
+    # `target_scope: missing` only means the gateway's own lookup failed, so it
+    # also needs Step 13's independent `ipa hostgroup-show` to confirm the
+    # hostgroup really does not exist (a group that exists but the gateway
+    # cannot read is a real fault); with no such result the group counts as
+    # present and the rule stays strict. Any other degraded body (FreeIPA
+    # unreachable, credential failure) or a missing/invalid answer is never
+    # acceptable.
+    gateway_health_acceptable: >-
+      {%- set raw = (gateway_health_probe.stdout | default('')) | trim -%}
+      {%- if (gateway_health_probe.rc | default(1)) != 0 or not raw.startswith('{') -%}
+      false
+      {%- else -%}
+      {%- set h = raw | from_json -%}
+      {{ h.get('status') == 'ok'
+         or (not (pilot_access_gateway_effective_install_forcecommand | bool)
+             and h.get('status') == 'degraded'
+             and h.get('freeipa') == 'reachable'
+             and h.get('credential') == 'ok'
+             and h.get('target_scope') == 'missing'
+             and (gateway_target_hostgroup_show.rc | default(0)) != 0) }}
+      {%- endif -%}
+
     # Session recording policy (docs/superpowers/specs/2026-09-23-pilot-
     # access-gateway-captive-ssh-transport-spec.md §12.2). Before this, Step
     # 11 rewrote /etc/pilot/access-gateway.yaml wholesale with NO recording:
@@ -1506,21 +1542,44 @@
     # from-scratch pilot-access-gateway install).
     - name: "Step 17: capability probe FreeIPA via /v1/health"
       ansible.builtin.command:
-        argv: [curl, --silent, --show-error, --fail, --unix-socket, "{{ gateway_socket_path }}", "http://localhost/v1/health"]
+        # No --fail: a degraded gateway answers 503 with the JSON body the
+        # acceptance rule (gateway_health_acceptable) needs, and --fail would
+        # turn that into curl rc 22 with no body. A connection failure still
+        # has rc != 0 and is retried like any other unacceptable answer.
+        argv: [curl, --silent, --show-error, --unix-socket, "{{ gateway_socket_path }}", "http://localhost/v1/health"]
       register: gateway_health_probe
       changed_when: false
+      failed_when: false
       retries: 3
       delay: 2
-      until: gateway_health_probe.rc == 0
+      until: gateway_health_acceptable | bool
       when: not ansible_check_mode
       tags: [AG_service, AG06]
 
     - name: "Step 17: gate — health probe reports ok"
       ansible.builtin.assert:
         that:
-          - (gateway_health_probe.stdout | from_json).status == 'ok'
-        fail_msg: "health probe did not report status=ok: {{ gateway_health_probe.stdout }}"
+          - gateway_health_acceptable | bool
+        fail_msg: >-
+          health probe did not report status=ok (rc={{ gateway_health_probe.rc }}):
+          {{ (gateway_health_probe.stdout ~ ' ' ~ gateway_health_probe.stderr) | trim }}.
+          A degraded answer is accepted only when ForceCommand is not being installed
+          and the single missing piece is pilot-target-{{ gateway_scope }}.
       when: not ansible_check_mode
+      tags: [AG_service]
+
+    - name: "Step 17: pilot-target-<scope> is not published yet (ForceCommand not requested)"
+      ansible.builtin.debug:
+        msg: >-
+          pilot-access-gateway is up, FreeIPA is reachable and its credential works, but
+          {{ gateway_target_hostgroup }} does not exist yet, so /v1/health is degraded
+          (target_scope=missing). Publish the scope with `pilot gateway-scope reconcile
+          --scope {{ gateway_scope }} ...`, then re-apply with
+          pilot_access_gateway_install_forcecommand=true to install ForceCommand.
+      when:
+        - not ansible_check_mode
+        - (gateway_health_probe.stdout | default('') | trim).startswith('{')
+        - (gateway_health_probe.stdout | from_json).get('status') != 'ok'
       tags: [AG_service]
 
     # AG82, after the new gateway passed its health check: remove the former
@@ -1692,7 +1751,22 @@
         that:
           - gateway_target_hostgroup_show.rc == 0
         fail_msg: "{{ gateway_target_hostgroup }} does not exist — run `pilot gateway-scope reconcile --scope {{ gateway_scope }} ...` first (spec.md Phase 6)."
-      when: not ansible_check_mode
+      when:
+        - not ansible_check_mode
+        - pilot_access_gateway_effective_install_forcecommand | bool
+      tags: [AG_service, AG12]
+
+    # Without ForceCommand nothing is redirected into the portal, and a first
+    # site-wide deploy cannot have published the scope yet (see
+    # gateway_health_acceptable above), so a missing pilot-target-<scope> only
+    # warns; Step 17 already refuses every other health failure.
+    - name: "Step 18: pilot-target-<scope> is not published yet (ForceCommand not requested)"
+      ansible.builtin.debug:
+        msg: "{{ gateway_target_hostgroup }} does not exist yet; ForceCommand is not being installed, so this is not fatal. Publish it with `pilot gateway-scope reconcile --scope {{ gateway_scope }} ...`."
+      when:
+        - not ansible_check_mode
+        - not (pilot_access_gateway_effective_install_forcecommand | bool)
+        - gateway_target_hostgroup_show.rc != 0
       tags: [AG_service, AG12]
 
     # ForceCommand preflight: Step 19 sends every portal user into

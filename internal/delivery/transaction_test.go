@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/kjelly/pilot/internal/store"
 )
@@ -338,5 +340,111 @@ func TestTransactionStepEvidenceReachesTheRealStoreAfterCancellation(t *testing.
 	var outcome string
 	if err := db.QueryRow(`SELECT outcome FROM delivery_runs WHERE run_id=?`, w.RunID()).Scan(&outcome); err != nil || outcome != string(OutcomePartialFailed) {
 		t.Fatalf("terminal outcome = %q, %v; want partial_failed", outcome, err)
+	}
+}
+
+// flakyWriter fails the first n AppendEvent calls and the first n Finish calls with
+// err, then succeeds. attempts counts every call.
+type flakyWriter struct {
+	failFor  int
+	err      error
+	appends  int
+	finishes int
+	events   []store.Event
+	finish   store.RunFinished
+}
+
+func (w *flakyWriter) AppendEvent(_ context.Context, event store.Event) error {
+	w.appends++
+	if w.appends <= w.failFor {
+		return w.err
+	}
+	w.events = append(w.events, event)
+	return nil
+}
+
+func (w *flakyWriter) Finish(_ context.Context, finish store.RunFinished) error {
+	w.finishes++
+	if w.finishes <= w.failFor {
+		return w.err
+	}
+	w.finish = finish
+	return nil
+}
+
+func fastEvidenceRetry(t *testing.T, budget time.Duration) {
+	t.Helper()
+	oldBudget, oldPause := evidenceRetryBudget, evidenceRetryPause
+	evidenceRetryBudget, evidenceRetryPause = budget, time.Millisecond
+	t.Cleanup(func() { evidenceRetryBudget, evidenceRetryPause = oldBudget, oldPause })
+}
+
+// F7 (minimal-PoC five-node run): under host load the evidence store timed out once,
+// and a deploy that had applied everything ended as evidence_failed with exit 1.
+// A transient store error is retried, for the step records and for the terminal one.
+func TestTransactionRetriesATransientEvidenceFailure(t *testing.T) {
+	fastEvidenceRetry(t, 5*time.Second)
+	for name, transient := range map[string]error{
+		"attempt timed out": fmt.Errorf("append delivery event: %w", context.DeadlineExceeded),
+		"sqlite busy":       errors.New("database is locked (5) (SQLITE_BUSY)"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := &flakyWriter{failFor: 2, err: transient}
+			res, err := (Transaction{Writer: w, Apply: func(context.Context) error { return nil }}).RunResult(context.Background())
+			if err != nil || res.Outcome != OutcomeSuccess {
+				t.Fatalf("result = %+v, err = %v; want success after the store recovered", res, err)
+			}
+			if w.appends != 3 || len(w.events) != 1 || w.events[0].Step != "apply" {
+				t.Fatalf("appends = %d events = %+v; want one record written on the third attempt", w.appends, w.events)
+			}
+			if w.finishes != 3 || w.finish.Outcome != string(OutcomeSuccess) {
+				t.Fatalf("finishes = %d finish = %+v; want the terminal record written on the third attempt", w.finishes, w.finish)
+			}
+		})
+	}
+}
+
+// The other half: a store that keeps timing out still ends as evidence_failed, and
+// one error that is not transient is not retried at all.
+func TestTransactionEvidenceFailureStillFailsClosedAfterTheRetryBudget(t *testing.T) {
+	fastEvidenceRetry(t, 30*time.Millisecond)
+	w := &flakyWriter{failFor: 1 << 30, err: context.DeadlineExceeded}
+	res, err := (Transaction{Writer: w, Apply: func(context.Context) error { return nil }}).RunResult(context.Background())
+	if res.Outcome != OutcomeEvidenceFailed || err == nil {
+		t.Fatalf("result = %+v, err = %v; want evidence_failed", res, err)
+	}
+	if w.appends < 2 {
+		t.Fatalf("appends = %d; a transient failure must be retried before giving up", w.appends)
+	}
+
+	fastEvidenceRetry(t, 5*time.Second)
+	w = &flakyWriter{failFor: 1 << 30, err: errors.New("disk I/O error")}
+	res, err = (Transaction{Writer: w, Apply: func(context.Context) error { return nil }}).RunResult(context.Background())
+	if res.Outcome != OutcomeEvidenceFailed || err == nil {
+		t.Fatalf("result = %+v, err = %v; want evidence_failed", res, err)
+	}
+	if w.appends != 1 {
+		t.Fatalf("appends = %d; a non-transient error must not be retried", w.appends)
+	}
+	for _, conflict := range []error{store.ErrEvidenceConflict, store.ErrRunFinished} {
+		w = &flakyWriter{failFor: 1 << 30, err: fmt.Errorf("wrapped: %w", conflict)}
+		_, _ = (Transaction{Writer: w, Apply: func(context.Context) error { return nil }}).RunResult(context.Background())
+		if w.appends != 1 {
+			t.Fatalf("%v: appends = %d; a final store answer must not be retried", conflict, w.appends)
+		}
+	}
+}
+
+// When the step did its work and only its record is missing, the error says so
+// (the operator saw "evidence_failed" and could not tell whether anything had run).
+func TestTransactionEvidenceFailureSaysTheStepItselfSucceeded(t *testing.T) {
+	fastEvidenceRetry(t, 5*time.Millisecond)
+	_, err := (Transaction{Writer: &flakyWriter{failFor: 1 << 30, err: errors.New("disk I/O error")}, Apply: func(context.Context) error { return nil }}).RunResult(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "apply step itself finished successfully") {
+		t.Fatalf("err = %v; want it to say the apply step itself finished successfully", err)
+	}
+	_, err = (Transaction{Writer: &flakyWriter{failFor: 1 << 30, err: errors.New("disk I/O error")}, Apply: func(context.Context) error { return errors.New("apply failed") }}).RunResult(context.Background())
+	if err == nil || strings.Contains(err.Error(), "finished successfully") {
+		t.Fatalf("err = %v; a failed step must not be described as successful", err)
 	}
 }

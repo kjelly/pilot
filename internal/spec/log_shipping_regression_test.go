@@ -20,7 +20,7 @@ import (
 //	    the central Loki via the alias
 //	C7  positions dir exists
 //	C8  config references the host-label pipeline stage (source: filename)
-//	C9  functional: query back filtered by {job=..., host="$(hostname)"} —
+//	C9  functional: query back filtered by {job=..., host="$(hostname -s)"} —
 //	    proves the host label is not just present but actually equals this
 //	    host's own name, not just "some value"
 //
@@ -185,8 +185,8 @@ func TestRegression_LogShippingSpec(t *testing.T) {
 		if !strings.Contains(r.Command, "logger") {
 			t.Errorf("C9 must inject a local test message via logger; got %q", r.Command)
 		}
-		if !strings.Contains(r.Command, `host=\"$(hostname)\"`) {
-			t.Errorf(`C9 must filter the query by host=\"$(hostname)\" (this host's own name, not a fixed value); got %q`, r.Command)
+		if !strings.Contains(r.Command, `host=\"$(hostname -s)\"`) {
+			t.Errorf(`C9 must filter the query by host=\"$(hostname -s)\" (this host's own name, not a fixed value); got %q`, r.Command)
 		}
 		if !strings.Contains(r.Command, "pilot-loki-backend") {
 			t.Errorf("C9 must query back through the pilot-loki-backend alias; got %q", r.Command)

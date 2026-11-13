@@ -24,29 +24,41 @@ Repo 已有 delivery test skill：`.agents/skills/delivery-test/SKILL.md`。它�
 整理給使用者。`tmp/pilot-semantic-actions-r15/` 的錄影只是 semantic action smoke
 coverage；它沒有驗證本拓撲的 restic、Thanos 或 Prometheus site label 值。
 
+> **2026-11-10 架構修訂（尚未在新拓撲上實跑驗證）**：PoC 由 3 台改為 5 台，對齊
+> `infra-config` 的 staging 與 prod，見 [`minimal-poc-architecture.md`](minimal-poc-architecture.md) §0.6。
+> 本文第 1、2.9、3、5 節已依新拓撲更新；其餘各節的內容沿用 3 台時已驗證的版本，仍然適用。
+
 ## 0.1 執行前提
 
 部署前必須確認：
 
-- 三台 VM 的實際 IP、SSH user、SSH private-key path 都能連線；不可沿用舊 evidence 的 IP。
-- `freeipa-server` 使用 AlmaLinux 9；`nexus`、`client-vm` 使用 Ubuntu 24.04。
+- 五台 VM 的實際 IP、SSH user、SSH private-key path 都能連線；不可沿用舊 evidence 的 IP。
+- `freeipa-server`、`freeipa-replica` 使用 AlmaLinux 9；`nexus`、`client-vm`、`bastion` 使用 Ubuntu 24.04。
 - `nexus` 至少有 4 vCPU、8 GiB RAM、50 GiB disk；Minimal PoC 建議使用 6 vCPU、12 GiB、80 GiB。
-- `freeipa-server` 至少有 2 vCPU、4 GiB RAM、30 GiB disk；`client-vm` 至少有 2 vCPU、2 GiB、20 GiB。
-- 三台主機彼此可連線，FreeIPA FQDN/IP、NFS FQDN/IP、S3 endpoint 可解析。
-- `nexus` 與 `client-vm` 具備 Docker；Wazuh manager 的目標主機符合上述資源需求。
+- `freeipa-server` 與 `freeipa-replica` 各至少 2 vCPU、4 GiB RAM、30 GiB disk
+  （contract 的 `minRAMMiB` 是 4096，AlmaLinux guest 只看得到配置值的約 95%，所以 VM 配置 4608 MiB）。
+- `client-vm` 至少有 2 vCPU、2.5 GiB、20 GiB（比原本多 512 MiB 給 `dns` 層）；`bastion` 2 vCPU、2 GiB、20 GiB。
+- 五台主機彼此可連線，FreeIPA FQDN/IP、NFS FQDN/IP、S3 endpoint 可解析。
+- `nexus`、`client-vm` 具備 Docker；Wazuh manager 的目標主機符合上述資源需求。
+- `agent-controller` 與 `detection-engine` 的 `dist/` 產物、`pilot-access-gateway` 的兩個 binary 已備妥
+  （pilot-cli image 的 `/pilot/dist/` 已內含，來源見 `images/Dockerfile.pilot-cli`）。
 - 使用同一個目前 revision 的 `pilot` binary、workspace、inventory；不可混用舊 workspace。
 
 ## 1. 目標拓撲與角色
 
 使用實際 VM IP 替換下表的 `<...>`；不可沿用舊 round 的 IP。
 
-| Host | 必要 roles |
-|---|---|
-| `freeipa-server` | `freeipa-server`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup` |
-| `nexus` | `freeipa-client`, `freeipa-nfs-server`, `docker`, `audit-log-forwarding`, `wazuh-manager`, `wazuh-fim`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard` |
-| `client-vm` | `freeipa-client`, `freeipa-nfs-client`, `docker`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup` |
+| Host | 對應的環境主機 | 必要 roles |
+|---|---|---|
+| `freeipa-server` | staging `stg-ipa1`／prod `freeipa` | `freeipa-server`, `freeipa-dns-client`, `host-monitoring`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup` |
+| `freeipa-replica` | staging `stg-ipa2`／prod `freeipa02` | `freeipa-server-replica`, `host-monitoring`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup` |
+| `nexus` | staging `stg-nexus`／prod `it-core` | `freeipa-client`, `freeipa-dns-client`, `freeipa-nfs-server`, `docker`, `reverse-proxy`, `host-monitoring`, `audit-log-forwarding`, `log-server`, `wazuh-manager`, `wazuh-fim`, `seaweedfs-s3`, `restic-backup`, `prometheus`, `thanos-query`, `alertmanager`, `dashboard`, `agent-controller`, `detection-engine` |
+| `client-vm` | staging `stg-client1` 加 `stg-dns1` | `freeipa-client`, `freeipa-dns-client`, `freeipa-nfs-client`, `dns`, `docker`, `host-monitoring`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup` |
+| `bastion` | prod `bastion-test` | `freeipa-client`, `pilot-access-gateway` |
 
-留空：`dns`、`ntp`、`keycloak`、`keycloak-db`、`linux-servers`、`log-server`。
+留空：`ntp`、`keycloak`、`keycloak-db`、`linux-servers`。`dcgm-exporter`（需要 GPU）、
+`snmp-exporter`（沒有 SNMP 設備）不納入；`reverse-proxy` 留在 `nexus`，不另開 `it-proxy`。
+`dns` 與 FreeIPA server／replica 在 contract 上互斥，所以放在 `client-vm`。
 
 `restic-backup` 不是自動加入的 role；若三台主機的 `hosts.yml` 沒有它，生成的
 `inventory.yml` 會有 `restic-backup: hosts: {}`，delivery test 不會有任何 restic
@@ -120,9 +132,9 @@ wazuh_manager_host: <nexus 的實際 IP>
 
 ### 2.6.1 `group_vars/audit-log-forwarding.yml` 與 `group_vars/wazuh-manager.yml`
 
-`siem_forward_host` 是選填。Minimal PoC 沒有 `log-server` group，因此不要為了填滿欄位
-而指向不存在的 host；Wazuh manager 作為中央接收端時，audit/FIM 的 provider discovery
-會使用 `wazuh-manager` group。只有要轉送到另一個外部 SIEM 時才填：
+`siem_forward_host` 是選填。`nexus` 同時有 `log-server` 與 `wazuh-manager`（2026-08-06 起），
+audit/FIM 的 provider discovery 會自動解析到 `log-server`，沒有就退回 `wazuh-manager`。
+只有要轉送到另一個外部 SIEM 時才填：
 
 ```yaml
 siem_forward_host: <外部或 log-server 的實際 IP/FQDN>
@@ -159,6 +171,23 @@ prometheus_site_label: site-nexus
 group vars 明確填入 `nexus` 的 IP。Site-wide deploy 仍必須先確認這些 provider group
 在實際 inventory 中有正確 host。
 
+### 2.9 新增角色的設定（2026-11-10，尚未實跑驗證）
+
+下列值依各 role 的 `contracts/*.yaml` 推導，對照 `infra-config` 的 staging／prod 設定；
+還沒有在 5 台拓撲上實際部署過，第一次實跑時以 preflight 的 `requires input` 為準，修正後回填本節。
+
+| 角色 | 檔案 | 值 | 說明 |
+|---|---|---|---|
+| `freeipa-server-replica` | `group_vars/freeipa.yml` | 沿用 §2.1 的 `freeipa_server_ip` | replica 與 primary 共用 `freeipa` 設定；`freeipa_replica_fqdn` 可省略時用預設 `ipa2.<freeipa_domain>`，拓撲已把 `freeipa-replica` 以這個名字寫進其他節點的 `/etc/hosts` |
+| `dns` | 無 | 全部有預設 | `dns_upstream` 預設 `1.1.1.1`；FreeIPA 內部網域自動送到 FreeIPA。沒有外網的環境要改成 lab 內可達的 upstream（staging 的 `dns.yml` 也只有註解） |
+| `agent-controller` | `group_vars/agent-controller.yml` | `agent_controller_artifact_path: dist/pilot-agent-controller-linux-amd64`、`agent_controller_artifact_sha256: <dist 內 .sha256 檔的值>` | `agent_controller_dispatcher_kind` 保持預設 `fake`（沒有外部 Agent Runtime）；`site.include: false`，要用 `pilot reconcile` 部署 |
+| `agent-controller` | `.vault/main.yaml` | `agent_controller_webhook_secret` | Alertmanager 送 webhook 的 bearer token |
+| `detection-engine` | `group_vars/detection-engine.yml` | `detection_engine_artifact_path: dist/pilot-detection-engine-linux-amd64`、`detection_metrics_source_host`／`detection_alertmanager_target_host`：`nexus` 的 IP | `detection_model_provider_enabled` 保持預設 `false`：staging 用的 FLM／Ollama 服務在 PoC 沒有；`site.include: false`，同樣用 `pilot reconcile` |
+| `pilot-access-gateway` | `host_vars/bastion.yml` | `gateway_id: poc-bastion`、`gateway_scope: all`（比照 prod `bastion-test`） | 另需 `pilot_binary_path: dist/pilot-linux-amd64`、`pilot_access_gateway_binary_path: dist/pilot-access-gateway-linux-amd64`，以及 vault 的 `ipa_admin_password` |
+
+`prometheus` 的 scrape 設定在 `nexus`：`freeipa-replica`、`bastion` 沒有 `host-monitoring`
+就不會被抓到，這是 prod `bastion-test` 的現況，不是遺漏。
+
 ## 3. `.vault/main.yaml` 必要 key
 
 透過 `pilot edit` 的 vault editor，或既有安全的 vault workflow，確保下列 scalar key
@@ -175,13 +204,18 @@ restic_password: <restic repository encryption password>
 
 thanos_aws_access_key_id: <必須等於 restic_aws_access_key_id>
 thanos_aws_secret_access_key: <必須等於 restic_aws_secret_access_key>
+
+node_exporter_basic_auth_password: <host-monitoring 與 prometheus 共用>
+agent_controller_webhook_secret: <agent-controller 的 Alertmanager webhook bearer token>
 ```
 
 Minimal PoC 使用本專案自建的 signed SeaweedFS S3 時，restic 與 Thanos 必須共用同一組
 S3 identity。`restic_password` 是 repository 加密密碼，不能用 S3 secret 代替。
 
-`alertmanager_config` 可使用 `group_vars/alertmanager.yml` 的 sandbox `null` receiver；
-只有需要真實通知 receiver 時才另加 vault/group-var 設定。
+`group_vars/alertmanager.yml` 不需要任何生效中的設定:沒設 `alertmanager_receiver_mode` 也沒有
+`alertmanager_config` 時,playbook 套用內建的 sandbox `null` receiver(帶 issue #11 的兩條 inhibit
+規則)。只有需要真實通知 receiver 時才另加 vault/group-var 設定;`alertmanager_config` 一旦定義
+(沒有 mode 時視為 legacy `custom`)就會整份取代內建設定,必須自帶那兩條規則。
 
 不要把以下內容誤當成已完成設定：
 
@@ -297,13 +331,17 @@ Semantic scenario 的 action 應按照下表使用；scenario 只放非秘密值
 
 - `prometheus` group 只有預期的 `nexus`。
 - `seaweedfs-s3`、`thanos-query`、`alertmanager`、`dashboard` 都包含 `nexus`。
-- `restic-backup` 包含所有需要備份的 hosts，至少是 PoC 表格中的三台。
-- `freeipa-server`、`freeipa-client`、NFS groups 與拓撲一致。
+- `restic-backup` 包含所有需要備份的 hosts，至少是 PoC 表格中的四台（`bastion` 與 prod 一致，不備份）。
+- `freeipa-server` 只有 `freeipa-server`、`freeipa-server-replica` 只有 `freeipa-replica`、
+  `freeipa-client` 有 `nexus`／`client-vm`／`bastion`、NFS groups 與拓撲一致。
+- `dns` 只有 `client-vm`，且沒有任何 host 同時在 `dns` 與 FreeIPA server／replica group。
+- `agent-controller`、`detection-engine` 都只有 `nexus`（contract 的 `hostCardinality: exactly-one`）。
+- `pilot-access-gateway` 只有 `bastion`，且 `bastion` 也在 `freeipa-client`（`sameHosts` 依賴）。
 - `host_vars/nexus.yml` 存在且含非空 `prometheus_site_label`。
 - `.vault/main.yaml` 包含本文件第 3 節所有必要 key。
 - `.vault/ipa-identity.yaml` 存在、schema 正確，且 `nfs.servers` 與 `nexus` 的實際
   hostname/IP 相符。
-- `freeipa_roster_file` 已設定在 `freeipa-server` 與 `nexus` 的 host extra vars。
+- `freeipa_roster_file` 已設定在 `freeipa-server`、`nexus`、`client-vm` 的 host extra vars。
 
 若 `restic-backup` 是空 group，必須先修正 `hosts.yml` 再重新產生 inventory；不能只
 補 vault key，因為沒有 target host 時不會部署 backup timer。
@@ -349,6 +387,11 @@ Site-wide deploy 應只選一次 `全站部署(site.yml)`。不要以單一 comp
 6. Restic backup。
 7. Prometheus、Thanos Query、Alertmanager、Dashboard。
 8. Audit/FIM/log shipping 等依賴中央服務的元件。
+
+`freeipa-server-replica`、`agent-controller`、`detection-engine` 同樣是 `site.include: false`：
+site-wide deployment 不會部署它們，要在 `freeipa-server` 部署完成後、驗收前各自用
+`pilot reconcile` 部署（replica 在 primary 之後；`detection-engine` 要在 `thanos-query`、
+`alertmanager` 之後）。`dns`、`pilot-access-gateway` 有接進 `site.yml`，不需要另外 reconcile。
 
 `freeipa-identity` 是 site-wide deployment 後另外執行的 day-2 reconcile；不要把
 canonical roster 當普通 group var，也不要只依賴 reconcile 成功來代表 day-1 roles 已部署。

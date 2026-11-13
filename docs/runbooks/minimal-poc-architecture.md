@@ -1,5 +1,19 @@
 # Runbook — Minimal PoC Architecture: FreeIPA + Wazuh + Grafana 3-VM Rebuild
 
+> **Round 33 (2026-11-13) — five-node topology, verified from zero.** The five-node layout of §0.6
+> (primary + replica FreeIPA, `nexus` with `agent-controller`/`detection-engine`, `client-vm` with the
+> `dns` tier, `bastion` with `pilot-access-gateway`) was rebuilt from zero in one pass on candidate `56e6734a`,
+> which carries the fixes for the round 32 findings (F1–F10), `dns_freeipa_zones` from the start and a 120 GiB
+> `nexus`. Every deploy, reconcile and idempotency step reached `failed=0`; **both site-wide reruns were
+> `changed=0` on all five hosts**; runbook §4.1–§4.5 all passed, including the Grafana FQDN from every host
+> (F2). Remaining failures are fixture-bound or by-design spec rows, and one open product finding, G1 (the
+> teardown cleans a different Ansible fact-cache directory than `pilot deploy` reads, §3.10; tracked as
+> kjelly/pilot#336). Details and the
+> evidence deficiencies: [round 33 record](../evidence/minimal-poc-architecture/2026-11-13-round-33.md). The
+> previous run, with the findings that led to these fixes, is the
+> [round 32 record](../evidence/minimal-poc-architecture/2026-11-13-round-32.md). The three-node history
+> below is unchanged.
+>
 > Status: **VERIFIED — the full merged scope (§3.7, §3.8, §4.2's strengthened check, §4.5) was
 > executed end-to-end for the first time in round 25, including the `freeipa-nfs-client`
 > `nfs_clients[]` Plan B fix. Four real bugs were found and fixed live; see round 25's evidence
@@ -263,6 +277,11 @@ One-time acceptance recordings and per-run wizard drivers are disposable.
 
 ## 0. Goal
 
+> **Five-node architecture, run on 2026-11-13 (§0.6, §3.10):** the topology file defines five nodes
+> aligned with `infra-config` staging/prod. The table in this section, §0.5 and the older round
+> history still describe the three original nodes; the five-node results, including what failed, are
+> in §0.6.3, §3.10 and the [round 33 record](../evidence/minimal-poc-architecture/2026-11-13-round-33.md).
+
 Rebuild and verify this three-node PoC entirely through sanctioned `pilot` workflows:
 
 | Node | Platform | Purpose |
@@ -298,6 +317,18 @@ component-specific values.
 
 The last run used ephemeral lab IPs. Never copy an address from old evidence; read the current
 addresses and generated inventory before each rebuild.
+
+### 0.5a Five-node facts (round 33, 2026-11-13)
+
+| Item | Value |
+|---|---|
+| Tested candidate | commit `56e6734ac857d6e0f049d41fe85b134dd507f695`, tree `5d1de35389221e07a406c73452b74dfee3866504` |
+| Targets | `freeipa-server`, `freeipa-replica` (AlmaLinux 9, 4608 MiB), `nexus` (12288 MiB, 120 GiB disk), `client-vm` (2560 MiB), `bastion` (2048 MiB); 14 vCPU, 26112 MiB in total |
+| Site-wide apply (gateway without ForceCommand) | `failed=0` on all five hosts (bastion ok=347 changed=49, client-vm ok=592 changed=77, freeipa-replica ok=175 changed=47, freeipa-server ok=234 changed=62, nexus ok=993 changed=167); 25 minutes |
+| Day-2 | gateway-scope reconcile, ForceCommand on, replica, identity, nfs-server, dns, `dns_freeipa_zones` + dns deploy (twice), dns-client, ca-trust, reverse-proxy, internal-endpoint, agent-controller, detection-engine: all `failed=0` (§3.10) |
+| Idempotency | both site-wide reruns `changed=0` on all five hosts |
+| Specs | 28 in scope, 27 ran; the rest are fixture-bound, dcgm (not applicable) or restic-backup C5 until the first backup window; `thanos-query` 13/13 and `prometheus` C22 pass about 3 h after the apply |
+| §4 | 4.1–4.5 all pass (4.4's removal reconcile exits 0 with the F7 retry) |
 
 ### Required role placement
 
@@ -358,6 +389,65 @@ automatically renders `/etc/seaweedfs/s3.json` with mode `0600` and starts Seawe
 The standalone [network firewall matrix](../network-firewall-matrix.md) defines the required
 inter-node and controlled outbound connections for this topology.
 
+## 0.6 Target architecture aligned with staging/prod (2026-11-10; run 2026-11-13, see §0.6.3)
+
+Source of truth for the comparison: the `infra-config/{staging,prod}/hosts.yml` of the
+infrasec-iac-pilot-cfg1 repository (read 2026-11-10, HEAD `6fe7731`). `docs/topologies/minimal-poc-topology.yaml`
+is the machine-readable form of this section and `TestMinimalPoCTopologyMatchesRunbook` locks it.
+This section is the design; its verification status is §0.6.3 and the round 32 record.
+
+### 0.6.1 Environment → PoC node mapping
+
+| PoC node | staging host | prod host | Roles added by this revision |
+|---|---|---|---|
+| `freeipa-server` | `stg-ipa1` | `freeipa` | none (unchanged) |
+| `freeipa-replica` (new) | `stg-ipa2` | `freeipa02` | `freeipa-server-replica` plus the four common roles (`host-monitoring`, `audit-log-forwarding`, `wazuh-fim`, `restic-backup`) |
+| `nexus` | `stg-nexus` | `it-core` | `agent-controller`, `detection-engine` (both run on it-core in prod; `reverse-proxy` stays here instead of prod's separate `it-proxy`) |
+| `client-vm` | `stg-client1` and `stg-dns1` | n/a | `dns` (the unbound tier; co-located like `dns-tier-topology.yaml`'s `dt-dns-2`) |
+| `bastion` (new) | n/a | `bastion-test` | `freeipa-client`, `pilot-access-gateway`, nothing else, as in prod |
+
+Role families present in staging or prod and deliberately **not** in the PoC: `dcgm-exporter`
+(needs a GPU, cannot be verified on a VM), `snmp-exporter` (no SNMP device to poll), a separate
+`it-proxy` host (same role, different host; costs a VM for no extra role coverage), and
+`pilot-gateway-scope` (a day-2 reconcile that needs a real target hostgroup, add it when the gateway is exercised).
+
+### 0.6.2 Resource budget
+
+| Node | Image | RAM (MiB) | vCPU | Disk (GiB) | Why this size |
+|---|---|---|---|---|---|
+| `freeipa-server` | AlmaLinux 9 | 4608 | 2 | 30 | contract `minRAMMiB` 4096; a guest sees ~95% of the configured value |
+| `freeipa-replica` | AlmaLinux 9 | 4608 | 2 | 30 | same 4096 floor as the primary (`contracts/freeipa-server-replica.yaml`); `freeipa-ha-topology.yaml`'s 3072 would fail `pilot deploy`'s resource gate |
+| `nexus` | Ubuntu 24.04 | 12288 | 6 | 120 | disk 80→120 (F9, §3.10); the two added roles need 256 MiB and 512 MiB (their contracts) |
+| `client-vm` | Ubuntu 24.04 | 2560 | 2 | 20 | +512 MiB for unbound (`contracts/dns.yaml` `minRAMMiB` 512) |
+| `bastion` | Ubuntu 24.04 | 2048 | 2 | 20 | the size `tx-gw` already runs with; contract floor is 512 MiB |
+| **Total** | | **26112** | **14** | **180** | was 18944 MiB / 10 vCPU / 130 GiB for three nodes |
+
+The lab host that built this revision has 12 cores, about 52 GiB of available RAM and about 211 GiB
+free disk, so the five nodes fit with vCPU overcommit; check `pilot vm-target list` and free
+disk before `topology up` (the disk was at 88%).
+
+Merging decisions and why they are safe to try:
+
+- `dns` on `client-vm` instead of a sixth VM: the contract's only conflicts are `freeipa-server` and
+  `freeipa-server-replica`, and `dt-dns-2` is a recorded `dns` + `freeipa-dns-client` co-location.
+- `pilot-access-gateway` on its own node rather than on `client-vm`: it installs an sshd `ForceCommand`
+  drop-in for portal users, which would change SSH behavior of the shared client host.
+- `agent-controller` and `detection-engine` on `nexus`: both are `hostCardinality: exactly-one`
+  and `detection-engine` needs `thanos-query` and `alertmanager` from the same site.
+
+### 0.6.3 Verification status of the five-node design (round 33, 2026-11-13)
+
+| # | Item | Status |
+|---|---|---|
+| 1 | `topology up` for the five-node file and generated-inventory read-back | done: 23 groups, every role on its single intended host |
+| 2 | Site-wide deploy including the new `dns` and `pilot-access-gateway` roles | done, `failed=0`; the gateway needs the two-phase procedure of §3.10 on a first deploy; `site.yml` also ran `detection-engine` and `reverse-proxy` |
+| 3 | Reconciles that `site.yml` skips (`freeipa-server-replica`, `agent-controller`; `detection-engine` was already applied) | done, `failed=0`; `agent-controller` needs `pilot deploy --show-experimental` |
+| 4 | Specs for the new roles | `freeipa-server-replica` 16/16, `agent-controller` 13/13, `detection-engine` 12/12 pass; `dns` 15/1 (C20: missing verification inputs, not F2; 17/0 after the F2 follow-up); `pilot-access-gateway` 32/1 (AG19, F5; 33/33 after the fix) |
+| 5 | Firewall flows | primary↔replica proven by the replication segment and the replica's own `hbactest`; bastion→FreeIPA and bastion→targets by the gateway spec rows; Alertmanager→agent-controller **not exercised** (the Alertmanager config has no such receiver, F1) |
+| 6 | §4 checks repeated against the replica | `ipa hbactest` and the replicated user checked on the replica; the Grafana FQDN check from the replica passes |
+
+The findings of round 32 (F1–F10) are fixed and re-verified from zero in round 33; the one open finding, G1 (kjelly/pilot#336), is in the round 33 record and §3.10.
+
 ## 1. Aligned acceptance contracts
 
 The component checks live in these specs and are not duplicated here:
@@ -383,8 +473,11 @@ The component checks live in these specs and are not duplicated here:
 - `docs/verification/reverse-proxy.md`
 - `docs/verification/internal-endpoint.md`
 - `docs/verification/host-monitoring.md`
+- `docs/verification/freeipa-server-replica.md`, `docs/verification/dns.md`,
+  `docs/verification/pilot-access-gateway.md`, `docs/verification/agent-controller.md`,
+  `docs/verification/detection-engine.md` (added 2026-11-10 with §0.6, not yet run on this topology)
 
-The last five were merged in from the retired `delivery-test` skill (2026-08-14) — see §3.7, §3.8,
+The last five of the list above (through `host-monitoring.md`) were merged in from the retired `delivery-test` skill (2026-08-14) — see §3.7, §3.8,
 and §4.5.
 
 **`freeipa-client.md`, `freeipa-identity.md`, and `freeipa-dns.md` do not fully pass `pilot verify`
@@ -1071,6 +1164,11 @@ confirmed live via `dig`/`getent hosts` from all three nodes. See
 
 ### 3.7 `freeipa-dns-client`/`freeipa-ca-trust`/`reverse-proxy` — day-2/opt-in, single-component
 
+> **Round 32 correction:** in the current catalog `freeipa-dns-client` and `freeipa-ca-trust` are `Reconcile: true`
+> entries, so they are selected in `pilot reconcile`'s multi-select, not in `pilot deploy`'s single-component
+> list; `reverse-proxy` is still a single-component deploy but `site.yml` already applies it on hosts that carry the
+> role (a rerun is `changed=0`). See §3.10.
+
 > Merged in from the retired `delivery-test` skill, 2026-08-14. **Executed against this exact
 > topology in round 25 (2026-08-15)** — all three single-component deploys passed `failed=0` on
 > every targeted host, with a clean idempotent rerun for each. See
@@ -1237,6 +1335,83 @@ standalone CLI shown above is unaffected in normal use only because its own `--i
 default is *also* `hosts.yml` (same latent bug) but every documented invocation overrides it
 explicitly with the workspace's `inventory.yml`. Until fixed, always pass `--inventory
 <workspace>/inventory.yml` explicitly and use the CLI form rather than the interactive menu item.
+
+### 3.10 Five-node procedure notes (round 32, 2026-11-13)
+
+Verified on candidate `164dafa3` with the five-node topology file. The evidence is the
+[round 32 record](../evidence/minimal-poc-architecture/2026-11-13-round-32.md); everything below
+that is not in a table there was observed in that run.
+
+**Before the first deploy on rebuilt VMs (run hygiene).**
+
+- `ansible.cfg` sets `gathering = smart` with a one-hour `jsonfile` fact cache keyed by inventory host
+  name. A VM rebuilt under the same name within the hour keeps its old facts and a preview can stop on
+  a stale address (`dns service address ... is not an IPv4 address of client-vm`). **Finding G1 (round 33, kjelly/pilot#336):
+  `pilot vm-target up` and teardown do not clean the cache that `pilot deploy`/`pilot reconcile` read.** They
+  clean the directory `ansible-config` reports for the working directory (`~/.ansible/pilot-factcache`);
+  deploy and reconcile use `<data-dir>/ansible/fact-cache` (default `~/.local/share/pilot/ansible/fact-cache`).
+  Round 33 saw the five entries of the previous run survive a `topology down` and `topology up`. Until
+  this is fixed, remove this run's host names from that directory before the first deploy
+  (`rm -f ~/.local/share/pilot/ansible/fact-cache/s1_<host>` for each of the five inventory names).
+- libvirt hands out recycled DHCP addresses, so `~/.ssh/known_hosts` keeps stale keys for them. The
+  preview still passes (Ansible does not check host keys here) but `pilot reconcile`'s `/etc/ipa` lock
+  step uses strict checking and stops before the apply. Remove the entries of the run's addresses
+  (`ssh-keygen -R <ip>`) and accept the new keys once.
+  This is strict host-key checking working as intended for a workspace inventory; pilot does not edit
+  the operator's `known_hosts` on their behalf.
+
+**Gateway: a first from-scratch deploy needs two phases.** `pilot_access_gateway_install_forcecommand`
+defaults to `true`, and `pilot-target-<scope>` is only published by `pilot gateway-scope reconcile`,
+which needs the FreeIPA server the same deploy creates. So:
+
+1. In `group_vars/pilot-access-gateway.yml` (`pilot edit`) set `pilot_access_gateway_install_forcecommand: false`,
+   then run the site-wide deploy. Step 17/18 print "pilot-target-<scope> is not published yet
+   (ForceCommand not requested)"; the gateway health is `degraded`/`target_scope=missing` and no sshd
+   drop-in exists. Any other degraded shape (FreeIPA unreachable, credential not ok, no answer) and any
+   ForceCommand-on gateway still stop the run.
+2. In `group_vars/freeipa.yml` set `freeipa_server_fqdn` (the default is `ipa1.<domain>`, so other roles
+   are unaffected); `gateway-scope` stops at "one designated FreeIPA authority" without it. Then
+   `pilot gateway-scope plan --scope all --hosts all --dir <workspace>` and the same command with
+   `reconcile`. Health becomes `ok`. (`--hosts all` adds the freeipa-client hosts except the gateway itself.)
+3. Set the flag back to `true` and run `pilot deploy` → single component → Pilot Access Gateway. The plan has two
+   playbooks on bastion (`freeipa-client`, `pilot-access-gateway`). The ForceCommand health gate passes and
+   `/etc/ssh/sshd_config.d/90-pilot-access-gateway.conf` appears (`Match Group role-pilot-portal-user`).
+
+**Day-2 order that passed (all `failed=0`).** `pilot reconcile` → `freeipa-server-replica`; `freeipa-identity`;
+`pilot deploy` single component `freeipa-nfs-server` (creates the share the site deploy deferred);
+`pilot reconcile` → `freeipa-dns`, `freeipa-dns-client`, `freeipa-ca-trust`; `pilot deploy` single component
+`reverse-proxy` (already applied by `site.yml`, `changed=0`); `pilot reconcile` → `internal-endpoint`;
+`pilot deploy --show-experimental` → `agent-controller`; `pilot deploy` → `detection-engine` (already applied by
+`site.yml`, `changed=0`).
+
+**Prompt chains that differ from §3.4/§3.5 (re-derive from the live screen, do not copy blindly).**
+
+- `pilot reconcile` offers its components as a **multi-select** (space or `x` toggles, enter confirms), not a menu.
+- A plan with one playbook asks `要先預覽(--check --diff)再決定…` → preview confirm → `要接著套用真正的變更嗎` → apply
+  confirm. A plan with several playbooks asks `要先對此計畫中的所有 playbook 預覽(--check --diff)嗎` and then one
+  `若所有前置檢查與預覽都成功，將不再詢問並依序正式套用…` confirm; it previews and applies with no further questions.
+- Single components use `要只跑某幾個檢查項目嗎` for `--tags`. `pilot deploy` only lists `agent-controller` with `--show-experimental`.
+- The site-wide auto-detected `-e` confirmation (Loki) only appears while its value is not yet in group_vars.
+
+**Idempotency.** The first site-wide rerun after the day-2 steps changed `client-vm` (`DNS — write the unbound
+config` and an unbound restart: the `dns` role re-rendered its forwarding after the FreeIPA zone appeared);
+the second rerun was `changed=0` on all five hosts. Run the rerun twice before reading `changed=0` as the result.
+
+**Required input in this topology (finding F2).** The `dns` tier is listed first in every dns-client resolver but forwards
+only the FreeIPA domain; `it.pilot.internal` (the zone `freeipa-dns` and `internal-endpoint` publish) needs
+`dns_freeipa_zones: [it.pilot.internal]` in `group_vars/dns.yml` (`pilot edit` → group_vars → `dns.yml` →
+`dns_freeipa_zones` → edit list items → add item). Without it §4.5's `grafana.it.pilot.internal` checks fail on
+`nexus`, `client-vm` and `bastion`. Set it **after** §3.6 has created the zone, not before the site-wide deploy:
+`dns-apply.yml` refuses a `dns_freeipa_zones` entry that FreeIPA does not have yet. Then run `pilot deploy` →
+single component → DNS cache tier; the plan is one playbook (preview, then apply), `changed=2` on `client-vm`
+only, and a second run is `changed=0`. Round 32 added it after the evidence run on the user's decision and verified
+it incrementally (dns spec 17 pass / 0 fail, §4.5 pass, `freeipa-dns-client` and `internal-endpoint` reconciles and a
+site-wide rerun all `changed=0`); round 33 carried it from this step on: the dns deploy was `changed=2` on `client-vm` only, the second run `changed=0`, and §4.5 passed.
+
+**`nexus` disk (finding F9).** The wazuh-manager vulnerability-detector feed grows to about 31 GiB over the first
+hours, so a rebuild with the old 80 GiB disk stops its site-wide idempotency rerun in the preflight (§6.1). The topology
+now sizes `nexus` at 120 GiB. An existing VM can be grown online with `pilot vm-target resize-disk --name nexus --disk 120`
+followed by `growpart /dev/vda 1 && resize2fs /dev/vda1` inside the guest (done in round 32: 72 GiB free afterwards). Round 33 built `nexus` with 120 GiB from the start.
 
 ## 4. Verification procedure
 
@@ -1457,6 +1632,11 @@ not the inventory/topology alias — the same "real hostname, not the alias" got
 documents for Loki's `host` label. Grepping the snapshot list for the literal string
 `freeipa-server` to confirm coverage finds nothing; use `ipa1.ipa.pilot.internal` instead.
 
+**First backup window (round 33).** The timer fires at 02:00 plus up to one hour, so a fresh rebuild has no
+snapshot for the rest of the day and `restic-backup.md` C5 fails on every host until then (36/4 about 50 minutes
+after the apply). The spec documents this as an eventually consistent state. The "trigger a backup" step above
+(`systemctl start restic-backup.service` on each host) creates the snapshot, and the spec then passes 40/40.
+
 ### 4.4 Identity reconciler cycle
 
 1. Remove the allowed user's HBAC/role-group membership from the roster and reconcile. Per §2's
@@ -1564,11 +1744,11 @@ silently no-ops on a host that never joined the inventory group.
 
 - Failed `pilot deploy`/`reconcile` previews must stop before mutation.
 - Apply playbooks retain their own snapshot/rescue boundaries; preserve their failure evidence.
-- For a disposable full teardown, confirm the exact three target names, then use `pilot vm-target
-  topology down --topology docs/topologies/minimal-poc-topology.yaml` — it tears down exactly the
-  three nodes that spec declares (the same three-name scope this step has always required), driven
-  from the same file §3.2 used to bring them up, instead of three separate `pilot vm-target down`
-  invocations.
+- For a disposable full teardown, confirm the exact target names (five in the current topology file),
+  then use `pilot vm-target topology down --topology docs/topologies/minimal-poc-topology.yaml` — it
+  tears down exactly the nodes that spec declares, driven from the same file §3.2 used to bring them
+  up, instead of separate `pilot vm-target down` invocations. After a rebuild on reused DHCP
+  addresses, also read §3.10's two hygiene items (fact cache, `known_hosts`) before the first deploy.
 - Never use a broad recursive deletion target, unresolved variable, wildcard, repository root, or
   shared image directory.
 
@@ -1607,7 +1787,7 @@ fixed upstream — on a current checkout you can skip it entirely.
 | §4.1's roster-authorized sudo command fails with `Unit sshd.service could not be found` even though the rule is correctly attached | **Authoring mistake, not a tool/playbook defect.** The roster granted `/usr/bin/systemctl status sshd`, but the live target is Ubuntu 24.04 where the unit is `ssh.service` — RHEL/AlmaLinux and Debian/Ubuntu name the same daemon differently. | Grant a command that exists on the target's OS family (`systemctl status ssh` on Debian/Ubuntu, `systemctl status sshd` on RHEL/AlmaLinux), re-run `pilot reconcile` to apply the correction (a useful exercise of the drift-correction path, §4.4); the reconcile refreshes the clients' sudo rules itself (§4.1), so the newly applied rule is checked live after it exits 0 with no manual cache step; a denial that remains is the sudo row's defect in this table. |
 | `pilot deploy` aborts before any preview with `delivery transaction failed: component "freeipa-server" ... resources ... are below minimum ... ramMiB=4096` | **Environment/topology gap, not a code defect.** `deploy_facts.go` gathers real per-host OS facts before the delivery preflight; AlmaLinux 9's usable RAM under this topology's KVM/virtio overhead lands ~185 MiB below the nominal `--memory` value. | Give `freeipa-server` headroom above the declared minimum — `docs/topologies/minimal-poc-topology.yaml`'s `memory: 4608` reflects this. If the node was already up, `pilot vm-target down --name freeipa-server` then `topology up` recreates just that node, **but it gets a new DHCP-assigned IP even with the same MAC** — re-set that host's `ansible_host` via `pilot edit` and re-run `pilot inventory generate` before redeploying. |
 | `pilot deploy`/`pilot reconcile` fail their completeness gate — or, worse, silently resolve a `group_vars`/`host_vars` value to the wrong thing — even though the workspace's own files are correct | **Environment pollution, not a pilot defect** — but the mechanism stated here for four rounds is wrong, **corrected round 23**. `internal/ansible`'s `Runner.Run` genuinely never sets `cmd.Dir`, so `ansible-playbook` does inherit pilot's process cwd. What does *not* follow is the vars-plugin claim: for `ansible-playbook <playbook>` the `host_group_vars` plugin reads the **inventory** directory and the **playbook's** directory, not the cwd. A controlled probe with inventory, playbook and cwd in three separate directories, each holding a conflicting `group_vars/<group>.yml`, resolved the **inventory-adjacent** value. Do **not** use `ansible -m debug -a "var=<key>"` from the same cwd as the diagnostic (what this row used to say): ad-hoc `ansible` *does* treat cwd as its basedir, so it reports a value the real deploy never uses. Round 23 hit exactly that false positive — the isolated cwd had accumulated six verbatim copies of unfilled `*.example.yml`, `ansible -m debug` reported `thanos_s3_target_host: ""`, and the live host had every derived alias correctly mapped to nexus in `/etc/hosts`, proving the apply had used the real values all along. A real cwd sensitivity may still exist by another route — vars-file paths reach `ansible-playbook` unresolved as `-e @<path>` (`internal/ansible/runner.go:207`), so a *relative* vault path would resolve against cwd — but that was not the thing this row described and has not been re-tested. **Reconfirmed round 30** with a concrete live trigger: a stray, gitignored repo-root `group_vars/prometheus.yml` (leftover from unrelated earlier work) with an empty `thanos_s3_target_host` produced exactly `component "thanos-query" requires input "thanos_s3_target_host"` when `pilot deploy` ran from the repo root, even though the workspace's own `group_vars/` had the correct value — confirmed by reproducing it directly with `ansible-inventory -i <workspace>/inventory.yml --list` from repo-root cwd vs. from the workspace dir. Isolating cwd via `PILOT_ROOT` was tried as a fix and rejected: it broke `ansible-playbook playbooks/preflight.yml`'s own relative-path resolution instead. | Never invoke `pilot edit`/`pilot inventory generate` without `--dir`. If the repo root already has such stray files and their ownership is unclear, don't move or delete them — run from an isolated directory that symlinks every repo-root entry except `host_vars`/`.vault`/`tmp`, **and a `group_vars/` containing symlinks to only the `*.example.yml` templates plus the `dns/` example dir**. Excluding `group_vars/` wholesale (what this row said before round 22) silently breaks `pilot inventory generate`'s backfill: that one directory holds both the stray shadowing `*.yml` and the 13 legitimate templates the generator copies from, so the run produces a workspace with **zero** group_vars files and still exits 0 — see §3.3. A future Go-side fix should pin `cmd.Dir` explicitly. Quick pre-flight check (added round 30): run `git status --porcelain group_vars/ host_vars/ .vault/` from the repo root before the first deploy of a round — any listed file is a candidate; move it aside for the run's duration rather than deleting it. |
-| `pilot deploy`/`pilot reconcile` preflight fails a **second, otherwise-clean** site-wide idempotency rerun with `component "wazuh-manager" host "nexus" resources ... diskGiB=<N> are below minimum ... diskGiB=50` | **Environment/topology sizing gap, found round 30, not a code defect.** `docs/topologies/minimal-poc-topology.yaml`'s `nexus` disk (80 GiB) was sized against `wazuh-manager`'s declared 50 GiB minimum assuming a mostly-empty disk; it does not leave headroom for the real data the full component stack accumulates once actually running (Wazuh indexer data, Prometheus/Loki TSDB, Docker images). Confirmed live: `df -h /` on `nexus` showed only 43 GiB free after a real full site-wide deploy, `77G total, 35G used`. | Not a bug to fix in code. Single-component deploys/reconcilers that don't select `wazuh-manager` (`freeipa-dns-client`, `freeipa-ca-trust`, `reverse-proxy`, `freeipa-dns` reconcile, `internal-endpoint` reconcile) are unaffected — verify idempotency through those instead of a full site-wide rerun once the stack has real data. A future round should bump `nexus`'s topology disk allocation (e.g. 80→120 GiB) if a full-site idempotency rerun after real data accumulation needs to stay possible. |
+| `pilot deploy`/`pilot reconcile` preflight fails a **second, otherwise-clean** site-wide idempotency rerun with `component "wazuh-manager" host "nexus" resources ... diskGiB=<N> are below minimum ... diskGiB=50` | **Environment/topology sizing gap, found round 30, not a code defect.** `docs/topologies/minimal-poc-topology.yaml`'s `nexus` disk (80 GiB) was sized against `wazuh-manager`'s declared 50 GiB minimum assuming a mostly-empty disk; it does not leave headroom for the real data the full component stack accumulates once actually running (Wazuh indexer data, Prometheus/Loki TSDB, Docker images). Confirmed live: `df -h /` on `nexus` showed only 43 GiB free after a real full site-wide deploy, `77G total, 35G used`. | Not a bug to fix in code. Single-component deploys/reconcilers that don't select `wazuh-manager` (`freeipa-dns-client`, `freeipa-ca-trust`, `reverse-proxy`, `freeipa-dns` reconcile, `internal-endpoint` reconcile) are unaffected — verify idempotency through those instead of a full site-wide rerun once the stack has real data. Round 32 confirmed the cause (the Wazuh vulnerability-detector feed, about 31 GiB, 33 GiB free of 77) and raised `nexus` to 120 GiB in `docs/topologies/minimal-poc-topology.yaml`; an existing VM can be grown with `pilot vm-target resize-disk` (§3.10). |
 
 The rows below were merged in from the retired `delivery-test` skill (2026-08-14). **Confirmed
 live against this exact topology in round 25 (2026-08-15)** — none of these five actually fired
@@ -1625,6 +1805,13 @@ kept as documented troubleshooting guidance.
 | §4.5's `curl https://grafana.it.pilot.internal/...` gets a connection that presents **Wazuh's own dashboard certificate** (`CN=wazuh.dashboard`), not a FreeIPA one, even though nginx's vhost config looks completely correct | **Real bug, found and fixed round 25.** Wazuh dashboard's official docker-compose bundle hard-binds host port 443, colliding with `reverse-proxy`/nginx on any host running both roles (this topology's `nexus`) — whichever binds first wins the socket; `journalctl -u nginx`/`/var/log/nginx/error.log` shows `bind() to 0.0.0.0:443 failed (98: Address already in use)`. | Upgrade past the fix (`wazuh-manager-apply.yml` now remaps the dashboard to host port 8443). If `nexus` was provisioned before the fix landed, one manual `systemctl restart nginx` is needed after re-running `wazuh-manager` — a stale nginx worker holding the old failed-bind state doesn't self-heal on its own. A fresh topology built after the fix never hits this. |
 | Plan B's `verification_mounts` check on `client-vm` never shows a real `nfs4`/`sec=krb5` mount, even after `freeipa-identity`/`freeipa-dns-client` have both run | **Separate, pre-existing gap, not a Plan B defect (found round 25).** The NFS server's own FQDN (`nfs.servers[].host`, e.g. `nexus.ipa.pilot.internal`) has no A record in FreeIPA's own DNS at all — confirmed via `dig @<freeipa-ip> nexus.ipa.pilot.internal A` returning `NXDOMAIN` directly from the authoritative server. `freeipa-client-apply.yml` deliberately passes `--no-dns-sshfp` with no `--enable-dns-updates` to `ipa-client-install` (this project's own DNS-is-reconciler-managed design choice), so client hosts are never dynamically registered. | Not yet fixed — would need either enabling dynamic DNS updates during enrollment, or adding an explicit `freeipa-dns` manifest record for every NFS server FQDN a client needs to resolve. The Plan B gate/targeting/verify mechanism itself is confirmed correct independent of this gap (see round-25 evidence). |
 | §3.9's `pilot internal-endpoint suggest` (or its `pilot edit` menu item) proposes a candidate that `pilot internal-endpoint validate`/`SimulateAddInternalEndpoint` then rejects with `dns ownership conflict` | **Not a bug — the same gate §3.8 already relies on, working as designed (found round 26).** A contract endpoint's default `autoPublish.subdomain` can collide with a name `freeipa-dns.yaml` already owns for something unrelated — happened live in this exact topology: the dashboard's default `wazuh` collided with an existing direct-access `wazuh` A record for the manager's own agent ports. | Pick a different, non-colliding subdomain for that one candidate (either edit the printed YAML's `fqdn` before pasting it, or the contract's own `autoPublish.subdomain` default if the collision will recur on every fresh run of this same reference topology — `contracts/wazuh-manager.yaml`'s default is already `wazuh-dashboard` for exactly this reason). |
+| `alertmanager.md` C10 fails (`amtool config show` has no `inhibit_rules`) on a workspace built from the skeleton | `group_vars/alertmanager.example.yml` ships an active `alertmanager_config` (only a `null` receiver) that `pilot inventory generate` copies; it overrides the playbook default that carries the two issue-#11 rules, and nothing routes alerts to `agent-controller` | Fixed after round 32 (F1): the example is now comment-only, a fresh `pilot inventory generate` produces a `group_vars/alertmanager.yml` with no live key, and the built-in `null` config (with both rules) applies. A workspace built from the old skeleton keeps the live `alertmanager_config` until that file is regenerated (either move the file aside and rerun `pilot inventory generate`, which is what round 32 did, or pick `pilot edit` → Alertmanager 通知 → 使用 null receiver, which sets an explicit `alertmanager_receiver_mode: null` in the vault that beats the legacy config; the editor cannot remove a block-scalar key from group_vars). The agent-controller webhook mirror is `teams` mode only (`alertmanager_forward_to_agent_controller`), so no receiver reaches `agent-controller` in `null` mode by design |
+| `grafana.it.pilot.internal` resolves on `freeipa-server`/`freeipa-replica` but not on `nexus`/`client-vm`/`bastion`; `dig @<dns tier>` returns NXDOMAIN while `dig @<FreeIPA>` answers | The `dns` tier is first in the dns-client resolvers and only forwards `ipa.pilot.internal`; `dns_freeipa_zones` is unset so `it.pilot.internal` goes upstream and NXDOMAIN is final | Open (round 32, F2). Set `dns_freeipa_zones: [it.pilot.internal]` and re-apply `dns` (a new human-authored input, not yet run) |
+| `freeipa-replica` logs under its old hostname (`/var/log/siem/freeipa-replica`, Loki `host="freeipa-replica"`) although its hostname is `ipa2.ipa.pilot.internal` | rsyslog started before the replica install renamed the host and was not restarted | Fixed after round 32 (F3): the replica playbook restarts rsyslog when it is older than `/etc/hostname`, so a replica renamed by an earlier run heals on the next `pilot reconcile freeipa-server-replica` (round 32: `changed=1`, the same test message then landed in `ipa2/auth.log` instead of `freeipa-replica/auth.log`, and a second reconcile was `changed=0`). Messages logged before the restart stay under the old label |
+| `log-shipping.md` C9 fails: no result for `host=$(hostname)` | the row uses the FQDN `hostname` (`nexus.ipa.pilot.internal`); the Loki label is the short `nexus` | Fixed after round 32 (F4): C9 now queries `host="$(hostname -s)"`; the label is rsyslog's `%HOSTNAME%`, which drops the domain. `log-shipping` 9/9 |
+| `pilot-access-gateway.md` AG19 fails on `bastion` (`/var/lib/pilot` exists) | `internal-endpoint` reapplies the resolver baseline fleet-wide, including `bastion`, leaving `/var/lib/pilot/freeipa-dns-client/pre-apply` | Fixed after round 32 (F5): AG19 now checks the gateway's own state (no `StateDirectory=`/`CacheDirectory=` in its units, no gateway directory) instead of the shared `/var/lib/pilot`. `pilot-access-gateway` 33/33 on the rebuilt topology, which still has `/var/lib/pilot/freeipa-dns-client/pre-apply` on `bastion` |
+| `pilot reconcile` stops before the apply with `REMOTE HOST IDENTIFICATION HAS CHANGED` while the preview passed; or a preview stops on a stale host address after a rebuild | stale `~/.ssh/known_hosts` entries / stale fact-cache entries for recycled addresses and reused host names (§3.10) | Remove the entries for this run's addresses and host names before the first deploy |
+| A `pilot reconcile` apply finished (`✅ 套用完成`, `failed=0`) but pilot exited 1 with `evidence_failed ... context deadline exceeded` | the delivery evidence store write timed out while the host was heavily loaded | Fixed after round 32 (F7): a transient store failure (attempt timeout, `SQLITE_BUSY`) is retried for up to 60 s for step records, the terminal record and `pilot verify`'s final write; a store that keeps failing is still `evidence_failed`, and the message says when the step itself finished. Unit-tested only: the load that triggered it (load average 36 on 12 cores) was not reproduced. If it still happens, the apply did happen: confirm the effective state and rerun only if it is not there |
 
 ### 6.2 Fixed upstream — upgrade past these
 
@@ -1662,6 +1849,11 @@ weaken authentication), and `restic-backup`'s `C6` verification timeout
 automatically).
 
 ## 7. Latest verified evidence
+
+The latest record is [round 33, five-node topology](../evidence/minimal-poc-architecture/2026-11-13-round-33.md)
+(candidate `56e6734a`, 2026-11-13); the findings it fixed come from the
+[round 32 record](../evidence/minimal-poc-architecture/2026-11-13-round-32.md). The table below is round 30's record for the original three-node
+topology and is kept as history.
 
 | Field | Round 30 record |
 |---|---|

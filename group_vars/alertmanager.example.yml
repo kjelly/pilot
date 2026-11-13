@@ -11,30 +11,30 @@
 #  alertmanager_target_host 指向本主機)
 # ============================================================================
 
-# 完整 alertmanager.yml 內容。預設僅有 stub `null` receiver
-# (drop 告警);正式環境建議用 vault 帶入完整 receiver 設定。
-# 範例(slack):
-#   route:
-#     receiver: 'slack'
-#     group_by: ['alertname', 'severity']
-#   receivers:
-#     - name: 'slack'
-#       slack_configs:
-#         - api_url: 'https://hooks.slack.com/services/...'
-#           channel: '#alerts'
-alertmanager_config: |
-  global:
-    resolve_timeout: 5m
-  route:
-    receiver: 'null'
-    group_by: ['alertname', 'pilot_subject', 'signal_id']
-    group_wait: 30s
-    group_interval: 5m
-    # Longer than normal detector oscillation; actionable repeats are pages,
-    # not lifecycle heartbeat traffic.
-    repeat_interval: 12h
-  receivers:
-    - name: 'null'
+# 接收通知的方式:不要在這個檔案放生效中的 `alertmanager_config`。
+#
+# 沒設 alertmanager_receiver_mode、也沒有 alertmanager_config 時,playbook 套用內建的
+# `null` receiver 設定(drop 告警),它已經帶著 issue #11 的兩條 inhibit 規則
+# (HostMetricsMissing 壓住同一台的 HostDown;PilotLoginProbeStale 壓住同一個 probe 的
+# 其他告警),docs/verification/alertmanager.md C10 檢查的就是這兩條。
+#
+# 一旦這裡有 alertmanager_config(沒有 alertmanager_receiver_mode 時視為 legacy `custom`),
+# 它會整份取代內建設定,內建的 inhibit 規則就不會被套用。所以範本只留註解:
+#   - 要 Teams:用 `pilot edit` 的「Alertmanager 通知」選 teams(或設
+#     alertmanager_receiver_mode: teams 與 vault 的 alertmanager_teams_webhook_url)。
+#   - 要自己的 receiver:選 custom,整份 alertmanager_config 放 vault,並自行帶上同樣兩條
+#     inhibit_rules(見 docs/verification/alertmanager.md §1.7)。
+#   範例(slack,只示範 receiver;實際要連同 inhibit_rules 一起放):
+#     route:
+#       receiver: 'slack'
+#       group_by: ['alertname', 'severity']
+#     receivers:
+#       - name: 'slack'
+#         slack_configs:
+#           - api_url: 'https://hooks.slack.com/services/...'
+#             channel: '#alerts'
+# alertmanager_config: |
+#   ...
 
 # Optional mirror: only supported alongside alertmanager_receiver_mode=teams.
 # Preserves the Teams receiver while also delivering every Alertmanager event

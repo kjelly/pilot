@@ -40,6 +40,40 @@
     - hosts_alias_target_host | default('') | length > 0
     - hosts_alias_inventory_match | length > 0
 
+# A host that is not enrolled yet still has its short hostname, so the gathered
+# `ansible_fqdn` above cannot match the FQDN `pilot deploy` proposes for it
+# (cmd/pilot/cmd/deploy.go fqdnForGroupHost: inventory name + freeipa_domain,
+# offered whenever the target is a freeipa-client and every consumer group
+# declares freeipa-dns-client). `--check` never performs the enrollment or the
+# hostname change, so on a genuinely fresh host the live lookup below can only
+# fail and the whole preview stops. Match the FQDN this host WILL carry once
+# freeipa-client has run instead: its inventory name, its short hostname or an
+# explicit `ipa_client_fqdn`, each under the host's own `freeipa_domain`
+# (freeipa-client-apply.yml defaults ipa_client_fqdn to
+# `<ansible_hostname>.<ipa_domain>`). Never matches a name outside this inventory.
+- name: "Resolve {{ hosts_alias_target_host }} against this inventory's enrollment FQDNs (hosts not enrolled yet)"
+  vars:
+    hosts_alias_enrollment_match_ip: >-
+      {%- set ns = namespace(ip='') -%}
+      {%- set want = (hosts_alias_target_host | default('')) | string | lower -%}
+      {%- for name, hv in hostvars.items() -%}
+      {%- set dom = ((hv.freeipa_domain | default('')) | string | lower) -%}
+      {%- set addr = ((hv.ansible_host | default('')) | string) -%}
+      {%- if ns.ip == '' and dom != '' and addr != '' -%}
+      {%- set short = ((hv.ansible_hostname | default(name)) | string | lower) -%}
+      {%- set explicit = ((hv.ipa_client_fqdn | default('')) | string | lower) -%}
+      {%- if want in [(name | lower) ~ '.' ~ dom, short ~ '.' ~ dom, explicit] -%}
+      {%- set ns.ip = addr -%}
+      {%- endif -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ ns.ip }}
+  ansible.builtin.set_fact:
+    hosts_alias_resolved_ip: "{{ hosts_alias_enrollment_match_ip }}"
+  when:
+    - hosts_alias_target_host | default('') | length > 0
+    - hosts_alias_resolved_ip | default('') | length == 0
+
 - name: "Resolve {{ hosts_alias_target_host }} via DNS/hosts (only when it is not this inventory's own FQDN)"
   ansible.builtin.command:
     argv:
