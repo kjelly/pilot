@@ -32,6 +32,7 @@
 | **SIEM RELP 雙向 TLS、輪替與補送邊界** | [`runbooks/siem-relp-mtls.md`](./runbooks/siem-relp-mtls.md) |
 | **Wazuh 中央伺服器（FIM/who-data 告警引擎 + CVE 弱點掃描；Docker 部署）** | [`runbooks/wazuh-manager.md`](./runbooks/wazuh-manager.md) |
 | **Wazuh agent：檔案完整性監控(FIM) + auditd who-data** | [`runbooks/wazuh-fim.md`](./runbooks/wazuh-fim.md) |
+| **`pilot hotfix wazuh-agent-skew`：移除版本比 manager 新的 Wazuh agent，之後可用 `pilot deploy` 重裝** | [`runbooks/hotfix-wazuh-agent-skew.md`](./runbooks/hotfix-wazuh-agent-skew.md) |
 | **S3 相容物件儲存（SeaweedFS）** | [`runbooks/seaweedfs-s3.md`](./runbooks/seaweedfs-s3.md) |
 | **跨主機通用備份到 S3（restic），含 FreeIPA 災難復原(DR)演練** | [`runbooks/restic-backup.md`](./runbooks/restic-backup.md) |
 | **被監控主機的監控 agent（node_exporter，強制 Basic Auth）** | [`runbooks/host-monitoring.md`](./runbooks/host-monitoring.md) |

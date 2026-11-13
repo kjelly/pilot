@@ -1,0 +1,103 @@
+# Test-only: turn the agents of the hosts in group wazuh-skewed into ones NEWER than the manager,
+# the way it happens in the field (the package is replaced outside pilot, and the guard pilot keeps
+# for the installed release is re-pointed at it). Imported last by wazuh-agent-skew-fixtures.yml;
+# also runnable alone. Idempotent.
+---
+- name: Make the wazuh-skewed hosts' agents newer than the manager
+  hosts: wazuh-skewed
+  become: true
+  gather_facts: true
+  vars:
+    skew_release: "4.14.9-1"
+    skew_rpm_url: "https://packages.wazuh.com/4.x/yum/wazuh-agent-4.14.9-1.x86_64.rpm"
+  tasks:
+    - name: "Read the installed agent version"
+      ansible.builtin.shell: |
+        if command -v rpm >/dev/null 2>&1; then rpm -q --qf '%{VERSION}-%{RELEASE}' wazuh-agent; else dpkg-query -W -f='${Version}' wazuh-agent; fi
+      register: skew_installed
+      changed_when: false
+      check_mode: false
+
+    - name: "Debian: release pilot's guard and install the newer agent release"
+      when:
+        - ansible_os_family == 'Debian'
+        - skew_installed.stdout != skew_release
+        - not ansible_check_mode
+      block:
+        - name: "Release pilot's hold so the newer package can be installed"
+          ansible.builtin.command: apt-mark unhold wazuh-agent
+          changed_when: true
+
+        - name: "Remove pilot's preference"
+          ansible.builtin.file:
+            path: /etc/apt/preferences.d/pilot-wazuh-agent
+            state: absent
+
+        # --force-confold: the package's service unit was modified by pilot's who-data setup, and a
+        # conffile prompt on a non-interactive stdin makes dpkg fail half-configured.
+        - name: "Install the newer agent release"
+          ansible.builtin.command: >-
+            apt-get install -y -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=300
+            wazuh-agent={{ skew_release }}
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          changed_when: true
+
+    - name: "Debian: point pilot's guard at the installed release"
+      when:
+        - ansible_os_family == 'Debian'
+        - not ansible_check_mode
+      block:
+        - name: "Write pilot's preference for the installed release"
+          ansible.builtin.copy:
+            dest: /etc/apt/preferences.d/pilot-wazuh-agent
+            owner: root
+            group: root
+            mode: "0644"
+            content: |
+              Package: wazuh-agent
+              Pin: version {{ skew_release }}
+              Pin-Priority: 1000
+
+              Package: wazuh-agent
+              Pin: version *
+              Pin-Priority: -1
+
+        - name: "Hold the package"
+          ansible.builtin.command: apt-mark hold wazuh-agent
+          register: skew_hold
+          changed_when: "'already' not in (skew_hold.stdout | default(''))"
+
+    - name: "RedHat: replace the agent package with the newer release and re-point the guard"
+      when:
+        - ansible_os_family == 'RedHat'
+        - skew_installed.stdout != skew_release
+        - not ansible_check_mode
+      block:
+        - name: "Drop pilot's versionlock block so the newer package can be installed"
+          ansible.builtin.blockinfile:
+            path: /etc/dnf/plugins/versionlock.list
+            marker: "# {mark} PILOT WAZUH VERSIONLOCK"
+            marker_begin: BEGIN
+            marker_end: END
+            state: absent
+
+        - name: "Install the newer agent release"
+          ansible.builtin.dnf:
+            name: "{{ skew_rpm_url }}"
+            state: present
+            disable_gpg_check: true
+
+        - name: "Re-point pilot's versionlock block at the installed release"
+          ansible.builtin.blockinfile:
+            path: /etc/dnf/plugins/versionlock.list
+            marker: "# {mark} PILOT WAZUH VERSIONLOCK"
+            marker_begin: BEGIN
+            marker_end: END
+            block: "wazuh-agent-0:{{ skew_release }}.x86_64"
+
+    - name: "Let the newer agent start"
+      ansible.builtin.systemd:
+        name: wazuh-agent
+        state: started
+      when: not ansible_check_mode
