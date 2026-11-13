@@ -1,0 +1,1 @@
+{"error": "invalid Wazuh writer identity", "error_kind": "refused"}
