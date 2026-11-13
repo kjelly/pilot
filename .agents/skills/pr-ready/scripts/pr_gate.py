@@ -793,6 +793,49 @@ class WorkflowHistory:
         return result
 
 
+AGENT_RUN_ROLES = ("pr-sa", "pr-coder", "pr-reviewer")
+AGENT_RUN_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+AGENT_RUN_SEVERITIES = ("P0", "P1", "P2", "P3", "P4")
+
+
+def agent_run_errors(runs: Any) -> list[str]:
+    """Shape check of the optional `agent_runs` record (model/effort of each role run).
+
+    The field exists to compare effort levels across PRs (`effort_report.py`), so it is never required
+    for Ready, but a present entry must be well formed: a typo here would silently drop a run from the
+    comparison. `findings` (reviewer runs) counts the P0-P4 findings that run reported.
+    """
+    if runs is None:
+        return []
+    if not isinstance(runs, list):
+        return ["agent_runs must be a list"]
+    errs: list[str] = []
+    for i, run in enumerate(runs):
+        label = f"agent_runs[{i}]"
+        if not isinstance(run, dict):
+            errs.append(f"{label} is not an object")
+            continue
+        if run.get("role") not in AGENT_RUN_ROLES:
+            errs.append(f"{label}.role must be one of {', '.join(AGENT_RUN_ROLES)}")
+        if not isinstance(run.get("model"), str) or not run["model"].strip():
+            errs.append(f"{label}.model missing")
+        if run.get("effort") not in AGENT_RUN_EFFORTS:
+            errs.append(f"{label}.effort must be one of {', '.join(AGENT_RUN_EFFORTS)}")
+        if not isinstance(run.get("head_sha"), str) or not SHA.fullmatch(run["head_sha"]):
+            errs.append(f"{label}.head_sha must be a full 40-hex SHA")
+        rnd = run.get("round")
+        if not isinstance(rnd, int) or isinstance(rnd, bool) or rnd < 1:
+            errs.append(f"{label}.round must be an integer >= 1")
+        findings = run.get("findings")
+        if findings is not None:
+            if run.get("role") != "pr-reviewer":
+                errs.append(f"{label}.findings is only recorded for pr-reviewer runs")
+            if not isinstance(findings, dict) or set(findings) - set(AGENT_RUN_SEVERITIES) or any(
+                    not isinstance(v, int) or isinstance(v, bool) or v < 0 for v in findings.values()):
+                errs.append(f"{label}.findings must map P0..P4 to non-negative integers")
+    return errs
+
+
 def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
              local: tuple[str, str, list[str]] | None = None,
              log_base: Path | None = None, ctx: Any = None, allow_pending: bool = False) -> list[str]:
@@ -848,6 +891,8 @@ def evaluate(s: Snapshot, evidence: dict[str, Any], *, repo: str, number: int,
             errs.append("Independent review has not passed / still has blocking findings")
         if not isinstance(r.get("report"), str) or len(r["report"].strip()) < 12:
             errs.append("Independent review needs a report reference/summary")
+
+    errs.extend(agent_run_errors(evidence.get("agent_runs")))
 
     validate_validation(evidence.get("local_validation"), sha, errs, log_base=log_base, ctx=ctx)
     if ctx is not None:

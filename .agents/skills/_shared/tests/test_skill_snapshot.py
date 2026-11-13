@@ -468,7 +468,10 @@ class RealRoleDefinitions(unittest.TestCase):
                 r.commit("a PR branch cut before this workflow")
                 rc, out = snap(r, "verify-role", "--snapshot", snapshot, "--repo", str(r.path),
                                "--platform", platform, f"--role={role}")
-                self.assertEqual((3, "DRIFT", digest(older), digest(REPO / path), False),
+                # The base file is the role as fdb6f03e shipped it: the Claude pr-coder was `effort: xhigh`
+                # there and is `high` since 2026-11-13, so verify-role must report that pin difference.
+                pins_differ = (role, platform) == ("pr-coder", "claude")
+                self.assertEqual((3, "DRIFT", digest(older), digest(REPO / path), pins_differ),
                                  (rc, out["status"], out["checkout_sha256"], out["snapshot_sha256"], out["pins_differ"]))
                 self.assertTrue(all(out["pins"]["checkout"].values()), "the model and effort pins parse")
 
