@@ -324,7 +324,7 @@ addresses and generated inventory before each rebuild.
 | Site-wide apply (gateway without ForceCommand) | `failed=0` on all five hosts (bastion ok=347 changed=49, client-vm ok=592 changed=77, freeipa-replica ok=175 changed=47, freeipa-server ok=234 changed=62, nexus ok=994 changed=167) |
 | Day-2 | gateway-scope reconcile, ForceCommand on, replica, identity, nfs-server, dns, dns-client, ca-trust, reverse-proxy, internal-endpoint, agent-controller, detection-engine: all `failed=0` (§3.10) |
 | Idempotency | second site-wide rerun `changed=0` on all five hosts; the first rerun had `client-vm changed=2` (unbound config) |
-| Specs | 28 in scope, 27 ran, 16 clean; the rest are fixture-bound, time dependent, or findings F1/F2/F4/F5 |
+| Specs | 28 in scope, 27 ran, 17 clean; the rest are fixture-bound, dcgm (not applicable), or findings F1/F2/F4/F5; `thanos-query` C13 and `prometheus` C22 only pass after the first Thanos block exists (about 3 h after the apply) |
 | §4 | 4.1–4.3 pass, 4.4 passes (its first reconcile recording is incomplete, F7), **4.5 fails** (F2) |
 
 ### Required role placement
