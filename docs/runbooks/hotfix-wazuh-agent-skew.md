@@ -109,11 +109,13 @@ fixture 的前三步（docker、manager、agent）只能跑一次：一旦有主
    自己取得 writer 之後才執行，所以第一次實跑就在 quiesce 失敗（`writer-active.json`）。
    修法：變更動作帶 `--owner`，只接受恰好屬於這次 run 的 writer marker（別人的、central 的、journal、沒有 marker 都拒絕）；
    唯讀的 `inspect` 仍拒絕任何 marker。
-2. **`pilot verify` 的 matcher 陷阱：缺 binary 也 PASS。** `sh -c '<不存在的指令> … && echo 0 || echo 1'` 在 `pilot verify`
-   下，shell 自己印的 `not found` 讓 stdout 不是單獨一個整數，`rc-from-stdout` 抽不出來，退回程序 rc（永遠 0），於是
-   **缺少 coordinator 的 manager 也 PASS**。本機 `pilot verify --local --probe` 就能重現。`wazuh-manager.md` C12 有同形寫法
-   （**本變更沒有修它**，需另開 issue）。本 spec 的 C6 加 `test -x` 與 `2>&1`，並由 regression test 對每個 row 鎖「輸出只有單獨的
-   0 或 1」，C6 另外對「有 manager stack 但沒有 coordinator」鎖必須 FAIL。
+2. **`pilot verify --local` 的 matcher 陷阱：缺 binary 也 PASS。** `sh -c '<不存在的指令> … && echo 0 || echo 1'` 在
+   `--local` 下，shell 自己印的 `not found` 併在 `echo` 前面，輸出不是單獨一個整數，`rc-from-stdout` 抽不出來，退回程序 rc
+   （永遠 0），於是缺少 coordinator 的 manager 也 PASS。`pilot verify --local --probe` 可以重現。**範圍要說窄**：inventory 路徑
+   （`ansible --one-line`，ansible-core 2.20.1，輸出 `(stdout) 1 (stderr) …`）實測不受影響，`extractRC` 讀得到 `1`；
+   `wazuh-manager.md` C11/C12、`wazuh-fim.md` C10、`wazuh-alert-delivery.md` C1 是同形寫法（#332，**本變更沒有修**）。
+   本 spec 的 C6 加 `test -x` 與 `2>&1`，並由 regression test 對每個 row 鎖「輸出只有單獨的 0 或 1」，C6 另外對「有 manager stack 但沒有
+   coordinator」鎖必須 FAIL。
 3. **套件移除會遺留 audit plugin 的 listener（Debian 與 EL 都是）。** 移除套件刪掉 `/etc/audit/plugins.d/af_wazuh.conf` 與
    `/var/ossec`，但 auditd 仍留著它啟動的 `audisp-af_unix`，listener 綁在已被刪除的路徑（`ss -xl` 仍列出，`ls` 看不到檔案）。
    重新安裝後 EL 的 `pilot deploy` 在 who-data 步驟以 `external audit endpoint did not appear after reloading the audit
