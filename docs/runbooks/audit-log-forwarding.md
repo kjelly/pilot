@@ -27,8 +27,11 @@ EL 只剩一個路徑時移除檔案、保留 mode/owner/group 與 symlink）均
 兩種情況都留下 `duplicate log entry`。測試 VM 已清理。
 完整版本、指紋與驗證範圍見 [本輪證據摘要](../evidence/audit-log-forwarding/2026-10-30-c97caf38cb06.md)。
 
-issue #324（spec v2.1 的 C23：本模組不再清掉同機 Wazuh 的 who-data watch，見 §5.6）尚未對目標環境實跑；
-上面的快照是這項變更之前的 candidate，不涵蓋它。
+issue #324（spec 的 C23：本模組不再清掉同機 Wazuh 的 who-data watch，見 §5.6）已對目標環境實跑：
+全新 Ubuntu 24.04 與 AlmaLinux 9 VM 的 `topology test --ephemeral`（candidate `b3e589280b43`，tree `4689200f`，
+含已合併的 Issue #323）通過 L1–L6，verify 11／46／12／22 全部 PASS、無 FAIL，第二次 apply `changed=0`；
+失敗路徑（外部 `-D`、規則檔被改、agent 停止、Wazuh writer 進行中、rescue）與未涵蓋範圍見
+[最新 evidence](../evidence/audit-log-forwarding/LATEST.md)。上面 2026-10-30 的快照是 #324 之前的 candidate，不涵蓋 #324。
 
 RELP/mTLS、大流量、輪替與 decommission 本輪未重跑；RELP/mTLS 最後驗證於 `34cfabea416eb9645aaa323e541198ae39bbbe96`，
 見 [該次證據摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
