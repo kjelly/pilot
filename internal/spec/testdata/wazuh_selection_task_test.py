@@ -47,7 +47,7 @@ class SelectionGraphTests(unittest.TestCase):
               foreign_source=False, foreign_policy=False, inherited=False, old_snapshot=False, fail_commit=False, recovery=False,
               manager_error=False, enrollment_host='localhost', manager_address='127.0.0.1', preview_fresh_manager=False,
               extra_vars=None, protected=None, native_preference=None, drift_preference=False, real_guard=False,
-              prior_block=True, legacy_policy_read=False):
+              prior_block=True, legacy_policy_read=False, fail_whodata=False):
         with tempfile.TemporaryDirectory(prefix='i244-selection-') as temporary:
             root = Path(temporary); data = root / 'data'; data.mkdir()
             paths = {'config': str(data / 'ossec.conf'), 'hosts': str(data / 'hosts')}
@@ -83,7 +83,7 @@ class SelectionGraphTests(unittest.TestCase):
             settings = root / 'settings.json'
             settings.write_text(json.dumps({'library': str(SOURCE / 'files/wazuh-transaction.py'), 'root': str(ledger),
                                              'state': str(state_file), 'events': str(events_file), 'paths': paths,
-                                             'manager': manager, 'fail_verify': fail_verify, 'fail_commit': fail_commit,
+                                             'manager': manager, 'fail_verify': fail_verify, 'fail_commit': fail_commit, 'fail_whodata': fail_whodata,
                                              'preference': str(preference), 'manager_error': manager_error,
                                              'drift_preference': drift_preference, 'real_guard': real_guard,
                                              'fault_resource': fault[0] if fault else ''}))
@@ -535,6 +535,85 @@ class SelectionGraphTests(unittest.TestCase):
         self.assertIn('controlled stable C10 failure', result.stdout)
         self.assertEqual(state['config'].count(OWN_BLOCK), 1, 'verification failure must not roll the FIM block back')
         self.assertIn('wazuh-manager', state['hosts'])
+
+    # --- Issue #323: the ordinary RedHat-family apply makes sure the who-data endpoint is live; Debian never runs it.
+    # The coordinator's action is a declared native leaf here (the real action runs over a modeled host in
+    # wazuh_whodata_ensure_test.py); what these runs prove is the PLAY: what selects the step, where it sits, what
+    # skips it and what a refusal does.
+    def test_the_redhat_apply_ensures_the_who_data_endpoint_once_after_the_last_service_change_and_before_C10(self):
+        result, events, state = self.agraph('RedHat', '4.14.1-1')
+        self.assert_run_ok(result)
+        actions = self.actions(events)
+        self.assertEqual(actions.count('agent-whodata-ensure'), 1)
+        ensure = actions.index('agent-whodata-ensure')
+        self.assertGreater(ensure, max(i for i, a in enumerate(actions) if a == 'service'),
+                           'the endpoint is proven after the agent restart that re-arms the watches')
+        self.assertLess(ensure, actions.index('agent-verify'))
+        last_service = max(i for i, a in enumerate(actions[:ensure]) if a == 'service')
+        self.assertEqual(actions[last_service + 1:ensure].count('agent-config-save'), 2,
+                         'the agent-service and audit-service snapshots are taken right before the step')
+        self.assertEqual([e['family'] for e in events if e['action'] == 'whodata-ensure-args'], ['RedHat'],
+                         'the play passes its own family, which the action checks')
+
+    def test_the_debian_apply_never_runs_the_endpoint_step_and_its_package_list_is_unchanged(self):
+        for tags in (None, 'C11'):
+            with self.subTest(tags=tags):
+                result, events, state = self.agraph('Debian', '4.14.1-1', flags=('--tags', tags) if tags else ())
+                self.assert_run_ok(result)
+                self.assertNotIn('agent-whodata-ensure', self.actions(events))
+                self.assertNotIn('whodata-ensure-args', self.actions(events))
+        # prepared=False: auditd is not installed yet, so the apt framework really installs the Debian list.
+        result, events, state = self.agraph('Debian', '4.14.1-1', prepared=False)
+        self.assert_run_ok(result)
+        self.assertEqual([e['package'] for e in events if e['action'] == 'install-prerequisite'], ['auditd'],
+                         'Debian keeps [auditd]: no audispd-plugins is added for the who-data endpoint')
+
+    def test_the_redhat_apply_installs_the_af_unix_plugin_package_with_audit(self):
+        result, events, state = self.agraph('RedHat', '4.14.1-1')
+        self.assert_run_ok(result)
+        self.assertEqual([e['package'] for e in events if e['action'] == 'install-prerequisite'],
+                         ['audit', 'audispd-plugins', 'python3-dnf-plugin-versionlock'])
+
+    def test_the_C11_selector_runs_the_endpoint_step_alone_with_its_service_snapshots(self):
+        result, events, state = self.agraph('RedHat', '4.14.1-1', flags=('--tags', 'C11'))
+        self.assert_run_ok(result)
+        actions = [a for a in self.actions(events) if a not in self.WRITER_BOOKKEEPING]
+        self.assertEqual(actions.count('agent-whodata-ensure'), 1)
+        self.assertEqual(actions.count('agent-config-save'), 2)
+        self.assertFalse([a for a in actions if a in MUTATORS], actions)
+        self.assertNotIn('agent-verify', actions, 'C10 is another row')
+        self.assertEqual(state['before'], state['after'], 'the selected step changes no file')
+
+    def test_no_other_selector_runs_the_endpoint_step(self):
+        selectors = [('--tags', tags) for tags in ('C1', 'C2', 'C3', 'C4', 'C5', 'C10')] + [('--skip-tags', 'C11')]
+        runs = self.graphs([(('RedHat', '4.14.1-1'), {'flags': flags}) for flags in selectors])
+        for flags, (result, events, state) in zip(selectors, runs):
+            with self.subTest(flags=flags):
+                self.assert_run_ok(result)
+                self.assertNotIn('agent-whodata-ensure', self.actions(events))
+
+    def test_the_endpoint_step_is_never_part_of_a_version_transaction_or_a_preview(self):
+        result, events, state = self.graph('RedHat', manager='4.14.9', requested='4.14.9', upgrade=True)
+        self.assert_ok(result, events, state)
+        self.assertIn('agent-commit', self.actions(events))
+        self.assertNotIn('agent-whodata-ensure', self.actions(events), 'the transaction owns its own audit proof')
+        result, events, state = self.agraph('RedHat', '4.14.1-1', flags=('--check',))
+        self.assert_run_ok(result)
+        self.assertNotIn('agent-whodata-ensure', self.actions(events))
+
+    def test_a_who_data_endpoint_that_cannot_be_made_live_fails_the_run_visibly_and_rolls_back_like_any_mutation(self):
+        result, events, state = self.agraph('RedHat', '4.14.1-1', fail_whodata=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('controlled who-data endpoint failure', result.stdout, 'the typed refusal must not be hidden')
+        self.assertEqual(state['config'].count(OWN_BLOCK), 0, 'the ordinary rollback scope covers the endpoint step')
+        self.assertNotIn('\twazuh-manager', state['hosts'])
+        self.assertIn('ordinary-restored', self.actions(events))
+        self.assertNotIn('agent-verify', self.actions(events))
+        self.assertIsNone(state['ownership']['writer'], 'the host-wide writer is still released')
+        # Whatever the rescue restores, it never restarts or stops auditd (EL refuses it, and the SIGHUP is not undone).
+        self.assertEqual(state['services']['auditd']['generation'], 50)
+        self.assertFalse([e for e in events if e['action'] == 'service' and e.get('unit') == 'auditd'
+                          and e['operation'] in ('restart', 'stop')], events)
 
     def test_a_failure_inside_the_configuration_block_still_rolls_back_through_the_existing_rescue(self):
         for resource, fault in (('config', 'before'), ('config', 'partial'), ('hosts', 'partial')):

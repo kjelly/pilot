@@ -1,6 +1,6 @@
 # Verification Spec — wazuh-fim（Wazuh agent：檔案完整性監控 FIM + auditd who-data）
 
-> 版本：v1.6
+> 版本：v1.7
 > 對齊規範：pilot 通用 config-only 服務規範；註冊目標為
 > `docs/verification/wazuh-manager.md`（Wazuh 中央伺服器），兩份 spec 搭配構成
 > 一組 Shape 3（agent+server）；`wazuh-manager.md` 再選填轉送至
@@ -103,30 +103,54 @@ endpoint／writer 直接拒絕。回復時只 prune 其他 persistent objects；
 不得置換 socket 或把祖先轉成 alias。套件替換、回復重播與原服務啟動後都重驗。
 boot／listener／anchor 改變時保留 journal 並拒絕自動回復，不猜測 HUP／respawn。
 啟用 audit plugin 卻缺少健康 endpoint 的舊主機，須先完成明確的前置修復。
-已知限制（EL 的 who-data endpoint 不由一般套用建立；#244 範圍外，未解決）：EL 的 `audit` 套件不含
-af_unix plugin，`/sbin/audisp-af_unix` 由 `audispd-plugins` 提供；本 repo 的一般套用只安裝 `audit`，
-不安裝 `audispd-plugins`，也不載入 plugin。AlmaLinux 9 實測：一般套用之後 `/var/ossec/queue/sockets/audit`
-不存在，kernel 沒有 `wazuh_fim` watch。在這樣的主機上，受控 agent 升級以
-`configured external audit endpoint is unavailable before upgrade` 拒絕，不改動 agent。拒絕發生在
-`agent-reserve` 之中，早於交易對 staged RPM 的簽章驗證，但 RPM 已先由 stage 下載（經 dnf，repository
+EL 的 who-data endpoint 由一般套用建立，否則套用失敗（Issue #323；只涉及 RedHat family）：EL 的 `audit`
+套件不含 af_unix plugin，`/sbin/audisp-af_unix` 由 `audispd-plugins` 提供（Debian family 的安裝清單仍只有
+`auditd`，Ubuntu 24.04 上 who-data 以它運作；Debian 的安裝清單與行為不變），所以 RedHat family 的 Step 4 與 `audit`
+一起安裝 `audispd-plugins`。agent
+首次啟動時寫入 `/etc/audit/plugins.d/af_wazuh.conf`（`active = yes`），但 EL 上沒有東西讓執行中的 auditd 載入
+它：auditd 拒絕 `systemctl restart`，minimal EL9 沒有 `service` 指令，Wazuh 自己的重啟失敗並記錄
+`Could not launch command to restart Auditd`，syscheckd 退回 real-time 而沒有 who-data。因此一般套用在最後
+一次 agent 服務變更（Step 11 的重啟）之後執行 Step 11a（tag C11；只在 RedHat family、只在一般套用、
+`--check` 不執行；進入前先取得 `agent-service` 與 `audit-service` 快照），由 coordinator 的
+`agent-whodata-ensure` 在既有的 host-wide writer／component lock 與 idle 檢查之下確保 endpoint；只在需要時
+才變更主機：
+- endpoint 是有 listener 的 socket，且 `wazuh-syscheckd` 已連線：不送訊號、不重啟、回報 unchanged；這條
+  路徑不要求任何 `wazuh_fim` watch。
+- listener 存在，但 syscheckd 在有上限的寬限內仍未連線：重啟一次 `wazuh-agent`，不送訊號。
+- endpoint 不存在：先有上限地等待 `af_wazuh.conf` 出現且 `active = yes`（全新主機上 Step 11 緊接在 Step 10
+  之後重啟 agent，檔案可能尚未寫出）；再對 auditd 主程序（systemd `MainPID`，以 pidfd 持有，執行檔必須是
+  `/usr/sbin/auditd`）送恰好一次 SIGHUP；有上限地等待 endpoint 以有 listener 的 socket 出現；然後重啟一次
+  `wazuh-agent`，並要求 syscheckd 已連線且至少一條 `wazuh_fim` kernel watch 出現（只有本次套用自己重啟 agent
+  之後才要求 watch）。全新主機的第一次套用因此會重啟 agent 兩次（Step 11 一次、本步驟一次）；第二次套用
+  不送訊號、不重啟、`changed=0`。
+- 下列情形以 typed refusal 讓套用失敗，既有 rescue 隨後執行（rescue 永遠不重啟 auditd，SIGHUP 不回復）：
+  plugin 在上限內始終不是 `active = yes`（不送訊號）；endpoint 路徑存在但不是 socket；socket 存在但沒有任何
+  listener；單一次 SIGHUP 之後 endpoint 仍未出現（不重啟 agent）；重啟之後 stream 或 watch 沒有出現。
+就緒判斷不看 listener 是哪個程序（外部的 `audisp-af_unix` 或 auditd 內建的 af_unix 都算），只看 `ss -xHap`：
+endpoint 路徑上有 LISTEN，且有 ESTAB 的 server 端、其 inode 與 `wazuh-syscheckd` 的 ESTAB client 互指（與 C11
+相同的判斷）。受控升級的 admission gate 不變，仍使用自己的精確 listener 與 watch 證明。
+舊主機（較早 revision 在 EL 上安裝：只有 `audit`、沒有 `audispd-plugins`、沒有 endpoint）須先完成一次含本
+revision 的一般套用，才能帶 `wazuh_upgrade=true`。在尚未修復的舊主機上，受控 agent 升級仍以
+`configured external audit endpoint is unavailable before upgrade` 拒絕，不送訊號、不重啟、不改動 agent。拒絕
+發生在 `agent-reserve` 之中，早於交易對 staged RPM 的簽章驗證，但 RPM 已先由 stage 下載（經 dnf，repository
 設定 `gpgcheck=1`），所以被拒絕的這次執行使 `/var/backups/pilot/wazuh` 增加約 22 MB，主要是 staged
 RPM：觀察到 `rpm-stage` 在拒絕後至少約 3 分鐘仍存在；保留的 root-only `agent-policy-<owner>` 目錄也留下。
-手動修復的實測順序：在主線鏈的 EL 主機上，依序安裝 `audispd-plugins`、對 auditd 主程序送
-`kill -HUP <auditd MainPID>`、重啟 `wazuh-agent`，之後 4.14.1 → 4.14.9 的受控升級成功。操作者觀察到
-EL 上 `systemctl restart auditd` 被拒絕。全新 AlmaLinux 9 VM 上的順序探測：`audispd-plugins` 與 agent
-同時或先於 agent 安裝（僅安裝）沒有 endpoint、沒有 `wazuh_fim` watch；之後單獨 HUP 有 endpoint 但沒有
-watch（60 秒內持續為 0）；單獨重啟 agent 什麼都沒有；HUP 之後再重啟 agent 兩者皆有；重新開機單獨即生效。
-Ubuntu 22.04（auditd 以內建的 `builtin_af_unix` 提供 af_unix plugin，未安裝 `audispd-plugins`）與
-aarch64 不在本契約與 evidence 的涵蓋範圍。由未變更的 admission gate 推論，未以升級嘗試原生執行：
-Ubuntu 22.04 沒有外部的 `audisp-af_unix` listener，受控 agent 升級預期以
+上述順序的依據是全新 AlmaLinux 9 VM（×3）上的順序探測（觀察到的事實）：僅安裝 `audispd-plugins`（不論在 agent
+之前或同時）沒有 endpoint、沒有 `wazuh_fim` watch；之後單獨對 auditd 主程序 HUP 有 endpoint（`ss -xHap` 只有一筆由 `audisp-af_unix` 持有的 LISTEN，沒有 ESTAB 連線）
+但沒有 watch（60 秒內持續為 0）；單獨重啟 agent 什麼都沒有；HUP 之後再重啟 agent 兩者皆有；重新開機單獨即生效。操作者另觀察到
+EL 上 `systemctl restart auditd` 被拒絕。Ubuntu 22.04（auditd 以內建的 `builtin_af_unix` 提供 af_unix，未安裝
+`audispd-plugins`）與 aarch64 依維護者決定不在本契約與 evidence 的涵蓋範圍（不要求實跑）。由未變更的 admission gate 推論，
+未以升級嘗試原生執行：Ubuntu 22.04 沒有外部的 `audisp-af_unix` listener，受控 agent 升級預期以
 `exact external audit listener is missing or ambiguous` 拒絕。
-已知限制（其他元件，既有行為）：`audit-log-forwarding` 每次套用都會執行 `augenrules --load`；在同機
+已知限制（其他元件，既有行為，#324 未解決）：`audit-log-forwarding` 每次套用都會執行 `augenrules --load`；在同機
 共用的 Ubuntu 24.04 主機上實測它把 kernel 的 `wazuh_fim` watch 由 2 條清為 0（auditd 主程序與連線不變），
 Wazuh 不會自行重新建立（套用後 90 秒、手動 `augenrules --load` 後 10 分鐘仍為 0），一般 FIM 套用也不補回；
 重啟 `wazuh-agent` 後約 2 秒內重新建立。`audit-log-forwarding` 有設定漂移時會重啟 auditd（新的
 MainPID），agent 的連線隨之中斷，watch 在探測的至少 90 秒內持續為 0。由未變更的 admission gate 推論，
 未以升級嘗試原生執行：此狀態下受控 agent 升級預期以 `native Wazuh audit client/watch readiness timed out`
-拒絕，直到執行 `systemctl restart wazuh-agent`。
+拒絕，直到執行 `systemctl restart wazuh-agent`。因此 Step 11a 的穩態（no-op）路徑與 C11 刻意不要求 watch：
+watch 被清為 0 而 endpoint 與連線仍在的主機維持 unchanged，第二次套用的 `changed=0` 不受影響；本修復不處理
+#324。
 套件 staging 目錄及其祖先也須通過型別與 alias 檢查；留存套件只從精確的
 root-only transaction directory 使用，回復不寫回 global package cache。
 Debian 交易同時冷備份 `/usr/sbin/policy-rc.d` 的內容、metadata 或不存在狀態。
@@ -240,7 +264,7 @@ V ≤ M。
 | ID  | Category  | Check                                                                 | Expected | Command |
 |-----|-----------|------------------------------------------------------------------------|----------|---------|
 | C1  | package   | `wazuh-agent` 已安裝（Debian 的 native hold 狀態仍是已安裝）           | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q wazuh-agent >/dev/null; else dpkg-query -W -f='${Status}\n' wazuh-agent 2>/dev/null | grep -qxE '(install|hold) ok installed'; fi |
-| C2  | package   | `auditd`／EL `audit` 已安裝（who-data provider 依賴）                   | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q audit >/dev/null; else dpkg-query -W -f='${Status}\n' auditd 2>/dev/null | grep -qx 'install ok installed'; fi |
+| C2  | package   | `auditd`／EL `audit`＋`audispd-plugins` 已安裝（who-data provider 與 EL 的 af_unix plugin 依賴） | 0        | if command -v rpm >/dev/null 2>&1; then rpm -q audit audispd-plugins >/dev/null; else dpkg-query -W -f='${Status}\n' auditd 2>/dev/null | grep -qx 'install ok installed'; fi |
 | C3  | service   | `wazuh-agent.service` 為 active                                        | 0        | systemctl is-active wazuh-agent >/dev/null 2>&1; echo $? |
 | C4  | service   | `auditd.service` 為 active                                             | 0        | systemctl is-active auditd >/dev/null 2>&1; echo $? |
 | C5  | config    | 至少一個目錄設定了 FIM + whodata（`check_all="yes" whodata="yes"`，不綁定特定路徑——見 §1.5） | 0 | grep -qE '<directories check_all="yes" whodata="yes">' /var/ossec/etc/ossec.conf; echo $? |
@@ -249,8 +273,9 @@ V ≤ M。
 | C8  | register  | `ossec.conf` 的 `<address>` 指向 `wazuh-manager` 別名                  | 0        | grep -qE '<address>wazuh-manager</address>' /var/ossec/etc/ossec.conf; echo $? |
 | C9  | register  | 已完成向 manager 註冊（`client.keys` 非空）                             | 0        | sh -c 'test -s /var/ossec/etc/client.keys && echo 0 || echo 1' |
 | C10 | functional | 套件與 native agent release 相同、exact package 受 native hold／versionlock 保護、服務 active、沒有未完成交易 | 0 | sh -c 'if test -f /etc/debian_version; then wazuh_family=Debian; elif test -f /etc/redhat-release; then wazuh_family=RedHat; else exit 1; fi; /usr/local/sbin/pilot-wazuh-transaction agent-verify --family "$wazuh_family" >/dev/null && echo 0 || echo 1' |
+| C11 | functional | EL：who-data endpoint 是 socket，有 listener，且 `wazuh-syscheckd` 已連線（endpoint 路徑上有 LISTEN，以及 ESTAB 的 server 端，其 inode 與 `wazuh-syscheckd` 的 ESTAB client 互指；不看 listener 是哪個程序）；非 RPM 主機（Debian family）此列不涵蓋（直接為 0） | 0 | if command -v rpm >/dev/null 2>&1; then if test -S /var/ossec/queue/sockets/audit && ss -xHap 2>/dev/null | awk -v e=/var/ossec/queue/sockets/audit '$2=="LISTEN" && $5==e {l=1} $2=="ESTAB" && $5==e {s[$6" "$8]=1} $2=="ESTAB" && /wazuh-syscheckd/ {c[$8" "$6]=1} END {if (l) for (k in s) if (k in c) exit 0; exit 1}'; then echo 0; else echo 1; fi; else echo 0; fi |
 
-> C1–C10 全部用**正邏輯 rc**（`; echo $?` 或原生 rc），C9 用
+> C1–C11 全部用**正邏輯 rc**（`; echo $?` 或原生 rc），C9 用
 > `sh -c '... && echo 0 || echo 1'` 讓外層指令恆回 0，避免「未註冊」的合法
 > FAIL 判定結果被 ansible ad-hoc 誤判成 task FAILED（見
 > `verification-spec-template.md` 陷阱 1）。
@@ -274,25 +299,40 @@ V ≤ M。
 > 版本交易以相同 native version、pin、active proof 加 identity／registry 驗證後
 > 才提交，不在 commit 後增加新的可失敗操作。獨立 verify 的 C10 另驗 idle state。
 > C10 由安裝在目標上的 root-only coordinator 執行，因此需要 verify 時的 privilege escalation。
+> C11（Issue #323）驗證 EL 上 who-data 的本機管線真的接上了，而不是設定文字或檔案存在：原本一個設定了
+> `af_wazuh.conf`、但 endpoint 從未建立的 EL 主機通過全部 C1–C10。只看 `test -S` 不夠（plugin 停用後 socket
+> 檔仍殘留而沒有 listener），所以另外要求 `ss -xHap` 看到 endpoint 路徑上有 LISTEN，以及 ESTAB 的 server 端，並且它的 inode 與
+> `wazuh-syscheckd` 的 ESTAB client 互指（兩端各自的 inode 與對端 inode 互換）。刻意**不**看 listener 是
+> 哪個程序：EL 的外部 `audisp-af_unix` 與 auditd 內建的 af_unix 都是合法的 listener，不能因為程序名稱不同
+> 而判定一台運作中的主機失敗。刻意**不**要求 kernel `wazuh_fim` watch：`audit-log-forwarding` 每次套用的
+> `augenrules --load` 會把 watch 清為 0 而 endpoint 與連線不變（#324，未解決，見 §2 上方），要求 watch 會讓同機
+> 共用的主機在第二次套用後 verify 失敗，也會讓一般套用的 no-op 路徑不再冪等；apply 自己重啟 agent 之後仍要求
+> 至少一條 watch，那是該次修復的證明，不是穩態斷言。判斷是否為 EL 用 `command -v rpm`，與 C1／C2 相同，也與 apply 以 `ansible_os_family == 'RedHat'` 決定是否執行 Step 11a
+> 一致（不用 `/etc/redhat-release`：沒有該檔的 RedHat family 主機，Step 11a 會執行，這列就必須真的觀察，不能直接印 0）。
+> 沒有 `rpm` 的主機（Debian family）這列直接印 0，不涵蓋：Debian 的 who-data
+> endpoint 與 watch 沒有任何 row 斷言（見 §2 上方；watch 的既有限制是 #324）。C11 讀取 process 名稱與 root 擁有的 socket 路徑，
+> 需要 verify 時的 privilege escalation（`ss ` 觸發 `spec.NeedsBecome`）。檢查它是否會誤判：用 `pilot verify
+> --probe '<cmd>' -i <inv> -l <host>` 在同一條管線下看實際 rc 與 stdout，不要憑猜測改 Expected。
 
 ## 3. 證據收集
 
 - 工具：`go run ./cmd/pilot vm-target verify --name wazuh-fim docs/verification/wazuh-fim.md`
 - 輸出格式：`.verification/wazuh-fim-<UTC>.{ndjson,md}`
-- 預期 row 數：10（C1–C10）
+- 預期 row 數：11（C1–C11）
 
 ## 4. PASS / FAIL 規則
 
-- 全部 C1–C10 `status=pass` → **PASS**
+- 全部 C1–C11 `status=pass` → **PASS**
 - 任一 `status=fail` → **FAIL**，列出 fail id + actual + want
 
 ## 5. 例外與已知偏差
 
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
-| C7, C8, C9 | 這三條的前提是套用時提供了 `wazuh_manager_host`（見 §1.5，選填）。若 manager 尚未存在、套用時未帶這個變數，playbook 會跳過 `/etc/hosts` pin 與註冊，C7–C9 在 `pilot verify` 會回報 `fail`——這是**預期行為**，不是 bug：此時應驗證 C1–C6 與 C10（本機 FIM 規則、服務與 native version／pin），待 manager 就緒、補跑一次 apply 帶上 `wazuh_manager_host` 後再驗全部 10 條 | 無 manager 的獨立部署 / manager 尚未就緒的過渡期 | 補上 `wazuh_manager_host` 並重新 apply 後即解除 |
+| C7, C8, C9 | 這三條的前提是套用時提供了 `wazuh_manager_host`（見 §1.5，選填）。若 manager 尚未存在、套用時未帶這個變數，playbook 會跳過 `/etc/hosts` pin 與註冊，C7–C9 在 `pilot verify` 會回報 `fail`——這是**預期行為**，不是 bug：此時應驗證 C1–C6、C10 與 C11（本機 FIM 規則、服務、native version／pin 與 EL 的本機 who-data endpoint），待 manager 就緒、補跑一次 apply 帶上 `wazuh_manager_host` 後再驗全部 11 條 | 無 manager 的獨立部署 / manager 尚未就緒的過渡期 | 補上 `wazuh_manager_host` 並重新 apply 後即解除 |
 | C9 | 本 spec 只驗證「client.keys 非空」（agent 端已取得憑證），**不**驗證「manager 端也認得這把憑證、連線真的建立成功」——那需要去 manager 端跑 `agent_control -l` 或看 `wazuh-remoted` 的連線狀態，屬於跨主機 Shape 3 cross-check，做法見 `docs/runbooks/wazuh-fim.md` §4 | 所有環境 | 永久（設計如此，非暫時偏差） |
 | C5 | 只驗證「至少一個目錄設定 whodata」，不驗證特定站台實際監控的路徑清單是否符合預期（那是逐主機的 `wazuh_fim_directories` 設定責任，見 §1.5）；若要確保某台主機**一定**監控了某個特定路徑，需要另外針對該主機寫查核（例如部署後手動 `grep` 確認），不在本通用 spec 範圍內 | 所有環境 | 永久（設計如此，非暫時偏差） |
+| C11 | 只涵蓋 EL（RedHat family）：Debian family 直接為 0，不斷言任何 who-data 狀態（Ubuntu 22.04 的 `builtin_af_unix` 與 aarch64 依維護者決定不在涵蓋範圍）；不要求 kernel `wazuh_fim` watch（`audit-log-forwarding` 的 `augenrules --load` 會把 watch 清為 0，#324）；不辨識 listener 是哪個程序，只證明 endpoint 的 server 端與 `wazuh-syscheckd` 互相連線 | 所有環境 | #324 決定 watch 的契約之後重新檢討；Debian family 不由本 row 涵蓋 |
 | — | Enrollment 使用開放式註冊（manager 端 `use_password=no` 出廠預設），見 `wazuh-manager.md` §5 對應說明 | sandbox / demo | 正式站台上線前檢討 |
 
 ## 6. Playbook 對應
@@ -302,7 +342,7 @@ V ≤ M。
 | Spec ID | Apply task | 備註 |
 |---------|------------|------|
 | C1 | Debian APT／RedHat DNF repository + 簽章的 exact `wazuh-agent` install family；既有版本保留、明示升級；native hold／versionlock | 共用 manager 相容性 gate（先讀 manager 原生版本）；未授權的版本變更 typed 拒絕 |
-| C2 | `install auditd` | who-data provider=audit 的執行期依賴 |
+| C2 | `install auditd`（Debian）；`dnf install audit audispd-plugins python3-dnf-plugin-versionlock`（RedHat） | who-data provider=audit 的執行期依賴；EL 的 af_unix plugin `/sbin/audisp-af_unix` 由 `audispd-plugins` 提供，Debian 由 `auditd` 提供；Debian 的安裝清單不變 |
 | C3 | `ensure wazuh-agent enabled+started` | 只在設定檔真的變更或剛完成註冊時才重啟 |
 | C4 | `ensure auditd enabled+started` | — |
 | C5, C6 | `blockinfile` 附加一個新的 `<ossec_config><syscheck>...</syscheck></ossec_config>` 區塊到 `ossec.conf` 檔案末端，`<directories>` 清單用 Jinja loop 依 `wazuh_fim_directories` 逐項展開 | 實測確認 Wazuh 的 XML parser 允許同一份檔案有多個 `<ossec_config>` 根節點並全部合併（套件出廠設定本身也是這樣分兩段），且對同一路徑重複宣告時會**聯集**選項（原本的 `scheduled` 疊加我們新增的 `whodata`），不會互相覆蓋或衝突——見 `docs/runbooks/wazuh-fim.md` §5。只新增管理區塊，不動套件出廠的其餘 `<syscheck>` 預設設定 |
@@ -310,10 +350,11 @@ V ≤ M。
 | C8 | `lineinfile` 改 `ossec.conf` 的 `<address>` | 套件出廠預設只有一個 `<address>` 標籤，可安全用單一 regex 取代 |
 | C9 | `agent-auth -m wazuh-manager`（只在 `client.keys` 為空且 manager 已提供時執行一次） | 非「每次都跑」，避免每次 apply 都重新註冊、破壞冪等性 |
 | C10 | coordinator `agent-verify`（native release、exact pin、服務 active） | 在設定區塊之外執行：驗證失敗不會觸發設定 rollback |
+| C11 | Step 11a：coordinator `agent-whodata-ensure`（只在 RedHat family 的一般套用、`--check` 不執行）：endpoint 已有 listener 且 syscheckd 已連線則只驗證；listener 在但未連線則重啟一次 agent；endpoint 不存在且 plugin `active = yes` 則對 auditd 主程序送一次 SIGHUP、等 endpoint、重啟一次 agent、再證明連線與至少一條 `wazuh_fim` watch | 排在 Step 11 的 agent 重啟之後、Step 11b／C10 之前，在一般套用的 rollback block 之內；單獨 `--tags C11` 可重跑；typed refusal 讓套用失敗，rescue 不重啟 auditd、不回復 SIGHUP；Debian family 不執行 |
 
 ## 7. SOP
 
-### 7.1 標準情境：manager 已存在（註冊啟用，驗證全部 10 條）
+### 7.1 標準情境：manager 已存在（註冊啟用，驗證全部 11 條）
 
 > **Issue #244 起的前提**：啟用 enrollment 時，manager 必須是**同一份 inventory** 的 host
 > （`wazuh-manager` group 或 `wazuh_manager_inventory_host`），apply 才能在動 agent 之前讀它的
@@ -364,7 +405,7 @@ go run ./cmd/pilot vm-target exec --name wazuh-fim -- \
 ```bash
 go run ./cmd/pilot vm-target run --name wazuh-fim \
     playbooks/apply/wazuh-fim-apply.yml
-# verify 時 C7-C9 預期 fail（見 §5），檢查 C1-C6 與 C10 是否全 pass
+# verify 時 C7-C9 預期 fail（見 §5），檢查 C1-C6、C10 與 C11 是否全 pass
 
 # 之後 manager 就緒：
 go run ./cmd/pilot vm-target run --name wazuh-fim \
@@ -391,3 +432,4 @@ go run ./cmd/pilot vm-target run --name wazuh-fim \
 | 2026-11-06 | Issue #244 (A) | 原生實跑後修正：安裝的 coordinator 可直接執行（shebang）；enrollment 拒絕的 typed 原因可見；被拒絕的 EL stage 不留私有目錄；明確記載 apt hold 與明確版本安裝的語意、manager 端「從未連線／pre-4.14 agent」fail closed 與移除方式。未放寬任何 Expected。 | pilot |
 | 2026-11-09 | Issue #244 (B) | 以已合併的 A（#271）為基底重新整合受控升級（B）：版本契約由 A 負責、B 只加 writer／transaction／reader／preview；未授權的版本變更仍 typed 拒絕，單次 `wazuh_upgrade=true` 才進入受控交易；版本升為 v1.5。未放寬任何 Expected。 | pilot |
 | 2026-11-10 | Issue #244 (B) | 文件補記（無 Expected 變更，C1–C10 不變；不新增、不收緊、不放寬任何 row）：記載 EL 的一般套用不建立 who-data endpoint（缺 `audispd-plugins`）與其後果——受控 agent 升級以 `configured external audit endpoint is unavailable before upgrade` 拒絕、不改動 agent，拒絕後留下 `agent-policy-<owner>` 與約 22 MB 的備份根目錄增長（主要是 staged RPM）；實測過的手動修復順序與順序探測結果；Ubuntu 22.04 與 aarch64 不在涵蓋範圍；`audit-log-forwarding` 的 `augenrules --load` 與 auditd 重啟會清除同機 `wazuh_fim` watch 的既有行為；備份不自動清除的已知限制。這些是已知限制的記載，不是新的保證；一般套用建立 who-data 的設計已自本版範圍移除。 | pilot |
+| 2026-11-12 | Issue #323 | EL 的一般套用建立 who-data endpoint，否則套用失敗：RedHat family 的 Step 4 安裝 `audispd-plugins`（C2 的 EL 檢查收緊為 `rpm -q audit audispd-plugins`）；新增 Step 11a（tag C11，只在 RedHat family 的一般套用）以 coordinator `agent-whodata-ensure` 在 agent 最後一次服務變更之後確保 endpoint：已存在且 syscheckd 已連線則不變更；listener 在但未連線則重啟一次 agent；endpoint 不存在且 plugin 啟用則一次 SIGHUP、等待、一次 agent 重啟並證明連線與至少一條 watch；其餘情形 typed refusal。新增 C11（EL；endpoint 為 socket 且 `wazuh-syscheckd` 已連線；不看 listener 程序、不要求 watch，原因見 §2 與 #324；Debian family 不涵蓋）。row 數 10 → 11；C1–C10 的 ID 與 Expected 不變，C2 的 EL 檢查收緊，沒有放寬任何 Expected。受控升級的 admission gate 不變；舊的 EL 主機須先完成一次一般套用才能升級。原生驗收以各 candidate 的 target evidence 為準（`docs/evidence/wazuh-fim/`）。 | pilot |

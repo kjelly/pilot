@@ -34,6 +34,7 @@ import grp
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -628,8 +629,27 @@ class AuditRuntime:
     """
     def __init__(self, runner): self.r = runner
 
+    # Bounds, in seconds, of the ordinary apply's who-data endpoint ensure (never of the upgrade proof): how long
+    # the Wazuh agent may take to write af_wazuh.conf after its first start, to open the endpoint after the one
+    # SIGHUP, to connect syscheckd to an existing listener, and to arm its watches after the one agent restart.
+    PLUGIN_WAIT, LISTENER_WAIT, CLIENT_GRACE, READY_WAIT = 60, 30, 30, 60
+
     @staticmethod
     def endpoint(): return Path('/var/ossec/queue/sockets/audit')
+
+    @staticmethod
+    def plugin(): return Path('/etc/audit/plugins.d/af_wazuh.conf')
+
+    @classmethod
+    def plugin_active(cls):
+        """Whether auditd is configured to run the Wazuh af_unix plugin (the one source of this fact)."""
+        plugin = cls.plugin()
+        return plugin.exists() and re.search(r'^\s*active\s*=\s*yes\s*$', plugin.read_text(), re.M) is not None
+
+    @staticmethod
+    def watch_lines(text):
+        """The kernel audit rules Wazuh's who-data engine armed (the one source of what counts as a wazuh_fim watch)."""
+        return sorted(line for line in text.splitlines() if re.search(r'(?:key=|\-k\s+)wazuh_fim(?:\s|$)', line))
 
     @classmethod
     def anchors(cls):
@@ -698,7 +718,7 @@ class AuditRuntime:
                       and server[5] == client[7] and server[7] == client[5]]
             pids = {int(value) for client in paired for value in re.findall(r'pid=([0-9]+)', ' '.join(client))}
             text = self.r.run(['auditctl', '-l'], timeout=15, operation='native Wazuh audit watches').stdout
-            watches = sorted(line for line in text.splitlines() if re.search(r'(?:key=|\-k\s+)wazuh_fim(?:\s|$)', line))
+            watches = self.watch_lines(text)
             if len(pids) == 1 and watches and set(proof.get('watches', [])).issubset(watches):
                 process = self.process(pids.pop())
                 if process['exe'] != '/var/ossec/bin/wazuh-syscheckd' or digest(Path('/proc') / str(process['pid']) / 'exe') != digest(Path('/var/ossec/bin/wazuh-syscheckd')):
@@ -708,11 +728,88 @@ class AuditRuntime:
                 raise Refused('native Wazuh audit client/watch readiness timed out')
             time.sleep(0.5)
 
+    @classmethod
+    def endpoint_kind(cls):
+        """'absent' or 'socket'; any other object at the endpoint path (file, symlink, directory) is refused."""
+        try:
+            mode = os.lstat(cls.endpoint()).st_mode
+        except FileNotFoundError:
+            return 'absent'
+        if not stat.S_ISSOCK(mode):
+            raise Refused('the external audit endpoint is not a socket')
+        return 'socket'
+
+    @classmethod
+    def parse_streams(cls, text):
+        """What one `ss -xHap` snapshot says about the Wazuh audit endpoint, whoever listens on it.
+
+        The listening side is not identified by program (an external audisp-af_unix and auditd's builtin af_unix are
+        both legitimate). The endpoint is `listening` when some socket in LISTEN is bound to its path, and
+        `connected` when an ESTAB socket bound to that path (the accepted, server side) is the exact peer of an
+        ESTAB socket owned by wazuh-syscheckd: each one's own inode is the other's peer inode. Columns:
+        netid state recv-q send-q local-address local-inode peer-address peer-inode [users:(...)].
+        """
+        endpoint, listening, servers, clients = str(cls.endpoint()), False, set(), set()
+        for line in text.splitlines():
+            fields = line.split()
+            if len(fields) < 8: continue
+            if fields[1] == 'LISTEN' and fields[4] == endpoint:
+                listening = True
+            elif fields[1] == 'ESTAB':
+                if fields[4] == endpoint: servers.add((fields[5], fields[7]))
+                if 'wazuh-syscheckd' in line: clients.add((fields[7], fields[5]))
+        return {'listening': listening, 'connected': bool(servers & clients)}
+
+    def streams(self):
+        return self.parse_streams(self.r.run(['ss', '-xHap'], timeout=15, operation='native audit client connection').stdout)
+
+    def watches(self):
+        return self.watch_lines(self.r.run(['auditctl', '-l'], timeout=15, operation='native Wazuh audit watches').stdout)
+
+    def listening(self): return self.endpoint_kind() == 'socket' and self.streams()['listening']
+
+    def connected(self):
+        state = self.streams()
+        return self.endpoint_kind() == 'socket' and state['listening'] and state['connected']
+
+    def armed(self):
+        """The connected stream plus the kernel watches (the list of them), or [] while either is missing."""
+        return self.watches() if self.connected() else []
+
+    @staticmethod
+    def poll(ready, seconds):
+        """The first truthy ready() within the bound (checked once more at the deadline), else False."""
+        deadline = time.monotonic() + seconds
+        while True:
+            value = ready()
+            if value: return value
+            if time.monotonic() >= deadline: return False
+            time.sleep(0.5)
+
+    def reload_plugins(self):
+        """Send ONE SIGHUP to the validated auditd main process so it loads a plugin that appeared after it started.
+
+        EL's auditd refuses `systemctl reload/restart` (RefuseManualStop) and minimal EL9 ships no `service`
+        command, so the signal is the only supported way to load a plugin into a running auditd. The target is
+        the systemd MainPID whose executable is exactly /usr/sbin/auditd, held by a pidfd so a recycled PID is
+        never signalled. Nothing is retried and no other process is ever signalled.
+        """
+        value = self.r.run(['systemctl', 'show', 'auditd', '-p', 'MainPID', '--value'], timeout=30,
+                           operation='native audit daemon identity').stdout.strip()
+        if not value.isdecimal() or int(value) <= 1:
+            raise Refused('audit daemon identity is unavailable')
+        descriptor = os.pidfd_open(int(value))
+        try:
+            if self.process(int(value))['exe'] != '/usr/sbin/auditd':
+                raise Refused('unsupported audit daemon executable')
+            signal.pidfd_send_signal(descriptor, signal.SIGHUP)
+        finally:
+            os.close(descriptor)
+
     def snapshot(self, capture):
         endpoint = self.endpoint()
         if not endpoint.exists():
-            plugin = Path('/etc/audit/plugins.d/af_wazuh.conf')
-            if plugin.exists() and re.search(r'^\s*active\s*=\s*yes\s*$', plugin.read_text(), re.M):
+            if self.plugin_active():
                 raise Refused('configured external audit endpoint is unavailable before upgrade')
             agent_socket_gate(capture)
             return None
@@ -4806,6 +4903,51 @@ class Agent(Transaction):
 
     def audit_runtime(self): return AuditRuntime(self.r)
 
+    def whodata_ensure(self, owner):
+        """Leave the who-data endpoint of an EL ordinary apply live and connected, or refuse with a typed reason.
+
+        RedHat family only: Debian's auditd ships its own af_unix and its behavior is not changed here. The
+        endpoint is judged without naming its listener (AuditRuntime.parse_streams), and a kernel watch is
+        required only after this call's own agent restart: a host whose watches were flushed by another role
+        while the endpoint and the connection survived stays a no-op, so a second apply reports no change.
+        Mutation happens only when needed and at most once each: an endpoint that is a listening socket with a
+        connected syscheckd is only verified; a listener with no connected syscheckd after a bounded grace costs
+        one agent restart and no signal; a missing endpoint under an active plugin costs one SIGHUP to auditd,
+        a bounded wait for the listening endpoint, then one agent restart (a syscheckd that started without an
+        endpoint silently fell back to real-time, so it must start after it) and proof that the stream and at
+        least one wazuh_fim watch exist. Everything else is a typed refusal that changes nothing further: a
+        plugin that never becomes active (af_wazuh.conf is written by the agent's first start, so it is awaited
+        first), an endpoint that is not a socket, a socket nobody listens on, an endpoint that does not appear
+        after the signal (the agent is not restarted), or a stream or watch that does not appear after the
+        restart. This runs under the host-wide writer owner and the component lock of the ordinary apply.
+        """
+        if self.family != 'RedHat':
+            raise Refused('the who-data endpoint ensure supports only the RedHat family')
+        with self.lock(owner=owner):
+            self.idle()
+            runtime = self.audit_runtime()
+            repair = False
+            if runtime.endpoint_kind() == 'absent':
+                if not runtime.poll(runtime.plugin_active, runtime.PLUGIN_WAIT):
+                    raise Refused('the Wazuh audit plugin is not active, so no who-data endpoint can exist')
+                if runtime.endpoint_kind() == 'absent':
+                    runtime.reload_plugins()
+                    if not runtime.poll(runtime.listening, runtime.LISTENER_WAIT):
+                        raise Refused('external audit endpoint did not appear after reloading the audit daemon')
+                    repair = True
+            if not repair:
+                if not runtime.poll(runtime.listening, runtime.LISTENER_WAIT):
+                    raise Refused('the external audit endpoint socket has no listener')
+                repair = not runtime.poll(runtime.connected, runtime.CLIENT_GRACE)
+            if not repair:
+                return {'changed': False}
+            self.r.run(['systemctl', 'restart', 'wazuh-agent'], timeout=120,
+                       operation='restart wazuh-agent so its who-data engine connects to the audit endpoint')
+            watches = runtime.poll(runtime.armed, runtime.READY_WAIT)
+            if not watches:
+                raise Refused('native Wazuh audit stream or watches did not appear after restarting the agent')
+            return {'changed': True, 'watches': len(watches)}
+
     def audit_check(self, item, stopped=False, ready=False, capture=None):
         self.audit_runtime().check(item.get('audit_runtime'), capture or self.capture_sources(recovery=True), stopped, ready)
 
@@ -5597,7 +5739,7 @@ def main():
                                          'central', 'central-verify', 'manager-version', 'verify-agent', 'agent-verify', 'agent-runtime', 'agent-check', 'agent-stage', 'agent-reserve', 'agent-backup',
                                          'agent-install', 'agent-recovery', 'agent-restore', 'agent-recovery-commit', 'agent-commit', 'agent-activate',
                                          'agent-policy-check', 'agent-protect', 'agent-apt-plan', 'agent-rpm-fresh',
-                                         'agent-hook-prepare', 'agent-hook-cleanup', 'agent-config-save', 'agent-config-restore',
+                                         'agent-hook-prepare', 'agent-hook-cleanup', 'agent-whodata-ensure', 'agent-config-save', 'agent-config-restore',
                                          'reader-tools-check', 'reader-enable-admit', 'reader-enable-expose', 'reader-enable-verify', 'reader-enable-complete', 'reader-enable-failed'])
     parser.add_argument('--version', default='')
     parser.add_argument('--legacy', default='')
@@ -5688,6 +5830,8 @@ def main():
                 value = agent.hook_prepare(args.owner)
             elif args.action == 'agent-hook-cleanup':
                 value = agent.hook_cleanup(args.owner, args.confirm_previous_stopped)
+            elif args.action == 'agent-whodata-ensure':
+                value = agent.whodata_ensure(args.owner)
             elif args.action == 'agent-runtime':
                 value = agent.runtime(args.owner or None)
             elif args.action == 'agent-verify':

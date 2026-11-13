@@ -1,0 +1,6 @@
+u_str LISTEN 0      128                        queue/sockets/syscheck 42605 * 0     users:(("wazuh-syscheckd",pid=7946,fd=8))
+u_str LISTEN 0      1                  /var/ossec/queue/sockets/audit 41841 * 0     users:(("audisp-af_unix",pid=7823,fd=3))
+u_str ESTAB  0      116736             /var/ossec/queue/sockets/audit 43081 * 42613 users:(("audisp-af_unix",pid=7823,fd=5))
+u_str ESTAB  28382  0                                               * 42613 * 43081 users:(("wazuh-syscheckd",pid=7946,fd=5))
+u_dgr ESTAB  0      0                                               * 42598 * 42580 users:(("wazuh-syscheckd",pid=7946,fd=3))
+u_dgr ESTAB  0      0                                               * 42599 * 42580 users:(("wazuh-syscheckd",pid=7946,fd=4))

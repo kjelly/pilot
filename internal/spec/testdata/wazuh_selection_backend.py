@@ -151,6 +151,15 @@ try:
     elif action == 'agent-activate':
         with host.guard(a.owner, 'agent'):
             transaction().owned(a.owner, ('installing',)); state['services']['wazuh-agent']['active'] = True; save(); result = {}
+    elif action == 'agent-whodata-ensure':
+        # Declared native leaf: auditd, the endpoint and syscheckd are not modeled in this graph (the real action runs
+        # over a modeled host in wazuh_whodata_ensure_test.py). The call's identity is recorded so the graph can assert
+        # which family the play passed; the writer ownership guard is the production one.
+        with host.guard(a.owner, 'agent'):
+            event('whodata-ensure-args', family=a.family)
+            if a.family != 'RedHat': raise w.Refused('the who-data endpoint ensure supports only the RedHat family')
+            if settings.get('fail_whodata'): raise w.Refused('controlled who-data endpoint failure')
+            result = {'changed': False, 'watches': 2}
     elif action == 'agent-runtime': result = runtime()
     elif action == 'verify-agent':
         with host.reader('central'):
