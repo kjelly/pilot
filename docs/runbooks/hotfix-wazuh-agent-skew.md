@@ -7,10 +7,7 @@
 「沒有 agent」，之後用 `pilot deploy` 重新安裝即可，版本取 `wazuh_version`，未設定時為 manager 的版本。
 驗收契約：[wazuh-fim-agent-skew-hotfix.md](../verification/wazuh-fim-agent-skew-hotfix.md)。
 
-> **目前狀態：spec v0.1 草稿。** 下面的實跑是在**未凍結 candidate 的工作樹**上做的探索性實跑
-> （AGENTS.md §1.5 允許迭代期這樣做），不是正式 evidence：沒有 candidate commit、沒有
-> `--evidence-record`，所以這份 runbook **不連結任何 evidence 檔**。要升格為正式驗收，需先凍結 candidate，
-> 再從乾淨的隔離 checkout 重跑 §4 的鏈並產生 evidence record。
+> 驗收證據：[最新 evidence](../evidence/wazuh-fim-agent-skew-hotfix/LATEST.md)（tested revision、tree、verdict、失敗路徑與未涵蓋範圍都在那裡）。
 
 ## 0.5 目前有效的事實快照
 
@@ -22,15 +19,14 @@
 | 偵測到的狀態（真實輸出） | manager 4.14.1；`wsk-deb` 4.14.9-1、`wsk-el` 4.14.9-1（都是 skewed，都已向 manager 註冊）；`wsk-ok` 4.14.1-1（相容） |
 | 對齊 | 用到的 vault／外部 state：無（只需要 `-e stage=sandbox`） |
 
-探索性實跑結果（最後一輪，修正都套用之後；sanitized）：
+正式實跑（candidate 綁定的 `vm-target topology test`，結果見上面連結的 evidence）：L1 syntax、L3 `--check --diff`、snapshot、L4 套用、
+L5 驗收（skewed 兩台與 manager 各一份，全部 PASS）、L6 冪等 `changed=0`。鏈外另跑的 arm：
 
-| 步驟 | 結果 |
-|------|------|
-| `pilot hotfix wazuh-agent-skew --preview-only` | 印出計畫，`wsk-deb`、`wsk-el` 標為「移除 agent 並在 manager 取消登記」，`wsk-ok` 標為「不動（版本相容）」；沒有變更任何東西 |
-| `vm-target topology test`（L1 syntax、L3 `--check --diff`、snapshot、L4 套用、L5 驗收、L6 冪等） | 全部通過；L5：skewed 兩台 `pass=16 fail=0`，manager `pass=8 fail=0`；L6 `changed=0`（所有主機） |
-| 套用後的實際狀態 | `wsk-deb`／`wsk-el`：套件不在、hold／versionlock 區塊不在、`client.keys` 不在、`wazuh-agent` 非 active；manager 登記表只剩 `wsk-ok`；`wsk-ok` 的套件、hold、`client.keys`、登記完全沒變 |
-| **hotfix 之後 `pilot deploy --component wazuh-fim --limit wsk-deb,wsk-el --force`** | 成功（`failed=0`）；兩台裝回 4.14.1-1（＝ manager），hold／versionlock 重建，向 manager 重新註冊為 Active，EL 的 who-data endpoint 重新 listening |
-| 負向：`wsk-el` 有進行中的 Wazuh writer marker | 在**偵測階段**以結束碼 1 拒絕，訊息指名 `writer-active.json`；`wsk-deb` 仍是 4.14.9-1、有 hold、`client.keys` 在、manager 仍登記著——沒有任何主機被動到 |
+- `--preview-only`：只印計畫，什麼都沒變。
+- 某台有進行中的 Wazuh writer：在偵測階段整次拒絕、結束碼 1，其他主機與 manager 登記完全沒動。
+- 真正的 `--force`：兩台 skewed 被移除，版本相容的主機完全沒動；重跑一次什麼都不做。
+- hotfix 之後 `pilot deploy --component wazuh-fim --limit <被移除的主機> --force`：成功，兩台裝回與 manager 相同的版本，
+  hold／versionlock 重建，向 manager 重新註冊為 Active。
 
 ## 1. 為什麼不是 `host decommission`
 
@@ -137,3 +133,9 @@ fixture 的前三步（docker、manager、agent）只能跑一次：一旦有主
    `database is locked (SQLITE_BUSY)` 失敗並 rollback；與本變更無關，重跑即可。
 8. **失敗訊息看不到原因。** ansible 的失敗摘要只有 `non-zero return code`，真正的 typed 拒絕原因在 helper 的 stdout 裡；
    現在 CLI 會從失敗輸出撈出來印成「原因：…」（`internal/hotfix.Refusals`，用真實擷取當 fixture）。
+9. **EL 的 who-data 步驟有既有的重啟 race（不是這個變更造成，但會影響「hotfix 之後重裝」）。** Wazuh 自己的 `restart.sh`
+   （註冊後重啟 agent）可能和 pilot 的 `systemctl restart wazuh-agent` 重疊，留下一個在 audit endpoint 出現**之前**就啟動的
+   `wazuh-syscheckd`（journal：`remains running after unit stopped`、`already running`），於是
+   `native Wazuh audit stream or watches did not appear after restarting the agent`，約 60 秒後 apply 失敗。
+   在 pilot 自己的一般 `wazuh-fim-apply.yml`（還沒有 hotfix 參與）也發生過一次，同一台主機重跑即通過。若 hotfix 之後的重裝在 EL
+   卡在這一步，**直接重跑 `pilot deploy` 即可**；它需要另外追根本原因，不是在 hotfix 裡加 workaround。
