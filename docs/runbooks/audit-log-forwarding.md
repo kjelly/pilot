@@ -144,15 +144,15 @@ Step 10、rescue；spec §5 與 §6 有完整說明）：
   失敗：`endpoint_not_ready`、`agent_restart_failed`、`watches_not_restored`、`kernel_unreadable`（錯誤訊息列出
   還缺的 watch）。這一步失敗不回滾已套用的規則與轉送設定；修好原因後 `systemctl restart wazuh-agent` 並用 C23
   確認。
-- agent 不存在、已停止、或擾動前 kernel 沒有 `wazuh_fim` watch（例如 Issue #323 之前套用的 EL 舊主機，endpoint 尚未建立，見下）的主機：
+- agent 不存在、已停止、或擾動前 kernel 沒有 `wazuh_fim` watch（例如 Issue #323 之前套用的 EL 舊主機，endpoint 尚未建立，見下；或被外部 `auditctl -D` 清掉而 Wazuh 尚未自行補回的主機）的主機：
   本模組永遠不啟動或重啟 agent。這類主機只會被上面的擾動前檢查拒絕（有 `wazuh-agent` unit、而且 Wazuh
   writer／journal 在進行中、讀不到狀態或 agent 在轉換中時；agent 已停止正是受控升級進行中的樣子），拒絕發生
   在 kernel 清單被動到之前；沒有 `wazuh-agent` unit 的主機完全不受 Wazuh 影響。
 - 失敗路徑：rescue 只在這次 run 載入過、而且規則檔被還原或移除（或載入本身失敗）時才重載 kernel 清單；
   重載之後重新建立 who-data。最後的錯誤訊息如實說明規則檔、kernel 清單與 who-data 各自的結果。
 
-**被舊版清掉 watch 的主機（一次性處理）**：這個版本不會自動修復已經被舊版清掉、至今沒重啟 agent 的主機
-（沒有新的 heal 路徑）。在那台主機上確認 `sudo auditctl -l | grep wazuh_fim` 沒有輸出但
+**被舊版、或被外部 `auditctl -D` 清掉而 Wazuh 沒有自行補回 watch 的主機（一次性處理）**：這個版本不會自動修復
+已經被清掉、至今沒重啟 agent 的主機（沒有新的 heal 路徑）。在那台主機上確認 `sudo auditctl -l | grep wazuh_fim` 沒有輸出但
 `systemctl is-active wazuh-agent` 為 active 後，執行一次 `sudo systemctl restart wazuh-agent`，再用 spec C23
 確認 watch 回來。
 
@@ -167,7 +167,10 @@ Step 10、rescue；spec §5 與 §6 有完整說明）：
   `/etc/audit/plugins.d/af_wazuh.conf`，auditd 尚未被告知載入它。2026-11-12 在拋棄式 AlmaLinux 9.8 上，
   audit-log-forwarding 先於 wazuh-fim 的全新同機鏈套用完成後，endpoint 沒有 listener、who-data 不是 live；
   之後 `pkill -HUP -x auditd` 才讓 listener 出現。這時 C23 回 0，本模組不碰 agent。who-data 已 live 的 EL 主機被
-  外部 `auditctl -D` 清掉後再套用：watch 被補回（agent 重啟一次），下一次套用 `changed=0`。
+  外部 `auditctl -D` 清掉後再套用：只有在 guard 於本次第一次擾動前讀取集合 S 時，kernel 已經有 `wazuh_fim`
+  watch（也就是 Wazuh 已在套用前自行補回），watch 才會被補回（agent 重啟一次），下一次套用 `changed=0`。
+  若套用前 watch 已是 0（Wazuh 還沒補回，或自癒次數已用完），S 為空：本模組只載回自己的規則、不重啟 agent，
+  C23 回 1，之後的套用也是 `changed=0` 而不會修復，需依上面「一次性處理」手動重啟 `wazuh-agent` 一次。
 - Ubuntu 22.04 沒有涵蓋、沒有 capture：auditd 內建 af_unix，沒有外部 `audisp-af_unix` 行程。re-arm 與 C23 只認
   `audisp-af_unix` 在 endpoint 上 LISTEN，所以 who-data 在 22.04 上 live 時，擾動之後 re-arm 以
   `endpoint_not_ready` 失敗、不重啟 agent（kernel 清單已被清掉，需要手動 `systemctl restart wazuh-agent`），
