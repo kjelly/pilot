@@ -7,7 +7,8 @@
 > `nexus`. Every deploy, reconcile and idempotency step reached `failed=0`; **both site-wide reruns were
 > `changed=0` on all five hosts**; runbook §4.1–§4.5 all passed, including the Grafana FQDN from every host
 > (F2). Remaining failures are fixture-bound or by-design spec rows, and one open product finding, G1 (the
-> teardown cleans a different Ansible fact-cache directory than `pilot deploy` reads, §3.10). Details and the
+> teardown cleans a different Ansible fact-cache directory than `pilot deploy` reads, §3.10; tracked as
+> kjelly/pilot#336). Details and the
 > evidence deficiencies: [round 33 record](../evidence/minimal-poc-architecture/2026-11-13-round-33.md). The
 > previous run, with the findings that led to these fixes, is the
 > [round 32 record](../evidence/minimal-poc-architecture/2026-11-13-round-32.md). The three-node history
@@ -445,7 +446,7 @@ Merging decisions and why they are safe to try:
 | 5 | Firewall flows | primary↔replica proven by the replication segment and the replica's own `hbactest`; bastion→FreeIPA and bastion→targets by the gateway spec rows; Alertmanager→agent-controller **not exercised** (the Alertmanager config has no such receiver, F1) |
 | 6 | §4 checks repeated against the replica | `ipa hbactest` and the replicated user checked on the replica; the Grafana FQDN check from the replica passes |
 
-The findings of round 32 (F1–F10) are fixed and re-verified from zero in round 33; the one open finding, G1, is in the round 33 record and §3.10.
+The findings of round 32 (F1–F10) are fixed and re-verified from zero in round 33; the one open finding, G1 (kjelly/pilot#336), is in the round 33 record and §3.10.
 
 ## 1. Aligned acceptance contracts
 
@@ -1345,7 +1346,7 @@ that is not in a table there was observed in that run.
 
 - `ansible.cfg` sets `gathering = smart` with a one-hour `jsonfile` fact cache keyed by inventory host
   name. A VM rebuilt under the same name within the hour keeps its old facts and a preview can stop on
-  a stale address (`dns service address ... is not an IPv4 address of client-vm`). **Finding G1 (round 33):
+  a stale address (`dns service address ... is not an IPv4 address of client-vm`). **Finding G1 (round 33, kjelly/pilot#336):
   `pilot vm-target up` and teardown do not clean the cache that `pilot deploy`/`pilot reconcile` read.** They
   clean the directory `ansible-config` reports for the working directory (`~/.ansible/pilot-factcache`);
   deploy and reconcile use `<data-dir>/ansible/fact-cache` (default `~/.local/share/pilot/ansible/fact-cache`).
