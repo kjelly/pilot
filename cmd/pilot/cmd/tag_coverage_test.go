@@ -297,6 +297,10 @@ var specTagMap = []specTagMapping{
 		}},
 	{spec: "thanos-query.md", playbook: "thanos-query-apply.yml"},
 	{spec: "wazuh-fim.md", playbook: "wazuh-fim-apply.yml"},
+	// Internal entry playbook (AGENTS.md §4.0): called only by `pilot hotfix wazuh-agent-skew`.
+	// It is not a *-apply.yml, so the "every apply playbook needs a spec" sweep above never
+	// lists it; the mapping keeps its row tags and its spec rows aligned both ways.
+	{spec: "wazuh-fim-agent-skew-hotfix.md", playbook: "wazuh-fim-agent-skew-hotfix.yml"},
 	{spec: "wazuh-manager.md", playbook: "wazuh-manager-apply.yml",
 		exemptRows: map[string]string{
 			"C7": "in-effect ossec.conf probe — asserts the /wazuh-config-mount injection (C4..C6 compose tasks) actually took",

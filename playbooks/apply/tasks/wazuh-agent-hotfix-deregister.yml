@@ -1,0 +1,79 @@
+# Deregister ONE agent on the Wazuh manager for the agent-skew hotfix
+# (playbooks/apply/wazuh-fim-agent-skew-hotfix.yml, spec C6).
+#
+# Included per host from Play B, which has recorded the agent's enrollment
+# (hotfix_state.registration: id + name, read from client.keys by
+# files/wazuh-agent-hotfix.py inspect) before anything was changed. The manager is
+# addressed by its recorded numeric ID, and the entry found under that ID must carry
+# the recorded name: a different name means the ID was reused or the inventory is not
+# what we think, and the run refuses instead of guessing (spec.md §5.6: never a
+# hostname substring). Already-absent is success, so a rerun after an interruption
+# finishes cleanly.
+#
+# Needs: hotfix_state.registration, hotfix_manager_host, hotfix_manager_container.
+# manage_agents -l prints "   ID: 001, Name: client1.example.com, IP: any" (real
+# capture in playbooks/decommission/wazuh-manager-agent-deregister.yml).
+#
+# Re-included for every skewed host in one run: the per-include state is reset first
+# (AGENTS.md §4.5 point 2).
+- name: "Reset this include's state"
+  ansible.builtin.set_fact:
+    hotfix_registry_match: []
+    hotfix_registry_after: []
+
+- name: "List the manager's registered agents before deregistering (read-only)"
+  ansible.builtin.command: "docker exec {{ hotfix_manager_container }} /var/ossec/bin/manage_agents -l"
+  delegate_to: "{{ hotfix_manager_host }}"
+  register: hotfix_registry_before
+  changed_when: false
+  check_mode: false
+
+- name: "Find the entry under the recorded ID"
+  ansible.builtin.set_fact:
+    hotfix_registry_match: >-
+      {{ hotfix_registry_before.stdout
+         | regex_findall('ID: ([0-9]+), Name: ([^,]+),')
+         | selectattr('0', 'equalto', hotfix_state.registration.id)
+         | list }}
+
+- name: "Gate: an entry under the recorded ID must carry the recorded name"
+  ansible.builtin.assert:
+    that:
+      - hotfix_registry_match | length <= 1
+      - >-
+        hotfix_registry_match | length == 0 or
+        (hotfix_registry_match[0][1] | lower) == (hotfix_state.registration.name | lower)
+    fail_msg: >-
+      The manager lists agent ID {{ hotfix_state.registration.id }} under a different name than the
+      one in this host's client.keys ({{ hotfix_state.registration.name }}); refusing to deregister it.
+
+- name: "Deregister the agent by its recorded ID"
+  ansible.builtin.shell: |
+    set -o pipefail
+    printf 'y\n' | docker exec -i {{ hotfix_manager_container }} /var/ossec/bin/manage_agents -r {{ hotfix_state.registration.id | quote }}
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ hotfix_manager_host }}"
+  register: hotfix_registry_removed
+  when: hotfix_registry_match | length == 1
+  changed_when: "'removed' in (hotfix_registry_removed.stdout | default(''))"
+  failed_when:
+    - hotfix_registry_removed.rc | default(0) != 0
+    - "'does not exist' not in (hotfix_registry_removed.stdout | default(''))"
+
+- name: "List the manager's registered agents again (read-only)"
+  ansible.builtin.command: "docker exec {{ hotfix_manager_container }} /var/ossec/bin/manage_agents -l"
+  delegate_to: "{{ hotfix_manager_host }}"
+  register: hotfix_registry_final
+  changed_when: false
+  check_mode: false
+
+- name: "Gate: the recorded ID is no longer registered"
+  ansible.builtin.assert:
+    that:
+      - >-
+        hotfix_registry_final.stdout
+        | regex_findall('ID: ([0-9]+), Name: ([^,]+),')
+        | selectattr('0', 'equalto', hotfix_state.registration.id)
+        | list | length == 0
+    fail_msg: "Agent ID {{ hotfix_state.registration.id }} is still registered on the manager after the removal."
