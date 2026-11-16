@@ -178,17 +178,22 @@ type Manager struct {
 	now      func() time.Time // overridable in tests
 
 	// dropFacts removes the Ansible fact-cache entries of the given
-	// inventory host names (factcache.Drop). Up calls it before starting
-	// the container and Down after removing it, so a target recreated
-	// under a name used within the cache timeout never gets the facts of
-	// the one it replaced. A field so tests can record the calls.
+	// inventory host names from the cache ansible.cfg resolves and from
+	// the one `pilot deploy` reads under stateDir (factcache.DropAll).
+	// Up calls it before starting the container and Down after removing
+	// it, so a target recreated under a name used within the cache
+	// timeout never gets the facts of the one it replaced. A field so
+	// tests can record the calls.
 	dropFacts func(ctx context.Context, hosts []string) error
 }
 
-// defaultDropFacts is what NewManager wires into Manager.dropFacts. The
-// package tests replace it in TestMain so no test reads or cleans the fact
-// cache of the machine running them.
-var defaultDropFacts = factcache.Drop
+// defaultDropFacts is what NewManager wires into Manager.dropFacts, bound
+// to the manager's stateDir. That directory is the pilot data dir
+// (resolveStateDir in cmd/pilot/cmd), which is where deploy keeps its fact
+// cache, so a lifecycle command and a later deploy of the same data dir see
+// the same cache. The package tests replace it in TestMain so no test reads
+// or cleans the fact cache of the machine running them.
+var defaultDropFacts = factcache.Dropper
 
 // NewManager constructs a Manager rooted at stateDir.
 // The state file is stateDir/docker-targets.json; stateDir is created
@@ -205,7 +210,7 @@ func NewManager(stateDir string) (*Manager, error) {
 		stateDir:  stateDir,
 		store:     store,
 		now:       time.Now,
-		dropFacts: defaultDropFacts,
+		dropFacts: defaultDropFacts(stateDir),
 	}, nil
 }
 

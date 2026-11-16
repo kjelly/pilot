@@ -179,10 +179,12 @@ type Manager struct {
 	grantLibvirtQEMUOverlayAccess func(ctx context.Context, path string) error
 
 	// dropFacts removes the Ansible fact-cache entries of the given
-	// inventory host names (factcache.Drop). Up calls it before creating
-	// anything and teardown after removing the VM, so a VM recreated
-	// under a name used within the cache timeout never gets the facts of
-	// the one it replaced. A field so tests can record the calls.
+	// inventory host names from the cache ansible.cfg resolves and from
+	// the one `pilot deploy` reads under stateDir (factcache.DropAll).
+	// Up calls it before creating anything and teardown after removing
+	// the VM, so a VM recreated under a name used within the cache
+	// timeout never gets the facts of the one it replaced. A field so
+	// tests can record the calls.
 	dropFacts func(ctx context.Context, hosts []string) error
 
 	// Tunables — real defaults in NewManager; tests shrink them so the
@@ -192,10 +194,13 @@ type Manager struct {
 	pollInterval time.Duration
 }
 
-// defaultDropFacts is what NewManager wires into Manager.dropFacts. The
-// package tests replace it in TestMain so no test reads or cleans the fact
-// cache of the machine running them.
-var defaultDropFacts = factcache.Drop
+// defaultDropFacts is what NewManager wires into Manager.dropFacts, bound
+// to the manager's stateDir. That directory is the pilot data dir
+// (resolveStateDir in cmd/pilot/cmd), which is where deploy keeps its fact
+// cache, so a lifecycle command and a later deploy of the same data dir see
+// the same cache. The package tests replace it in TestMain so no test reads
+// or cleans the fact cache of the machine running them.
+var defaultDropFacts = factcache.Dropper
 
 // NewManager constructs a Manager. stateDir holds the json metadata
 // (docker-targets.json sibling: vm-targets.json). vmDir is where the
@@ -220,7 +225,7 @@ func NewManager(stateDir, vmDir string) (*Manager, error) {
 		now:                           time.Now,
 		dialReachable:                 realDialReachable,
 		grantLibvirtQEMUOverlayAccess: grantLibvirtQEMUOverlayAccess,
-		dropFacts:                     defaultDropFacts,
+		dropFacts:                     defaultDropFacts(stateDir),
 		bootTimeout:                   3 * time.Minute,
 		sshTimeout:                    2 * time.Minute,
 		pollInterval:                  2 * time.Second,

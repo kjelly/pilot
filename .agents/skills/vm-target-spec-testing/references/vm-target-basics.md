@@ -203,10 +203,12 @@ directory left behind after a successful `down` is a teardown bug to report.
 ## Fact cache after `reset` or `rollback`
 
 The repo `ansible.cfg` caches facts (`gathering = smart`, jsonfile cache in
-`~/.ansible/pilot-factcache`, 3600 s). `up` and `down` drop the VM's
-entries; `reset` and `rollback` do not, so a reverted VM can still be
-served facts gathered before the revert. If the playbook branches on facts,
-delete your VM's `s1_<name>` entry before the next run
+`~/.ansible/pilot-factcache`, 3600 s), and `pilot deploy` keeps a second cache
+in `<data-dir>/ansible/fact-cache`. `up` and `down` drop the VM's entries from
+both (the data dir must be the one the later deploy uses); `reset` and
+`rollback` do not, so a reverted VM can still be served facts gathered before
+the revert. If the playbook branches on facts, delete your VM's `s1_<name>`
+entry from both directories before the next run
 ([vm-target.md](../../../../docs/runbooks/vm-target.md) §5.4).
 
 ## Useful diagnostics
