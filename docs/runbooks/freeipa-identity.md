@@ -130,29 +130,41 @@ rerun with --vault-password-file <path>`。lint 通過只代表名冊結構正�
 
 名冊的密碼欄位可以引用變數，例如 `password.initial: '{{ ipa_default_initial_password }}'`，
 值放在 `.vault/main.yaml`（apply 時的 `-e @.vault/main.yaml`）。那個 key 不存在時，只帶名冊的
-`pilot roster lint` 仍印 `ok`，apply 才在 no_log 的 task 因 `undefined variable` 失敗，而且
-不說是哪一個。兩個入口會先講出來，只列變數名稱，不印任何值：
+`pilot roster lint` 仍印 `ok`，apply 才在 no_log 的 task 因 `undefined variable` 失敗。那個
+task 的 `fatal:` 結果行被 no_log 遮蔽，所以失敗發生在執行到一半：前面的相依元件（例如
+`freeipa-server`）已經套用完才失敗（identity playbook 自己是在 pre_tasks 失敗，它自己的任務還沒
+改動 FreeIPA）。兩個入口把失敗移到任何東西執行之前，只列變數名稱，不印任何值：
 
 - `pilot roster lint <名冊> --vars-file <變數檔>`：列出 `freeipa.admin.password` 與每個
   `users[].password.initial` 裡變數檔沒有定義的引用，跟其他結構問題一起算在 `N issue(s) found`
   （exit 1）。變數檔是明確指定的，所以必須存在、不是目錄、讀得到；加密的變數檔要帶
   `--vault-password-file`（記憶體內解密，與名冊共用同一個密碼，不寫出明文檔）。不帶
-  `--vars-file` 時不會自己去找 `.vault/main.yaml`，輸出與以前完全一樣。
+  `--vars-file` 時不會自己去找 `.vault/main.yaml`，輸出與以前完全一樣。lint 不知道哪支
+  playbook 會套用這份名冊，所以每個 admin 與 user 引用都報；deploy／reconcile 只判斷那支
+  playbook 這次真的會展開的欄位（見下），所以 lint 對一個這次不會展開的欄位的 finding，
+  可能是 deploy 不會拒絕的 finding。
 - `pilot deploy`／`pilot reconcile` 對 `freeipa-identity` 與 `freeipa-nfs-server`：只要這次有
   vault 變數檔（`-e @file`），就在顯示計畫、問授權、預覽或連任何主機**之前**做同樣的檢查，沒定義就拒絕。
   判斷用的是這次執行實際生效的變數（`ansible-inventory --list` 帶著這次的 `-e`／vault 參數：
   inventory 的 group_vars／host_vars、變數檔與 `-e` 合併後的結果），而且只看該 playbook 真的會
   展開的欄位：`freeipa-identity` 一律展開每位使用者（含 `state: absent`）的
   `password.initial`；`freeipa.admin.password` 只在 `ipa_admin_password` 沒定義或是空的、或名冊沒有
-  `freeipa.server`（playbook 會替它補值）時才展開；`freeipa-nfs-server` 只展開
-  `freeipa.admin.password`。沒有 vault 變數檔、`--ask-vault-pass`、`ansible-inventory` 讀不出
+  宣告 `freeipa.server`（playbook 會替它補值，補值時連 admin 密碼一起展開）時才展開——空字串
+  或只有空白不算宣告，`null` 算（Ansible 的條件是 `server | default('') | string | trim | length == 0`，
+  `None | string` 是文字 `None`）；`freeipa-nfs-server` 只展開 `freeipa.admin.password`。沒有 vault 變數檔、`--ask-vault-pass`、`ansible-inventory` 讀不出
   變數、名冊加密又沒給 `--vault-password-file`、名冊讀不出來時，檢查會跳過並印一行
   `roster 變數引用檢查已略過：<原因>`，不算失敗。
 
 只檢查單純的 `{{ name }}`（含 `{{- name -}}`、`{{ name.attr }}`，混在字面字串裡也算）。帶 filter
 （例如 `| default('')`）、運算子、函式呼叫、`{% %}` 區塊的值，或 `!unsafe`、行內 `!vault` 值，
 都不判斷也不報；Jinja／Ansible 自己提供的名稱（`inventory_hostname`、`ansible_*`、`true`、`none`…）
-不算缺。
+不算缺。兩支 playbook 自己在展開名冊字串之前就定義好的名稱也不算缺（`stage`、`confirm_staging`、
+`ipa_domain`、`ipa_realm`…，即 play 的 `vars:` 與前幾個 pre_task 的 `freeipa_roster` 等；lint
+把兩支 playbook 的聯集都當成已定義，deploy／reconcile 只算該元件自己那支）。名冊字串看不到
+identity playbook 的「Normalize canonical FreeIPA settings」才設的名稱（`ipa_hbac_services`、
+`identity_admin_principal`、`ipa_active_users`…）：對 Ansible 那些是 undefined，這個檢查也照報。
+這份名單是從真的 playbook 讀出來的（`TestRosterPlaybookNamesMatchThePlaybooks`），playbook 改了
+測試就會失敗；task 層級的變數（`item` 等）不在其中。
 
 2026-11-16 在本機（ansible-core 2.19.2，拋棄式目錄與拋棄式變數檔，不連任何主機）實跑：
 
@@ -167,7 +179,7 @@ $ pilot roster lint .vault/ipa-identity.yaml --vars-file .vault/main.yaml
 ok: schema v3; no issues found
 $ pilot reconcile --dir . --component freeipa-identity --preview-only
 ...
-roster 變數引用檢查沒有通過(1 項)：roster 的密碼欄位引用了下列變數，但這次執行沒有任何地方定義它們。apply 時 Ansible 會在 no_log 的 task 因 undefined variable 失敗，而且不會說是哪一個：
+roster 變數引用檢查沒有通過(1 項)：roster 的密碼欄位引用了下列變數，但這次執行沒有任何地方定義它們。apply 會在 playbook 的 no_log task 因 undefined variable 失敗(該 task 的 fatal 結果被遮蔽)，所以是執行到一半才失敗，那時前面的相依元件(例如 freeipa-server)已經套用完；這個檢查把失敗移到任何東西執行之前：
   - .vault/ipa-identity.yaml: [roster-reference] users[alice].password.initial references ipa_default_initial_password, which .vault/main.yaml (or the inventory, for ipa-1) does not define
 請把這些 key 加進 .vault/main.yaml(或 inventory)，或改正 roster 的引用。...
 (exit 1，沒有任何 ansible-playbook 或 ssh)
@@ -1312,4 +1324,4 @@ refresh`，或以 `PARTIAL` 失敗，重跑相同的 apply（或 `--tags client-
 | 2026-10-15 | v1.4 | §0.5 加上 `freeipa-identity.md` v1.12 的最新驗證（PR #89，candidate `decc613`）：ldapi row 以 root 執行、netgroup SOP 步驟 1 改走 ldapi | pilot |
 | 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步（含沒加引號、YAML 可能讀成數字／日期／布林值的密碼，打不開的 lock 檔）、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步）、舊版 root 留下的 lock 檔如何處理、要跟著改的名冊被鎖住或不能寫時整次存檔拒絕、自動化遇到寫不進的名冊時該步失敗（MCP apply 會 rollback，`--actions` 停在那一步、保留之前的步驟，plan 失敗）、plan／MCP apply 只在真的要改 `.vault/` 以外的名冊時失敗、apply rollback 保留被其他操作改過的名冊、名冊的寫入方式；review 後修正：同一個名冊的多個 hard link 名稱共用 inode 鎖與同一個 journal 身分、plan 的暫存複本保留 `.vault/` 別名結構、rollback 以 apply 前的狀態與寫入紀錄判斷哪些檔案是名冊（一般 vault 檔一律還原）、rollback 期間保留對名冊的登記直到還原結束；暫存目錄以持有的 flock 判斷建立者是否還在（不以 pid）；`RemoveRosterFile` 的呼叫端要先停掉 journal（candidate `3b4bdb1`、`22cad092` 與 `09119dd` 都曾對兩台全新 VM 實跑，見 §4.5 末段；rollback 的還原路徑、plan 的探測、MCP plan/apply 與暫存目錄清掃沒有實機觸發） | pilot |
 | 2026-10-31 | v1.6 | §3 名冊範例與說明改為 schema v3（`schema_version: 3`、`grants: []`，netgroups 註明 v2 起支援），新增第 5 步 `pilot roster lint --vault-password-file`（加密名冊在記憶體內解密），附本機實跑輸出；§4.1 編輯後先跑該步；§0.5 補上範例名冊與該步的事實。未重跑目標主機：v2 → v3 只改版本號並加空的 `grants: []`，與 `EnsureRosterCurrent` 載入時套用的升級相同，apply playbook 對 v2/v3 的差別只在允許的頂層 key | pilot |
-| 2026-11-16 | v1.7 | §3 新增「名冊裡的 `{{ 變數 }}` 引用」（issue #165）：`pilot roster lint --vars-file` 與 `pilot deploy`／`pilot reconcile` 對 `freeipa-identity`、`freeipa-nfs-server` 的前置檢查，名冊密碼欄位引用的變數沒有任何地方定義就在計畫、預覽與連線之前拒絕（只列名稱，不印值）；附本機實跑輸出。沒有對 vm-target 重跑 apply：檢查不改變 playbook 的行為 | pilot |
+| 2026-11-16 | v1.7 | §3 新增「名冊裡的 `{{ 變數 }}` 引用」（issue #165）：`pilot roster lint --vars-file` 與 `pilot deploy`／`pilot reconcile` 對 `freeipa-identity`、`freeipa-nfs-server` 的前置檢查，名冊密碼欄位引用的變數沒有任何地方定義就在計畫、預覽與連線之前拒絕（只列名稱，不印值）。apply 對這類引用是在 no_log task 失敗、`fatal:` 結果行被遮蔽，所以是執行到一半、前面的相依元件已套用完才失敗；這個檢查把失敗移到任何東西執行之前。判斷只看 playbook 真的會展開的欄位（`freeipa.server: null` 算已宣告、空字串不算）、兩支 playbook 自己定義的名稱（`stage`、`ipa_realm`…）算已定義，lint 對每個 admin／user 引用都報、deploy／reconcile 只判斷這次會展開的欄位；以上都對 ansible-core 2.19.2 實跑 oracle 驗證，附本機實跑輸出。沒有對 vm-target 重跑 apply：檢查不改變 playbook 的行為 | pilot |

@@ -1,10 +1,11 @@
 // deploy_roster_references.go is the preflight half of issue #165: a roster
 // string that refers to a variable — password.initial:
 // '{{ ipa_default_initial_password }}', resolved at apply time from
-// .vault/main.yaml (-e @file) — fails apply when nothing defines the variable,
-// inside a no_log task that hides which one. `pilot deploy` and `pilot
-// reconcile` refuse such a run before the plan is shown, with the names of
-// what is missing. The reading and the verdict are internal/inventory's
+// .vault/main.yaml (-e @file) — fails apply when nothing defines the variable.
+// The failure is inside a no_log task (its fatal result is censored), so it
+// comes mid-run, after the dependency chain (freeipa-server, say) has been
+// applied. `pilot deploy` and `pilot reconcile` refuse such a run before the
+// plan is shown, with the names of what is missing. The reading and the verdict are internal/inventory's
 // (RosterSecretVarReferences, RosterVarReferencesRenderedBy,
 // MissingRosterVarReferences); this file decides which rosters and hosts a run
 // touches and what it knows about their variables.
@@ -48,7 +49,9 @@ var rosterReferenceConsumers = map[string]inventory.RosterVarConsumer{
 // roster) pair on what that host's run defines: the effective variables of
 // `ansible-inventory --list` with the run's own -e and vault arguments — the
 // inventory, the vault vars file and every -e, merged the way Ansible merges
-// them for the playbook — and the -e names. The fields a consumer does not
+// them for the playbook — and the -e names, plus the names the playbook
+// defines for itself before it renders a roster string (its play vars, say:
+// inventory.MissingRosterVarReferencesFor). The fields a consumer does not
 // render are not judged (inventory.RosterVarReferencesRenderedBy): refusing a
 // run for them would refuse one that works.
 //
@@ -134,8 +137,7 @@ func precheckRosterReferences(ctx context.Context, out io.Writer, catalog contra
 				AdminPasswordProvided: jinjaTruthy(hostVars["ipa_admin_password"]),
 				ServerDeclared:        roster.serverDeclared,
 			}
-			rendered := inventory.RosterVarReferencesRenderedBy(rosterReferenceConsumers[id], roster.refs, facts)
-			for _, ref := range inventory.MissingRosterVarReferences(rendered, defined) {
+			for _, ref := range inventory.MissingRosterVarReferencesFor(rosterReferenceConsumers[id], roster.refs, facts, defined) {
 				key := rosterPath + "\x00" + ref.Field + "\x00" + ref.Name
 				if seen[key] {
 					continue
@@ -154,7 +156,8 @@ func precheckRosterReferences(ctx context.Context, out io.Writer, catalog contra
 		lines = append(lines, fmt.Sprintf("  - %s: %s", f.roster, f.text))
 	}
 	return fmt.Errorf("roster 變數引用檢查沒有通過(%d 項)：roster 的密碼欄位引用了下列變數，但這次執行沒有任何地方定義它們。"+
-		"apply 時 Ansible 會在 no_log 的 task 因 undefined variable 失敗，而且不會說是哪一個：\n%s\n"+
+		"apply 會在 playbook 的 no_log task 因 undefined variable 失敗(該 task 的 fatal 結果被遮蔽)，所以是執行到一半才失敗，"+
+		"那時前面的相依元件(例如 freeipa-server)已經套用完；這個檢查把失敗移到任何東西執行之前：\n%s\n"+
 		"請把這些 key 加進 %s(或 inventory)，或改正 roster 的引用。只有 {{ name }} 形式的引用會檢查；"+
 		"用 filter(例如 | default(''))、運算子或 {%% %%} 區塊的值不會判斷。", len(findings), strings.Join(lines, "\n"), vault.ExtraVarsFile)
 }

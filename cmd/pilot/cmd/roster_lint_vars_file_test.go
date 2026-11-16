@@ -136,16 +136,17 @@ func TestRosterLintVarsFile_DoesNotReportWhatItCannotJudge(t *testing.T) {
 	adminLit := `"` + lintRunSentinel(t) + `"`
 	vars := writeLintFile(t, dir, "main.yaml", "other: 1\n")
 	for name, initial := range map[string]string{
-		"default filter": `"{{ nope | default('') }}"`,
-		"unsafe":         `!unsafe "{{ nope }}"`,
-		"raw block":      `"{% raw %}{{ nope }}{% endraw %}"`,
-		"magic variable": `"{{ inventory_hostname }}"`,
-		"jinja literal":  `"{{ none }}"`,
-		"a literal":      `"` + lintRunSentinel(t) + `"`,
-		"empty":          `""`,
-		"inline !vault":  "!vault |\n          $ANSIBLE_VAULT;1.1;AES256\n          6162636465",
-		"a call":         `"{{ lookup('env', 'NOPE') }}"`,
-		"another scalar": `12345678`,
+		"default filter":                         `"{{ nope | default('') }}"`,
+		"unsafe":                                 `!unsafe "{{ nope }}"`,
+		"raw block":                              `"{% raw %}{{ nope }}{% endraw %}"`,
+		"magic variable":                         `"{{ inventory_hostname }}"`,
+		"jinja literal":                          `"{{ none }}"`,
+		"a literal":                              `"` + lintRunSentinel(t) + `"`,
+		"empty":                                  `""`,
+		"inline !vault":                          "!vault |\n          $ANSIBLE_VAULT;1.1;AES256\n          6162636465",
+		"a call":                                 `"{{ lookup('env', 'NOPE') }}"`,
+		"a name the playbooks define themselves": `"{{ stage }}-{{ ipa_realm }}-{{ nfs_pseudo_root }}"`,
+		"another scalar":                         `12345678`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			roster := writeLintFile(t, dir, "r.yaml", lintRefRoster(adminLit, initial))
@@ -323,5 +324,38 @@ func TestRosterLintVarsFile_EncryptedFilesReportLikePlaintext(t *testing.T) {
 		if names := dirEntryNames(t, d); len(names) != 0 {
 			t.Fatalf("temp directory %s not empty after lint: %v", d, names)
 		}
+	}
+}
+
+// The names the freeipa-identity and freeipa-nfs-server playbooks define for
+// themselves are known to lint; one their settings task sets afterwards is
+// not visible to a roster string, and is reported.
+func TestRosterLintVarsFile_KnowsThePlaybooksOwnNames(t *testing.T) {
+	dir := t.TempDir()
+	roster := writeLintFile(t, dir, "roster.yaml", lintRefRoster(`"`+lintRunSentinel(t)+`"`, `"{{ stage }}{{ ipa_hbac_services }}"`))
+	vars := writeLintFile(t, dir, "main.yaml", "other: 1\n")
+	out, err := execRosterLint(t, "--vars-file", vars, roster)
+	want := "[roster-reference] users[alice].password.initial references ipa_hbac_services, which " + vars + " does not define\n"
+	if out != want || err == nil || err.Error() != "1 issue(s) found" {
+		t.Fatalf("stdout = %q, error = %v, want only ipa_hbac_services reported", out, err)
+	}
+}
+
+// The help says what is verified about apply (a no_log task whose fatal result
+// is censored, mid-run after the dependency chain), not that the name is hidden,
+// and says that lint reports what deploy would not refuse.
+func TestRosterLintHelpDescribesTheCheckHonestly(t *testing.T) {
+	help := strings.Join(strings.Fields(rosterLintCmd.Long), " ")
+	for _, want := range []string{
+		"its fatal result is censored", "after the dependency chain",
+		"reports every admin and every user reference", "a finding deploy would not refuse",
+		"the names the freeipa-identity and freeipa-nfs-server playbooks define for themselves",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("the help does not say %q", want)
+		}
+	}
+	if strings.Contains(help, "hides why") {
+		t.Error("the help claims apply hides why it failed")
 	}
 }

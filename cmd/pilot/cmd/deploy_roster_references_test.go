@@ -26,10 +26,19 @@ const refusalMarker = "roster 變數引用檢查沒有通過"
 // accept, with the given admin password and alice's initial password (YAML
 // scalars) and freeipa.server declared or not.
 func rosterRefRoster(server bool, admin, initial string) string {
+	if server {
+		return rosterRefRosterServer("ipa-1.ipa.pilot.internal", admin, initial)
+	}
+	return rosterRefRosterServer("", admin, initial)
+}
+
+// rosterRefRosterServer is rosterRefRoster with freeipa.server as the given
+// YAML scalar, or no freeipa.server key for "".
+func rosterRefRosterServer(server, admin, initial string) string {
 	var b strings.Builder
 	b.WriteString("schema_version: 3\nnetgroups: []\ngrants: []\nfreeipa:\n")
-	if server {
-		b.WriteString("  server: ipa-1.ipa.pilot.internal\n")
+	if server != "" {
+		b.WriteString("  server: " + server + "\n")
 	}
 	b.WriteString("  admin:\n    principal: admin\n    password: " + admin + "\n")
 	b.WriteString("users:\n  - name: alice\n    password:\n      initial: " + initial + "\n    ssh_keys: {authoritative: true, values: []}\n")
@@ -168,6 +177,17 @@ func (e *rosterRefEnv) assertRefusedByRosterReferences(err error, out string, wa
 			e.t.Fatalf("err = %v, want it to hold %q", err, want)
 		}
 	}
+	// What the refusal says about apply is what ansible-core does (verified): the
+	// failure is inside a no_log task whose fatal result is censored, so it comes
+	// mid-run after the dependency chain — and the name is not hidden.
+	for _, want := range []string{"fatal 結果被遮蔽", "執行到一半", "相依元件"} {
+		if !strings.Contains(err.Error(), want) {
+			e.t.Fatalf("err = %v, want it to say %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "不會說是哪一個") {
+		e.t.Fatalf("the refusal claims Ansible hides the variable name: %v", err)
+	}
 	if got := e.ran(); len(got) != 0 {
 		e.t.Fatalf("the funnel ran %q before refusing", got)
 	}
@@ -242,6 +262,18 @@ func TestPrecheckRosterReferencesVerdicts(t *testing.T) {
 			wantNames: []string{"freeipa.admin.password references lacking_admin"}},
 		{name: "identity: ipa_admin_password empty falls back to the roster", component: idc, roster: rosterRefRoster(true, `"{{ lacking_admin }}"`, initialLit), vars: "ipa_admin_password: \"\"\n",
 			wantNames: []string{"freeipa.admin.password references lacking_admin"}},
+		{name: "identity: freeipa.server: null counts as declared, so the admin reference is never rendered", component: idc, roster: rosterRefRosterServer("null", `"{{ lacking_admin }}"`, initialLit), vars: vars},
+		{name: "identity: freeipa.server: empty string is not declared, so the fill-in renders the admin reference", component: idc, roster: rosterRefRosterServer(`""`, `"{{ lacking_admin }}"`, initialLit), vars: vars,
+			wantNames: []string{"freeipa.admin.password references lacking_admin"}},
+		// ---- names the playbooks define for themselves ----
+		{name: "identity: play vars and the early pre_task names are known in a user's password", component: idc, roster: rosterRefRoster(true, adminLit, `"{{ stage }}-{{ ipa_realm }}-{{ ipa_domain }}-{{ freeipa_detected_server_fqdn }}"`), vars: vars},
+		{name: "identity: a name the settings task sets is not visible to a user's password", component: idc, roster: rosterRefRoster(true, adminLit, `"{{ ipa_hbac_services }}"`), vars: vars,
+			wantNames: []string{"users[alice].password.initial references ipa_hbac_services"}},
+		{name: "identity: a name only the nfs play defines is missing", component: idc, roster: rosterRefRoster(true, adminLit, `"{{ nfs_pseudo_root }}"`), vars: vars,
+			wantNames: []string{"users[alice].password.initial references nfs_pseudo_root"}},
+		{name: "nfs-server: a play var is known in the admin password", component: nfs, roster: rosterRefRoster(true, `"{{ stage }}-{{ nfs_pseudo_root }}"`, initialLit), vars: vars},
+		{name: "nfs-server: a name only the identity play defines is missing", component: nfs, roster: rosterRefRoster(true, `"{{ ipa_realm }}"`, initialLit), vars: vars,
+			wantNames: []string{"freeipa.admin.password references ipa_realm"}},
 		{name: "identity: admin and user together", component: idc, roster: rosterRefRoster(true, `"{{ lacking_admin }}"`, `"{{ lacking_user }}"`), vars: "other: 1\n",
 			wantNames: []string{"freeipa.admin.password references lacking_admin", "users[alice].password.initial references lacking_user"}},
 		// ---- freeipa-nfs-server: the admin password only ----
@@ -453,5 +485,24 @@ func TestRosterReferenceConsumersAreTheOraclePlaybooks(t *testing.T) {
 		if _, ok := rosterReferenceConsumers[id]; !ok {
 			t.Errorf("%s is not a roster reference consumer", id)
 		}
+	}
+}
+
+// Lint does not know which playbook applies the roster, so it reports every
+// admin and user reference, where deploy judges only the fields the playbook
+// renders for the run: the same roster and vars file, an admin reference that
+// ipa_admin_password makes unnecessary, is a lint finding and not a refusal.
+func TestRosterLintReportsWhatDeployWouldNotRefuse(t *testing.T) {
+	admin := lintRunSentinel(t)
+	env := newRosterRefEnv(t, rosterRefRoster(true, `"{{ lacking_admin }}"`, `"`+lintRunSentinel(t)+`"`), "ipa_admin_password: "+admin+"\n")
+
+	out, err := env.call(t, "freeipa-identity", nil, env.vault())
+	if err != nil || out != "" {
+		t.Fatalf("deploy: err = %v, output = %q, want no refusal: ipa_admin_password is set and the roster declares freeipa.server", err, out)
+	}
+	lintOut, lintErr := execRosterLint(t, "--vars-file", env.vars, env.roster)
+	want := "[roster-reference] freeipa.admin.password references lacking_admin, which " + env.vars + " does not define\n"
+	if lintOut != want || lintErr == nil || lintErr.Error() != "1 issue(s) found" {
+		t.Fatalf("lint: stdout = %q, error = %v, want the admin finding", lintOut, lintErr)
 	}
 }

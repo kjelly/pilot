@@ -229,7 +229,11 @@ func TestRosterFreeIPAServerDeclared(t *testing.T) {
 		{"a template is declared", "freeipa: {server: \"{{ ipa_server_fqdn }}\"}\n", true},
 		{"missing", "freeipa: {admin: {principal: admin}}\n", false},
 		{"no freeipa mapping", "schema_version: 3\n", false},
-		{"null", "freeipa: {server: null}\n", false},
+		{"null counts as declared (None | string is the text None)", "freeipa: {server: null}\n", true},
+		{"a bare key is a null", "freeipa:\n  server:\n  admin: {principal: admin}\n", true},
+		{"a tilde is a null", "freeipa: {server: ~}\n", true},
+		{"a number is declared", "freeipa: {server: 12}\n", true},
+		{"a list is declared", "freeipa: {server: [a]}\n", true},
 		{"empty", "freeipa: {server: \"\"}\n", false},
 		{"blank", "freeipa: {server: \"  \"}\n", false},
 		{"through a merge key", "base: &b {server: ipa.example.test}\nfreeipa:\n  <<: *b\n", true},
@@ -482,4 +486,50 @@ func filesWithContent(t *testing.T, needle string, dirs ...string) []string {
 		}
 	}
 	return hits
+}
+
+// The names the consuming playbooks define for themselves are known to the
+// check, each to its own playbook (and to a lint that does not know the
+// consumer); the ones its settings task sets afterwards are not. The oracle
+// test checks every one of these against ansible-core.
+func TestMissingRosterVarReferencesForKnowsThePlaybooksOwnNames(t *testing.T) {
+	refs, _, err := RosterSecretVarReferences([]byte(refRoster(`"{{ stage }}-{{ ipa_realm }}-{{ nfs_pseudo_root }}-{{ ipa_hbac_services }}"`, `"{{ stage }}"`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := RosterRenderFacts{}
+	names := func(missing []RosterVarRef) []string {
+		var out []string
+		for _, ref := range missing {
+			out = append(out, ref.Field+" "+ref.Name)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name     string
+		consumer RosterVarConsumer
+		want     []string
+	}{
+		{"identity", RosterConsumerFreeIPAIdentity, []string{"freeipa.admin.password nfs_pseudo_root", "freeipa.admin.password ipa_hbac_services"}},
+		{"nfs-server", RosterConsumerFreeIPANFSServer, []string{"freeipa.admin.password ipa_realm", "freeipa.admin.password ipa_hbac_services"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := names(MissingRosterVarReferencesFor(tc.consumer, refs, facts)); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("missing = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// A run's own variables still count.
+	if got := MissingRosterVarReferencesFor(RosterConsumerFreeIPANFSServer, refs, facts, map[string]bool{"ipa_realm": true, "ipa_hbac_services": true}); len(got) != 0 {
+		t.Fatalf("missing = %+v, want none once the run defines them", got)
+	}
+	// A lint that does not know the consumer takes both playbooks' names as known.
+	known := RosterPlaybookKnownNames()
+	var lint []string
+	for _, ref := range MissingRosterVarReferences(refs, known) {
+		lint = append(lint, ref.Field+" "+ref.Name)
+	}
+	if want := []string{"freeipa.admin.password ipa_hbac_services"}; !reflect.DeepEqual(lint, want) {
+		t.Fatalf("lint missing = %q, want %q", lint, want)
+	}
 }

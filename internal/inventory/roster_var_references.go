@@ -11,7 +11,8 @@ import (
 
 // A roster string that Ansible templates — password.initial: '{{ ipa_default_initial_password }}',
 // where the value lives in .vault/main.yaml — fails at apply time when the
-// variable is not defined, inside a no_log task that censors the reason. The
+// variable is not defined: inside a no_log task (whose fatal result is
+// censored), mid-run, after the dependency chain has been applied. The
 // functions below read the references out of a roster (RosterSecretVarReferences)
 // and decide which ones nothing defines (MissingRosterVarReferences), so
 // `pilot roster lint --vars-file` and the deploy/reconcile preflight say so
@@ -268,7 +269,7 @@ type RosterRenderFacts struct {
 	// AdminPasswordProvided: the run has an ipa_admin_password that is defined
 	// and non-empty, so the playbook takes the admin password from it.
 	AdminPasswordProvided bool
-	// ServerDeclared: the roster's freeipa.server is non-empty
+	// ServerDeclared: the roster's freeipa.server counts as declared
 	// (RosterFreeIPAServerDeclared).
 	ServerDeclared bool
 }
@@ -292,10 +293,15 @@ func RosterVarReferencesRenderedBy(consumer RosterVarConsumer, refs []RosterVarR
 }
 
 // RosterFreeIPAServerDeclared reports whether the decrypted roster's
-// freeipa.server is non-empty, the way the identity playbook asks (its
-// "Detect FreeIPA server FQDN when roster omits freeipa.server" condition:
-// the value as a trimmed string has a length): a missing, null or blank value
-// is not declared. A document that does not parse declares nothing.
+// freeipa.server counts as declared for the identity playbook's "Detect
+// FreeIPA server FQDN when roster omits freeipa.server" and "Fill canonical
+// roster freeipa.server" pre_tasks, whose condition takes the server, applies
+// default with an empty-string argument, string and trim, and asks for a length
+// of 0. That default replaces only a value that is not defined, so: a missing key
+// (or a missing freeipa mapping) is not declared; an empty or blank string
+// is not declared; a null is declared, because None | string is the text None; any
+// other scalar, list or mapping is declared. A document that does not parse
+// declares nothing.
 func RosterFreeIPAServerDeclared(plaintext []byte) bool {
 	doc, err := parseYAMLDocument(plaintext)
 	if err != nil {
@@ -306,8 +312,10 @@ func RosterFreeIPAServerDeclared(plaintext []byte) bool {
 	switch {
 	case server == nil:
 		return false
+	case server.Kind == yaml.ScalarNode && server.ShortTag() == "!!null":
+		return true
 	case server.Kind == yaml.ScalarNode:
-		return server.ShortTag() != "!!null" && strings.TrimSpace(server.Value) != ""
+		return strings.TrimSpace(server.Value) != ""
 	}
 	return true
 }

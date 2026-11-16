@@ -251,10 +251,19 @@ type oracleFixture struct {
 // admin password and the users' initial passwords as given (YAML scalars),
 // and freeipa.server declared or not.
 func oracleRoster(server bool, admin string, users ...string) string {
+	if server {
+		return oracleRosterServer("ipa.oracle.test", admin, users...)
+	}
+	return oracleRosterServer("", admin, users...)
+}
+
+// oracleRosterServer is oracleRoster with freeipa.server as the given YAML
+// scalar, or no freeipa.server key at all for "".
+func oracleRosterServer(server, admin string, users ...string) string {
 	var b strings.Builder
 	b.WriteString("schema_version: 3\nfreeipa:\n")
-	if server {
-		b.WriteString("  server: ipa.oracle.test\n")
+	if server != "" {
+		b.WriteString("  server: " + server + "\n")
 	}
 	b.WriteString("  admin:\n    principal: admin\n    password: " + admin + "\nusers:\n")
 	for i, initial := range users {
@@ -283,7 +292,7 @@ func goVerdict(t *testing.T, consumer RosterVarConsumer, f oracleFixture, roster
 	}
 	facts := RosterRenderFacts{AdminPasswordProvided: f.ipaAdmin == "set", ServerDeclared: RosterFreeIPAServerDeclared([]byte(roster))}
 	set := map[string]bool{}
-	for _, ref := range MissingRosterVarReferences(RosterVarReferencesRenderedBy(consumer, refs, facts), f.varsNames()) {
+	for _, ref := range MissingRosterVarReferencesFor(consumer, refs, facts, f.varsNames()) {
 		if ref.Admin && consumer == RosterConsumerFreeIPAIdentity {
 			set[adminGateMarker] = true
 			continue
@@ -291,6 +300,21 @@ func goVerdict(t *testing.T, consumer RosterVarConsumer, f oracleFixture, roster
 		set[ref.Name] = true
 	}
 	return sortedNameSet(set)
+}
+
+// referencing is a YAML scalar whose value is a concatenation of {{ name }}
+// for every name of set but the left out ones.
+func referencing(set map[string]bool, leaveOut ...string) string {
+	var b strings.Builder
+	b.WriteString(`"`)
+	for _, name := range sortedNameSet(set) {
+		if slicesContains(leaveOut, name) {
+			continue
+		}
+		b.WriteString("{{ " + name + " }}")
+	}
+	b.WriteString(`"`)
+	return b.String()
 }
 
 func slicesContains(list []string, want string) bool {
@@ -409,6 +433,20 @@ func TestRosterRenderedFieldsMatchAnsible(t *testing.T) {
 	}
 	id, nfs := RosterConsumerFreeIPAIdentity, RosterConsumerFreeIPANFSServer
 	idp, nfsp := identityOraclePlay, nfsOraclePlay
+	// The names the play has defined at each site, read from the playbook itself
+	// (not from the Go lists, so a name missing from them makes Go report what
+	// Ansible resolves).
+	identityPlay := loadFirstPlay(t, "freeipa-identity-apply.yml")
+	identityPre := yamlKey(identityPlay, "pre_tasks")
+	atIdentity := func(task string) map[string]bool {
+		return definedBefore(identityPlay, identityPre, preTaskIndex(t, identityPre, task))
+	}
+	nfsPlay := loadFirstPlay(t, "freeipa-nfs-server-apply.yml")
+	nfsPre := yamlKey(nfsPlay, "pre_tasks")
+	nfsNames := definedBefore(nfsPlay, nfsPre, preTaskIndex(t, nfsPre, "Gate: required roster and stage authorization"))
+	usersSite := atIdentity("Gate: canonical user objects are structurally valid")
+	fallbackSite := atIdentity("Normalize canonical FreeIPA settings")
+	fillInSite := atIdentity("Fill canonical roster freeipa.server for this reconcile")
 	rows := []row{
 		// ---- freeipa-identity: users' initial passwords ----
 		{id, idp, oracleFixture{name: "a missing bare reference", roster: oracleRoster(true, lit, `"{{ u1 }}"`)}, true},
@@ -443,6 +481,35 @@ func TestRosterRenderedFieldsMatchAnsible(t *testing.T) {
 		{nfs, nfsp, oracleFixture{name: "nfs admin reference defined", roster: oracleRoster(true, `"{{ adm }}"`, lit), defined: []string{"adm"}}, false},
 		{nfs, nfsp, oracleFixture{name: "nfs user references are never rendered", roster: oracleRoster(true, lit, `"{{ u1 }}"`, `"{{ u2 }}"`)}, false},
 		{nfs, nfsp, oracleFixture{name: "nfs admin literal", roster: oracleRoster(true, lit, lit)}, false},
+
+		// ---- freeipa.server: when the fill-in renders the admin password ----
+		// (ipa_admin_password is set, so only the fill-in can render it.)
+		{id, idp, oracleFixture{name: "server key missing: the fill-in renders the admin password", roster: oracleRosterServer("", `"{{ adm }}"`, lit), adminRefs: []string{"adm"}, ipaAdmin: "set"}, true},
+		{id, idp, oracleFixture{name: "server: null counts as declared, the fill-in is skipped", roster: oracleRosterServer("null", `"{{ adm }}"`, lit), adminRefs: []string{"adm"}, ipaAdmin: "set"}, false},
+		{id, idp, oracleFixture{name: "server: ~ counts as declared too", roster: oracleRosterServer("~", `"{{ adm }}"`, lit), adminRefs: []string{"adm"}, ipaAdmin: "set"}, false},
+		{id, idp, oracleFixture{name: "server: empty string is not declared", roster: oracleRosterServer(`""`, `"{{ adm }}"`, lit), adminRefs: []string{"adm"}, ipaAdmin: "set"}, true},
+		{id, idp, oracleFixture{name: "server: blank string is not declared", roster: oracleRosterServer(`"   "`, `"{{ adm }}"`, lit), adminRefs: []string{"adm"}, ipaAdmin: "set"}, true},
+		{id, idp, oracleFixture{name: "server: a name is declared", roster: oracleRosterServer("ipa.oracle.test", `"{{ adm }}"`, lit), adminRefs: []string{"adm"}, ipaAdmin: "set"}, false},
+		{id, idp, oracleFixture{name: "server: null, no ipa_admin_password: the fallback gate still renders it", roster: oracleRosterServer("null", `"{{ adm }}"`, lit), adminRefs: []string{"adm"}}, true},
+
+		// ---- names the playbook defines for itself ----
+		// Every name the playbook has defined when it first renders a field (read
+		// from the playbook) is referenced from that field, in one roster: Ansible
+		// must resolve every one of them, and Go must not report any. freeipa_roster (a reference to the roster itself) is left
+		// out: it recurses, a failure of another kind than an undefined name.
+		{id, idp, oracleFixture{name: "the names the play defines, in a user's password", roster: oracleRoster(true, lit, referencing(usersSite, "freeipa_roster"))}, false},
+		{id, idp, oracleFixture{name: "the names the play defines, in the admin password the settings task renders", roster: oracleRoster(true, referencing(fallbackSite, "freeipa_roster"), lit), adminRefs: sortedNameSet(fallbackSite)}, false},
+		{id, idp, oracleFixture{name: "the names the play defines, in the admin password the server fill-in renders", roster: oracleRosterServer("", referencing(fillInSite, "freeipa_roster"), lit), adminRefs: sortedNameSet(fillInSite), ipaAdmin: "set"}, false},
+		{nfs, nfsp, oracleFixture{name: "the names the nfs play defines, in the admin password", roster: oracleRoster(true, referencing(nfsNames, "freeipa_roster"), lit)}, false},
+		// What the identity play's settings task sets, and what comes after it, is
+		// not visible to a roster string: undefined to Ansible, reported by Go. The
+		// admin password through the settings task's default() is an empty password
+		// that the admin gate refuses without naming (adminGateMarker).
+		{id, idp, oracleFixture{name: "names set by the settings task are undefined in a user's password", roster: oracleRoster(true, lit, `"{{ identity_admin_principal }}{{ identity_admin_password }}{{ ipa_hbac_services }}{{ ipa_sudo_command_groups }}{{ ipa_active_users }}{{ ipa_active_groups }}{{ ipa_active_netgroups }}"`)}, true},
+		{id, idp, oracleFixture{name: "a name set by the settings task is undefined in the admin password too", roster: oracleRoster(true, `"{{ ipa_hbac_services }}"`, lit), adminRefs: []string{"ipa_hbac_services"}}, true},
+		{id, idp, oracleFixture{name: "a name set by the settings task is undefined for the server fill-in", roster: oracleRosterServer("", `"{{ ipa_hbac_services }}"`, lit), adminRefs: []string{"ipa_hbac_services"}, ipaAdmin: "set"}, true},
+		{nfs, nfsp, oracleFixture{name: "a name only the identity play defines is undefined for the nfs play", roster: oracleRoster(true, `"{{ ipa_realm }}"`, lit)}, true},
+		{id, idp, oracleFixture{name: "a name only the nfs play defines is undefined for the identity play", roster: oracleRoster(true, lit, `"{{ nfs_pseudo_root }}"`)}, true},
 	}
 	for _, r := range rows {
 		r := r

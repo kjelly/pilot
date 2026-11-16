@@ -47,21 +47,31 @@ for a plaintext roster.
 A roster string can refer to a variable — password.initial:
 '{{ ipa_default_initial_password }}' — that apply resolves from the vars file
 ` + "(`-e @.vault/main.yaml`)" + `; when the vars file lacks it, apply fails inside a
-no_log task that hides why. With --vars-file lint reads the vars file's
-top-level variable names (never its values) and reports every
+no_log task (its fatal result is censored), so mid-run, after the dependency
+chain (freeipa-server, say) has been applied. With --vars-file lint reads the
+vars file's top-level variable names (never its values) and reports every
 freeipa.admin.password and users[].password.initial reference that file does
 not define, as "[roster-reference] <field> references <name>, which <file>
 does not define", with the other violations. Only a bare {{ name }} (or
 {{ name.attr }}) is checked: a value with a filter such as default(''), an
 operator, a call or a {% %} block cannot be judged without evaluating it and
-is never reported, nor are !unsafe and inline !vault values and Jinja's and
-Ansible's own names (inventory_hostname, ansible_*, ...). The names the
-inventory itself defines (group_vars, host_vars) are not known to lint: for a
-variable only the inventory defines, ` + "`pilot deploy`" + ` and ` + "`pilot reconcile`" + `
-make the same check with them taken into account. --vars-file is never found
-on its own: without it lint reads and prints exactly what it always did. A
-missing, unreadable or non-YAML vars file, or an encrypted one without
---vault-password-file, is an error. An encrypted vars file is decrypted in
+is never reported, nor are !unsafe and inline !vault values, Jinja's and
+Ansible's own names (inventory_hostname, ansible_*, ...) and the names the
+freeipa-identity and freeipa-nfs-server playbooks define for themselves (stage,
+ipa_domain, ipa_realm, ...). The names the inventory itself defines
+(group_vars, host_vars) are not known to lint: for a variable only the
+inventory defines, ` + "`pilot deploy`" + ` and ` + "`pilot reconcile`" + ` make the same check with
+them taken into account. Lint also does not know which playbook will apply the
+roster, so it reports every admin and every user reference; deploy and
+reconcile judge only the fields the playbook renders for that run (the admin
+password only when ipa_admin_password is not set or the roster declares no
+freeipa.server — an empty string is not a declaration, null is — for
+freeipa-identity; no user password for freeipa-nfs-server), so a lint finding
+for a field a run does not render is a finding deploy would not refuse.
+
+--vars-file is never found on its own: without it lint reads and prints exactly
+what it always did. A missing, unreadable or non-YAML vars file, or an
+encrypted one without --vault-password-file, is an error. An encrypted vars file is decrypted in
 memory with the same --vault-password-file as the roster, so both must be
 encrypted with one vault password.
 
@@ -188,7 +198,9 @@ func rosterLintReferenceViolations(rosterPath string, rosterPlaintext []byte, va
 		return nil, fmt.Errorf("check the references in roster %s: %w", rosterPath, err)
 	}
 	var out []inventory.RosterViolation
-	for _, ref := range inventory.MissingRosterVarReferences(refs, names) {
+	// The playbooks' own names (stage, ipa_realm, ...) are known to both consumers'
+	// runs; lint does not know the consumer, so it takes them all as defined.
+	for _, ref := range inventory.MissingRosterVarReferences(refs, names, inventory.RosterPlaybookKnownNames()) {
 		out = append(out, ref.Violation(varsFile))
 	}
 	return out, nil
