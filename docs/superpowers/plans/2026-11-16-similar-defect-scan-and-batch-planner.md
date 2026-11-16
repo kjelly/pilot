@@ -232,7 +232,7 @@ Issue 另有 `overlapping_prs` 旗標：它引用的路徑與某個 open PR 的�
 | base SHA | `git ls-remote https://github.com/OWNER/REPO refs/heads/<default>`（40 碼） |
 | 本地 clone 有該 commit | `git -C <repo-dir> cat-file -e <sha>^{commit}`；沒有就以結束碼 2 結束，提示使用者先 `git fetch` |
 | 路徑驗證 | `git -C <repo-dir> ls-tree -r --name-only <sha>` |
-| 測試名稱驗證 | `git -C <repo-dir> grep -l -F -w <name> <sha> --` |
+| base 的測試定義 | `git -C <repo-dir> grep -h -o -E 'func Test[A-Za-z0-9_]*\|def test_[A-Za-z0-9_]*' <sha> -- '*.go' '*.py'`（固定參數；Issue 提到的名稱在記憶體裡比對，不放進指令） |
 | open Issues | `gh issue list -R OWNER/REPO --state open --limit 1000 --json number,title,url,labels,body,comments,createdAt,updatedAt,blockedBy,parent,subIssues,closedByPullRequestsReferences` |
 | open PRs | `gh pr list -R OWNER/REPO --state open --limit 1000 --json number,url,isDraft,headRefName,body,closingIssuesReferences,files` |
 
@@ -240,7 +240,7 @@ Issue 另有 `overlapping_prs` 旗標：它引用的路徑與某個 open PR 的�
 - **衍生欄位**（本文與留言只在記憶體中使用，不寫入任何檔案）：
   - 引用路徑：本文與留言中以 `playbooks/`、`cmd/`、`internal/`、`contracts/`、`.agents/`、`docs/verification/`、`group_vars/`、`scripts/` 開頭的路徑，只保留存在於 base tree 的。
   - 引用的同 repo Issue 編號（`#N`）。
-  - 引用的測試名稱（`Test[A-Z]\w*`、`test_\w+`），只保留在 base 找得到的。
+  - 引用的測試名稱（`Test[A-Z]\w*`、`test_\w+`），只保留出現在 base 測試定義清單裡的。
   - PR body 的 closing 引用：用 `issue-to-pr/scripts/issue_gate.py` 的 `closes_issue()`，依路徑載入（比照 `load_secret_scan()`），不另寫一份正規表示式。
 - `snapshot.json`：`schema_version`、`repository`、`base{branch, sha}`、`collected_at`、`sources{issues{count, limit, complete}, pull_requests{...}}`、`issues[]`（`number`、`title`、`url`、`labels`、`blocked_by`、`parent`、`sub_issues`、`closed_by_prs`、`comments_count`、`comments_complete`、`referenced_paths`、`referenced_issues`、`referenced_tests`）、`pull_requests[]`（`number`、`url`、`is_draft`、`closing_issues`、`body_closing_issues`、`files`、`files_complete`）。不含本文與留言文字。
 
@@ -271,7 +271,7 @@ Issue 另有 `overlapping_prs` 旗標：它引用的路徑與某個 open PR 的�
 
 ### 5.6 `validate`
 
-拒絕（結束碼 2，輸出 `validation.json` 列出每一項）下列情況：
+拒絕（結束碼 2，stdout 輸出 `{status: VALID | INVALID, errors}` 列出每一項）下列情況：
 
 - `snapshot_sha256` 或 `base_sha` 與 snapshot 不符；
 - 引用不在 snapshot 裡的 Issue；
@@ -280,7 +280,7 @@ Issue 另有 `overlapping_prs` 旗標：它引用的路徑與某個 open PR 的�
 - `evidence` 為空；`code` 證據的 `ref_sha` 不是 base SHA，或該路徑不在 base tree；
 - `pair_compatibility` 缺少任何一對；
 - `acceptance_by_issue` 沒有涵蓋每個 Issue；
-- `MERGE_CANDIDATE` 含有 `EXISTING_PR`、`BLOCKED_BY`、`NEEDS_DECISION` 的 Issue；含 `overlapping_prs` 的 Issue 但 `blockers` 沒說明；
+- 任何分組含有硬性狀態的 Issue（`EXISTING_PR`、`BLOCKED_BY`、`NEEDS_DECISION`、`ALREADY_RESOLVED_REVIEW`、umbrella）：它們只能列在 `issue_statuses`，且狀態必須與 snapshot 算出的一致；`MERGE_CANDIDATE` 的成員有 `overlapping_prs`，但那些 PR 沒列在 `existing_prs`；
 - `human_approval_required` 不是 `true`；`root_cause_class` 不符 §3 第 1 點；
 - 有 Issue 未出現在任何分組或 `issue_statuses`，或出現超過一次。
 

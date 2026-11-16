@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
-NAMES = ("issue-to-pr", "pr-ready", "pr-review-merge", "_shared")
+NAMES = ("issue-to-pr", "pr-ready", "pr-review-merge", "_shared", "issue-batch-planner")
 
 FENCE = re.compile(r"^(```|~~~).*?^\1[^\n]*$", re.S | re.M)
 INLINE_CODE = re.compile(r"`[^`\n]*`")
