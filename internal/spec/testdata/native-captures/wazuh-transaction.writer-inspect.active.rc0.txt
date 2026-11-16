@@ -1,0 +1,1 @@
+{"journals": [], "writer": {"component": "agent", "mode": "apply", "owner": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}

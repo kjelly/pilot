@@ -1,20 +1,16 @@
-# Disposable Issue #244 (part A) version-contract topology: three VMs. Root must claim
-# the unique names before provisioning. No fixed IPs: agents use the sole manager group
-# and the manager forwards to the sole log-server group.
+# Disposable Issue #244 version-contract topology (part A contract, part B controlled
+# upgrade): three VMs. Root must claim the unique names before provisioning. No fixed IPs:
+# agents use the sole manager group and the manager forwards to the sole log-server group.
 #
-# - wf244-manager carries docker, the manager and an agent, so one host meets the
-#   central gate and the agent contract side by side; the other agents observe its
-#   native release over SSH.
-# - wf244-deb is an Ubuntu 24.04 agent that also hosts main's log-server receiver.
-#   Without a receiver in the inventory the manager spec's C10 (siem-log-server host
-#   pin) and C11 (host rsyslog imfile reader) are not applicable and the chain cannot
-#   verify clean: `topology test --verify` has no row filter. The manager's
-#   siem_forward_host is therefore derived from this log-server group (main's own
-#   auto-detect, not a variable set here). The receiver's self-forwarding sender
-#   (audit-log-forwarding) is not part of this run: only the manager's rows are verified
-#   against it, and the real-alert delivery challenge belongs to the separate
-#   wazuh-alert-delivery chain.
+# - wf244-manager carries docker, the manager and an agent, so one host meets the central
+#   gate and the agent contract side by side; the other agents observe its native release
+#   over SSH.
+# - wf244-deb is an Ubuntu 24.04 agent that also hosts the real log-server receiver (the
+#   manager's C10/C11 rows need one in the inventory; without it `topology test --verify`
+#   cannot verify clean) and, via audit-log-forwarding, the receiver's own local sender
+#   that log-server C7/C8 require.
 # - wf244-el is an AlmaLinux 9 agent (signed exact RPM path, DNF versionlock).
+# Ubuntu 22.04 is not part of this topology: its coverage needs its own candidate evidence.
 #
 # This descriptor uses direct upstream services:none, not inherited cache consumers;
 # native evidence must bind the actual inventory/proxy state.
@@ -39,7 +35,7 @@ nodes:
     ssh_user: root
     ssh_timeout: 5m
     boot_timeout: 8m
-    groups: [sandbox, log-server, wazuh-fim]
+    groups: [sandbox, log-server, audit-log-forwarding, wazuh-fim]
   - name: wf244-el
     base_image: almalinux-9
     memory: 2048

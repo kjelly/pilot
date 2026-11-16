@@ -153,7 +153,7 @@ func TestRegression_WazuhHeartbeatSelectedPreflightFailsBeforeMutation(t *testin
 			if err := os.WriteFile(children, child, 0600); err != nil {
 				t.Fatal(err)
 			}
-			// Preserve the production pre_tasks boundary and actual include
+			// Preserve the owned ordinary-path ordering and actual include
 			// selector/apply tags; replace only its target-specific children.
 			include := findNamedTask(t, production, "Step 9c: Configure isolated host imfile forwarding")
 			include["ansible.builtin.include_tasks"].(map[string]any)["file"] = children
@@ -224,15 +224,32 @@ func TestRegression_WazuhHeartbeatPreflightAndSameAction(t *testing.T) {
 	if preflight["no_log"] != true || preflight["changed_when"] != false {
 		t.Fatal("ownership/capability preflight must hide private config and remain read-only")
 	}
-	pre := play["pre_tasks"].([]any)
-	found := false
-	for _, task := range pre {
-		if task.(map[string]any)["name"] == preflight["name"] {
-			found = true
+	// Forwarding prerequisites must remain before ordinary Wazuh mutation,
+	// inside host ownership and outside completed version-only operations.
+	owned := findNamedTask(t, play, "Own all Wazuh mutations on this host through their final proofs")
+	ordinary := findNamedTask(t, play, "Apply the selected Wazuh tasks only after policy is recomputed under ownership")
+	index := func(items []any, name string) int {
+		for i, item := range items {
+			if item.(map[string]any)["name"] == name {
+				return i
+			}
 		}
+		return -1
 	}
-	if !found {
-		t.Fatal("ownership/native capability must precede all Wazuh configuration mutation")
+	outer := owned["block"].([]any)
+	claim := index(outer, "Claim the host-wide Wazuh writer before any shared coordinator copy or mutation")
+	version := index(outer, "Inspect compatibility or execute the explicitly authorized central upgrade")
+	selected := index(outer, ordinary["name"].(string))
+	if claim < 0 || version <= claim || selected <= version || ordinary["when"] != "not wazuh_finish_host" {
+		t.Fatal("forwarding must stay inside the claimed ordinary path after native version planning and version-only early exit")
+	}
+	children := ordinary["block"].([]any)
+	prerequisite := index(children, "Wazuh: install native RELP preflight prerequisites before configuration changes")
+	guard := index(children, preflight["name"].(string))
+	gate := index(children, "Gate: Wazuh requires exclusive native heartbeat support for RELP")
+	mutation := index(children, "Step 1: Set vm.max_map_count=262144 (indexer requirement, persistent)")
+	if prerequisite < 0 || guard <= prerequisite || gate <= guard || mutation <= gate {
+		t.Fatal("owned native prerequisites and fresh heartbeat gate must precede Wazuh configuration mutation")
 	}
 	when, _ := preflight["when"].(string)
 	args, _ := preflight["ansible.builtin.script"].(string)

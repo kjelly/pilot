@@ -355,10 +355,103 @@ func TestDeployAndReconcileRefuseAnUnlockableInventoryBeforeAnything(t *testing.
 		env := newFunnelEnv(t, proxyCommandVars)
 		t.Setenv("PILOT_ROOT", repoRootForTest(t))
 		catalog := loadRepoCatalogForPrecheck(t)
-		if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-dns"}, "playbooks/apply/freeipa-dns-apply.yml", env.inv, "", nil); err != nil {
+		if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-dns"}, "playbooks/apply/freeipa-dns-apply.yml", env.inv, "", nil, vaultInput{}); err != nil {
 			t.Fatalf("a component that is not the identity playbook was refused: %v", err)
 		}
 	})
+}
+
+// The identity apply playbook is handed its connection variables from three
+// places: the inventory, the vault file (`-e @.vault/main.yaml`) and a plain `-e`.
+// The precheck of every deploy and reconcile entry reads the inventory through
+// the arguments the playbook gets, so a variable the lock cannot honor is refused
+// whichever of the three carries it. Each source goes through each real entry,
+// not through precheckIdentityDeploy: the single run (deploy, and the one request
+// of a reconcile that is already authorized) and the batch, whose own precheck
+// comes before the plan is shown (precheckIdentityBatch). The refusal must come
+// before anything ran, and the batch's before its plan: the inner precheck of the
+// single run is a second guard that would still refuse after the plan was shown,
+// so the plan is what tells the two prechecks apart. Every source has its twin,
+// the same source with a variable the lock accepts, which goes past the precheck.
+func TestDeployAndReconcilePrecheckReadsEverySourceOfTheConnectionVariables(t *testing.T) {
+	const playbook = "playbooks/apply/freeipa-identity-apply.yml"
+	proxyVault := func(t *testing.T) vaultInput {
+		return vaultInput{ExtraVarsFile: writeVarsFile(t, "ansible_ssh_extra_args: \"-o ProxyCommand='nc %h %p'\"\nipa_admin_password: sentinel-not-a-credential\n")}
+	}
+	cleanVault := func(t *testing.T) vaultInput {
+		return vaultInput{ExtraVarsFile: writeVarsFile(t, "ipa_admin_password: sentinel-not-a-credential\n")}
+	}
+	type source struct {
+		name       string
+		serverVars string
+		vault      func(t *testing.T) vaultInput
+		extraVars  []string
+	}
+	refused := []struct {
+		source
+		wantIn string
+	}{
+		{source{name: "the inventory", serverVars: proxyCommandVars}, "ProxyCommand"},
+		{source{name: "the vault file", vault: proxyVault}, "ProxyCommand"},
+		{source{name: "an extra var", extraVars: []string{"ansible_port=not-a-port"}}, "ansible_port"},
+	}
+	accepted := map[string]source{
+		"the inventory":  {name: "the inventory", serverVars: lockCommonArgs},
+		"the vault file": {name: "the vault file", vault: cleanVault},
+		"an extra var":   {name: "an extra var", extraVars: []string{"ansible_port=2222"}},
+	}
+	entries := []struct {
+		name string
+		run  func(t *testing.T, env *funnelEnv, src source, out *bytes.Buffer) error
+	}{
+		{"a single run", func(t *testing.T, env *funnelEnv, src source, out *bytes.Buffer) error {
+			var vault vaultInput
+			if src.vault != nil {
+				vault = src.vault(t)
+			}
+			_, err := executeRecordedDeploymentWithAuthorizationResult(context.Background(), ansible.NewRunner(), out, playbook, env.inv, "", "", src.extraVars, vault, "sandbox", []string{"freeipa-identity"}, nil, nil)
+			return err
+		}},
+		{"a batch", func(t *testing.T, env *funnelEnv, src source, out *bytes.Buffer) error {
+			request := catalogDeploymentRequest{playbook: playbook, inv: env.inv, stage: "sandbox", extraVars: src.extraVars, componentHints: []string{"freeipa-identity"}, workspaceDir: filepath.Dir(env.inv)}
+			if src.vault != nil {
+				request.vault = src.vault(t)
+			}
+			return executeCatalogReconcileBatch(context.Background(), ansible.NewRunner(), out, []catalogDeploymentRequest{request})
+		}},
+	}
+	setup := func(t *testing.T, serverVars string) *funnelEnv {
+		env := newFunnelEnv(t, serverVars)
+		t.Setenv("PILOT_ROOT", repoRootForTest(t))
+		oldPrompt := activePromptAutomation
+		activePromptAutomation = &promptAutomation{useDefaults: true, previewOnly: true}
+		t.Cleanup(func() { activePromptAutomation = oldPrompt })
+		stubDeploymentAvailabilityAllReachable(t)
+		return env
+	}
+	for _, entry := range entries {
+		for _, refusal := range refused {
+			t.Run(entry.name+"/"+refusal.name+" is refused before anything runs", func(t *testing.T) {
+				env := setup(t, refusal.serverVars)
+				var out bytes.Buffer
+				err := entry.run(t, env, refusal.source, &out)
+				env.assertRefused(err, out.String(), refusal.wantIn)
+				if strings.Contains(out.String(), "batch execution plan") || strings.Contains(out.String(), "Deployment execution plan") {
+					t.Fatalf("the plan was shown before the refusal:\n%s", out.String())
+				}
+			})
+			t.Run(entry.name+"/"+refusal.name+" twin: a variable the lock accepts goes on", func(t *testing.T) {
+				twin := accepted[refusal.name]
+				env := setup(t, twin.serverVars)
+				var out bytes.Buffer
+				err := entry.run(t, env, twin, &out)
+				env.assertWentOn(err)
+				if got := env.ran(); len(got) == 0 {
+					t.Fatalf("the run never reached its playbook (err = %v)\n%s", err, out.String())
+				}
+			})
+		}
+	}
 }
 
 func loadRepoCatalogForPrecheck(t *testing.T) contract.Catalog {
@@ -382,7 +475,7 @@ func TestDeployPrecheckPassesALockableInventoryAndFollowsTheScope(t *testing.T) 
 	env := newFunnelEnv(t, lockCommonArgs)
 	t.Setenv("PILOT_ROOT", repoRootForTest(t))
 	catalog := loadRepoCatalogForPrecheck(t)
-	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "", nil); err != nil {
+	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "", nil, vaultInput{}); err != nil {
 		t.Fatalf("a supported inventory was refused: %v", err)
 	}
 
@@ -391,12 +484,12 @@ func TestDeployPrecheckPassesALockableInventoryAndFollowsTheScope(t *testing.T) 
 	if err := os.WriteFile(env.inv, []byte(two), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "", nil)
+	err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "", nil, vaultInput{})
 	if err == nil || !strings.Contains(err.Error(), "剛好一台 freeipa-server") {
 		t.Fatalf("two servers: err = %v, want the exactly-one refusal", err)
 	}
 	// --limit narrows it to one, as it does for the run.
-	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-1", nil); err != nil {
+	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-1", nil, vaultInput{}); err != nil {
 		t.Fatalf("--limit ipa-1: %v", err)
 	}
 	// A server the limit leaves out is not asked about: ipa-2 is the one with the
@@ -405,10 +498,10 @@ func TestDeployPrecheckPassesALockableInventoryAndFollowsTheScope(t *testing.T) 
 	if err := os.WriteFile(env.inv, []byte(bad), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-1", nil); err != nil {
+	if err := precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-1", nil, vaultInput{}); err != nil {
 		t.Fatalf("--limit ipa-1 with a refusing ipa-2 outside the limit: %v", err)
 	}
-	err = precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-2", nil)
+	err = precheckIdentityDeploy(context.Background(), catalog, []string{"freeipa-identity"}, playbook, env.inv, "ipa-2", nil, vaultInput{})
 	if err == nil || !strings.Contains(err.Error(), "ansible_connection 是 docker") {
 		t.Fatalf("--limit ipa-2: err = %v, want the docker refusal", err)
 	}
@@ -656,17 +749,46 @@ func TestDecommissionPlanWarnsAboutAnUnlockableInventory(t *testing.T) {
 // The precheck and the lock are one decision: for every inventory the precheck
 // refuses, taking the lock refuses with the same reason, and for every one it
 // passes, the lock is taken. (AGENTS.md §5.7: a second copy of a rule drifts.)
+//
+// The rows with extra are the same decision for a run whose playbook gets a
+// `-e @file` (identityLockRequest.ExtraArgs): the precheck and the acquirer each
+// build the derivation's request themselves, so each must carry the arguments,
+// and a pair that dropped them on one side only disagrees on these rows (a
+// connection setting only the file has: the precheck passes, the lock refuses, or
+// the other way round). An accepted row also says where the lock was dialed.
 func TestPrecheckAndLockMakeTheSameDecision(t *testing.T) {
-	cases := append([]struct {
-		name   string
-		vars   string
-		wantIn string
-	}{{"a supported inventory", lockCommonArgs, ""}, {"the full name of the ssh plugin", "          ansible_connection: ansible.builtin.ssh\n", ""}}, refusedByTheLock...)
+	type decisionCase struct {
+		name     string
+		vars     string
+		extra    string // the body of the -e @file the playbook is handed, "" for none
+		wantIn   string // the refusal's text, "" for accepted
+		wantAddr string // for an accepted row: the address the lock is dialed on
+	}
+	cases := []decisionCase{
+		{name: "a supported inventory", vars: lockCommonArgs, wantAddr: "192.0.2.10"},
+		{name: "the full name of the ssh plugin", vars: "          ansible_connection: ansible.builtin.ssh\n", wantAddr: "192.0.2.10"},
+	}
+	for _, refused := range refusedByTheLock {
+		cases = append(cases, decisionCase{name: refused.name, vars: refused.vars, wantIn: refused.wantIn})
+	}
+	cases = append(cases,
+		// The inventory is the supported one above; only the file differs.
+		decisionCase{name: "ProxyCommand only in the -e @file", vars: lockCommonArgs, extra: "ansible_ssh_extra_args: \"-o ProxyCommand='nc %h %p'\"\n", wantIn: "ProxyCommand"},
+		decisionCase{name: "a docker connection only in the -e @file", vars: lockCommonArgs, extra: "ansible_connection: docker\n", wantIn: "ansible_connection 是 docker"},
+		decisionCase{name: "an address override in the -e @file", vars: lockCommonArgs, extra: "ansible_host: 192.0.2.99\n", wantAddr: "192.0.2.99"},
+		decisionCase{name: "a target_group in the -e @file that moves the play to another host", vars: lockCommonArgs, extra: "target_group: freeipa-client\n", wantAddr: "192.0.2.20"},
+	)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newFunnelEnv(t, tc.vars)
 			req := identityLockRequest{Inventory: env.inv}
+			if tc.extra != "" {
+				req.ExtraArgs = []string{"-e", "@" + writeVarsFile(t, tc.extra)}
+			}
 			checkErr := checkIdentityLockTarget(context.Background(), req)
+			if got := env.seam.started(); len(got) != 0 {
+				t.Fatalf("the precheck started an ssh dialer: %+v", got)
+			}
 			held, lockErr := productionIdentityLock(req)(context.Background())
 			if held != nil {
 				defer func() { _ = held.Release() }()
@@ -677,6 +799,9 @@ func TestPrecheckAndLockMakeTheSameDecision(t *testing.T) {
 			if tc.wantIn == "" {
 				if checkErr != nil {
 					t.Fatalf("refused: %v", checkErr)
+				}
+				if got := env.seam.started(); len(got) != 1 || got[0].Host != tc.wantAddr {
+					t.Fatalf("the lock was dialed on %+v, want exactly one dial on %s", got, tc.wantAddr)
 				}
 				return
 			}

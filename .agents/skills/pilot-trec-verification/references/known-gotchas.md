@@ -125,11 +125,13 @@ a play-level `connection: local`. And/or clear the specific
 fresh preflight.
 
 `pilot vm-target`/`docker-target` `up` and `down` (and `topology up/down`) now
-drop the cache entries of the target's name and aliases themselves, so a
-recreated target never inherits the previous one's facts
-(`docs/evidence/vm-target/2026-10-01-198fb03.md`). Clearing by hand is still
-needed after `vm-target rollback`/`reset`, for hosts outside those commands,
-and for `pilot deploy`'s own cache under `<data-dir>/ansible`.
+drop the cache entries of the target's name and aliases themselves, from the
+cache `ansible.cfg` resolves and from `pilot deploy`'s own cache under
+`<data-dir>/ansible/fact-cache`, so a recreated target never inherits the
+previous one's facts (`docs/evidence/vm-target/2026-10-01-198fb03.md` covers the
+`ansible.cfg` cache only). Clearing by hand is still needed after
+`vm-target rollback`/`reset`, for hosts outside those commands, and when the
+lifecycle command ran with a different data dir than the deploy.
 
 ### `known_hosts` churn
 

@@ -863,7 +863,11 @@ func hostDecommissionLockRequest(ctx context.Context, dir string) (identityLockR
 	if err != nil {
 		return identityLockRequest{}, fmt.Errorf("prepare ansible runtime for host decommission: %w", err)
 	}
-	return identityLockRequest{Inventory: filepath.Join(dir, "inventory.yml"), Wait: identityLockWaitFrom(ctx), Progress: identityLockProgressFrom(ctx), Runtime: &runtime}, nil
+	inventoryPath := filepath.Join(dir, "inventory.yml")
+	// The converge step hands the playbook the workspace's main vault file
+	// (hostDecommissionFreeIPAExtraArgs); the rest of its -e arguments are
+	// values pilot makes itself (roster path, retiring alias, stage).
+	return identityLockRequest{Inventory: inventoryPath, ExtraArgs: hostDecommissionVaultArgs(inventoryPath), Wait: identityLockWaitFrom(ctx), Progress: identityLockProgressFrom(ctx), Runtime: &runtime}, nil
 }
 
 // planHasIdentityConverge reports whether a plan runs the central

@@ -76,35 +76,100 @@ func checkWazuhVersionPlaybook(play map[string]any, all []map[string]any, verify
 		// Read-only observations run in check mode and never report a change.
 		if script, ok := task["ansible.builtin.script"].(map[string]any); ok {
 			cmd, _ := script["cmd"].(string)
-			for _, readOnly := range []string{" manager-version", " agent-check ", " agent-policy-check ", " central --version"} {
-				if strings.Contains(" "+strings.Join(strings.Fields(cmd), " ")+" ", readOnly) {
-					if task["check_mode"] != false || task["changed_when"] != false {
-						problems = append(problems, fmt.Sprintf("read-only observation %q must set check_mode: false and changed_when: false", name))
+			flat := " " + strings.Join(strings.Fields(cmd), " ") + " "
+			if strings.Contains(flat, " central --version") && strings.Contains(flat, "--upgrade") {
+				// The owner-held central entry point is an inspection unless the operator
+				// authorized an upgrade, in which case it is the mutation itself: it must
+				// run for real (check_mode: false) but only ever previews under --check,
+				// and it must report a real change instead of hiding it.
+				if task["check_mode"] != false {
+					problems = append(problems, fmt.Sprintf("central inspect/execute task %q must set check_mode: false", name))
+				}
+				if v, ok := task["changed_when"]; !ok || v == false {
+					problems = append(problems, fmt.Sprintf("central inspect/execute task %q must report an authorized change (changed_when must not be absent or false)", name))
+				}
+				if !strings.Contains(flat, "--preview") {
+					problems = append(problems, fmt.Sprintf("central inspect/execute task %q must pass --preview under --check", name))
+				}
+			} else {
+				for _, readOnly := range []string{" manager-version", " agent-check ", " agent-policy-check ", " central --version"} {
+					if strings.Contains(flat, readOnly) {
+						if task["check_mode"] != false || task["changed_when"] != false {
+							problems = append(problems, fmt.Sprintf("read-only observation %q must set check_mode: false and changed_when: false", name))
+						}
 					}
 				}
 			}
 		}
 	}
-	// The native verification must sit outside the block whose rescue reverts
-	// configuration: a failed verification is a failed run, not a rollback.
+	// The native verification must not sit inside a block whose rescue reverts
+	// configuration: a failed verification is a failed run, not a rollback. It may
+	// sit inside a writer-ownership block whose rescue only reports and settles.
 	var verify map[string]any
 	for _, task := range all {
 		if task["name"] == verifyName {
 			verify = task
 		}
 	}
-	top, _ := play["tasks"].([]any)
+	var scopes []map[string]any
+	var locate func(items []any, chain []map[string]any) bool
+	locate = func(items []any, chain []map[string]any) bool {
+		for _, item := range items {
+			task, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if task["name"] == verifyName {
+				scopes = chain
+				return true
+			}
+			children, _ := task["block"].([]any)
+			if locate(children, append(append([]map[string]any{}, chain...), task)) {
+				return true
+			}
+			// A verification placed in a rescue/always section is itself part of the recovery path.
+			for _, section := range []string{"rescue", "always"} {
+				recovery, _ := task[section].([]any)
+				if locate(recovery, append(append([]map[string]any{}, chain...), map[string]any{"name": "recovery section", "rescue": []any{map[string]any{"name": "rollback"}}})) {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	found := false
-	for _, item := range top {
-		if task, ok := item.(map[string]any); ok && task["name"] == verifyName {
+	for _, section := range []string{"pre_tasks", "tasks"} {
+		top, _ := play[section].([]any)
+		if locate(top, nil) {
 			found = true
+			break
+		}
+	}
+	revertsConfiguration := func(scope map[string]any) bool {
+		rescue, _ := scope["rescue"].([]any)
+		for _, task := range flattenWazuhTasks(rescue) {
+			lower := strings.ToLower(wazuhTaskText(task))
+			if strings.Contains(lower, "rollback") || strings.Contains(lower, "restore") || strings.Contains(lower, "recover") {
+				return true
+			}
+		}
+		return false
+	}
+	reverting, revertingName := false, ""
+	for _, scope := range scopes {
+		if revertsConfiguration(scope) {
+			reverting = true
+			revertingName, _ = scope["name"].(string)
+			if revertingName == "" {
+				revertingName = "(unnamed block)"
+			}
 		}
 	}
 	switch {
-	case verify == nil:
+	case verify == nil || !found:
 		problems = append(problems, "missing verification task "+verifyName)
-	case !found:
-		problems = append(problems, verifyName+" is nested in a block/rescue scope; a failed verification would trigger the configuration rollback")
+	case reverting:
+		problems = append(problems, verifyName+" is nested in the rollback scope "+fmt.Sprintf("%q", revertingName)+"; a failed verification would trigger the configuration rollback")
 	case wazuhTaskTags(verify) != fmt.Sprintf(`["%s"]`, verifyTag):
 		problems = append(problems, verifyName+" must carry exactly its row tag "+verifyTag)
 	}
@@ -147,6 +212,13 @@ func TestWazuhVersionPlaybookInvariantsFire(t *testing.T) {
 	if play, all := good(); len(checkWazuhVersionPlaybook(play, all, "C10", "verify")) != 0 {
 		t.Fatalf("a conforming play was rejected: %v", checkWazuhVersionPlaybook(play, all, "C10", "verify"))
 	}
+	ownerOnly := map[string]any{"name": "own", "block": []any{verify},
+		"rescue": []any{map[string]any{"name": "Surface the original failure"}}, "always": []any{map[string]any{"name": "Release the writer"}}}
+	if play, all := good(); len(checkWazuhVersionPlaybook(map[string]any{"tasks": []any{ownerOnly}}, all, "C10", "verify")) != 0 {
+		t.Fatalf("a writer-ownership block whose rescue only reports was rejected: %v", checkWazuhVersionPlaybook(map[string]any{"tasks": []any{ownerOnly}}, all, "C10", "verify"))
+	} else {
+		_ = play
+	}
 	cases := map[string]func() (map[string]any, []map[string]any){
 		"no_log hides a refusal": func() (map[string]any, []map[string]any) {
 			play, all := good()
@@ -170,7 +242,31 @@ func TestWazuhVersionPlaybookInvariantsFire(t *testing.T) {
 		},
 		"verification inside the rollback block": func() (map[string]any, []map[string]any) {
 			play, all := good()
-			play["tasks"] = []any{map[string]any{"name": "block", "block": []any{verify}, "rescue": []any{}}}
+			play["tasks"] = []any{map[string]any{"name": "block", "block": []any{verify},
+				"rescue": []any{map[string]any{"name": "ROLLBACK — restore the previous files"}}}}
+			return play, all
+		},
+		"verification inside the rescue path": func() (map[string]any, []map[string]any) {
+			play, all := good()
+			play["tasks"] = []any{map[string]any{"name": "block", "block": []any{}, "rescue": []any{verify}}}
+			return play, all
+		},
+		"central execute task hides an authorized change": func() (map[string]any, []map[string]any) {
+			play, all := good()
+			all = append(all, map[string]any{"name": "central", "check_mode": false, "changed_when": false,
+				"ansible.builtin.script": map[string]any{"cmd": "files/wazuh-transaction.py central --version 4.14.1 --owner x --upgrade --preview"}})
+			return play, all
+		},
+		"central execute task runs in check mode": func() (map[string]any, []map[string]any) {
+			play, all := good()
+			all = append(all, map[string]any{"name": "central", "changed_when": "x",
+				"ansible.builtin.script": map[string]any{"cmd": "files/wazuh-transaction.py central --version 4.14.1 --owner x --upgrade --preview"}})
+			return play, all
+		},
+		"central execute task lacks --preview": func() (map[string]any, []map[string]any) {
+			play, all := good()
+			all = append(all, map[string]any{"name": "central", "check_mode": false, "changed_when": "x",
+				"ansible.builtin.script": map[string]any{"cmd": "files/wazuh-transaction.py central --version 4.14.1 --owner x --upgrade"}})
 			return play, all
 		},
 		"verification loses its row tag": func() (map[string]any, []map[string]any) {

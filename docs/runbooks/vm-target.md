@@ -270,11 +270,17 @@ return——`return nil, err` 不能把 teardown 的對象 null 掉（這個 nil
   `ansible_ssh_common_args` 沒有用：Ansible 先放 `ssh_args`，OpenSSH 取第一個
   值，所以以前實際用的一直是 `ansible.cfg` 的共用 `~/.ansible/cp/pilot-%C`。
   host 變數也蓋過 `ANSIBLE_SSH_ARGS`。
-- **fact cache**：`ansible.cfg` 是 `gathering = smart` + 3600 秒 jsonfile cache。
-  `up` 先刪掉這個名稱與每個 alias 的舊 facts（刪不掉就不建 VM），`down` 再刪一次；
-  `topology up/down` 走同一條路。位置用 `ansible-config dump` 依當下目錄與
-  環境變數解析。`rollback`/`reset` 不會刪：還原後的 VM 仍可能拿到還原前收集的
-  facts，需要時刪掉 cache 目錄下的 `s1_<名稱>`。
+- **fact cache**：`ansible.cfg` 是 `gathering = smart` + 3600 秒 jsonfile cache，
+  `pilot deploy`／`reconcile` 另外把 cache 放在 `<data-dir>/ansible/fact-cache`，
+  是兩個不同的目錄。`up` 先刪掉這個名稱與每個 alias 在**兩個目錄**的舊 facts
+  （任何一個刪不掉就不建 VM），`down` 再刪一次；`topology up/down` 走同一條路。
+  `ansible.cfg` 那個目錄用 `ansible-config dump` 依當下目錄與環境變數解析；
+  data-dir 那個只由 data dir 決定，不需要 `ansible-config`，目錄不存在就略過、
+  不會建立。`up`/`down` 要用跟之後 `pilot deploy` 相同的 data dir
+  （`--data-dir`、`PILOT_DATA_DIR`、config 的 `data_dir`，見 §6），否則清掉的是
+  另一個 data dir 的 cache，要手動刪那個 data dir 下的
+  `ansible/fact-cache/s1_<名稱>`。`rollback`/`reset` 不會刪：還原後的 VM 仍可能拿到
+  還原前收集的 facts，需要時刪掉兩個目錄下的 `s1_<名稱>`。
 
 ## 6. State 檔在哪
 

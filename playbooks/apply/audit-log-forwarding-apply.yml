@@ -149,6 +149,29 @@
         rsyslog_selinux_port_label: {}
         siem_forward_rsyslog_start_result: {}
         siem_forward_rsyslog_restart_result: {}
+        # The kernel audit list is shared with the Wazuh agent's who-data
+        # (spec C23). Facts live across plays of one ansible-playbook run, so
+        # none of these may carry over from an earlier play of the same host.
+        # The agent state and the set S of watches to give back are not read
+        # here: tasks/audit-whodata-guard.yml reads them right before a step
+        # that disturbs the list, so no decision rests on a snapshot taken before
+        # the package installs of Step 1 (auditctl may only appear there).
+        audit_whodata_agent: unknown
+        audit_whodata_kernel: unknown
+        audit_whodata_expected: []
+        audit_whodata_writer: {}
+        audit_whodata_rearm_result: {}
+        audit_load_needed: false
+        augenrules_result: {}
+        audit_kernel_load_attempted: false
+        audit_auditd_restart_attempted: false
+        audit_rules_restore_result: {}
+        audit_rules_remove_result: {}
+        audit_rescue_reload_needed: false
+        audit_rescue_rearm_needed: false
+        audit_rescue_disturbed: false
+        audit_rescue_whodata_live: false
+        audit_rescue_reload_result: {}
       tags: [always]
 
     - name: "Gate: RELP mTLS inputs"
@@ -409,12 +432,72 @@
             backup: true
           register: audit_rules_result
 
+        # `augenrules --load` ends in `auditctl -R /etc/audit/audit.rules`, even when
+        # augenrules reports "No change", and that file starts with `-D`: every load
+        # empties the whole kernel audit list, including the `wazuh_fim` watches the
+        # Wazuh agent's who-data keeps there (spec C23, issue #324). So the list is
+        # only loaded when it is not already what the rules files say. A load is
+        # needed when this run changed the rules file, when `augenrules --check` sees
+        # the generated /etc/audit/audit.rules differ from /etc/audit/rules.d or
+        # cannot say, or when the kernel lacks a rule key this role declares (the
+        # file is right but the list was emptied: an external `auditctl -D`, an
+        # earlier run that failed or ran only `--tags C3`..`C9`). The file-changed
+        # test alone misses that last case for ever.
+        - name: "Step 3a: Read whether the kernel audit list already holds the managed rules (read-only, spec C10)"
+          tags: [C10]
+          ansible.builtin.script:
+            cmd: "files/audit-whodata.py probe --rules {{ audit_rules_dest | quote }}"
+            executable: python3
+          register: audit_kernel_probe
+          changed_when: false
+          failed_when: audit_kernel_probe.rc != 0
+          check_mode: false
+
+        - name: "Step 3b: Decide whether the kernel audit list must be loaded (spec C10)"
+          tags: [C10]
+          ansible.builtin.set_fact:
+            audit_load_needed: >-
+              {{ ((audit_rules_result | default({})) is changed)
+                 or audit_kernel_probe_document.augenrules != 'no_change'
+                 or audit_kernel_probe_document.managed != 'present' }}
+          vars:
+            audit_kernel_probe_document: "{{ audit_kernel_probe.stdout | from_json }}"
+
+        # Only reached when a load is about to happen. Reads the Wazuh agent and the
+        # kernel list again right now and takes the set S of watches to give back
+        # there, then refuses, before the list is touched, when the agent state cannot
+        # be read or is changing, or a Wazuh writer or journal is active
+        # (tasks/audit-whodata-guard.yml).
+        - name: "Step 3c: Refuse to flush the kernel audit list while Wazuh is mid-operation or unreadable (spec C23)"
+          tags: [C10]
+          ansible.builtin.include_tasks:
+            file: tasks/audit-whodata-guard.yml
+            apply:
+              tags: [C10]
+          when:
+            - not ansible_check_mode
+            - audit_load_needed | bool
+
+        # Set before the load, not after: a load that fails half way has already run
+        # its `-D`, and the rescue must know the list may be disturbed.
+        - name: "Step 3d: Record that the kernel audit list is about to be loaded (spec C23)"
+          tags: [C10]
+          ansible.builtin.set_fact:
+            audit_kernel_load_attempted: true
+          when:
+            - not ansible_check_mode
+            - audit_load_needed | bool
+
         - name: "Step 3: Load the custom rules into the running kernel audit list (spec C10)"
           tags: [C10]
           ansible.builtin.command: augenrules --load
           register: augenrules_result
-          changed_when: false
+          # A load that ran changed the kernel list; a converged host skips it.
+          changed_when: true
           failed_when: augenrules_result.rc != 0
+          when:
+            - not ansible_check_mode
+            - audit_load_needed | bool
 
         - name: "Step 4: Render /etc/logrotate.d/auditd"
           tags: [C12, C14]
@@ -903,6 +986,33 @@
           failed_when: false
           when: not ansible_check_mode
 
+        # Step 8a replaces the running auditd. Ubuntu 24.04's auditd.service also runs
+        # `augenrules --load` in ExecStartPost, so the restart empties the kernel
+        # audit list like Step 3 does, and the new auditd's af_unix listener drops
+        # the Wazuh agent's connection (spec C23). Same guard before it (it re-reads the
+        # agent and the list, and keeps the S an earlier guard of this run took), same
+        # record that it was attempted, under exactly the condition of Step 8a
+        # (TestRegression_AuditDisturbanceGuardsShareTheDisturbancesCondition keeps them equal).
+        - name: "Step 8d: Refuse to restart auditd while Wazuh is mid-operation or unreadable (spec C23) — Debian family"
+          tags: [C21]
+          ansible.builtin.include_tasks:
+            file: tasks/audit-whodata-guard.yml
+            apply:
+              tags: [C21]
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == "Debian"
+            - (audisp_syslog_active_result is changed) or (audisp_syslog_args_result is changed) or (audisp_syslog_process.rc | default(1) != 0)
+
+        - name: "Step 8e: Record that auditd is about to be restarted (spec C23) — Debian family"
+          tags: [C21]
+          ansible.builtin.set_fact:
+            audit_auditd_restart_attempted: true
+          when:
+            - not ansible_check_mode
+            - ansible_os_family == "Debian"
+            - (audisp_syslog_active_result is changed) or (audisp_syslog_args_result is changed) or (audisp_syslog_process.rc | default(1) != 0)
+
         - name: "Step 8a: Reload auditd if the syslog plugin config changed or isn't actually running (spec C21) — Debian family"
           tags: [C21]
           ansible.builtin.systemd:
@@ -1014,6 +1124,7 @@
             dest: "{{ audit_rules_dest }}"
             remote_src: true
             force: true
+          register: audit_rules_restore_result
           when:
             - audit_rules_result is defined
             - audit_rules_result is changed
@@ -1024,16 +1135,58 @@
           ansible.builtin.file:
             path: "{{ audit_rules_dest }}"
             state: absent
+          register: audit_rules_remove_result
           when:
             - audit_rules_result is defined
             - audit_rules_result is changed
             - audit_rules_result.backup_file is not defined
 
+        # `augenrules --load` empties the kernel audit list, with the Wazuh agent's
+        # who-data watches in it (spec C23), so the rollback only runs it when the
+        # list may no longer match the rules file: this run attempted a load, and either
+        # the rollback just restored or removed the rules file the load had applied, or
+        # the load itself failed (a failed `auditctl -R` has already run its `-D`).
+        # Nothing else gets a reload: a failure before Step 3, or after a load of the
+        # unchanged file, leaves the list as it should be. Who-data is given back
+        # after any disturbance the main flow did not already settle, or after this
+        # reload. The facts below are computed here, from facts that may be missing
+        # (this rescue runs from any failed step).
+        - name: "ROLLBACK — decide whether the kernel audit list needs a reload and Wazuh who-data a re-arm (spec C23)"
+          tags: [always]
+          ansible.builtin.set_fact:
+            audit_rescue_reload_needed: "{{ audit_rescue_reload_value }}"
+            audit_rescue_disturbed: "{{ audit_rescue_disturbed_value }}"
+            audit_rescue_whodata_live: "{{ audit_whodata_expected is defined and (audit_whodata_expected | length) > 0 }}"
+            audit_rescue_rearm_needed: >-
+              {{ (not ansible_check_mode) and (audit_rescue_reload_value
+                 or (audit_rescue_disturbed_value and ((audit_whodata_rearm_result | default({})) | length) == 0)) }}
+          vars:
+            audit_rescue_disturbed_value: >-
+              {{ (audit_kernel_load_attempted is defined and audit_kernel_load_attempted | bool)
+                 or (audit_auditd_restart_attempted is defined and audit_auditd_restart_attempted | bool) }}
+            audit_rescue_reload_value: >-
+              {{ (not ansible_check_mode)
+                 and (audit_kernel_load_attempted is defined and audit_kernel_load_attempted | bool)
+                 and ((audit_rules_restore_result is changed) or (audit_rules_remove_result is changed)
+                      or (augenrules_result is defined and (augenrules_result.rc | default(0)) != 0)) }}
+
         - name: "ROLLBACK — reload kernel audit rules back to the restored state"
           tags: [always]
           ansible.builtin.command: augenrules --load
+          register: audit_rescue_reload_result
           changed_when: false
           failed_when: false
+          when: audit_rescue_reload_needed | bool
+
+        - name: "ROLLBACK — put Wazuh who-data back after this run disturbed the kernel audit list (spec C23)"
+          tags: [always]
+          ansible.builtin.include_tasks:
+            file: tasks/audit-whodata-rearm.yml
+            apply:
+              tags: [always]
+          vars:
+            audit_whodata_rearm_fatal: false
+          when: audit_rescue_rearm_needed | bool
 
         - name: "ROLLBACK — restore the previous siem forward config"
           tags: [always]
@@ -1109,8 +1262,50 @@
           tags: [always]
           ansible.builtin.fail:
             msg: >-
-              audit-log-forwarding apply failed (see task output above); the
-              audit rules and siem forward config were reverted. Runtime recovery
+              audit-log-forwarding apply failed (see task output above).
+              {{ audit_rollback_rules }} {{ audit_rollback_kernel }} {{ audit_rollback_whodata }}
+              The siem forward config {{ audit_rollback_siem }}. Runtime recovery
               is attempted after a service operation changed or failed, or TLS rollback
               changed files, and only when the restored global configuration passes validation. Otherwise the
               current rsyslog process is left untouched. Fix the failing task and re-run.
+          vars:
+            audit_rollback_rules: >-
+              {{ 'The audit rules file was restored from the backup this run took.' if audit_rules_restore_result is changed
+                 else ('The audit rules file was removed because this run created it.' if audit_rules_remove_result is changed
+                 else 'The audit rules file was not changed by this run.') }}
+            audit_rollback_kernel: >-
+              {{ (('The kernel audit list was reloaded from the restored rules.' if (audit_rescue_reload_result.rc | default(1)) == 0
+                   else 'The kernel audit list reload FAILED, so it may not match the rules file.')
+                  if audit_rescue_reload_needed | bool
+                  else 'The rollback did not reload the kernel audit list.') }}
+            audit_rollback_whodata: >-
+              {{ ('The kernel audit list was not disturbed by this run.' if not (audit_rescue_disturbed | bool)
+                  else ('Wazuh who-data was not live before this run, so none was touched.' if not (audit_rescue_whodata_live | bool)
+                  else ('Wazuh who-data was restored (wazuh-agent restarted, its wazuh_fim watches are back).'
+                        if (audit_whodata_rearm_result.state | default('')) == 'restored'
+                        else ('Wazuh who-data was NOT restored (reason: ' ~ (audit_whodata_rearm_result.reason | default('no re-arm ran'))
+                              ~ '); fix the cause and run systemctl restart wazuh-agent.')))) }}
+            audit_rollback_siem: >-
+              {{ 'was restored from the backup this run took' if siem_forward_restore_result is changed
+                 else ('was removed because this run created it' if siem_forward_remove_result is changed
+                 else 'was not changed by the rollback') }}
+
+    # After the block, not in it: a failure here must not roll back the audit rules
+    # and the forwarding configuration this run applied, which is not what failed.
+    # The rescue gives who-data back itself when the block fails after a disturbance.
+    # Runs once, after the LAST disturbance of the run (Step 3, Step 8a): it waits for
+    # auditd and the Wazuh endpoint, restarts wazuh-agent, and waits until the kernel
+    # holds every `wazuh_fim` watch it held before the run (spec C23, issue #324).
+    # Reads the two "attempted" facts with defaults: each is set only under its own
+    # step's tag.
+    - name: "Step 10: Give the Wazuh who-data watches back after this run disturbed the kernel audit list (spec C23)"
+      tags: [C10, C21]
+      ansible.builtin.include_tasks:
+        file: tasks/audit-whodata-rearm.yml
+        apply:
+          tags: [C10, C21]
+      vars:
+        audit_whodata_rearm_fatal: true
+      when:
+        - not ansible_check_mode
+        - (audit_kernel_load_attempted | default(false) | bool) or (audit_auditd_restart_attempted | default(false) | bool)

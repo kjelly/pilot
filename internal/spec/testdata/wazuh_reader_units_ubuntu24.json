@@ -1,0 +1,128 @@
+{
+  "source": "Root native Ubuntu24 rsyslog 8.2312.0-3ubuntu9.2; declared controls only",
+  "units": {
+    "rsyslog.service": {
+      "Restart": "on-failure",
+      "TimeoutStopUSec": "1min 30s",
+      "ExecStartPre": "{ path=/usr/lib/rsyslog/reload-apparmor-profile ; argv[]=/usr/lib/rsyslog/reload-apparmor-profile ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }",
+      "ExecStart": "{ path=/usr/sbin/rsyslogd ; argv[]=/usr/sbin/rsyslogd -n -iNONE ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }",
+      "KillMode": "control-group",
+      "SendSIGKILL": "yes",
+      "Id": "rsyslog.service",
+      "Names": "rsyslog.service syslog.service",
+      "Requires": "sysinit.target system.slice syslog.socket",
+      "After": "syslog.socket system.slice systemd-journald.socket sysinit.target basic.target",
+      "Triggers": "",
+      "TriggeredBy": "syslog.socket",
+      "LoadState": "loaded",
+      "ActiveState": "active",
+      "SubState": "running",
+      "FragmentPath": "/usr/lib/systemd/system/rsyslog.service",
+      "DropInPaths": "",
+      "UnitFileState": "enabled"
+    },
+    "syslog.socket": {
+      "Accept": "no",
+      "RemoveOnStop": "no",
+      "Listen": "/run/systemd/journal/syslog (Datagram)",
+      "KillMode": "control-group",
+      "SendSIGKILL": "yes",
+      "Id": "syslog.socket",
+      "Names": "syslog.socket",
+      "Requires": "-.mount system.slice",
+      "After": "-.mount system.slice",
+      "Triggers": "rsyslog.service",
+      "TriggeredBy": "",
+      "LoadState": "loaded",
+      "ActiveState": "active",
+      "SubState": "running",
+      "FragmentPath": "/usr/lib/systemd/system/syslog.socket",
+      "DropInPaths": "",
+      "UnitFileState": "static"
+    }
+  },
+  "vendor_provenance": {
+    "snapshot": "https://snapshot.ubuntu.com/ubuntu/20260610T120000Z/",
+    "signer": "F6ECB3762474EDA9D21B7022871920D1991BC93C",
+    "signed_indexes": [
+      {
+        "suite": "noble-updates",
+        "inrelease_sha256": "b42ce89ba3b97e649169177d67b87165bb2eafe605ada453c0658803c04ea0c2",
+        "index_sha256": "8bd6bc3a037c32202d7212f8fb1465ea1ebb0c699258fae3a53e63e9cd5448b9"
+      },
+      {
+        "suite": "noble",
+        "inrelease_sha256": "cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0",
+        "index_sha256": "2a6a199e1031a5c279cb346646d594993f35b1c03dd4a82aaa0323980dd92451"
+      }
+    ],
+    "packages": {
+      "apparmor": {
+        "version": "4.0.1really4.0.1-0ubuntu0.24.04.7",
+        "suite": "noble-updates",
+        "deb_sha256": "45c30f4a9724a21e2f5f91a0556f979c13ab2042e6a38c7fdd6da87829e8d67e",
+        "filename": "pool/main/a/apparmor/apparmor_4.0.1really4.0.1-0ubuntu0.24.04.7_amd64.deb",
+        "members": [
+          {
+            "name": "./etc/apparmor/parser.conf",
+            "sha256": "f8586f1c3bfd7abac6a182c1b45d22a8397c0db5a737b54bc8f9fc48da53d5bd",
+            "uid": 0,
+            "gid": 0,
+            "mode": 420
+          },
+          {
+            "name": "./sbin/apparmor_parser",
+            "sha256": "6bc852b37807961c14976be9a227ae96bd817f73b5189cb0e0ff5eca4448c01c",
+            "uid": 0,
+            "gid": 0,
+            "mode": 493
+          },
+          {
+            "name": "./usr/sbin/aa-status",
+            "sha256": "af9f579ad039f0e669bfb15735c55efd17896f838d684e7f9be15b09fa1e2dd4",
+            "uid": 0,
+            "gid": 0,
+            "mode": 493
+          }
+        ]
+      },
+      "rsyslog": {
+        "version": "8.2312.0-3ubuntu9.2",
+        "suite": "noble-updates",
+        "deb_sha256": "66cd3b735f9d3273f49e31213b93c1b6ffa4e12b0724b218ff6c3e67ee4e0899",
+        "filename": "pool/main/r/rsyslog/rsyslog_8.2312.0-3ubuntu9.2_amd64.deb",
+        "members": [
+          {
+            "name": "./usr/lib/rsyslog/reload-apparmor-profile",
+            "sha256": "eec0bf16836e34f166fb5da22836bd65676e5b670152a00c257f24d4176b2cac",
+            "uid": 0,
+            "gid": 0,
+            "mode": 493
+          },
+          {
+            "name": "./usr/lib/systemd/system/rsyslog.service",
+            "sha256": "2728f43f3e86d6eb2480d6cbc38a977e185b369c3733351459f40a9fc7581b2c",
+            "uid": 0,
+            "gid": 0,
+            "mode": 420
+          }
+        ]
+      },
+      "dash": {
+        "version": "0.5.12-6ubuntu5",
+        "suite": "noble",
+        "deb_sha256": "e97728d8deaa51300255f0572bbd68b9549e0894a184c056dc420fc4e0ba0781",
+        "filename": "pool/main/d/dash/dash_0.5.12-6ubuntu5_amd64.deb",
+        "members": [
+          {
+            "name": "./usr/bin/dash",
+            "sha256": "86d31f6fb799e91fa21bad341484564510ca287703a16e9e46c53338776f4f42",
+            "uid": 0,
+            "gid": 0,
+            "mode": 493
+          }
+        ]
+      }
+    }
+  }
+}

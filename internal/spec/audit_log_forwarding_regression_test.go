@@ -51,6 +51,17 @@ import (
 //	        syslogd_port_t (2026-10-14, PR #79). v1.8: it retries for up to
 //	        8 s and counts only a connection to the address siem-log-server
 //	        resolves to
+//	C23     with the Wazuh agent active, whodata configured and the audisp
+//	        af_unix listener on the endpoint, the kernel audit list still holds
+//	        the agent's `wazuh_fim` watches. `augenrules --load` (every load
+//	        starts with -D) and an auditd restart empty that shared list, the
+//	        endpoint and the connection stay up, and Wazuh does not put the
+//	        watches back by itself, so C1-C22 stayed green with who-data off
+//	        (issue #324). The apply side (load only when needed, refuse while a
+//	        Wazuh writer is active, give the watches back) is locked by
+//	        audit_whodata_runtime_test.go and
+//	        audit_kernel_disturbance_regression_test.go; the row itself over
+//	        captured states by audit_log_forwarding_c23_test.go
 //
 // Cross-row invariants locked below:
 //
@@ -88,7 +99,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	wantIDs := []string{
 		"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10",
 		"C11", "C12", "C13", "C14", "C15", "C16", "C17", "C18", "C19", "C20",
-		"C21", "C22",
+		"C21", "C22", "C23",
 	}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
@@ -113,7 +124,7 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 	// checks and legitimately use `present` instead). C11 uses the
 	// `sh -c '... && echo 0 || echo 1'` idiom so the outer command
 	// always exits 0 regardless of match outcome.
-	rcRows := []string{"C1", "C2", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C14", "C15", "C16", "C17", "C18", "C19", "C20", "C21", "C22"}
+	rcRows := []string{"C1", "C2", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C14", "C15", "C16", "C17", "C18", "C19", "C20", "C21", "C22", "C23"}
 	for _, id := range rcRows {
 		if exp[id] != "0" {
 			t.Errorf("%s expected must be rc-based `0`, got %q", id, exp[id])
@@ -256,6 +267,28 @@ func TestRegression_AuditLogForwardingSpec(t *testing.T) {
 		if !strings.Contains(cmd["C22"], want) {
 			t.Errorf("C22 must contain %q, got %q", want, cmd["C22"])
 		}
+	}
+
+	// C23 must name every premise of "who-data is live" (agent active, whodata configured, the af_unix listener
+	// on the endpoint) before it demands the watch, and must refuse to pass when it cannot look (no ss). It must
+	// match the watch key the way the Wazuh coordinator does (TestRegression_WhodataWatchPatternHasOneSource).
+	// Without the premises it would fail every host that has no Wazuh; without the watch check it could not fail.
+	for _, want := range []string{
+		"systemctl is-active --quiet wazuh-agent",
+		"whodata=.yes",
+		"command -v ss",
+		"/var/ossec/queue/sockets/audit",
+		"LISTEN",
+		"audisp-af_unix",
+		"auditctl -l",
+		"wazuh_fim",
+	} {
+		if !strings.Contains(cmd["C23"], want) {
+			t.Errorf("C23 must contain %q, got %q", want, cmd["C23"])
+		}
+	}
+	if strings.Contains(cmd["C23"], "ausearch") {
+		t.Errorf("C23 must read the kernel list with auditctl -l, got %q", cmd["C23"])
 	}
 
 	// C21 must check both the plugin's active flag and its pinned facility.

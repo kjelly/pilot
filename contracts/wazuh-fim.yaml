@@ -16,6 +16,7 @@ playbooks:
   decommission: playbooks/decommission/wazuh-agent-decommission.yml
 regressionTests:
   - internal/spec/wazuh_fim_regression_test.go
+  - internal/spec/wazuh_whodata_playbook_regression_test.go
   - internal/spec/wazuh_version_transaction_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 dependencies:

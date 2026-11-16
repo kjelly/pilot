@@ -1,6 +1,6 @@
 """Native backend substitute for the manager version-gate graph.
 
-The production coordinator's `central` action (Central.gate, discovery, registry
+The production coordinator's `central` action (Central.execute, discovery, registry
 bound, health parsing) runs for real over the modeled docker/Wazuh commands of
 wazuh_models.Docker. The docker engine probe and the sentinel "a stack mutation
 was reached" task are modeled. Not native VM evidence.
@@ -60,7 +60,16 @@ w.Central.__init__ = lambda self, managed_root=None, **kwargs: original(self, ma
 w.is_root = lambda: True
 w.Runner = lambda: docker
 w.ROOT = root / 'ledger'
+if '--preview-tools-json' in rest:
+    # The check-mode preview capability (pinned /run tool closure) is attested and tested by
+    # wazuh_preview_tools_test.py; this harness is about the gate's decisions, so the attestation is modeled.
+    w.preview_tools = lambda *args, **kwargs: {}
+    w.preview_attestation = lambda *args, **kwargs: {}
 sys.argv = ['wazuh-transaction.py', action, *rest]
+if '--owner' in rest:
+    # The production play claims the host-wide writer before the central entry point; the model does the same
+    # for the same owner so the coordinator's ownership check is exercised, not bypassed.
+    w.HostWriter().claim(rest[rest.index('--owner') + 1], 'central', 'apply')
 captured = io.StringIO()
 with contextlib.redirect_stdout(captured):
     status = w.main()

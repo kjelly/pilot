@@ -1,0 +1,72 @@
+---
+# Development/native tool probe on a disposable manager. This does not upgrade
+# containers. The optional canary adds one synthetic, nonce-bearing alert.
+- name: Probe Wazuh release policy on a disposable central stack
+  hosts: "{{ target_group | default('wazuh-manager') }}"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Allocate the native-probe writer owner
+      ansible.builtin.command:
+        argv: [python3, -c, "import uuid; print(uuid.uuid4().hex)"]
+      register: wazuh_probe_uuid
+      changed_when: false
+
+    - name: Reset native-probe writer authority
+      ansible.builtin.set_fact:
+        wazuh_probe_claimed: false
+
+    - name: Own candidate helper copy and the optional canary mutation
+      block:
+        - name: Claim the probe writer using the uniquely shipped source
+          ansible.builtin.script:
+            cmd: >-
+              ../../apply/files/wazuh-transaction.py writer-claim --component central
+              --mode canary --owner {{ wazuh_probe_uuid.stdout | quote }}
+            executable: python3
+          changed_when: false
+
+        - name: Record the successful probe claim
+          ansible.builtin.set_fact:
+            wazuh_probe_claimed: true
+
+        - name: Install the candidate coordinator under host ownership
+          ansible.builtin.copy:
+            src: ../../apply/files/wazuh-transaction.py
+            dest: /usr/local/sbin/pilot-wazuh-transaction
+            owner: root
+            group: root
+            mode: "0700"
+
+        - name: Probe native versions and the explicitly selected canary under ownership
+          ansible.builtin.command:
+            argv: >-
+              {{ ['/usr/local/sbin/pilot-wazuh-transaction', 'central-verify',
+                  '--owner', wazuh_probe_uuid.stdout]
+                 + (['--canary'] if (wazuh_probe_canary | default(false) | bool) else []) }}
+          register: wazuh_probe_result
+          changed_when: false
+
+        - name: Show the sanitized native probe result
+          ansible.builtin.debug:
+            var: wazuh_probe_result.stdout
+      always:
+        - name: Release only the completed native-probe writer
+          ansible.builtin.script:
+            cmd: >-
+              ../../apply/files/wazuh-transaction.py writer-release
+              --owner {{ wazuh_probe_uuid.stdout | quote }}
+            executable: python3
+          changed_when: false
+          when: wazuh_probe_claimed | bool
+
+    - name: Probe the exact candidate verification-row command
+      ansible.builtin.command:
+        argv: [sh, -c, "/usr/local/sbin/pilot-wazuh-transaction central-verify >/dev/null && echo 0 || echo 1"]
+      register: wazuh_probe_row
+      changed_when: false
+
+    - name: Require the native verification-row expected value
+      ansible.builtin.assert:
+        that:
+          - wazuh_probe_row.stdout == '0'

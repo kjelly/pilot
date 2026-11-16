@@ -68,13 +68,23 @@ func validateWazuhVersionTopology(topology, wrapper []byte) error {
 	if images["ubuntu-22.04"] {
 		return fmt.Errorf("Ubuntu 22.04 is not part of this topology")
 	}
-	want := []string{"../../apply/docker-apply.yml", "../../apply/log-server-apply.yml", "../../apply/wazuh-manager-apply.yml", "../../apply/wazuh-fim-apply.yml"}
+	want := []string{"../../apply/docker-apply.yml", "../../apply/log-server-apply.yml", "../../apply/audit-log-forwarding-apply.yml",
+		"../../apply/wazuh-manager-apply.yml", "../../apply/wazuh-fim-apply.yml"}
+	// The explicit diagnostic fixture (a fresh native alert challenge) may follow the
+	// agents, and only as the last import, deferred in check mode.
+	if n := len(imports); n == len(want)+1 {
+		last := imports[n-1]
+		if got, _ := last["ansible.builtin.import_playbook"].(string); got != "wazuh-alert-delivery-fixtures.yml" || last["when"] != "not ansible_check_mode" {
+			return fmt.Errorf("a sixth import must be the check-mode-deferred alert-delivery fixture, got %v", last)
+		}
+		imports = imports[:len(want)]
+	}
 	if len(imports) != len(want) {
 		return fmt.Errorf("wrapper imports %d playbooks, want %d", len(imports), len(want))
 	}
 	for i, file := range want {
 		if got, _ := imports[i]["ansible.builtin.import_playbook"].(string); got != file {
-			return fmt.Errorf("import %d is %q, want %q (docker, the receiver, the manager, then the agents)", i, got, file)
+			return fmt.Errorf("import %d is %q, want %q (docker, the receiver and its sender, the manager, then the agents)", i, got, file)
 		}
 		if len(imports[i]) != 3 || imports[i]["when"] != nil || imports[i]["vars"] != nil {
 			return fmt.Errorf("import %s must keep the component's own hosts, defaults and check mode", file)
@@ -109,19 +119,20 @@ func TestWazuhVersionTopologyFixture(t *testing.T) {
 	}
 	// Each withdrawal removes one invariant; the checker must notice every one.
 	for name, pair := range map[string][2][]byte{
-		"agents before the manager":  {topology, []byte(swap(string(wrapper), "../../apply/wazuh-manager-apply.yml", "../../apply/wazuh-fim-apply.yml"))},
-		"docker after the manager":   {topology, []byte(swap(string(wrapper), "../../apply/docker-apply.yml", "../../apply/wazuh-manager-apply.yml"))},
-		"receiver after the manager": {topology, []byte(swap(string(wrapper), "../../apply/log-server-apply.yml", "../../apply/wazuh-manager-apply.yml"))},
-		"no receiver import":         {topology, []byte(strings.Replace(string(wrapper), "- name: Deploy the independent log receiver before the manager forwards to it\n  ansible.builtin.import_playbook: ../../apply/log-server-apply.yml\n  tags: [log-server]\n", "", 1))},
-		"no receiver node":           {[]byte(strings.Replace(string(topology), "groups: [sandbox, log-server, wazuh-fim]", "groups: [sandbox, wazuh-fim]", 1)), wrapper},
-		"receiver on the manager":    {[]byte(strings.Replace(strings.Replace(string(topology), "groups: [sandbox, log-server, wazuh-fim]", "groups: [sandbox, wazuh-fim]", 1), "groups: [sandbox, docker, wazuh-manager, wazuh-fim]", "groups: [sandbox, docker, wazuh-manager, log-server, wazuh-fim]", 1)), wrapper},
-		"receiver on EL":             {[]byte(strings.Replace(strings.Replace(string(topology), "groups: [sandbox, log-server, wazuh-fim]", "groups: [sandbox, wazuh-fim]", 1), "name: wf244-el\n    base_image: almalinux-9\n    memory: 2048\n    vcpus: 2\n    disk: 30\n    ssh_user: root\n    ssh_timeout: 5m\n    boot_timeout: 8m\n    groups: [sandbox, wazuh-fim]", "name: wf244-el\n    base_image: almalinux-9\n    memory: 2048\n    vcpus: 2\n    disk: 30\n    ssh_user: root\n    ssh_timeout: 5m\n    boot_timeout: 8m\n    groups: [sandbox, log-server, wazuh-fim]", 1)), wrapper},
-		"receiver below its minimum": {[]byte(strings.Replace(string(topology), "memory: 4096", "memory: 1024", 1)), wrapper},
-		"a limited import":           {topology, []byte(strings.Replace(string(wrapper), "tags: [wazuh-manager]", "tags: [wazuh-manager]\n  when: not ansible_check_mode", 1))},
-		"no EL agent":                {[]byte(strings.Replace(string(topology), "almalinux-9", "ubuntu-24.04", 1)), wrapper},
-		"an Ubuntu 22.04 node":       {[]byte(strings.Replace(string(topology), "name: wf244-deb\n    base_image: ubuntu-24.04", "name: wf244-deb\n    base_image: ubuntu-22.04", 1)), wrapper},
-		"manager is not an agent":    {[]byte(strings.Replace(string(topology), "groups: [sandbox, docker, wazuh-manager, wazuh-fim]", "groups: [sandbox, docker, wazuh-manager]", 1)), wrapper},
-		"two managers":               {[]byte(strings.Replace(string(topology), "groups: [sandbox, log-server, wazuh-fim]", "groups: [sandbox, log-server, wazuh-manager, wazuh-fim]", 1)), wrapper},
+		"agents before the manager":              {topology, []byte(swap(string(wrapper), "../../apply/wazuh-manager-apply.yml", "../../apply/wazuh-fim-apply.yml"))},
+		"docker after the manager":               {topology, []byte(swap(string(wrapper), "../../apply/docker-apply.yml", "../../apply/wazuh-manager-apply.yml"))},
+		"receiver after the manager":             {topology, []byte(swap(string(wrapper), "../../apply/log-server-apply.yml", "../../apply/wazuh-manager-apply.yml"))},
+		"no receiver import":                     {topology, []byte(strings.Replace(string(wrapper), "- name: Deploy the actual independent SIEM receiver before forwarding\n  ansible.builtin.import_playbook: ../../apply/log-server-apply.yml\n  tags: [log-server]\n", "", 1))},
+		"no receiver node":                       {[]byte(strings.Replace(string(topology), "groups: [sandbox, log-server, audit-log-forwarding, wazuh-fim]", "groups: [sandbox, wazuh-fim]", 1)), wrapper},
+		"receiver on the manager":                {[]byte(strings.Replace(strings.Replace(string(topology), "groups: [sandbox, log-server, audit-log-forwarding, wazuh-fim]", "groups: [sandbox, wazuh-fim]", 1), "groups: [sandbox, docker, wazuh-manager, wazuh-fim]", "groups: [sandbox, docker, wazuh-manager, log-server, wazuh-fim]", 1)), wrapper},
+		"receiver on EL":                         {[]byte(strings.Replace(strings.Replace(string(topology), "groups: [sandbox, log-server, audit-log-forwarding, wazuh-fim]", "groups: [sandbox, wazuh-fim]", 1), "name: wf244-el\n    base_image: almalinux-9\n    memory: 2048\n    vcpus: 2\n    disk: 30\n    ssh_user: root\n    ssh_timeout: 5m\n    boot_timeout: 8m\n    groups: [sandbox, wazuh-fim]", "name: wf244-el\n    base_image: almalinux-9\n    memory: 2048\n    vcpus: 2\n    disk: 30\n    ssh_user: root\n    ssh_timeout: 5m\n    boot_timeout: 8m\n    groups: [sandbox, log-server, wazuh-fim]", 1)), wrapper},
+		"receiver below its minimum":             {[]byte(strings.Replace(string(topology), "memory: 4096", "memory: 1024", 1)), wrapper},
+		"a sixth import that runs in check mode": {topology, []byte(strings.Replace(string(wrapper), "  when: not ansible_check_mode\n", "", 1))},
+		"a limited import":                       {topology, []byte(strings.Replace(string(wrapper), "tags: [wazuh-manager]", "tags: [wazuh-manager]\n  when: not ansible_check_mode", 1))},
+		"no EL agent":                            {[]byte(strings.Replace(string(topology), "almalinux-9", "ubuntu-24.04", 1)), wrapper},
+		"an Ubuntu 22.04 node":                   {[]byte(strings.Replace(string(topology), "name: wf244-deb\n    base_image: ubuntu-24.04", "name: wf244-deb\n    base_image: ubuntu-22.04", 1)), wrapper},
+		"manager is not an agent":                {[]byte(strings.Replace(string(topology), "groups: [sandbox, docker, wazuh-manager, wazuh-fim]", "groups: [sandbox, docker, wazuh-manager]", 1)), wrapper},
+		"two managers":                           {[]byte(strings.Replace(string(topology), "groups: [sandbox, log-server, audit-log-forwarding, wazuh-fim]", "groups: [sandbox, log-server, wazuh-manager, wazuh-fim]", 1)), wrapper},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if validateWazuhVersionTopology(pair[0], pair[1]) == nil {

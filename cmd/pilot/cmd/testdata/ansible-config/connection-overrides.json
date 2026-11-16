@@ -1,0 +1,107 @@
+[
+    {
+        "name": "CONFIG_FILE",
+        "origin": "",
+        "value": "/work/ansible.cfg"
+    },
+    {
+        "name": "DEFAULT_REMOTE_PORT",
+        "origin": "/work/ansible.cfg",
+        "value": 2200
+    },
+    {
+        "name": "DEFAULT_REMOTE_USER",
+        "origin": "/work/ansible.cfg",
+        "value": "ops"
+    },
+    {
+        "name": "DEFAULT_TRANSPORT",
+        "origin": "env: ANSIBLE_TRANSPORT",
+        "value": "local"
+    },
+    {
+        "name": "EDITOR",
+        "origin": "env: EDITOR",
+        "value": "vi"
+    },
+    {
+        "GALAXY_SERVERS": {}
+    },
+    {
+        "BECOME_PLUGINS": []
+    },
+    {
+        "CACHE_PLUGINS": []
+    },
+    {
+        "CALLBACK_PLUGINS": []
+    },
+    {
+        "CLICONF_PLUGINS": []
+    },
+    {
+        "CONNECTION_PLUGINS": [
+            {
+                "paramiko_ssh": [
+                    {
+                        "name": "port",
+                        "origin": "/work/ansible.cfg",
+                        "value": 2200
+                    },
+                    {
+                        "name": "remote_user",
+                        "origin": "/work/ansible.cfg",
+                        "value": "ops"
+                    }
+                ]
+            },
+            {
+                "ssh": [
+                    {
+                        "name": "port",
+                        "origin": "/work/ansible.cfg",
+                        "value": 2200
+                    },
+                    {
+                        "name": "remote_user",
+                        "origin": "/work/ansible.cfg",
+                        "value": "ops"
+                    },
+                    {
+                        "name": "ssh_args",
+                        "origin": "/work/ansible.cfg",
+                        "value": "-o ProxyCommand=\"ssh -W %h:%p jump\" -o ControlMaster=auto"
+                    },
+                    {
+                        "name": "ssh_common_args",
+                        "origin": "/work/ansible.cfg",
+                        "value": "-o ProxyJump=bastion"
+                    },
+                    {
+                        "name": "ssh_executable",
+                        "origin": "env: ANSIBLE_SSH_EXECUTABLE",
+                        "value": "/tmp/wrap"
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "HTTPAPI_PLUGINS": []
+    },
+    {
+        "INVENTORY_PLUGINS": []
+    },
+    {
+        "LOOKUP_PLUGINS": []
+    },
+    {
+        "NETCONF_PLUGINS": []
+    },
+    {
+        "SHELL_PLUGINS": []
+    },
+    {
+        "VARS_PLUGINS": []
+    }
+]

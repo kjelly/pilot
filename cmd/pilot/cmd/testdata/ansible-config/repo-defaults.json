@@ -1,0 +1,142 @@
+[
+    {
+        "name": "CACHE_PLUGIN",
+        "origin": "/work/ansible.cfg",
+        "value": "jsonfile"
+    },
+    {
+        "name": "CACHE_PLUGIN_CONNECTION",
+        "origin": "/work/ansible.cfg",
+        "value": "~/.ansible/pilot-factcache"
+    },
+    {
+        "name": "CACHE_PLUGIN_TIMEOUT",
+        "origin": "/work/ansible.cfg",
+        "value": 3600
+    },
+    {
+        "name": "CONFIG_FILE",
+        "origin": "",
+        "value": "/work/ansible.cfg"
+    },
+    {
+        "name": "DEFAULT_FORKS",
+        "origin": "/work/ansible.cfg",
+        "value": 20
+    },
+    {
+        "name": "DEFAULT_GATHERING",
+        "origin": "/work/ansible.cfg",
+        "value": "smart"
+    },
+    {
+        "name": "DEFAULT_TIMEOUT",
+        "origin": "/work/ansible.cfg",
+        "value": 30
+    },
+    {
+        "name": "EDITOR",
+        "origin": "env: EDITOR",
+        "value": "vi"
+    },
+    {
+        "name": "HOST_KEY_CHECKING",
+        "origin": "/work/ansible.cfg",
+        "value": false
+    },
+    {
+        "name": "INTERPRETER_PYTHON",
+        "origin": "/work/ansible.cfg",
+        "value": "auto_silent"
+    },
+    {
+        "GALAXY_SERVERS": {}
+    },
+    {
+        "BECOME_PLUGINS": []
+    },
+    {
+        "CACHE_PLUGINS": [
+            {
+                "jsonfile": [
+                    {
+                        "name": "_timeout",
+                        "origin": "/work/ansible.cfg",
+                        "value": 3600
+                    },
+                    {
+                        "name": "_uri",
+                        "origin": "/work/ansible.cfg",
+                        "value": "/home/user/.ansible/pilot-factcache"
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "CALLBACK_PLUGINS": []
+    },
+    {
+        "CLICONF_PLUGINS": []
+    },
+    {
+        "CONNECTION_PLUGINS": [
+            {
+                "paramiko_ssh": [
+                    {
+                        "name": "host_key_checking",
+                        "origin": "/work/ansible.cfg",
+                        "value": false
+                    },
+                    {
+                        "name": "timeout",
+                        "origin": "/work/ansible.cfg",
+                        "value": 30
+                    }
+                ]
+            },
+            {
+                "ssh": [
+                    {
+                        "name": "host_key_checking",
+                        "origin": "/work/ansible.cfg",
+                        "value": false
+                    },
+                    {
+                        "name": "pipelining",
+                        "origin": "/work/ansible.cfg",
+                        "value": true
+                    },
+                    {
+                        "name": "ssh_args",
+                        "origin": "env: ANSIBLE_SSH_ARGS",
+                        "value": "-o ControlMaster=auto -o ControlPath=\"/home/u/.pilot/ssh/cp-%C\" -o ControlPersist=60s"
+                    },
+                    {
+                        "name": "timeout",
+                        "origin": "/work/ansible.cfg",
+                        "value": 30
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "HTTPAPI_PLUGINS": []
+    },
+    {
+        "INVENTORY_PLUGINS": []
+    },
+    {
+        "LOOKUP_PLUGINS": []
+    },
+    {
+        "NETCONF_PLUGINS": []
+    },
+    {
+        "SHELL_PLUGINS": []
+    },
+    {
+        "VARS_PLUGINS": []
+    }
+]

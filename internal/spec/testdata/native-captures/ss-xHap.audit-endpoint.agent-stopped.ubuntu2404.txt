@@ -1,0 +1,1 @@
+u_str LISTEN 0      1                              /var/ossec/queue/sockets/audit 28988 * 0     users:(("audisp-af_unix",pid=6694,fd=3))

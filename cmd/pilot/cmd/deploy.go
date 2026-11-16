@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,6 +33,7 @@ import (
 	"github.com/kjelly/pilot/internal/childproc"
 	"github.com/kjelly/pilot/internal/contract"
 	"github.com/kjelly/pilot/internal/delivery"
+	"github.com/kjelly/pilot/internal/factcache"
 	"github.com/kjelly/pilot/internal/identitylock"
 	"github.com/kjelly/pilot/internal/inventory"
 	"github.com/kjelly/pilot/internal/outbound"
@@ -118,7 +120,9 @@ func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
 	root := filepath.Join(dir, "ansible")
 	home := filepath.Join(root, "home")
 	tmp := filepath.Join(root, "tmp")
-	factCache := filepath.Join(root, "fact-cache")
+	// factcache owns this location: vm-target and docker-target drop the
+	// cached facts of hosts they recreate from the same directory.
+	factCache := factcache.RuntimeDir(dir)
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return deployAnsibleRuntime{}, fmt.Errorf("create Ansible data directory %s: %w", root, err)
 	}
@@ -135,29 +139,34 @@ func prepareDeployAnsibleRuntime(dir string) (deployAnsibleRuntime, error) {
 	if err != nil {
 		return deployAnsibleRuntime{}, err
 	}
+	env := []string{
+		"ANSIBLE_HOME=" + home,
+		"ANSIBLE_LOCAL_TEMP=" + tmp,
+	}
+	// The cache plugin and directory (<data-dir>/ansible/fact-cache) are
+	// spelled out only in factcache, whose DropAll cleans the same
+	// directory when vm-target or docker-target recreate a host.
+	env = append(env, factcache.RuntimeEnv(dir)...)
+	env = append(env,
+		"ANSIBLE_LOG_PATH="+logPath,
+		"ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath="+strconv.Quote(sshcontrol.ControlPath(sshControl))+" -o ControlPersist=60s",
+		"ANSIBLE_RETRY_FILES_ENABLED=False",
+		// Collapses each task to one SSH round-trip instead of a
+		// separate sftp-and-exec per task; safe because every target
+		// image pilot provisions has no sudoers `requiretty`.
+		"ANSIBLE_PIPELINING=True",
+		// Default forks is 5, which serializes host 6+ behind the
+		// first batch on any play targeting a full topology (site.yml)
+		// or a wide overlay group. Only widens per-play SSH
+		// concurrency — task/role order (e.g. FreeIPA server before
+		// client, Wazuh manager before agent) is unaffected.
+		"ANSIBLE_FORKS=20",
+	)
 	return deployAnsibleRuntime{
 		TempDir:       tmp,
 		SSHControlDir: sshControl,
 		LogPath:       logPath,
-		Env: []string{
-			"ANSIBLE_HOME=" + home,
-			"ANSIBLE_LOCAL_TEMP=" + tmp,
-			"ANSIBLE_CACHE_PLUGIN=jsonfile",
-			"ANSIBLE_CACHE_PLUGIN_CONNECTION=" + factCache,
-			"ANSIBLE_LOG_PATH=" + logPath,
-			"ANSIBLE_SSH_ARGS=-o ControlMaster=auto -o ControlPath=" + strconv.Quote(sshcontrol.ControlPath(sshControl)) + " -o ControlPersist=60s",
-			"ANSIBLE_RETRY_FILES_ENABLED=False",
-			// Collapses each task to one SSH round-trip instead of a
-			// separate sftp-and-exec per task; safe because every target
-			// image pilot provisions has no sudoers `requiretty`.
-			"ANSIBLE_PIPELINING=True",
-			// Default forks is 5, which serializes host 6+ behind the
-			// first batch on any play targeting a full topology (site.yml)
-			// or a wide overlay group. Only widens per-play SSH
-			// concurrency — task/role order (e.g. FreeIPA server before
-			// client, Wazuh manager before agent) is unaffected.
-			"ANSIBLE_FORKS=20",
-		},
+		Env:           env,
 	}, nil
 }
 
@@ -1843,7 +1852,7 @@ func promptReconcileExecutionAuthorization(plannedPlaybooks int) (*deploymentAut
 // honored) before availability dropped any: the host the apply step locks is
 // one of them, and the contract's exactly-one cardinality fails a run with
 // more at its own preflight anyway, only later.
-func precheckIdentityDeploy(ctx context.Context, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string) error {
+func precheckIdentityDeploy(ctx context.Context, catalog contract.Catalog, components []string, playbook, inv, limit string, extraVars []string, vault vaultInput) error {
 	if !identitylock.IsApplyPlaybook(playbook) {
 		return nil
 	}
@@ -1854,7 +1863,7 @@ func precheckIdentityDeploy(ctx context.Context, catalog contract.Catalog, compo
 	// Non-nil even when empty: none resolved is "0 hosts", refused, not "resolve
 	// the group again".
 	hosts := append([]string{}, deploymentCandidateHosts(applied, scope)...)
-	return checkIdentityLockTarget(ctx, identityLockRequest{Inventory: inv, Hosts: hosts})
+	return checkIdentityLockTarget(ctx, identityLockRequest{Inventory: inv, Hosts: hosts, ExtraArgs: ansibleExtraVarArgs(extraVars, vault)})
 }
 
 // precheckIdentityBatch runs precheckIdentityDeploy for every request of a
@@ -1881,7 +1890,7 @@ func precheckIdentityBatch(ctx context.Context, requests []catalogDeploymentRequ
 		if err != nil {
 			return err
 		}
-		if err := precheckIdentityDeploy(ctx, catalog, components, request.playbook, request.inv, request.limit, request.extraVars); err != nil {
+		if err := precheckIdentityDeploy(ctx, catalog, components, request.playbook, request.inv, request.limit, request.extraVars, request.vault); err != nil {
 			return err
 		}
 	}
@@ -1917,7 +1926,7 @@ func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runne
 	// runs under the server's /etc/ipa lock, and an inventory the lock cannot be
 	// taken through is refused here instead of after all of that. --preview-only
 	// gets the same answer --force would (see checkIdentityLockTarget).
-	err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars)
+	err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars, vault)
 	if err != nil {
 		return DeploymentExecutionResult{}, err
 	}
@@ -2322,7 +2331,10 @@ func executeRecordedDeploymentCore(ctx context.Context, runner *ansible.Runner, 
 			// Non-nil even when empty: none resolved is "0 hosts", refused, not
 			// "resolve the group again".
 			Inventory: inv, Hosts: append([]string{}, appliedHosts...),
-			Wait: identityLockWaitFrom(ctx), Progress: identityLockProgressFrom(ctx),
+			// The same -e and vault arguments the apply step hands to
+			// ansible-playbook (executeDeploymentTransaction's baseArgs).
+			ExtraArgs: ansibleExtraVarArgs(extraVars, vault),
+			Wait:      identityLockWaitFrom(ctx), Progress: identityLockProgressFrom(ctx),
 		})
 	}
 
@@ -2828,10 +2840,31 @@ type deployInventorySnapshot struct {
 }
 
 func loadDeployInventorySnapshot(ctx context.Context, inventory string) (deployInventorySnapshot, error) {
+	return loadDeployInventorySnapshotWithArgs(ctx, inventory, nil)
+}
+
+// loadDeployInventorySnapshotWithArgs is loadDeployInventorySnapshot with the
+// -e / vault arguments a playbook run is going to get (ansibleExtraVarArgs):
+// Ansible merges them over the inventory in the order it will for the playbook,
+// so the host variables are the effective ones — what the playbook will connect
+// with — and not what the inventory alone says. nil asks for the inventory
+// alone.
+func loadDeployInventorySnapshotWithArgs(ctx context.Context, inventory string, extraArgs []string) (deployInventorySnapshot, error) {
 	if err := validateInventorySecretStorage(filepath.Dir(inventory)); err != nil {
 		return deployInventorySnapshot{}, err
 	}
-	command := deployAnsibleCommand(ctx, "ansible-inventory", "-i", inventory, "--list")
+	args := append([]string{"-i", inventory, "--list"}, extraArgs...)
+	command := deployAnsibleCommand(ctx, "ansible-inventory", args...)
+	if slices.Contains(extraArgs, "--ask-vault-pass") {
+		// The only prompt that can come from this command, as in
+		// resolveInventoryVariables.
+		command.Stdin = os.Stdin
+	}
+	if len(extraArgs) > 0 {
+		// With the -e and vault arguments the listing carries their decrypted
+		// values on every host: not into the controller log.
+		keepValuesOutOfAnsibleLog(command)
+	}
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr

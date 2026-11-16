@@ -1476,11 +1476,11 @@ func TestIdentityLockLintFailsOnMutationsOfTheRealFunnels(t *testing.T) {
 			"cmd/pilot/cmd/host_decommission.go: calls newIdentityLock directly",
 		},
 		"the deploy precheck removed": {
-			"cmd/pilot/cmd/deploy.go", "err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars)", "err = nil",
+			"cmd/pilot/cmd/deploy.go", "err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars, vault)", "err = nil",
 			"executeRecordedDeploymentWithAuthorizationResult: runs the playbook (applyDeploymentDependencyChain) without taking the lock: no call of precheckIdentityDeploy",
 		},
 		"the deploy precheck behind a branch": {
-			"cmd/pilot/cmd/deploy.go", "err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars)", "if len(components) > 1 {\n\t\terr = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars)\n\t}",
+			"cmd/pilot/cmd/deploy.go", "err = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars, vault)", "if len(components) > 1 {\n\t\terr = precheckIdentityDeploy(ctx, catalog, components, playbook, inv, limit, extraVars, vault)\n\t}",
 			"the lock is taken behind a branch that can skip it",
 		},
 		"the batch precheck removed": {

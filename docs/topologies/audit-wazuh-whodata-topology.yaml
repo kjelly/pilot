@@ -1,0 +1,38 @@
+# Disposable topology for issue #324: audit-log-forwarding and the Wazuh agent
+# (who-data) co-hosted on both OS families, with a real manager and receiver.
+#
+# - i324-manager: Ubuntu 24.04, docker + the Wazuh manager stack (central side).
+# - i324-deb: Ubuntu 24.04, the real log-server receiver, audit-log-forwarding and
+#   a Wazuh agent on the same host (the supported co-hosted shape).
+# - i324-el: AlmaLinux 9, audit-log-forwarding and a Wazuh agent on one host.
+# Ubuntu 22.04 and aarch64 are not part of this topology.
+services: none
+nodes:
+  - name: i324-manager
+    base_image: ubuntu-24.04
+    # Guest-visible RAM must exceed the central contract's 8192 MiB.
+    memory: 9216
+    vcpus: 4
+    disk: 100
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [sandbox, docker, wazuh-manager]
+  - name: i324-deb
+    base_image: ubuntu-24.04
+    memory: 4096
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [sandbox, log-server, audit-log-forwarding, wazuh-fim]
+  - name: i324-el
+    base_image: almalinux-9
+    memory: 2048
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [sandbox, audit-log-forwarding, wazuh-fim]

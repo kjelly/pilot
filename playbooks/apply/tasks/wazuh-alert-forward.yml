@@ -230,6 +230,21 @@
   changed_when: false
   when: siem_forwarding_enabled | bool or wazuh_forward_had_config | default(false)
 
+- name: "Wazuh: durably record potential replay cursor exposure before activation"
+  ansible.builtin.command:
+    argv:
+      - /usr/local/sbin/pilot-wazuh-transaction
+      - reader-enable-expose
+      - --owner
+      - "{{ wazuh_writer_owner }}"
+      - --operation
+      - "{{ wazuh_reader_operation.stdout }}"
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - wazuh_reader_enable_admitted | default(false) | bool
+    - siem_forwarding_enabled | bool
+
 - name: "Wazuh: start the host reader"
   ansible.builtin.systemd:
     name: rsyslog

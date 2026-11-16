@@ -2,6 +2,8 @@
 """Local pipeline checks and a controller-orchestrated, one-use delivery oracle."""
 
 import datetime
+import hashlib
+import stat
 import json
 import os
 import pathlib
@@ -15,6 +17,256 @@ import uuid
 CHALLENGE = pathlib.Path('/run/pilot-wazuh-delivery.json')
 PROFILE = pathlib.Path('/etc/rsyslog.d/pilot-wazuh/profile.json')
 
+
+
+class PreviewTools:
+    """Transient read-only invocation capability, never recovery authority.
+
+    The coordinator authenticates this fixed source member before loading this
+    validator. The local subprocess uses this SAME implementation for siblings.
+    No environment variables or arbitrary executable names select tool paths.
+    """
+    RUN = pathlib.Path('/run')
+    WRITER = pathlib.Path('/var/backups/pilot/wazuh/writer-active.json')
+    PROC = pathlib.Path('/proc')
+    NAMES = frozenset(('pilot-wazuh-heartbeat','pilot-wazuh-delivery','pilot-siem-relp-check'))
+    KIND = 'WAZUH_PREVIEW_TOOLS'
+    LIMIT = 1024 * 1024
+
+    @staticmethod
+    def identity(info):
+        return [info.st_dev,info.st_ino,info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode)]
+
+    @staticmethod
+    def stable(info):
+        return [getattr(info,key) for key in ('st_dev','st_ino','st_uid','st_gid','st_mode','st_nlink','st_size','st_mtime_ns','st_ctime_ns')]
+
+    @staticmethod
+    def directory(path):
+        if not path.is_absolute() or str(path) != os.path.normpath(str(path)):
+            raise ValueError('noncanonical preview directory')
+        for parent in (path,*path.parents):
+            info=parent.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                raise ValueError('untrusted preview directory ancestry')
+
+    @classmethod
+    def header(cls, value, owner, operation, absent=False):
+        if (not isinstance(value,dict) or set(value) != {'schema','kind','owner','operation','path','identity','tools'}
+                or type(value['schema']) is not int or value['schema'] != 1 or value['kind'] != cls.KIND
+                or value['owner'] != owner or value['operation'] != operation
+                or not re.fullmatch('[a-f0-9]{32}',owner) or not re.fullmatch('[a-f0-9]{32}',operation)
+                or set(value['tools']) != cls.NAMES
+                or any(not isinstance(h,str) or not re.fullmatch('[a-f0-9]{64}',h) for h in value['tools'].values())):
+            raise ValueError('invalid preview invocation descriptor')
+        path=pathlib.Path(value['path'])
+        if (not isinstance(value['path'],str) or str(path)!=value['path'] or path.parent != cls.RUN or not re.fullmatch('pilot-wazuh-preview-'+owner+'-'+operation+'-[a-zA-Z0-9_]+',path.name)):
+            raise ValueError('preview scope is outside the fixed invocation namespace')
+        cls.directory(path.parent)
+        try: info=path.lstat()
+        except FileNotFoundError:
+            if not absent: raise
+            info=None
+        if (not isinstance(value['identity'],list) or len(value['identity'])!=5
+                or any(type(part) is not int for part in value['identity'])
+                or value['identity'][2:] != [0,0,0o700]
+                or (info is not None and (not stat.S_ISDIR(info.st_mode) or cls.identity(info) != value['identity']))):
+            raise ValueError('preview scope identity changed')
+        cls.directory(cls.WRITER.parent)
+        before=cls.WRITER.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600 or before.st_size > 4096):
+            raise ValueError('invalid preview writer metadata')
+        fd=os.open(cls.WRITER,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try:
+            writer=json.loads(os.read(fd,4097))
+            if cls.stable(os.fstat(fd)) != cls.stable(before) or cls.stable(cls.WRITER.lstat()) != cls.stable(before):
+                raise ValueError('preview writer changed during observation')
+        finally:os.close(fd)
+        if writer != {'owner':owner,'component':'central','mode':'apply'}:
+            raise ValueError('preview lacks its exact genuine central writer')
+        return path
+
+    @classmethod
+    def bootstrap(cls, value, owner, operation, absent=False):
+        # No locking here: parent already holds the genuine host writer/central
+        # lock. A nested shared flock must not contend with its own caller.
+        path=cls.header(value,owner,operation,absent=absent)
+        raw=(cls.PROC/'self/mountinfo').read_text();rows=[]
+        for line in raw.splitlines():
+            left,sep,right=line.partition(' - ');fields=left.split()
+            if not sep or len(fields)<6 or not re.fullmatch('[0-9]+:[0-9]+',fields[2]):
+                raise ValueError('unknown preview mount namespace')
+            decode=lambda text: re.sub(r'\\(040|011|012|134)',lambda m:chr(int(m[1],8)),text)
+            root,point=pathlib.Path(decode(fields[3])),pathlib.Path(decode(fields[4]))
+            rows.append((fields[2],root,point,'rw' in fields[5].split(',')))
+        def project(selected):
+            candidates=[row for row in rows if selected==row[2] or row[2] in selected.parents]
+            if not candidates:raise ValueError('preview path has no physical mount')
+            depth=max(len(row[2].parts) for row in candidates)
+            found={(dev,root,point,writable) for dev,root,point,writable in candidates if len(point.parts)==depth}
+            if len(found)!=1:raise ValueError('preview path has ambiguous mount')
+            dev,root,point,writable=found.pop()
+            if not root.is_absolute():raise ValueError('preview path has no filesystem root')
+            return dev,root/selected.relative_to(point),root,writable
+        physical=project(path)
+        if not physical[3] or physical[2] != pathlib.Path('/') or any(path==point or path in point.parents for _,_,point,_ in rows):
+            raise ValueError('preview scope has a mount or bind escape')
+        for dev,root,point,_ in rows:
+            if point==pathlib.Path('/') or point==cls.RUN:continue
+            if dev==physical[0] and root.is_absolute() and (root==physical[1] or root in physical[1].parents or physical[1] in root.parents):
+                # An ancestor mount only supplies this path; an alternate bind
+                # projection into the selected physical subtree is forbidden.
+                if point not in path.parents:raise ValueError('preview scope has an outside mount alias')
+        for protected in ('/usr/local/libexec','/usr/local/sbin/pilot-wazuh-transaction',
+                          '/etc','/var/spool/rsyslog/pilot-wazuh','/opt/pilot/wazuh-docker','/var/lib/docker'):
+            other=project(pathlib.Path(protected))
+            if physical[0]==other[0] and (physical[1]==other[1] or physical[1] in other[1].parents or other[1] in physical[1].parents):
+                raise ValueError('preview scope overlaps protected physical state')
+        return path
+
+    def __init__(self,value,owner,operation):
+        self.value,self.owner,self.operation=value,owner,operation
+        self.settled=True
+        self.validate()
+
+    def validate(self,partial=False):
+        path=self.bootstrap(self.value,self.owner,self.operation)
+        fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:
+            if self.identity(os.fstat(fd)) != self.value['identity']:raise ValueError('preview directory replaced')
+            names=set(os.listdir(fd))
+            if (names-self.NAMES or (not partial and names!=self.NAMES)):
+                raise ValueError('preview member set differs')
+            for name in sorted(names):
+                file=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+                try:
+                    info=os.fstat(file)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_gid!=0 or info.st_nlink!=1
+                            or stat.S_IMODE(info.st_mode)!=0o700 or not 0<info.st_size<=self.LIMIT):
+                        raise ValueError('unsafe preview tool member')
+                    payload=os.read(file,self.LIMIT+1)
+                    if (len(payload)!=info.st_size or hashlib.sha256(payload).hexdigest()!=self.value['tools'][name]
+                            or self.stable(os.fstat(file))!=self.stable(info) or self.stable(os.stat(name,dir_fd=fd,follow_symlinks=False))!=self.stable(info)):
+                        raise ValueError('preview member source identity differs')
+                finally:os.close(file)
+            if set(os.listdir(fd))!=names or self.identity(path.lstat())!=self.value['identity']:
+                raise ValueError('preview namespace changed')
+        finally:os.close(fd)
+        return path
+
+    def tool(self,name,required):
+        if name not in self.NAMES or self.value['tools'][name]!=required:
+            raise ValueError('preview desired code differs from required retained provenance')
+        return self.validate()/name
+
+    @classmethod
+    def interpreter_path(cls,path):
+        # Every symlink hop must remain in root-controlled directories, even
+        # when a writable intermediate could resolve back to the system image.
+        for _ in range(16):
+            if not path.is_absolute() or str(path)!=os.path.normpath(str(path)):
+                raise ValueError('preview interpreter path is noncanonical')
+            cls.directory(path.parent);info=path.lstat()
+            if info.st_uid!=0:raise ValueError('preview interpreter alias is untrusted')
+            if not stat.S_ISLNK(info.st_mode):return path
+            target=pathlib.Path(os.readlink(path))
+            path=target if target.is_absolute() else path.parent/target
+        raise ValueError('preview interpreter symlink chain exceeds bound')
+
+    @classmethod
+    def system_python(cls):
+        # No PATH or caller-selected interpreter. The standard distro symlink
+        # is allowed only through root-controlled ancestry to the SAME running
+        # canonical system binary. A venv/user interpreter is not this profile.
+        if not sys.executable or not pathlib.Path(sys.executable).is_absolute() or sys.prefix!=sys.base_prefix:
+            raise ValueError('preview requires the running absolute system Python')
+        requested=pathlib.Path(sys.executable)
+        canonical=cls.interpreter_path(pathlib.Path('/usr/bin/python3'));running=cls.interpreter_path(requested)
+        cls.directory(canonical.parent)
+        info=canonical.stat();identity=(info.st_dev,info.st_ino)
+        if (running!=canonical or not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_mode & 0o022
+                or identity!=(requested.stat().st_dev,requested.stat().st_ino)
+                or identity!=(pathlib.Path('/proc/self/exe').stat().st_dev,pathlib.Path('/proc/self/exe').stat().st_ino)
+                or not info.st_mode & 0o111 or not os.access(canonical,os.X_OK)):
+            raise ValueError('preview interpreter differs from trusted running system Python')
+        return canonical
+
+    def argv(self,name,required,*arguments):
+        path=self.tool(name,required)
+        allowed=(name=='pilot-wazuh-heartbeat' and list(arguments) in
+                 (['inspect-reader'],['inspect-reader','--cold'],['runtime','tcp'],['runtime','relp'])) or (
+                 name=='pilot-siem-relp-check' and list(arguments)==['sender-config','wazuh-sender'])
+        if name=='pilot-wazuh-delivery' and len(arguments)==3 and arguments[:2]==('local','--preview-tools-json'):
+            try:allowed=json.loads(arguments[2])==self.value
+            except (ValueError,TypeError):allowed=False
+        if not allowed:raise ValueError('preview tool arguments are outside fixed readonly modes')
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try:
+            before=os.fstat(fd);payload=os.read(fd,self.LIMIT+1)
+            if (not payload.startswith(b'#!/usr/bin/python3\n') or hashlib.sha256(payload).hexdigest()!=required
+                    or self.stable(os.fstat(fd))!=self.stable(before) or self.stable(path.lstat())!=self.stable(before)):
+                raise ValueError('preview requires the exact fixed Python script kind and bytes')
+        finally:os.close(fd)
+        return [str(self.system_python()),str(path),*arguments]
+
+    def certificate(self,kind):
+        return {'schema':1,'kind':kind,'owner':self.owner,'operation':self.operation,
+                'path':self.value['path'],'identity':self.value['identity'],
+                'source_sha256':self.value['tools']['pilot-wazuh-delivery']}
+
+    def remove(self):
+        path=self.bootstrap(self.value,self.owner,self.operation,absent=True)
+        # Exact already-absent retry is admitted only by main's independent
+        # settled-foreground proof and this original pinned invocation header.
+        parent=os.open(self.RUN,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:
+            try:os.stat(path.name,dir_fd=parent,follow_symlinks=False)
+            except FileNotFoundError:
+                os.fsync(parent)
+                try:os.stat(path.name,dir_fd=parent,follow_symlinks=False)
+                except FileNotFoundError:
+                    return dict(self.certificate('WAZUH_PREVIEW_CLEANUP'),observers_settled=True,scope_absent=True)
+                raise ValueError('preview absence changed')
+        finally:os.close(parent)
+        path=self.validate(partial=True)
+        identities={tuple(self.identity(path.lstat())[:2])}
+        identities.update((file.stat().st_dev,file.stat().st_ino) for file in path.iterdir())
+        processes=list(self.PROC.iterdir())
+        if len(processes)>8192:raise ValueError('preview process census exceeds bound')
+        for process in processes:
+            if not process.name.isdecimal() or int(process.name)==os.getpid():continue
+            try:
+                with (process/'cmdline').open('rb') as stream:raw=stream.read(65537)
+                if len(raw)>65536:raise ValueError('preview child identity exceeds bound')
+                argv=raw.split(b'\0')
+                if any(token==str(path).encode() or token.startswith(str(path).encode()+b'/') for token in argv):
+                    raise ValueError('preview child has not exited')
+                cwd=(process/'cwd').stat()
+                if (cwd.st_dev,cwd.st_ino) in identities:raise ValueError('preview child retains its scope')
+                descriptors=list((process/'fd').iterdir())
+                if len(descriptors)>8192:raise ValueError('preview descriptor census exceeds bound')
+                for entry in descriptors:
+                    try:
+                        info=entry.stat()
+                        if (info.st_dev,info.st_ino) in identities:raise ValueError('preview child retains an open member')
+                    except FileNotFoundError:continue
+            except (FileNotFoundError,ProcessLookupError):continue
+        fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        parent=os.open(self.RUN,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:
+            self.validate(partial=True)
+            if self.identity(os.fstat(fd))!=self.value['identity']:raise ValueError('preview cleanup scope replaced')
+            for name in os.listdir(fd):os.unlink(name,dir_fd=fd)
+            os.fsync(fd)
+            if self.identity(os.stat(path.name,dir_fd=parent,follow_symlinks=False))!=self.value['identity']:
+                raise ValueError('preview cleanup namespace replaced')
+            os.rmdir(path.name,dir_fd=parent);os.fsync(parent)
+            try:os.stat(path.name,dir_fd=parent,follow_symlinks=False)
+            except FileNotFoundError:pass
+            else:raise ValueError('preview scope reappeared after removal')
+        finally:os.close(fd);os.close(parent)
+        return dict(self.certificate('WAZUH_PREVIEW_CLEANUP'),observers_settled=True,scope_absent=True)
 
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, capture_output=True, timeout=20, **kwargs).stdout
@@ -126,7 +378,7 @@ def check_input(text, source):
         raise ValueError('dedicated Wazuh ruleset is missing')
 
 
-def check_local():
+def check_local(preview=None):
     profile = json.loads(PROFILE.read_text())
     conf = pathlib.Path('/etc/rsyslog.d/31-pilot-wazuh.conf')
     if not profile['enabled']:
@@ -152,16 +404,56 @@ def check_local():
         raise ValueError('legacy UDP forward is still active')
     # Config/TLS/loaded-state check is intentionally local. Only the receiver
     # delivery mode can establish that a real alert reached disk.
-    run('/usr/local/libexec/pilot-siem-relp-check', 'sender-config', 'wazuh-sender')
+    relp=['/usr/local/libexec/pilot-siem-relp-check','sender-config','wazuh-sender']
+    heartbeat=['/usr/local/libexec/pilot-wazuh-heartbeat','runtime',profile['transport']]
+    if preview is not None:
+        if type(preview) is not PreviewTools:raise ValueError('unknown local preview capability')
+        if pathlib.Path(__file__) != preview.tool('pilot-wazuh-delivery',preview.value['tools']['pilot-wazuh-delivery']):
+            raise ValueError('preview delivery must execute its authenticated fixed member')
+        relp=preview.argv('pilot-siem-relp-check',preview.value['tools']['pilot-siem-relp-check'],'sender-config','wazuh-sender')
+        heartbeat=preview.argv('pilot-wazuh-heartbeat',preview.value['tools']['pilot-wazuh-heartbeat'],'runtime',profile['transport'])
+    run(*relp)
     expected_interval = 5 if profile['transport'] == 'relp' else 0
     if profile.get('heartbeat_interval') != expected_interval:
         raise ValueError('desired transport heartbeat profile is missing or changed')
-    run('/usr/local/libexec/pilot-wazuh-heartbeat', 'runtime', profile['transport'])
+    run(*heartbeat)
     check_input(conf.read_text(), profile['source'])
 
 
 def main():
     mode = sys.argv[1]
+    preview=None
+    if mode in ('preview-pin','preview-cleanup'):
+        if len(sys.argv)!=(3 if mode=='preview-pin' else 4):raise ValueError('invalid preview cleanup arguments')
+        value=json.loads(sys.argv[2])
+        if hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()!=value['tools']['pilot-wazuh-delivery']:
+            raise ValueError('preview cleanup must use exact desired source')
+        if mode=='preview-pin':
+            pinned=PreviewTools.bootstrap(value,value['owner'],value['operation'])
+            if any(pinned.iterdir()):raise ValueError('new preview scope is not empty')
+            preview=object.__new__(PreviewTools);preview.value=value;preview.owner=value['owner'];preview.operation=value['operation']
+            print(json.dumps(preview.certificate('WAZUH_PREVIEW_PIN'),sort_keys=True));return
+        outcomes=json.loads(sys.argv[3])
+        if (not isinstance(outcomes,dict) or set(outcomes)!={'coordinator_sha256','calls'}
+                or not re.fullmatch('[a-f0-9]{64}',outcomes['coordinator_sha256'])
+                or not isinstance(outcomes['calls'],list) or len(outcomes['calls'])!=2):
+            raise ValueError('unknown preview dispatch outcomes')
+        for outcome in outcomes['calls']:
+            if type(outcome.get('dispatched')) is not bool:raise ValueError('unknown preview dispatch intent')
+            if outcome['dispatched']:
+                try:response=json.loads(outcome.get('response',''))
+                except (ValueError,TypeError):raise ValueError('preview foreground outcome is unknown')
+                if (not isinstance(response,dict) or response.get('preview_source_sha256')!=outcomes['coordinator_sha256']
+                        or response.get('preview_children_settled') is not True or response.get('preview_owner')!=value['owner']
+                        or response.get('preview_operation')!=value['operation']):
+                    raise ValueError('preview foreground children are not proved settled')
+        preview=object.__new__(PreviewTools);preview.value=value;preview.owner=value['owner'];preview.operation=value['operation']
+        print(json.dumps(preview.remove(),sort_keys=True));return
+    if '--preview-tools-json' in sys.argv:
+        if mode!='local' or len(sys.argv)!=4 or sys.argv[2]!='--preview-tools-json':
+            raise ValueError('preview context is local-only')
+        value=json.loads(sys.argv[3]);preview=PreviewTools(value,value['owner'],value['operation'])
+    elif mode=='local' and len(sys.argv)!=2:raise ValueError('unknown local verification arguments')
     if mode == 'challenge':
         challenge(*sys.argv[2:4])
     elif mode == 'inject':
@@ -169,14 +461,35 @@ def main():
     elif mode == 'delivery':
         check_delivery()
     elif mode == 'local':
-        check_local()
+        check_local(preview)
     else:
         raise ValueError('unknown mode')
 
 
-if __name__ == '__main__':
+def typed_error(kind, text):
+    """Bounded, secret-free failure field; same contract as the coordinator's.
+
+    The Ansible cleanup task runs under no_log, which hides why it was refused.
+    kind is a closed set; text is a fixed ValueError literal of this file (or a
+    generic message), reduced to printable ASCII without quote, backslash or brace.
+    """
+    assert kind in ('refused', 'native')
+    return {'error': re.sub(r'[^ !#-\[\]-z|~]', '?', str(text))[:300], 'error_kind': kind}
+
+
+def entry():
     try:
         main()
     except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as error:
         print('Wazuh verification failed: ' + str(error), file=sys.stderr)
+        if sys.argv[1:2] in (['preview-pin'], ['preview-cleanup']):
+            # Preview scope settlement: only a plain ValueError (this file's own
+            # fixed-literal gates) is shown; OS/JSON/other errors stay generic so
+            # paths, descriptors and parsed documents never reach the output.
+            print(json.dumps(typed_error('refused', error) if type(error) is ValueError else
+                             typed_error('native', 'preview scope operation failed; scope and writer retained')))
         sys.exit(1)
+
+
+if __name__ == '__main__':
+    entry()
