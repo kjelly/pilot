@@ -116,16 +116,36 @@ EL 的 who-data endpoint 由一般套用建立，否則套用失敗（Issue #323
 才變更主機：
 - endpoint 是有 listener 的 socket，且 `wazuh-syscheckd` 已連線：不送訊號、不重啟、回報 unchanged；這條
   路徑不要求任何 `wazuh_fim` watch。
-- listener 存在，但 syscheckd 在有上限的寬限內仍未連線：重啟一次 `wazuh-agent`，不送訊號。
+- listener 存在，但 syscheckd 在有上限的寬限內仍未連線：重啟一次 `wazuh-agent`，不送訊號（重啟前後的條件同下）。
 - endpoint 不存在：先有上限地等待 `af_wazuh.conf` 出現且 `active = yes`（全新主機上 Step 11 緊接在 Step 10
   之後重啟 agent，檔案可能尚未寫出）；再對 auditd 主程序（systemd `MainPID`，以 pidfd 持有，執行檔必須是
   `/usr/sbin/auditd`）送恰好一次 SIGHUP；有上限地等待 endpoint 以有 listener 的 socket 出現；然後重啟一次
   `wazuh-agent`，並要求 syscheckd 已連線且至少一條 `wazuh_fim` kernel watch 出現（只有本次套用自己重啟 agent
   之後才要求 watch）。全新主機的第一次套用因此會重啟 agent 兩次（Step 11 一次、本步驟一次）；第二次套用
   不送訊號、不重啟、`changed=0`。
+- 重啟 `wazuh-agent` 之前與之後的條件（Issue #330；以上兩條會重啟的路徑相同）。全新主機上 agent 註冊後收到第一份
+  shared config（`merged.mg`）時，會自己執行 `active-response/bin/restart.sh agent reload`（`systemctl reload
+  wazuh-agent`，由 `wazuh-control reload` 重啟 syscheckd）；pilot 的 `systemctl restart` 若與它重疊，systemd 會把
+  重啟併入進行中的 job，endpoint 出現**之前**就啟動的舊 `wazuh-syscheckd` 因此留下來：它退回 real-time，而且（#323 的原生 arm A'：至少 60 秒）
+  不會自己連上 endpoint，所以多等 `READY_WAIT` 沒有用（Issue #330 記載的失敗套用 journal：`remains running after
+  unit stopped`、`wazuh-syscheckd already running`）。所以 coordinator 在每一條會重啟的路徑上：(1) 於「endpoint 第一次被觀察到有
+  listener」之後立刻讀開機時鐘（`/proc/uptime`，與 `/proc/<pid>/stat` 的 starttime 同一個時基）當作時間點，
+  不會早於 endpoint 出現；(2) 有上限地（`SETTLE_WAIT`＝120 秒，大於上游 `restart.sh` 最多等 active 的 60 秒加上
+  unit 的 `TimeoutSec=45`）等到 `wazuh-agent.service` 沒有進行中的轉換——`systemctl show` 的 `ActiveState` 不是
+  `reloading`/`activating`/`deactivating`/`refreshing`、沒有排隊中的 job、且該 service 的 cgroup 內沒有
+  `restart.sh` 行程（只看這個 service 自己的 cgroup，其他行程不算；`inactive`/`failed` 且沒有排隊 job 不是轉換，
+  重啟會把它啟動，與先前相同）；逾時即 typed refusal，**不重啟**（已經送出的 SIGHUP 不回復）；(3) 只重啟一次，
+  沒有補救性的第二次重啟；(4) 重啟之後，該 service 的 cgroup 內必須恰好有一個 `wazuh-syscheckd`（執行檔
+  `/var/ossec/bin/wazuh-syscheckd`），而且它的 starttime 不早於該時間點；比時間點更早的 syscheckd 在重啟後仍在，
+  代表重啟沒有換掉它，立刻 typed refusal（不等）。其餘條件在 `READY_WAIT`（60 秒）內輪詢，到期時依成立的那一個
+  各自 typed refusal（見下）。no-op 路徑（endpoint 有 listener 且 syscheckd 已連線）不看 agent 服務，行為不變。
 - 下列情形以 typed refusal 讓套用失敗，既有 rescue 隨後執行（rescue 永遠不重啟 auditd，SIGHUP 不回復）：
   plugin 在上限內始終不是 `active = yes`（不送訊號）；endpoint 路徑存在但不是 socket；socket 存在但沒有任何
-  listener；單一次 SIGHUP 之後 endpoint 仍未出現（不重啟 agent）；重啟之後 stream 或 watch 沒有出現。
+  listener；單一次 SIGHUP 之後 endpoint 仍未出現（不重啟 agent）；agent 服務在上限內沒有結束進行中的
+  reload/restart（不重啟 agent）；重啟之後：比 endpoint 更早啟動的 syscheckd 倖存、該 service 不是恰好有一個
+  syscheckd、endpoint 已不再有 listener、syscheckd 沒有連上 endpoint、已連線但沒有 `wazuh_fim` watch——每一個條件
+  有各自固定的訊息，讀 typed 原因就知道缺的是哪一個；`systemctl show` 或 `/proc` 讀不到或讀不懂也是 typed
+  refusal，不會當作通過。
 就緒判斷不看 listener 是哪個程序（外部的 `audisp-af_unix` 或 auditd 內建的 af_unix 都算），只看 `ss -xHap`：
 endpoint 路徑上有 LISTEN，且有 ESTAB 的 server 端、其 inode 與 `wazuh-syscheckd` 的 ESTAB client 互指（與 C11
 相同的判斷）。受控升級的 admission gate 不變，仍使用自己的精確 listener 與 watch 證明。
@@ -460,3 +480,4 @@ go run ./cmd/pilot vm-target run --name wazuh-fim \
 | 2026-11-12 | Issue #324 | 文件更新（無 Expected 變更，不新增、不收緊、不放寬任何 row）：`audit-log-forwarding` v2.1 改由該模組負責不讓 `augenrules --load`／auditd 重啟清掉同機的 `wazuh_fim` watch（只在需要時載入；擾動前讀本協調器的唯讀 `writer-inspect` 並在 writer 進行中時拒絕；擾動後重啟 `wazuh-agent` 並有上限地等 watch 回來，否則 typed 失敗）。更新「已知限制（其他元件）」與 ownership 契約的例外說明，並列出仍存在的限制。wazuh-fim 的 playbook、coordinator 與 spec row 都沒有改。目標環境實跑結果見 `docs/evidence/audit-log-forwarding/LATEST.md`。 | pilot |
 | 2026-11-12 | Issue #324 | 文件修正（無 Expected 變更，不新增、不收緊、不放寬任何 row）：「已知限制（其他元件）」改記 2026-11-12 在拋棄式 Ubuntu 24.04.4 VM 以 BASE 量到的 Wazuh 自癒行為（前兩次清除自行補回、連續第三次起退回 real-time 且不再恢復），EL 9.8 上 Step 8b 的 SIGHUP 已量過不是擾動，並明記既有的 EL 順序缺口（audit-log-forwarding 的 SIGHUP 先於 Wazuh agent 套件安裝 `af_wazuh.conf`，同機全新鏈套用後 endpoint 尚未 live，之後需要 `pkill -HUP -x auditd`；這個缺口已由 Issue #323 修復，不屬於 #324，與 main 整合後的鏈實跑見 `docs/evidence/audit-log-forwarding/LATEST.md`）。 | pilot |
 | 2026-11-12 | Issue #323 | EL 的一般套用建立 who-data endpoint，否則套用失敗：RedHat family 的 Step 4 安裝 `audispd-plugins`（C2 的 EL 檢查收緊為 `rpm -q audit audispd-plugins`）；新增 Step 11a（tag C11，只在 RedHat family 的一般套用）以 coordinator `agent-whodata-ensure` 在 agent 最後一次服務變更之後確保 endpoint：已存在且 syscheckd 已連線則不變更；listener 在但未連線則重啟一次 agent；endpoint 不存在且 plugin 啟用則一次 SIGHUP、等待、一次 agent 重啟並證明連線與至少一條 watch；其餘情形 typed refusal。新增 C11（EL；endpoint 為 socket 且 `wazuh-syscheckd` 已連線；不看 listener 程序、不要求 watch，原因見 §2 與 #324；Debian family 不涵蓋）。row 數 10 → 11；C1–C10 的 ID 與 Expected 不變，C2 的 EL 檢查收緊，沒有放寬任何 Expected。受控升級的 admission gate 不變；舊的 EL 主機須先完成一次一般套用才能升級。原生驗收以各 candidate 的 target evidence 為準（`docs/evidence/wazuh-fim/`）。 | pilot |
+| 2026-11-16 | Issue #330 | 文件更新（無 Expected 變更，不新增、不收緊、不放寬任何 row；C11 的文字不變）：§2 Step 11a 補記重啟 `wazuh-agent` 前後的條件。agent 自己的 `restart.sh agent reload` 與 pilot 的 `systemctl restart` 重疊時，重啟被併入進行中的 job，endpoint 出現之前啟動的 `wazuh-syscheckd` 留下來而永遠連不上；coordinator 現在先記下 endpoint 第一次被觀察到有 listener 的開機時鐘時間點，有上限（120 秒）地等 `wazuh-agent.service` 沒有進行中的 reload/restart 再重啟一次，重啟後要求恰好一個起始時間不早於該時間點的 syscheckd，並且把原本單一的「stream 或 watch 沒有出現」拒絕拆成各自固定訊息的 typed refusal（逾時未重啟、舊 syscheckd 倖存、不是恰好一個 syscheckd、endpoint 不再有 listener、未連線、連線但沒有 watch）。no-op 路徑與 Debian 不變。這個變更目前只有本機 harness（systemd、`/proc`、Wazuh 的行為為 modeled）的證明；原生實跑結果尚待 `docs/evidence/wazuh-fim/` 的 evidence record 記錄，在那之前不應視為已在目標主機驗證。 | pilot |

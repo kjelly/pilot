@@ -275,6 +275,16 @@ C11 的邊界：只涵蓋 EL（RedHat family），Debian family 不斷言；不�
 本列仍不要求 watch：穩態 no-op 與驗收不依賴它；不辨識 listener 是哪個程序。排查 EL 上 C11 失敗或 Step 11a 失敗時，
 讀 apply 輸出的 typed 原因，再看 `ss -xHap`（endpoint 路徑上的 LISTEN 與 ESTAB、以及 syscheckd 的 ESTAB）、
 `auditctl -l`（有沒有 `wazuh_fim` 規則）與 `/etc/audit/plugins.d/af_wazuh.conf`（是否 `active = yes`）。
+重啟 `wazuh-agent` 之後的失敗原因各有固定訊息（Issue #330），指出缺的是哪一個條件：「did not finish an in-flight
+reload or restart」＝agent 自己的 reload/restart 在 120 秒內沒結束，agent 沒有被重啟（看 `systemctl status
+wazuh-agent` 與 `/var/ossec/logs/active-responses.log` 是否有 `restart.sh`）；「survived the agent restart」＝比
+endpoint 更早啟動的 `wazuh-syscheckd` 在重啟後仍在，重啟沒有換掉它（看 journal 有沒有 `remains running after unit
+stopped`、`wazuh-syscheckd already running`；#323 的原生 arm A' 看到這種 syscheckd 至少 60 秒不會自己連上
+endpoint，Issue #330 記載重跑一般套用後收斂）；「exactly one
+wazuh-syscheckd」、「no longer listening」、「did not connect」、「no wazuh_fim kernel audit watch」各對應 syscheckd
+行程數、endpoint 的 listener、stream、kernel watch。這些訊息的條件與判斷方式見
+`docs/verification/wazuh-fim.md` §2 Step 11a；該修復的原生 target 實跑結果尚待 evidence record 記錄，在那之前上面
+的看法是 harness 模型與 Issue 記載的 journal，不是目標主機上的觀察。
 在 EL 上較早 revision 套用的舊主機（沒有 `audispd-plugins`、沒有 endpoint）需要先重跑一次含 Step 11a 的一般
 套用，之後才能帶 `wazuh_upgrade=true`；受控升級本身不會修復它，會以
 `configured external audit endpoint is unavailable before upgrade` 拒絕。
