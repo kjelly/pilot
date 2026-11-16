@@ -1,0 +1,53 @@
+# Deregister ONE agent on the Wazuh manager for the agent-skew hotfix
+# (playbooks/apply/wazuh-fim-agent-skew-hotfix.yml, spec C6).
+#
+# Included per host from Play B, which has recorded the agent's enrollment
+# (hotfix_state.registration: id + name, read from client.keys by
+# files/wazuh-agent-hotfix.py inspect) before anything was changed. Play A already ran the
+# read-only registry check (tasks/wazuh-agent-hotfix-registry-check.yml) for every actionable
+# host; it runs again here, right before the removal, because the registry can change in
+# between. Already-absent is success, so a rerun after an interruption finishes cleanly.
+#
+# Needs: hotfix_state.registration, hotfix_manager_host, hotfix_manager_container.
+#
+# Re-included for every actionable host in one run. Everything it reads is registered or reset
+# below before it is read (the registry check resets its own facts, AGENTS.md §4.5 point 2).
+
+# Shared with Play A; read-only, so `always` ("whenever this include runs") is right for every
+# caller's tags (the shared-file rule of AGENTS.md §4.5 point 8).
+- name: "Re-check the manager's registry right before the removal (read-only; the same refusals as Play A)"
+  ansible.builtin.include_tasks:
+    file: wazuh-agent-hotfix-registry-check.yml
+    apply:
+      tags: [always]
+
+- name: "Deregister the agent by its recorded ID"
+  ansible.builtin.shell: |
+    set -o pipefail
+    printf 'y\n' | docker exec -i {{ hotfix_manager_container }} /var/ossec/bin/manage_agents -r {{ hotfix_state.registration.id | quote }}
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ hotfix_manager_host }}"
+  register: hotfix_registry_removed
+  when: hotfix_registry_by_id | length == 1
+  changed_when: "'removed' in (hotfix_registry_removed.stdout | default(''))"
+  failed_when:
+    - hotfix_registry_removed.rc | default(0) != 0
+    - "'does not exist' not in (hotfix_registry_removed.stdout | default(''))"
+
+- name: "List the manager's registered agents again (read-only)"
+  ansible.builtin.command: "docker exec {{ hotfix_manager_container }} /var/ossec/bin/manage_agents -l"
+  delegate_to: "{{ hotfix_manager_host }}"
+  register: hotfix_registry_final
+  changed_when: false
+  check_mode: false
+
+- name: "Gate: the recorded ID is no longer registered"
+  ansible.builtin.assert:
+    that:
+      - >-
+        hotfix_registry_final.stdout
+        | regex_findall('ID: ([0-9]+), Name: ([^,]+),')
+        | selectattr('0', 'equalto', hotfix_state.registration.id)
+        | list | length == 0
+    fail_msg: "Agent ID {{ hotfix_state.registration.id }} is still registered on the manager after the removal."

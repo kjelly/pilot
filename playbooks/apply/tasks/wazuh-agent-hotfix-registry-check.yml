@@ -1,0 +1,64 @@
+# Read-only: compare ONE agent's recorded enrollment with the Wazuh manager's registry,
+# for the agent-skew hotfix (playbooks/apply/wazuh-fim-agent-skew-hotfix.yml, spec C6).
+#
+# Included per host, twice: by Play A (read-only, any_errors_fatal) so a mismatch refuses the
+# whole run before anything is changed, and by wazuh-agent-hotfix-deregister.yml right before
+# Play B removes the registration, because the registry can change between the two. It changes
+# nothing; the deregistration itself stays in the deregister file.
+#
+# The recorded enrollment is hotfix_state.registration (id + name, read from client.keys by
+# files/wazuh-agent-hotfix.py inspect). The manager is addressed by that numeric ID and a
+# different name under it means the ID was reused or the inventory is not what we think, so the
+# run refuses instead of guessing (spec.md §5.6: never a hostname substring). The reverse holds
+# too: the recorded NAME registered under a DIFFERENT ID is another registration of this host
+# (stale, or a re-enrollment this client.keys does not know about); removing the recorded ID
+# would leave that one behind or hide it, so it refuses too. An ID the manager no longer lists
+# is success (an interrupted earlier run already removed it).
+#
+# Needs: hotfix_state.registration, hotfix_manager_host, hotfix_manager_container.
+# manage_agents -l prints "   ID: 001, Name: client1.example.com, IP: any" (real capture in
+# playbooks/decommission/wazuh-manager-agent-deregister.yml). The listing is lowercased, so the
+# names compare case-insensitively (FreeIPA and DNS names do not distinguish case, AGENTS.md §5.13).
+#
+# Sets: hotfix_registry_by_id (entries under the recorded ID, 0 or 1 of [id, name]) and
+# hotfix_registry_elsewhere (entries carrying the recorded name under another ID), both
+# reset first: this file is included for every actionable host in one run (AGENTS.md §4.5 point 2).
+- name: "Reset this include's state"
+  ansible.builtin.set_fact:
+    hotfix_registry_by_id: []
+    hotfix_registry_elsewhere: []
+
+- name: "List the manager's registered agents (read-only)"
+  ansible.builtin.command: "docker exec {{ hotfix_manager_container }} /var/ossec/bin/manage_agents -l"
+  delegate_to: "{{ hotfix_manager_host }}"
+  register: hotfix_registry_listing
+  changed_when: false
+  check_mode: false
+
+- name: "Read the registry entries"
+  ansible.builtin.set_fact:
+    hotfix_registry_entries: "{{ hotfix_registry_listing.stdout | lower | regex_findall('id: ([0-9]+), name: ([^,]+),') }}"
+
+- name: "Find the entry under the recorded ID"
+  ansible.builtin.set_fact:
+    hotfix_registry_by_id: "{{ hotfix_registry_entries | selectattr('0', 'equalto', hotfix_state.registration.id) | list }}"
+
+- name: "Find any other entry that carries the recorded name"
+  ansible.builtin.set_fact:
+    hotfix_registry_elsewhere: >-
+      {{ hotfix_registry_entries
+         | selectattr('1', 'equalto', hotfix_state.registration.name | lower)
+         | rejectattr('0', 'equalto', hotfix_state.registration.id)
+         | list }}
+
+- name: "Gate: an entry under the recorded ID carries the recorded name, and no other entry carries that name"
+  ansible.builtin.assert:
+    that:
+      - hotfix_registry_by_id | length <= 1
+      - hotfix_registry_by_id | length == 0 or hotfix_registry_by_id[0][1] == (hotfix_state.registration.name | lower)
+      - hotfix_registry_elsewhere | length == 0
+    fail_msg: >-
+      The manager's registry does not match this host's client.keys (ID {{ hotfix_state.registration.id }},
+      name {{ hotfix_state.registration.name }}): under that ID it lists {{ hotfix_registry_by_id }}, and
+      the name is also registered under {{ hotfix_registry_elsewhere | map(attribute=0) | list }}.
+      Refusing to deregister anything; resolve the registry by hand, then rerun.

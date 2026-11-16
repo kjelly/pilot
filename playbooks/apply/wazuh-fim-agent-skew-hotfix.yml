@@ -1,0 +1,436 @@
+# Wazuh agent version-skew hotfix — remove agents newer than their manager.
+#
+# Spec: docs/verification/wazuh-fim-agent-skew-hotfix.md
+# Entry: `pilot hotfix wazuh-agent-skew` (cmd/pilot/cmd/hotfix_wazuh_agent_skew.go).
+#
+# wazuh-fim-apply.yml refuses an installed agent release V that is strictly
+# newer than the manager release M, with no downgrade path, so such a host can
+# never be redeployed. This playbook takes it back to "no agent, no pilot
+# package policy, no manager registration" so the next `pilot deploy` installs M.
+# It is deliberately NOT wazuh-agent-decommission.yml, which keeps the package
+# and its hold (and so leaves the host unredeployable).
+#
+# Internal entry (AGENTS.md §4.0): no contract, no catalog entry, not in
+# site.yml. Operators go through `pilot hotfix`, which plans, asks for the stage
+# and a confirmation, and hands this file the hosts it confirmed; running this
+# file directly skips all of that and is only for vm-target runs and diagnostics.
+# The stage gate (§4.3) is complete anyway.
+#
+# Two plays in one ansible-playbook run:
+#   Play A  (every target host, read-only, any_errors_fatal)
+#           observe M and each host's state and decide, in
+#           files/wazuh-agent-hotfix.py inspect, which hosts are actionable: newer
+#           than M, or the residue of an earlier removal (no package, audit plugin
+#           still running). In apply mode it also makes EVERY refusal that does not
+#           need a change first: the stage gates (confirm, environment-group
+#           cross-checks for the host and for the manager, prod attestation), the
+#           confirmed-host list, and the manager-registry check. Any host that
+#           cannot be judged, or any refusal, fails the WHOLE run here, before
+#           anything is changed ("fail closed for the whole run"). Play B's
+#           pre_tasks gates repeat the stage gates as defence in depth; Play B is
+#           serial, so a gate there would already be running after the first host
+#           was changed and must never be the first to fail.
+#   Play B  (only the hosts Play A found actionable, serial 1, stops at the first
+#           failure) per host: claim the Wazuh writer -> stop the agent ->
+#           deregister it on the manager by recorded ID + name -> release pilot's
+#           hold -> drop client.keys -> purge the package -> retire the audit
+#           plugin -> verify -> release.
+#
+# No rollback, by design: a purged package cannot be put back in place. Resumable
+# instead: every step is idempotent, and the order puts the purge after every step
+# that could not otherwise be seen again, so an interruption anywhere up to the
+# purge leaves the package installed (the host is still "newer than M" and the
+# rerun selects it), and after the purge the only thing that can be left is the
+# orphaned audit plugin, which is what Play A reports as residue. The writer is
+# released in the `always:` section whenever this play claimed it; a controller
+# that is killed or times out cannot run that section, and the marker then stays
+# until it is removed by hand (docs/runbooks/hotfix-wazuh-agent-skew.md §2).
+#
+# -e pilot_hotfix_mode=observe runs only Play A's read-only inspection (the plan
+# `pilot hotfix` prints before it asks for confirmation); it changes nothing,
+# needs no stage flags, and evaluates none of the apply-mode gates. -e
+# '{"pilot_hotfix_confirmed_hosts": [...]}' (a JSON object value, never key=[...])
+# restricts apply mode to the hosts the operator confirmed; undefined means no
+# restriction (vm-target runs).
+#
+# Stage gating (same convention as every apply playbook):
+#   sandbox  default; runs immediately
+#   staging  requires -e confirm_staging=true
+#   prod     requires -e confirm_prod=true AND staging_attested_within_hours<=168
+---
+- name: Wazuh agent skew hotfix — observe which agents are newer than the manager, and refuse before any change (read-only)
+  hosts: "{{ target_group | default('wazuh-fim') }}"
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    hotfix_manager_container: single-node-wazuh.manager-1
+  tasks:
+    - name: "Gate: pilot_hotfix_mode is apply or observe"
+      ansible.builtin.assert:
+        that:
+          - (pilot_hotfix_mode | default('apply')) in ['apply', 'observe']
+        fail_msg: >-
+          pilot_hotfix_mode must be 'apply' or 'observe' (got {{ pilot_hotfix_mode | default('apply') }});
+          any other value would run neither the gates nor the removal.
+      tags: [always]
+
+    - name: "Gate: the inventory has exactly one wazuh-manager host and this host runs a supported platform"
+      ansible.builtin.assert:
+        that:
+          - groups.get('wazuh-manager', []) | length == 1
+          - ansible_architecture == 'x86_64'
+          - ansible_os_family in ['Debian', 'RedHat']
+        fail_msg: >-
+          The hotfix needs exactly one inventory host in the wazuh-manager group
+          (found {{ groups.get('wazuh-manager', []) | length }}) and a Debian/RedHat x86_64
+          agent host; it never guesses which manager to compare against.
+      tags: [always]
+
+    - name: "Resolve the one inventory manager"
+      ansible.builtin.set_fact:
+        hotfix_manager_host: "{{ groups['wazuh-manager'] | first }}"
+        hotfix_apply_mode: "{{ (pilot_hotfix_mode | default('apply')) == 'apply' }}"
+        hotfix_skewed: false
+        hotfix_residue: false
+        hotfix_actionable: false
+        hotfix_state: {}
+      tags: [always]
+
+    - name: "Observe the manager's effective native Wazuh version (read-only)"
+      ansible.builtin.script:
+        cmd: files/wazuh-transaction.py manager-version
+        executable: python3
+      delegate_to: "{{ hotfix_manager_host }}"
+      register: hotfix_manager_observed
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Gate: the manager version is a known stable 4.14.x"
+      ansible.builtin.assert:
+        that:
+          - (hotfix_manager_observed.stdout | from_json).version is match('^4[.]14[.](0|[1-9][0-9]*)$')
+        fail_msg: "Unknown effective Wazuh manager version; the hotfix refuses to judge any agent against it."
+      tags: [always]
+
+    - name: "Inspect this host's agent against that manager version (read-only; the one place the comparison is made)"
+      ansible.builtin.script:
+        cmd: >-
+          files/wazuh-agent-hotfix.py inspect --family {{ ansible_os_family | quote }}
+          --manager {{ (hotfix_manager_observed.stdout | from_json).version | quote }}
+        executable: python3
+      register: hotfix_inspected
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Record this host's state"
+      ansible.builtin.set_fact:
+        hotfix_state: "{{ hotfix_inspected.stdout | from_json }}"
+        hotfix_skewed: "{{ (hotfix_inspected.stdout | from_json).skewed | bool }}"
+        hotfix_residue: "{{ (hotfix_inspected.stdout | from_json).residue | bool }}"
+      tags: [always]
+
+    - name: "Decide whether this run would change this host (newer than the manager, or residue)"
+      ansible.builtin.set_fact:
+        hotfix_actionable: "{{ hotfix_skewed | bool or hotfix_residue | bool }}"
+      tags: [always]
+
+    - name: "Report the manager version for external tooling"
+      ansible.builtin.debug:
+        msg: "PILOT_HOTFIX_MANAGER host={{ hotfix_manager_host }} version={{ (hotfix_manager_observed.stdout | from_json).version }}"
+      tags: [always]
+
+    - name: "Report this host's state for external tooling"
+      ansible.builtin.debug:
+        msg: >-
+          PILOT_HOTFIX_STATE host={{ inventory_hostname }}
+          installed={{ hotfix_state.installed | default('none', true) }}
+          skewed={{ hotfix_skewed | bool | lower }}
+          residue={{ hotfix_residue | bool | lower }}
+          registration={{ (hotfix_state.registration.id ~ ':' ~ hotfix_state.registration.name)
+                          if hotfix_state.registration | default(none) else 'none' }}
+      tags: [always]
+
+    - name: "Collect the hosts that are actionable (newer than the manager, or residue of an earlier removal)"
+      ansible.builtin.group_by:
+        key: pilot_hotfix_actionable
+      when: hotfix_actionable | bool
+      tags: [always]
+
+    # The apply-mode gates. They live here, not (only) in Play B: Play B is serial, so its pre_tasks run
+    # per host and the second host's gate would run after the first host was already changed. They are
+    # evaluated only in apply mode (the observation needs no stage) and only for hosts this run would
+    # change, so a staging host that is left alone never blocks a sandbox run.
+    - name: "Gate: staging or prod requires explicit confirm (every host this run would change, before any change)"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      when:
+        - hotfix_apply_mode | bool
+        - hotfix_actionable | bool
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group (before any change)"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      when:
+        - hotfix_apply_mode | bool
+        - hotfix_actionable | bool
+      tags: [always]
+
+    - name: "Gate: stage must also match the manager this run may deregister from (before any change)"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in hostvars[hotfix_manager_host].group_names and stage != 'prod')
+          - not ('staging' in hostvars[hotfix_manager_host].group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in hostvars[hotfix_manager_host].group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 manager {{ hotfix_manager_host }} 的 inventory 環境 group 不一致
+          (group_names: {{ hostvars[hotfix_manager_host].group_names }})；這次 run 會在它上面
+          deregister agent，所以它也要符合 stage。
+      when:
+        - hotfix_apply_mode | bool
+        - hotfix_actionable | bool
+        - pilot_hotfix_deregister | default(true) | bool
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation (before any change)"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when:
+        - stage == 'prod'
+        - hotfix_apply_mode | bool
+        - hotfix_actionable | bool
+      tags: [always]
+
+    - name: "Gate: every host this run would change is in the plan the operator confirmed (when pilot hotfix passed one)"
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname in pilot_hotfix_confirmed_hosts
+        fail_msg: >-
+          {{ inventory_hostname }} needs the hotfix now but was not in the plan that was confirmed
+          (confirmed: {{ pilot_hotfix_confirmed_hosts }}); its state changed after the plan was shown.
+          Nothing was changed. Rerun `pilot hotfix wazuh-agent-skew` to plan and confirm again.
+      when:
+        - hotfix_apply_mode | bool
+        - hotfix_actionable | bool
+        - pilot_hotfix_confirmed_hosts is defined
+      tags: [always]
+
+    # Read-only, so it runs in the observation too: a manager registry that contradicts the host's
+    # client.keys is a refusal the operator should see in the plan, not after confirming. Shared with
+    # Play B, which repeats it right before it removes the registration.
+    - name: "Check the manager's registry against this host's recorded enrollment (read-only; refuses before any change)"
+      ansible.builtin.include_tasks:
+        file: tasks/wazuh-agent-hotfix-registry-check.yml
+        apply:
+          tags: [always]
+      when:
+        - hotfix_actionable | bool
+        - pilot_hotfix_deregister | default(true) | bool
+        - hotfix_state.registration | default(none) is not none
+      tags: [always]
+
+- name: Wazuh agent skew hotfix — remove the actionable agents, one at a time
+  hosts: "{{ 'pilot_hotfix_actionable' if (pilot_hotfix_mode | default('apply')) == 'apply' else 'pilot_hotfix_none' }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  serial: 1
+  vars:
+    stage: sandbox
+    confirm_staging: false
+    confirm_prod: false
+    staging_attested_within_hours: 168
+    hotfix_manager_container: single-node-wazuh.manager-1
+  pre_tasks:
+    # Defence in depth: Play A already made each of these refusals for every host before any change.
+    - name: "Gate: staging or prod requires explicit confirm"
+      ansible.builtin.assert:
+        that:
+          - (stage == 'sandbox') or
+            (stage == 'staging' and confirm_staging | bool) or
+            (stage == 'prod' and confirm_prod | bool)
+        fail_msg: "stage={{ stage }} requires confirm flag. Pass -e confirm_staging=true or confirm_prod=true."
+      tags: [always]
+
+    - name: "Gate: stage must match this host's inventory environment group"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in group_names and stage != 'prod')
+          - not ('staging' in group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 {{ inventory_hostname }} 的 inventory 環境 group 不一致
+          (group_names: {{ group_names }})。
+      tags: [always]
+
+    - name: "Gate: stage must also match the manager this run deregisters from"
+      ansible.builtin.assert:
+        that:
+          - not ('prod' in hostvars[hotfix_manager_host].group_names and stage != 'prod')
+          - not ('staging' in hostvars[hotfix_manager_host].group_names and stage != 'staging')
+          - not (stage in ['staging', 'prod'] and stage not in hostvars[hotfix_manager_host].group_names)
+        fail_msg: >-
+          stage={{ stage }} 與 manager {{ hotfix_manager_host }} 的 inventory 環境 group 不一致
+          (group_names: {{ hostvars[hotfix_manager_host].group_names }})；這次 run 會在它上面
+          deregister agent，所以它也要符合 stage。
+      when: pilot_hotfix_deregister | default(true) | bool
+      tags: [always]
+
+    - name: "Gate: prod requires recent staging attestation"
+      ansible.builtin.assert:
+        that:
+          - (staging_attested_within_hours | int) <= 168
+        fail_msg: "prod gate: staging attestation missing or older than 168h."
+      when: stage == 'prod'
+      tags: [always]
+
+    - name: "Allocate an independent owner for this hotfix's Wazuh writer claim"
+      ansible.builtin.command:
+        argv: [python3, -c, "import uuid; print(uuid.uuid4().hex)"]
+      register: hotfix_writer_uuid
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "Reset this host's claim and outcome state"
+      ansible.builtin.set_fact:
+        hotfix_writer_owner: "{{ hotfix_writer_uuid.stdout }}"
+        hotfix_writer_claimed: false
+        hotfix_removed: false
+      tags: [always]
+
+  tasks:
+    - name: "Remove one agent that is newer than the manager (or retire the plugin an earlier removal left), step by step"
+      block:
+        # Tags: a step that must run before a mutation carries that mutation's tags too (AGENTS.md §4.4),
+        # so a --tags run never reaches a mutation without the steps that guard it. The writer claim comes
+        # before everything; quiesce before the deregistration and the removal; the deregistration (which
+        # re-checks the manager's registry) before the removal.
+        - name: "Claim the host-wide Wazuh writer (refuses while another writer or an unfinished transaction owns the host)"
+          ansible.builtin.script:
+            cmd: >-
+              files/wazuh-transaction.py writer-claim --component agent
+              --owner {{ hotfix_writer_owner | quote }} --mode apply
+            executable: python3
+          register: hotfix_claim
+          when: not ansible_check_mode
+          changed_when: false
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8]
+
+        # always, so the release in the always: section can read it under any --tags selection; it is
+        # true only when the claim task above really ran and succeeded (never merely because it was selected)
+        - name: "Record this play's successful writer claim"
+          ansible.builtin.set_fact:
+            hotfix_writer_claimed: true
+          when: hotfix_claim is defined and hotfix_claim is succeeded and hotfix_claim is not skipped
+          tags: [always]
+
+        - name: "Stop and disable the agent (reversible; nothing is deleted yet)"
+          ansible.builtin.script:
+            cmd: >-
+              files/wazuh-agent-hotfix.py quiesce --family {{ ansible_os_family | quote }}
+              --manager {{ hotfix_state.manager | quote }}
+              --owner {{ hotfix_writer_owner | quote }}
+            executable: python3
+          register: hotfix_quiesced
+          when: not ansible_check_mode
+          changed_when: (hotfix_quiesced.stdout | default('{}') | from_json).get('changed', false) | bool
+          tags: [C1, C2, C3, C4, C5, C6, C8]
+
+        - name: "Deregister the agent from the manager by its recorded ID and name"
+          ansible.builtin.include_tasks:
+            file: tasks/wazuh-agent-hotfix-deregister.yml
+            apply:
+              tags: [C1, C3, C4, C5, C6, C8]
+          when:
+            - not ansible_check_mode
+            - pilot_hotfix_deregister | default(true) | bool
+            - hotfix_state.registration | default(none) is not none
+          tags: [C1, C3, C4, C5, C6, C8]
+
+        # One helper action, in this order: release pilot's hold/versionlock/preference, drop client.keys,
+        # purge the package, retire the orphaned audit plugin. The purge is the last step that can strand
+        # the host (files/wazuh-agent-hotfix.py, "Resumability"); a residue host only does the last one.
+        - name: "Release pilot's hold or versionlock, drop client.keys, purge the package, then retire the orphaned audit plugin"
+          ansible.builtin.script:
+            cmd: >-
+              files/wazuh-agent-hotfix.py remove --family {{ ansible_os_family | quote }}
+              --manager {{ hotfix_state.manager | quote }}
+              --owner {{ hotfix_writer_owner | quote }}
+            executable: python3
+          register: hotfix_purged
+          when: not ansible_check_mode
+          changed_when: (hotfix_purged.stdout | default('{}') | from_json).get('changed', false) | bool
+          tags: [C1, C3, C4, C5, C8]
+
+        - name: "Verify the end state of this host (spec C1-C5, C8)"
+          ansible.builtin.script:
+            cmd: files/wazuh-agent-hotfix.py verify --family {{ ansible_os_family | quote }}
+            executable: python3
+          register: hotfix_verified
+          when: not ansible_check_mode
+          changed_when: false
+          tags: [C1, C2, C3, C4, C5, C8]
+
+        # always, so the report below can read it under any --tags selection; true only when the
+        # verification above really ran and passed
+        - name: "Record that this host was removed"
+          ansible.builtin.set_fact:
+            hotfix_removed: true
+          when: hotfix_verified is defined and hotfix_verified is succeeded and hotfix_verified is not skipped
+          tags: [always]
+
+        - name: "Report the outcome for external tooling"
+          ansible.builtin.debug:
+            msg: >-
+              PILOT_HOTFIX_RESULT host={{ inventory_hostname }}
+              outcome={{ 'removed' if hotfix_removed | bool else 'would-remove' }}
+              residue={{ hotfix_residue | bool | lower }}
+              registration={{ (hotfix_state.registration.id ~ ':' ~ hotfix_state.registration.name)
+                              if hotfix_state.registration | default(none) else 'none' }}
+          tags: [always]
+
+      rescue:
+        - name: "Say exactly which state this host was left in"
+          ansible.builtin.debug:
+            msg: >-
+              The hotfix stopped on {{ inventory_hostname }}. Nothing is rolled back: a rerun of
+              `pilot hotfix wazuh-agent-skew` finishes it (every step is idempotent). Until then the
+              agent may be stopped and its manager registration, hold, client.keys or package may
+              already be gone; if the package is gone, the audit plugin may still be running, which
+              the rerun reports as a host to clean up.
+          tags: [always]
+
+        - name: "Fail the run (the rescue never turns a failure into success)"
+          ansible.builtin.fail:
+            msg: "Wazuh agent skew hotfix failed on {{ inventory_hostname }}; see the task above."
+          tags: [always]
+
+      always:
+        - name: "Release this host's Wazuh writer"
+          ansible.builtin.script:
+            cmd: >-
+              files/wazuh-transaction.py writer-release --owner {{ hotfix_writer_owner | quote }}
+            executable: python3
+          when: hotfix_writer_claimed | default(false) | bool
+          changed_when: false
+          tags: [always, C7]

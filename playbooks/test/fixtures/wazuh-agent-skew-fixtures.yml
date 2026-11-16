@@ -1,0 +1,30 @@
+# Test fixture for docs/verification/wazuh-fim-agent-skew-hotfix.md: builds the situation the
+# hotfix exists for, using pilot's own playbooks for everything except the skew itself.
+#
+#   1. docker + the Wazuh manager at its default release (4.14.1)
+#   2. every wazuh-fim agent enrolled at the manager's own release, with pilot's native guard
+#   3. wazuh-agent-skew-make-skew.yml: the hosts in group wazuh-skewed get an agent NEWER than
+#      the manager (4.14.9), the way it happens in the field (the package is replaced outside
+#      pilot; the guard pilot keeps for the installed release is re-pointed at it).
+#
+# Not a component: the skew is a test-only state. wazuh-fim-apply.yml and wazuh-manager-apply.yml
+# refuse once a host is skewed, so steps 1-2 run once; step 3 is idempotent and runnable alone.
+---
+- name: Install Docker for the manager
+  ansible.builtin.import_playbook: ../../apply/docker-apply.yml
+  tags: [docker]
+
+- name: Deploy the Wazuh manager at its default release
+  ansible.builtin.import_playbook: ../../apply/wazuh-manager-apply.yml
+  tags: [wazuh-manager]
+
+- name: Enroll every agent at the manager's own release
+  ansible.builtin.import_playbook: ../../apply/wazuh-fim-apply.yml
+  tags: [wazuh-fim]
+
+# Separate file so the skew can be (re)made on its own: once a host is newer than the manager,
+# wazuh-manager-apply.yml and wazuh-fim-apply.yml refuse, so the three imports above cannot be
+# rerun, which is exactly the situation the hotfix is for.
+- name: Make the wazuh-skewed hosts' agents newer than the manager
+  ansible.builtin.import_playbook: wazuh-agent-skew-make-skew.yml
+  tags: [skew]
