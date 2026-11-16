@@ -235,13 +235,17 @@ func runHotfixPlaybook(t *testing.T, hosts []hotfixHost, registry string, number
 		"ANSIBLE_CONFIG="+filepath.Join(root, "ansible.cfg"),
 		"ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False",
 		"ANSIBLE_INVENTORY_UNPARSED_WARNING=False", "ANSIBLE_DEPRECATION_WARNINGS=False",
-		"ANSIBLE_HOME="+filepath.Join(root, "ansible-home"), "ANSIBLE_LOCAL_TEMP="+filepath.Join(root, "ansible-local"),
+		// ANSIBLE_HOME stays the caller's: ansible-core 2.19.x resolves the json callback to ansible.posix.json,
+		// and the collections CI installs live under it (an isolated home cannot load the callback).
+		"ANSIBLE_LOCAL_TEMP="+filepath.Join(root, "ansible-local"),
 		"ANSIBLE_CACHE_PLUGIN=memory", "ANSIBLE_GATHER_SUBSET=min", "ANSIBLE_FORKS=1")
 	write(filepath.Join(root, "ansible.cfg"), "[defaults]\nhost_key_checking = False\n", 0o644)
 	out, runErr := cmd.Output()
 	run := hotfixPlaybookRun{t: t, tasks: map[string][]string{}, skipped: map[string][]string{}, stdout: string(out)}
+	var stderr []byte
 	if ee, ok := runErr.(*exec.ExitError); ok {
 		run.rc = ee.ExitCode()
+		stderr = ee.Stderr
 	} else if runErr != nil {
 		t.Fatalf("ansible-playbook did not run: %v", runErr)
 	}
@@ -255,7 +259,7 @@ func runHotfixPlaybook(t *testing.T, hosts []hotfixHost, registry string, number
 		}
 	}
 	if err := json.Unmarshal(out, &doc); err != nil {
-		t.Fatalf("no ansible JSON on stdout (rc=%d): %v\n%s", run.rc, err, out)
+		t.Fatalf("no ansible JSON on stdout (rc=%d): %v\nstdout: %s\nstderr: %s", run.rc, err, out, stderr)
 	}
 	for _, play := range doc.Plays {
 		for _, task := range play.Tasks {
