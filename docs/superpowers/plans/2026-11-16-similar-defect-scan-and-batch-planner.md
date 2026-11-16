@@ -1,18 +1,26 @@
 # Pilot：同類缺陷掃描、相似 Issue 處理與 Issue Batch Planner 實作計畫
 
-- **狀態**：W1–W6 已在分支 `feat/similar-defect-scan-batch-planner` 實作並各自 commit（2026-11-16）；W6 的第一次真實使用經使用者核准後完成（2026-11-16 建立 kjelly/pilot#354，子 Issue #142、#216，重跑未重複建立）
+- **狀態**：W7（§5C）已規劃，待 PR #355 合併後實作。W1–W6 已在分支 `feat/similar-defect-scan-batch-planner` 實作並各自 commit（2026-11-16）；W6 的第一次真實使用經使用者核准後完成（2026-11-16 建立 kjelly/pilot#354，子 Issue #142、#216，重跑未重複建立）
 - **來源**：合併兩份本機草稿（`issue-to-pr` 同類缺陷主動掃描、Issue Batch Planner Phase 1）與同日評估後的縮減版。不適合實作、或無法只靠 coding agent 完成的部分已移除（§2）。同日依使用者決定加入 W6（建立母 Issue）
 - **基準**：`main` @ `05e55a3d`。開工時以當下的 `main` 重驗 §1 的事實；對不上就先修正本計畫，不要照舊內容實作
 - **執行方式**（使用者 2026-11-16 指示）：在分支 `feat/similar-defect-scan-batch-planner` 依 §6 的順序實作，每完成一個工作項目 commit 一次。實跑摘要寫在該項目的 commit message（之後的 PR body 沿用），不貼原始輸出
 
 ## 0. 已確認的決策（2026-11-16，使用者確認）
 
-1. 一個 PR 仍只修一個 Issue（`Fixes #N`）。相似 Issue 只走「階段 0」（§4.6）。一個 PR 同時關閉多個 Issue 不在本計畫。
+1. 一個 PR 仍只修一個 Issue（`Fixes #N`）。相似 Issue 只走「階段 0」（§4.6）。唯一的例外是決策 7 的母 Issue 模式；沒有母 Issue 時，一個 PR 不關閉多個 Issue。
 2. 同類掃描的 gate 只做 advisory：只警告、不擋 PR。何時切換成強制擋 PR，由使用者看過累積資料後另開 Issue 決定，不在本計畫。
 3. Issue Batch Planner 只做原計畫的 M1–M3：契約、離線引擎、手動對真實 GitHub 的唯讀執行。每週排程與外部 agent runner 不做。
 4. 需要人工標註或人工抽查的品質門檻全部移除。planner 報告一律標示「需人工核准」，不宣稱分類精確度。
 5. Planner 可以建立母 Issue（W6）：只針對使用者核准的 `MERGE_CANDIDATE` 分組，由獨立的寫入腳本執行；planner 的分析腳本維持唯讀。
 6. W6 的實跑驗證就是第一次真實使用：由使用者在 `kjelly/pilot` 的 `REVIEWED` 報告中核准一個分組，不另設 sandbox repo。
+
+以下為 2026-11-16 第二輪確認（W7）：
+
+7. **母 Issue 模式**：對 issue-batch-planner 建立的母 Issue，或它的任一子 Issue 執行 `issue-to-pr` 時，一個 PR 以各自的 `Fixes #c` 關閉全部子 Issue（§5C）。其他情況維持決策 1。
+8. **母 Issue 本身**：全部子 Issue 都是 `fixes` 時，PR 才寫 `Fixes #U`；只要有一個不是，U 只寫 `Refs #U` 並保持 open。
+9. **修不了或需要決策的子 Issue**：該子 Issue 改為 `Refs #c`，依 `references/issue-claims.md` 在該 Issue 上回覆原因；其他子 Issue 照常關閉，不因一個子 Issue 卡住整個 PR。
+10. **實作位置**：W7 等 PR #355（W1–W6）合併後，從當時的 `main` 另開分支、另開 PR。
+11. **kjelly/pilot#354 的本文**：目前寫「不要對本 Issue 執行 `issue-to-pr`」，在母 Issue 模式下是錯的。W7 實作後，以新版 `file_umbrella.py` 產生本文給使用者看，經核准後修改一次。
 
 ## 1. 現況（已對照 `main` 驗證）
 
@@ -44,7 +52,7 @@
 
 | 移除項目 | 原因 |
 |---|---|
-| 一個 PR 關閉多個 Issue（多 Issue claim、多 Issue gate、多個 `Fixes`） | 決策 1；要改三個 skill 共用的單一項目契約與 merge train 依賴的 gate |
+| 一個 PR 關閉多個沒有共同母 Issue 的 Issue | 決策 1；只有 planner 建立、經使用者核准的母 Issue 才進入 W7 的母 Issue 模式（決策 7） |
 | gate 切換為強制、觀察期判定 | 決策 2；需要使用者判斷 |
 | `similar_defect_scan.py` 重播搜尋、在 HEAD 重跑比對命中數 | 查詢由 SA 自己寫，重播只證明出處、不證明覆蓋；修正後命中數本來就會下降，與漏報無法區分 |
 | BASE 上負向控制的機器驗證 | 現有 receipt 要求 status `pass` 並綁 HEAD，在 BASE 上失敗的紀錄與契約衝突；「因目標 invariant 失敗」無法由程式判定。改為 Reviewer 確認的文字欄位 |
@@ -353,6 +361,82 @@ python3 "$P" diff      --previous <old>/report.json --current <dir>/report.json 
 - 指令白名單：`python3 <issue-filing>/scripts/create_issue.py`、`gh issue view`、`gh issue list`、`gh issue edit <n> --add-sub-issue <m>`。其他一律拒絕，並以 AST 檢查腳本中沒有白名單以外的 `subprocess` 用法。
 - `--state-dir` 的規則同 §5.9 的 `--out-dir`：位於 repo 內時必須被 gitignore。
 
+## 5C. C 線設計：`issue-to-pr` 的母 Issue 模式（W7）
+
+一個 PR 關閉一個母 Issue 底下的全部子 Issue（決策 7–9）。「一個分支、一個 checkout、一個 writer、一個 PR」不變；變的是一個項目可以是「母 Issue 加上它的子 Issue」。
+
+### 5C.1 入口與辨識
+
+新增唯讀腳本 `.agents/skills/issue-to-pr/scripts/umbrella.py`：`resolve --repo OWNER/REPO --issue N`。
+
+- 讀 `gh issue view N --json number,state,url,body,parent,subIssues`（形狀見 `issue-batch-planner/tests/fixtures/captured/gh_issue_view.json`）。
+- N 的本文有一行 `issue-batch-planner batch: <12 hex>` → N 就是母 Issue U。
+- 否則 N 的 parent 是同 repo 的 Issue，且其本文有那一行 → U = parent。指定子 Issue 時，Root 要告知使用者已改以 U 為工作項目。
+- 其他情況（沒有 parent、parent 不是 planner 建的）→ 單一 Issue 模式，流程完全不變。一般的 GitHub parent／sub-issue 關係不會觸發母 Issue 模式。
+- 子 Issue 集合以 U **當下**的 `subIssues` 為準：只取同 repo、`OPEN` 的；已關閉的列出但不處理。
+- 拒絕（結束碼 2）：U 已關閉；`subIssues.totalCount` 與 nodes 數不同（清單不完整）；有子 Issue 屬於其他 repo；open 的子 Issue 為 0 個或超過 4 個；本文有兩個以上的識別行。
+- 輸出：`{mode: single | umbrella, umbrella, batch_id, sub_issues, closed_sub_issues}`。
+
+### 5C.2 claim、分支與 checkout
+
+- `claim.py acquire` 新增 `--member C`（可重複）：在現有的 repo 層級鎖內，對 U 與每個 `--member` 檢查既有 claim 與分支衝突（`scan_branches` 對每個編號各跑一次）。全部可取才一次寫入，共用一個 token；任一個衝突就全部不寫，回 `CONFLICT` 並指出是哪個編號。
+- `renew`／`release` 以同一個 token 處理整組；`check` 查任一成員都會看到整組的 claim。
+- 分支 `issue/<U>-<slug>`，仍是一個 checkout、一個 writer、一個 PR。
+
+### 5C.3 分析與實作
+
+- SA 對每個子 Issue 各自做 claims 分流與驗收條件，並給出可區分的回歸測試；整組共用一個同類掃描（`similar_defect_scan` 以 U 為單位，子 Issue 回報的站點都是 in-scope）。
+- 子 Issue 分流為 `INVALID`、`NEEDS_DECISION`，或確定修不了時：該子 Issue 的 `issue_resolution` 為 `partial`，依 `issue-claims.md` 在該 Issue 回覆；其他子 Issue 照常（決策 9）。
+- Coder：每個子 Issue 至少一個可區分的回歸測試；只有一個共用測試時，Reviewer 判定為不足。
+- Reviewer：逐個子 Issue 給 verdict，並確認決策 8 的 U 處理。
+
+### 5C.4 `evidence.json`
+
+- `issue` 填 U。新增 `umbrella`：
+
+  ```json
+  {
+    "umbrella": {
+      "batch_id": "<12 hex>",
+      "sub_issues": [
+        {"issue": 142, "issue_resolution": "fixes",
+         "acceptance_criteria": [{"criterion": "...", "met": true, "evidence": "regression TestX"}],
+         "disputed_issue_claims": [], "reviewer_confirmed": true},
+        {"issue": 216, "issue_resolution": "partial", "acceptance_criteria": [...],
+         "disputed_issue_claims": [{"source_url": "...", "disposition": "needs_evidence", "...": "..."}],
+         "reviewer_confirmed": true}
+      ]
+    }
+  }
+  ```
+
+- 頂層 `issue_resolution` 是 U 的：全部子 Issue 都是 `fixes` 時必須是 `fixes`，否則必須是 `partial`（決策 8）。
+- 頂層 `acceptance_criteria`、`checks`、`review`、`similar_defect_scan` 照舊，作用於整個 PR。
+- 沒有 `umbrella` 欄位時，evidence 與 gate 行為完全不變。
+
+### 5C.5 gate、建立 PR、Ready
+
+`issue_gate.py` 在 evidence 有 `umbrella` 時，**fail closed**（與現有 gate 相同，不是 advisory）：
+
+1. 用 `umbrella.py` 的同一套規則重新解析 U：`batch_id` 相同，`sub_issues` 的編號集合必須等於 U 當下 open 的子 Issue 集合（GitHub 為準）。
+2. 對 U 與每個子 Issue 執行 `gh_issue_and_duplicates`：仍為 open、沒有其他 closing PR（`own_pr` 照舊排除本 PR）。
+3. 每個子 Issue 的 `acceptance_criteria`、`disputed_issue_claims`、`issue_resolution` 用現有規則逐一檢查；disputed claims 讀**該子 Issue 自己的**留言串。
+4. 決策 8 的一致性（兩個方向都檢查）。
+
+`create_pr.py`／`mark_ready.py`：`issue_reference_problem` 對 U 與每個子 Issue 逐一檢查：`fixes` 的要有它自己的 `Fixes #n`，`partial` 的只能 `Refs #n`。`Fixes #1, #2` 只算關閉 #1（沿用 `closes_issue` 的規則：每個編號前都要有關鍵字）。
+
+### 5C.6 要同步修改的既有內容
+
+- `.agents/skills/_shared/single-item-checkout.md`「Select exactly one item」：加一條明確例外——planner 建立的母 Issue 與它的子 Issue 合計是一個項目（一個分支、一組 claim、一個 PR），不能用來處理其他任何 Issue。`_shared/tests/test_single_item_contract.py` 加斷言：例外存在、且限定於 planner 識別行；措辭要避開該測試的禁用用語（batch、queue、one by one 等）。
+- issue-to-pr：`SKILL.md`（§0 解析母 Issue、§1–§5 的子 Issue 逐一處理）、`references/{workflow,evidence-contract,issue-claims,quality-gate,similar-defect-scan}.md`、`README.md`、三平台的 SA／Coder／Reviewer、`PROJECT-CHANGES.md`。`similar-defect-scan.md` §5：相似 Issue 已在同一個母 Issue 下時，改用母 Issue 模式；其他情況維持階段 0。
+- issue-batch-planner：`file_umbrella.py` 的本文改成「對本 Issue 或任一子 Issue 執行 `issue-to-pr`，一個 PR 關閉全部子 Issue；全部修好時一併關閉本 Issue」；原本的 primary 改稱「建議先分析的 Issue」。`SKILL.md`、`classification-rubric.md` 與測試同步。
+- kjelly/pilot#354：依決策 11，W7 完成後修改一次本文。
+
+### 5C.7 不處理
+
+- 一般（非 planner）的 parent 關係、超過 4 個子 Issue、跨 repo 的子 Issue。
+- `pr-ready`、`pr-review-merge` 與 merge train 不改：它們的腳本以 PR 為單位，不從 PR 反查 Issue（2026-11-16 以 `git grep` 確認；開工時重驗）。
+
 ## 6. 工作項目（依序實作，每項一個 commit）
 
 | 編號 | 名稱 | 相依 |
@@ -363,8 +447,9 @@ python3 "$P" diff      --previous <old>/report.json --current <dir>/report.json 
 | W4 | Planner `collect` 與 `shortlist`，真實擷取 fixture 與實跑 | W3 |
 | W5 | Planner `render` 與 `diff`，端到端實跑 | W4 |
 | W6 | 建立母 Issue（`file_umbrella.py`）與第一次真實使用 | W5 |
+| W7 | `issue-to-pr` 的母 Issue 模式（§5C） | PR #355 合併（決策 10） |
 
-W2 與 W3 可平行。
+W2 與 W3 可平行。W7 另開分支與 PR。
 
 ### W1：`issue-to-pr` 同類掃描契約與階段 0
 
@@ -528,6 +613,42 @@ W2 與 W3 可平行。
 
 **驗收**：F1–F12 與 `make skill-test` 通過；實跑第 4–6 步全部成立，或如實回報哪一步失敗。
 
+### W7：`issue-to-pr` 的母 Issue 模式
+
+**前置**：PR #355 已合併；從當時的 `main` 開新分支。開工前重驗 §5C.7 的事實（`pr-ready`／`pr-review-merge` 不從 PR 反查 Issue）。
+
+**檔案**：
+- 新增 `.agents/skills/issue-to-pr/scripts/umbrella.py` 與 `tests/test_umbrella.py`。
+- 修改 `scripts/{claim,issue_gate,create_pr,mark_ready}.py` 與對應測試（`test_claim.py`、`test_issue_gate.py`、`test_create_and_ci.py`、`test_mark_ready.py`）。
+- 修改 §5C.6 列出的文件、角色檔、`_shared/single-item-checkout.md` 與 `_shared/tests/test_single_item_contract.py`。
+- 修改 `issue-batch-planner/scripts/file_umbrella.py` 與 `tests/test_file_umbrella.py`。
+
+**測試**（每個「應該擋」都配一個「應該過」；`gh` 輸出的形狀沿用 `gh_issue_view.json` 的真實擷取）：
+
+| # | 案例 | 預期 |
+|---|---|---|
+| V1 | 指定母 Issue；指定子 Issue；parent 不是 planner 建的；沒有 parent | 前兩者為 umbrella 模式且 U 相同；後兩者為 single 模式 |
+| V2 | U 已關閉、`totalCount` 與 nodes 不符、跨 repo 子 Issue、0 個或 5 個 open 子 Issue、兩個識別行 | `umbrella.py` 結束碼 2 |
+| V3 | 一組 claim 中有一個成員已被別人 claim 或已有分支 | `CONFLICT`，指出該編號，**沒有任何**成員被寫入；全部可取時一次寫入、共用 token |
+| V4 | 以同一 token `renew`／`release`；`check` 查任一成員 | 整組一起續期／釋放；查任一成員都看到整組 |
+| V5 | evidence 的 `sub_issues` 與 GitHub 當下集合不同（多一個、少一個） | gate `BLOCKED` |
+| V6 | 某子 Issue 有其他 open 的 closing PR；本 PR 自己 | 前者 `BLOCKED`；後者以 `own_pr` 排除 |
+| V7 | 某子 Issue 缺驗收條件或 `reviewer_confirmed` 不是 true | `BLOCKED` |
+| V8 | 全部 `fixes` 但頂層為 `partial`；有 `partial` 子 Issue 但頂層為 `fixes` | 都 `BLOCKED`；一致時通過 |
+| V9 | 子 Issue 的 disputed claim 的 `reply_url` 在別的 Issue 上 | `BLOCKED`（讀該子 Issue 自己的留言串） |
+| V10 | PR 本文缺某個 `fixes` 子 Issue 的 `Fixes`；對 `partial` 子 Issue 寫了 `Fixes`；寫成 `Fixes #142, #216`；決策 8 下 U 的 `Fixes`／`Refs` 寫錯 | `create_pr.py` 拒絕；逐一寫對時通過 |
+| V11 | Ready 前 PR 本文被改成與 evidence 不一致 | `mark_ready.py` 拒絕 |
+| V12 | 沒有 `umbrella` 欄位的既有 evidence | 現有 issue-to-pr 測試全部照舊通過，輸出不變 |
+| V13 | `single-item-checkout.md` 的例外 | 新斷言通過；`test_single_item_contract.py` 的用語檢查照舊通過 |
+| V14 | `file_umbrella.py` 的新本文 | 不再含「不要對本 Issue 執行 `issue-to-pr`」，含決策 7、8 的說明與識別行 |
+
+**實跑**：
+1. 唯讀：`umbrella.py resolve` 對 #354（母 Issue）、#216（子 Issue）與一個沒有 parent 的 Issue 各跑一次；預期前兩者解析到 U=#354、子 Issue #142、#216，後者為 single。結果寫進 commit message。
+2. 依決策 11 修改 #354 本文：產生新本文給使用者看；**使用者核准後**才執行一次 `gh issue edit 354 -R kjelly/pilot --body-file <file>`，讀回確認識別行仍在、sub-issue 不變。
+3. 真正用母 Issue 模式修 #142、#216，是之後另一次由使用者發起的 `issue-to-pr`。那次會改 `freeipa-identity-apply.yml`，依 `AGENTS.md` 需要它自己的 vm-target 實跑證據，不在 W7 的驗收內。
+
+**驗收**：V1–V14、`make skill-test` 與 `go test ./cmd/pilot/cmd -run TestAgentSkillLayout -count=1` 通過；實跑第 1 步的結果符合預期；第 2 步經使用者核准後完成，或如實記錄尚未核准。
+
 ## 7. 驗證指令（各 PR 共用）
 
 以下是實作後要實際執行的指令，不是已執行的紀錄：
@@ -546,7 +667,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .agents/skills/<skill>
 
 這些變更只改 `.agents/**` 與 `.claude/skills/**`，不涉及 playbook、spec 或 pilot runtime，預期不需要 vm-target evidence；開工時以 `.github/pr-evidence.json` 與 `repo_evidence.py` 重新確認。
 
-W6 的實跑會在 `kjelly/pilot`（public）建立真實的公開 Issue，只在使用者核准後執行。
+W6 的實跑會在 `kjelly/pilot`（public）建立真實的公開 Issue，只在使用者核准後執行。W7 唯一的公開寫入是修改 #354 的本文，同樣只在使用者核准後執行。
 
 ## 8. 風險
 
@@ -559,3 +680,6 @@ W6 的實跑會在 `kjelly/pilot`（public）建立真實的公開 Issue，只�
 7. **階段 0 不 claim 相似 Issue**：見 §4.6 的殘留風險。
 8. **重複建立母 Issue**：GitHub 搜尋索引有延遲，所以以子 Issue 的 `parent` 欄位與本機狀態檔為主要判斷，搜尋只是第三層。同一台機器的並行執行由 `flock` 擋下；不同機器在極短時間內對同一分組執行，仍可能重複建立。
 9. **公開寫入**：母 Issue 的內容公開，只放驗證過的欄位，寫入前先做 secret scan。
+10. **母 Issue 模式改到共用契約與 fail-closed 的 gate**：錯了會影響每一次 `issue-to-pr`。以 V12（沒有 `umbrella` 欄位時行為完全不變）鎖住，並在 W7 的 PR 跑完整的 `make skill-test`。
+11. **整組 PR 變大**：子 Issue 上限 4 個、每個子 Issue 要有可區分的回歸測試；一個子 Issue 卡住時改為 `Refs`，不拖住其他子 Issue（決策 9）。
+12. **子 Issue 在 PR 進行中被改動**（有人加入或移出母 Issue）：gate 每次以 GitHub 當下的集合重新比對（V5），不一致就停下，由 Root 決定重新分析或拆開。
