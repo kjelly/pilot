@@ -2,6 +2,7 @@ package spec
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -9,7 +10,7 @@ import (
 )
 
 // TestRegression_FreeipaDNSClientSpec locks the structural contract of
-// docs/verification/freeipa-dns-client.md: 7 rows C1..C7, lint-clean, and a
+// docs/verification/freeipa-dns-client.md: 8 rows C1..C8, lint-clean, and a
 // generated diagnostic playbook that covers every row.
 func TestRegression_FreeipaDNSClientSpec(t *testing.T) {
 	const specPath = "../../docs/verification/freeipa-dns-client.md"
@@ -18,7 +19,7 @@ func TestRegression_FreeipaDNSClientSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -59,6 +60,46 @@ func TestRegression_FreeipaDNSClientSpec(t *testing.T) {
 	for _, id := range wantIDs {
 		if !covered[id] {
 			t.Errorf("spec row %s is not covered by any generated task", id)
+		}
+	}
+}
+
+// TestRegression_FreeipaDNSClientCrossRowInvariants locks what rows must
+// agree on. C6 and C8 ask the same FreeIPA server FQDN (section 5: one
+// override changes both). C8 prints a PASS token that no FAIL output can
+// contain: its Expected is a ~substring, so a FAIL line that held the token
+// would pass. C8 must not use grep -q with that ~substring (quiet grep prints
+// nothing, so it could never match).
+func TestRegression_FreeipaDNSClientCrossRowInvariants(t *testing.T) {
+	s, err := Parse("../../docs/verification/freeipa-dns-client.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string]Row{}
+	for _, r := range s.Rows {
+		rows[r.ID] = r
+	}
+	const fqdn = "ipa1.ipa.pilot.internal"
+	if !strings.Contains(rows["C6"].Command, fqdn) {
+		t.Errorf("C6 does not ask %s: %q", fqdn, rows["C6"].Command)
+	}
+	if !strings.Contains(rows["C8"].Command, "n="+fqdn+".;") {
+		t.Errorf("C8 must ask the same FQDN as C6 (%s, with the trailing dot): %q", fqdn, rows["C8"].Command)
+	}
+	pass := strings.TrimPrefix(rows["C8"].Expected, "~")
+	if pass == rows["C8"].Expected || pass == "" {
+		t.Fatalf("C8 expected %q must be a ~substring", rows["C8"].Expected)
+	}
+	for _, id := range []string{"C3", "C7"} {
+		if strings.Contains(rows["C8"].Expected, strings.TrimPrefix(rows[id].Expected, "~")) && rows[id].Expected != "" && strings.HasPrefix(rows[id].Expected, "~") {
+			t.Errorf("C8 expected %q collides with %s expected %q", rows["C8"].Expected, id, rows[id].Expected)
+		}
+	}
+	// Every other word the command can print starts with the FAIL token, never
+	// with, or inside, the PASS token.
+	for _, other := range regexp.MustCompile(`resolver-effective-[a-z]+`).FindAllString(rows["C8"].Command, -1) {
+		if other != pass && strings.Contains(other, pass) {
+			t.Errorf("C8 prints %q, which contains the PASS token %q", other, pass)
 		}
 	}
 }

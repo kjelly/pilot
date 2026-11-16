@@ -1,6 +1,6 @@
 # Verification Spec — freeipa-dns-client（目標主機把 DNS resolver 指向 FreeIPA DNS）
 
-> 版本：v1.4（2026-10-15 寫入前的 nameserver 檢查只擋必要的情況，見 §1.5 與 §8）；v1.3（2026-10-02 C7 的數值照 glibc 的 `strtol` 解析，見 §8）；v1.2（2026-10-02 C7 改為比對 glibc 實際生效的 timeout/attempts）；v1.1（2026-10-01 新增 C7 resolver 逾時）；v1.0（2026-07-31 對兩台活體 vm-target 實跑：AlmaLinux 9
+> 版本：v1.5（2026-11-16 新增 C8：glibc 實際使用的每一台 nameserver 都解析得到 FreeIPA server，見 §1.5 與 §8）；v1.4（2026-10-15 寫入前的 nameserver 檢查只擋必要的情況，見 §1.5 與 §8）；v1.3（2026-10-02 C7 的數值照 glibc 的 `strtol` 解析，見 §8）；v1.2（2026-10-02 C7 改為比對 glibc 實際生效的 timeout/attempts）；v1.1（2026-10-01 新增 C7 resolver 逾時）；v1.0（2026-07-31 對兩台活體 vm-target 實跑：AlmaLinux 9
 > `freeipa-dns-server`（FreeIPA server 自身，`--setup-dns`，自我指向案例，
 > NetworkManager 路徑）與 Ubuntu 24.04 `freeipa-dns-ubuntu`（一般未納管
 > client，systemd-resolved 路徑），C1-C6 兩台皆 6/6 PASS，含 idempotent
@@ -43,6 +43,12 @@ L6 `changed=0`；Ubuntu 與 AlmaLinux 上同一行覆寫、後面另一行覆寫
 L6 `changed=0`；Ubuntu 與 AlmaLinux 上 `timeout:10e-1`（glibc 用 10 秒）與 `attempts:20e-1`（glibc 用 5 次）
 新的 C7 判 FAIL、v1.2 判 PASS，`timeout: 1`（glibc 用 1 秒）新的 C7 判 PASS。見
 `docs/evidence/freeipa-dns-client/2026-10-02-065a1c6.md`。
+**C8 生效的 nameserver（v1.5，issue #168）**：C3／C4／C6／C7 讀的是 pilot 寫入的設定、
+「至少一筆 nameserver」、resolver 回傳的第一個答案，看不到「寫入之後被改掉」的清單（例如
+`FreeIPA 在前、1.1.1.1 在後`，或 `resolv.conf` 又被換回 systemd-resolved 的 stub）。C8 改問
+glibc 實際會問的每一台 nameserver；playbook 另加寫入前的報告與寫入後的一致性 gate（§1.5、§6）。
+目前有效的實跑結果只放在 evidence：`docs/evidence/freeipa-dns-client/LATEST.md`（pilot 在鏈
+成功時改寫），不寫進本檔。
 
 **實跑過程找到並修好的真實 bug**（皆非顯而易見，見 runbook §5 完整踩雷紀錄）：
 1. C3/C4/C6 三個 Command 誤用跳脫 `\|`／`grep -q`，在「完全沒套用」的狀態下
@@ -139,6 +145,40 @@ FreeIPA server/replica 自己用得到。
 > 可以換的對象，維持 glibc 預設、不寫 `options`；之前寫過的值會被清掉。
 > 這不是可設定的變數，`freeipa_dns_client_servers` 也套用同一條規則；
 > `internal-endpoint-apply.yml` 的 resolver baseline 用同一支共用檔，也一樣。
+>
+> **生效的 nameserver（C8，v1.5，issue #168）**：寫入前的檢查只管「這次要寫的清單」，C3／C4／C6／C7
+> 只看 pilot 寫的設定或 resolver 的第一個答案；主機的 DHCP、別的自動化或人工在寫入之後把
+> `/etc/resolv.conf` 改掉時，沒有任何一步會發現。C8 與 playbook 的兩個新步驟都以「glibc 實際會問的
+> 每一台 nameserver」為準：
+> - **範圍**：`/etc/resolv.conf` 前 3 行 `^nameserver[ \t]` 的位址（glibc 的 `MAXNS` 是 3，第 4 行起
+>   glibc 不會問，不算）。清單裡出現 systemd-resolved 的 stub（`127.0.0.53`、`127.0.0.54`）**直接算
+>   偏離**：stub 背後是 resolved 自己的 Global／per-link DNS，不是 pilot 寫的清單。C8 另用
+>   `resolvectl dns` 展開 stub 背後的每一台逐台分類（沒有 `resolvectl` 時只印 `resolvectl-not-found`），
+>   整體仍判 FAIL。
+> - **查詢（C8）**：對每一台問 FreeIPA server 的 FQDN（`ipa1.ipa.pilot.internal`，與 C6 同一個，§5 的
+>   例外也套用）的 A 與 AAAA，遞迴查詢（RD=1，跟 glibc 一樣；不用 `+norec`），`dig +time=2
+>   +tries=1 +noall +comments +answer`，所有查詢並行，所以最壞情況約 2 秒。分類規則與寫入前的
+>   nameserver 檢查（`tasks/freeipa-dns-client-nameserver-check.yml`）一致，兩邊對同一份 dig 輸出必須
+>   得到同一個分類：有 A 或 AAAA 位址 → `address`；有回答但沒有位址（NXDOMAIN、REFUSED、其他 rcode，
+>   或 NOERROR 但 A／AAAA 都沒有）→ `no_address`；SERVFAIL → `servfail`；沒有回答（逾時、connection
+>   refused）→ `no_answer`。任何一個查詢是 NXDOMAIN、REFUSED 等硬錯誤，整台就是
+>   `no_address`，即使另一個查詢有位址。
+> - **判定（C8）**：有任何一台 `no_address`，或沒有任何一台 `address`，或出現 stub → FAIL；`servfail`
+>   與 `no_answer` 的 server 只列出，前提是另有一台 `address`。輸出是一行，逐台
+>   `<位址>=<分類>(<rcode>)`。系統上找不到 `dig` 時 FAIL（`dig-not-found`），不假裝通過。
+> - **寫入前報告（playbook）**：共用檔在建立快照之前先唯讀印出目前生效的清單與來源
+>   （`/etc/resolv.conf`，stub 時加 `resolvectl dns`）、不在這次要寫入清單裡的 server、這次要寫入的清單，
+>   並分辨「這台尚未由 pilot 管理」與「pilot 管理後又偏離」。`--check` 也會執行；不需要 `dig`，主機沒有
+>   `dig` 或 `resolvectl` 時只少一個資訊來源，不會讓預覽失敗；不是 gate，不加 `no_log`（內容不含秘密）。
+> - **寫入後一致性 gate（playbook）**：在 functional proof 之前（`when: not ansible_check_mode`），寫入後
+>   生效的 nameserver 必須是**這次寫入清單的子集**且不能為空，也不能出現 stub。只檢查子集、不要求相等：
+>   FreeIPA server 上 installer 的 `zzz-ipa.conf` global DNS 會讓 NetworkManager 只在 `resolv.conf` 留下
+>   `127.0.0.1`。EL 上不符時先 `nmcli general reload dns-rc`（讓 NetworkManager 依 profile 重新產生
+>   `resolv.conf`），在最多 10 秒內每秒重讀一次（NetworkManager 非同步寫檔）；仍不符就 fail，訊息列出
+>   完整的生效清單與來源，交給 rescue 還原（rescue 的訊息如實報告有沒有還原，見 §6）。Debian 直接寫
+>   `resolv.conf`，不做 reload。
+> - **不做**：`~<domain>` routing domain（Debian 已在 resolved Global drop-in 寫 `Domains=`；EL 的
+>   NetworkManager 預設不經 resolved，對 glibc 沒有作用）、新的 inventory 變數。
 
 ## 2. Checklist
 
@@ -154,6 +194,7 @@ FreeIPA server/replica 自己用得到。
 | C5  | config   | search domain 含 FreeIPA domain（未限定名稱可補 domain 解析）  | 0                        | grep -qE "^search .*ipa.pilot.internal" /etc/resolv.conf |
 | C6  | dns      | FreeIPA server FQDN 真的透過 DNS 解析成功（非 `/etc/hosts` 短路）| 0                       | sh -c 'dig +short ipa1.ipa.pilot.internal | grep -qE "^[0-9]+\."' |
 | C7  | config   | 2 筆以上 nameserver 時 glibc 實際生效的逾時是 timeout 1、attempts 2；只有 1 筆時沒有 timeout/attempts 選項 | ~resolver-timeout-ok | awk 'function num(v, d) { if (!match(v, /^[+-]?[0-9]+/)) return 0; v = substr(v, 1, RLENGTH); d = v; sub(/^[+-]?0*/, "", d); if (length(d) > 9) return "invalid"; return v + 0 } BEGIN { n = 0; t = 5; a = 2; set = 0 } /^nameserver[ \t]/ { n++ } /^options[ \t]/ { for (i = 2; i <= NF; i++) { k = ""; if ($i ~ /^timeout:/) { k = "t"; v = substr($i, 9) } else if ($i ~ /^attempts:/) { k = "a"; v = substr($i, 10) } if (k == "") continue; if (v == "" && i < NF) v = $(i + 1); v = num(v); set = 1; if (k == "t") t = (v != "invalid" && v > 30) ? 30 : v; else a = (v != "invalid" && v > 5) ? 5 : v } } END { ok = n >= 2 ? t == 1 && a == 2 : !set; if (ok) print "resolver-timeout-ok"; else print "resolver-timeout-wrong nameservers=" n " timeout=" t " attempts=" a " options=" (set ? "set" : "none") }' /etc/resolv.conf |
+| C8  | dns      | glibc 實際使用的每一台 nameserver（`/etc/resolv.conf` 前 3 行）都解析得到 FreeIPA server FQDN：沒有 systemd-resolved stub、沒有「有回答但沒有位址」的 server、至少一台回位址 | ~resolver-effective-ok | if ! command -v dig >/dev/null 2>&1; then echo "resolver-effective-wrong dig-not-found"; exit 0; fi; n=ipa1.ipa.pilot.internal.; d=$(mktemp -d); if [ ! -d "$d" ]; then echo "resolver-effective-wrong no-temp-dir"; exit 0; fi; trap 'rm -rf "$d"' EXIT; ns=$(awk '/^nameserver[ \t]/ { if (++c <= 3) print $2 }' /etc/resolv.conf); stub=; list=; note=; for a in $ns; do case $a in 127.0.0.53) stub=$a;; 127.0.0.54) stub=$a;; *) list="$list $a";; esac; done; if [ -n "$stub" ]; then if command -v resolvectl >/dev/null 2>&1; then resolvectl dns >"$d/rd" 2>/dev/null; else note=" resolvectl-not-found"; : >"$d/rd"; fi; list=$(awk -v l="$list" 'BEGIN { m = split(l, p, " "); for (i = 1; i <= m; i++) if (!s[p[i]]++ && ++c <= 9) print p[i] } { sub(/^(Global|Link [0-9]+ \([^)]*\)):/, ""); for (i = 1; i <= NF; i++) { sub(/#.*/, "", $i); if ($i != "" && !s[$i]++ && ++c <= 9) print $i } }' "$d/rd"); fi; i=0; for a in $list; do i=$((i+1)); for t in A AAAA; do dig +time=2 +tries=1 +noall +comments +answer "@$a" "$n" $t >"$d/$i.$t" 2>/dev/null & done; done; wait; out=; bad=; good=; i=0; for a in $list; do i=$((i+1)); r=$(awk -v a="$a" 'FNR == 1 { cur = "" } /^;; Got answer:/ { ans = 1 } /status: / { s = $0; sub(/.*status: /, "", s); sub(/,.*/, "", s); cur = s; if (s == "SERVFAIL") sf = 1; else if (s != "NOERROR" && hr == "") hr = s } /[ \t]IN[ \t]+(A|AAAA)[ \t]+[^ \t]/ { if (cur == "NOERROR") ad = 1 } END { if (hr != "") print a "=no_address(" hr ")"; else if (ad) print a "=address(NOERROR)"; else if (sf) print a "=servfail(SERVFAIL)"; else if (ans) print a "=no_address(NOERROR)"; else print a "=no_answer" }' "$d/$i.A" "$d/$i.AAAA"); out="$out $r"; case $r in *=no_address*) bad=1;; *=address*) good=1;; esac; done; if [ -n "$stub" ]; then v="resolver-effective-wrong stub=$stub$note"; elif [ -n "$bad" ]; then v="resolver-effective-wrong server-without-address"; elif [ -z "$good" ]; then v="resolver-effective-wrong no-server-returned-an-address"; else v=resolver-effective-ok; fi; echo "$v servers=$out" |
 
 > **C1/C2/C4/C6 = rc 型 expected（`0`）**：`command -v`（C1）找到即回 0；
 > `systemctl is-active`（C2）刻意用 rc 而非 `~active`——字串 `active` 也會命中
@@ -212,6 +253,18 @@ FreeIPA server/replica 自己用得到。
 >   `timeout:2147483648` 是負數），C7 一律印 `invalid` 並判 FAIL，不嘗試重現截斷。
 > `TestRegression_FreeipaDNSClientC7MatchesGlibc` 在本機 glibc 上逐一比對這些例子；
 > mawk（Ubuntu）、gawk（AlmaLinux）、busybox awk 的結果相同。
+> **C8 = `~resolver-effective-ok`，問的是 glibc 實際會問的每一台 nameserver**（規則見 §1.5）：
+> 通過時印 `resolver-effective-ok servers= <位址>=<分類>(<rcode>) …`；失敗時第一個詞是
+> `resolver-effective-wrong`，接原因（`server-without-address`、`no-server-returned-an-address`、
+> `stub=<位址>`、`dig-not-found`），再接同樣的逐台明細，所以 PASS 的 token 不會是 FAIL 輸出的子字串。
+> - Command 是一整段 POSIX shell（Ubuntu 的 `/bin/sh` 是 dash，不用 bash 語法），所有 `|` 都在引號內
+>   （awk 的 regex），因為沒有引號保護的 `|` 會被 spec parser 當成欄位分隔；也不用 `grep -q`（`~substring` 比對
+>   stdout，見上）。註解與字串裡沒有單引號（Ansible 的 `split_args` 會把它算成未成對的引號）。
+> - 所有 `dig` 並行在背景跑、用暫存目錄收結果，結束時 `trap` 清掉；最壞情況（每台都不回答）約 2 秒，
+>   在 `pilot verify` 預設的 15 秒 timeout 內，不需要另外加 `--timeout`。
+> - 與 C6 的差別：C6 的 `dig +short` 沒有指定 server，只用 glibc 第一台有回答的；C8 對每一台各問一次，
+>   所以「第一台正常、第二台是公共 DNS」這種 C6 看不到的偏離會 FAIL。
+> - 第 4 行起的 nameserver、`search`／`options` 不在 C8 的範圍（`options` 由 C7 管）。
 
 ## 3. 證據收集
 
@@ -219,7 +272,7 @@ FreeIPA server/replica 自己用得到。
   （真實主機：`pilot verify docs/verification/freeipa-dns-client.md -i inventory.yaml`）
 - 原始輸出：gitignored `.verification/freeipa-dns-client-<UTC>.{ndjson,md}`
 - Sanitized 摘要：`docs/evidence/freeipa-dns-client/<date>-<tested-revision>.md`
-- 預期 row 數：7
+- 預期 row 數：8
 
 **真實輸出摘要**（2026-07-31，兩台 vm-target：AlmaLinux 9 `freeipa-dns-server`
 與 Ubuntu 24.04 `freeipa-dns-ubuntu`；完整指令與逐行輸出見
@@ -236,8 +289,8 @@ FreeIPA server/replica 自己用得到。
 
 ## 4. PASS / FAIL 規則
 
-- C1–C7 全部 `status=pass`（或 §5 允許的 `skip`）→ **PASS**：本機 DNS 查詢確實
-  導向 FreeIPA DNS。
+- C1–C8 全部 `status=pass`（或 §5 允許的 `skip`）→ **PASS**：本機 DNS 查詢確實
+  導向 FreeIPA DNS，而且 glibc 實際會問的每一台 nameserver 都解析得到 FreeIPA server。
 - 任一 `fail` → **FAIL**，常見修法：
   - C1 fail → 套件安裝失敗（Debian `bind9-dnsutils`／EL `bind-utils`）；重跑 apply。
   - C2 fail → Debian 上 `systemd-resolved` 未啟用（罕見，多數 Ubuntu server image
@@ -253,6 +306,12 @@ FreeIPA server/replica 自己用得到。
     重跑 apply。EL 上 profile 是對的、但 `/etc/resolv.conf` 被手動改過時，重跑 apply
     是 `changed=0`，NetworkManager 不會重寫（`nmcli device reapply` 也不會）；
     `nmcli general reload dns-rc` 會依 profile 重新產生（2026-10-02 實測）。
+  - C8 fail → 看輸出的第二個詞與逐台明細：`server-without-address`（某一台回答了、卻沒有 FreeIPA
+    server 的位址：它不服務 FreeIPA 的 zone，通常是清單被換成公共 DNS 或不相干的 DNS；先查是誰改的
+    ——DHCP、NetworkManager 的 `conf.d`／`global-dns`、別的自動化——再重跑 apply）；
+    `no-server-returned-an-address`（每一台都沒回答或是 SERVFAIL：查 FreeIPA 的 named、dns tier 的
+    unbound 與網路）；`stub=<位址>`（`resolv.conf` 又指向 systemd-resolved 的 stub，看 `resolvectl dns`
+    的逐台明細，重跑 apply）；`dig-not-found`（C1 也會 fail，重跑 apply）。
 
 ## 5. 例外與已知偏差
 
@@ -260,6 +319,8 @@ FreeIPA server/replica 自己用得到。
 |----|---------|---------|------|
 | C6 | 若站台覆寫了 `freeipa_server_fqdn`（非預設 `ipa1.<domain>`），本 row 的
   Command 需要跟著改用該站台實際的 FQDN，否則永遠 fail | 覆寫過 `freeipa_server_fqdn` 的站台 | 依站台 |
+| C8 | 與 C6 相同：站台覆寫了 `freeipa_server_fqdn` 時，本 row Command 開頭的 `n=ipa1.ipa.pilot.internal.`
+  （結尾要有點）也要改成該站台的 FQDN，否則永遠 fail | 覆寫過 `freeipa_server_fqdn` 的站台 | 依站台 |
 | C2 | 若目標主機兩個 resolver 管理服務都不存在（例如手動管理 `/etc/resolv.conf`
   且兩個 service 都未安裝的特殊 minimal image），可標 `skip` 並改用 C3/C4/C6
   佐證設定確實生效 | 兩種 resolver 管理服務都不存在的主機 | 依站台 |
@@ -269,7 +330,7 @@ FreeIPA server/replica 自己用得到。
 | Spec row | Apply task / tag |
 |----------|-------------------|
 | C1-C6 | 2026-08-14 起，實際邏輯抽到共用檔 `playbooks/apply/tasks/freeipa-dns-client-resolver.yml`（spec.md §26 point 1），`freeipa-dns-client-apply.yml` 本身只剩 stage gate + 一個
-  `Apply the FreeIPA DNS resolver baseline to this host`／`tags: [C1, C3, C4, C5, C6]` 的
+  `Apply the FreeIPA DNS resolver baseline to this host`／`tags: [C1, C3, C4, C5, C6, C7, C8]` 的
   `include_tasks`。同一份共用檔也被 `internal-endpoint-apply.yml` 的 fleet-wide
   baseline play 引用（docs/verification/internal-endpoint.md C9），比照
   `tasks/freeipa-ca-trust.yml` 已建立的共用慣例，兩份 playbook 不會分岔出兩套實作。 |
@@ -301,6 +362,7 @@ FreeIPA server/replica 自己用得到。
   vacuously PASS，跟 2026-08-14 那次修的問題是同一類）。 |
 | C6 | 驗證用途，無對應 mutate task（apply 完成後的功能性結果）|
 | C7 | 同一支共用檔：`compute effective resolver options for THIS host` 決定選項，Debian 由寫 `/etc/resolv.conf` 的 task 寫入 `options` 行，EL 由 `community.general.nmcli` 的 `dns4_options` 設定；`freeipa-dns-client-apply.yml` 的 include tag 加上 `C7`。EL 的套用前快照與 rescue 也包含 `ipv4.dns-options` |
+| C8 | 驗證用途（apply 後的生效狀態），playbook 對應兩個步驟，都在同一支共用檔 `tasks/freeipa-dns-client-resolver.yml`：(1) 寫入前的報告（`freeipa-dns-client-effective-resolver.yml`，唯讀、`check_mode: false`、`--check` 也跑、不是 gate、不加 `no_log`）印出生效的清單與來源、不在這次寫入清單裡的 server、這次要寫入的清單，並分辨「尚未由 pilot 管理」與「管理後又偏離」；(2) block 內、functional proof 之前、`when: not ansible_check_mode` 的一致性 gate（寫入後生效的 nameserver 必須是寫入清單的子集且不為空、不能有 stub；EL 不符時先 `nmcli general reload dns-rc` 並在 10 秒內重讀，仍不符就 fail，由 rescue 還原並如實報告）。`freeipa-dns-client-apply.yml` 的 include tag 與 `apply.tags` 加上 `C8`；`internal-endpoint-apply.yml` 的 C9 baseline 引用同一支共用檔，所以 `--tags C9` 也會跑這兩個步驟 |
 
 ## 7. 動態行為 SOP（fixture：確保有 DNS 提供者可偵測）
 
@@ -329,3 +391,4 @@ FreeIPA server/replica 自己用得到。
 | 2026-10-02 | v1.3 | 修正 C7 的數值解析（PR #37 review）：v1.2 用 awk 的 `int()`，`10e-1` 被當成浮點數 1，所以 `timeout:10e-1`（glibc 生效 10）與 `attempts:20e-1`（glibc 生效 5）都會 PASS。改成照 glibc 2.39 `res_setoptions` 的 `strtol(…, 10)`：只取開頭的十進位整數（可帶正負號），值是空的時讀下一個欄位，timeout 上限 30、attempts 上限 5；有效位數超過 9 位（glibc 會溢位截斷）一律 `invalid` 判 FAIL。`TestRegression_FreeipaDNSClientC7MatchesGlibc` 加上這兩個例子與正負號、空白、小數、十六進位、上限、溢位等案例 | sre |
 | 2026-10-02 | v1.3 | Checklist 不變。candidate `065a1c6` 實跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`；Ubuntu 與 AlmaLinux 上 `timeout:10e-1`、`attempts:20e-1` 新的 C7 判 FAIL（v1.2 判 PASS），`timeout: 1` 判 PASS（v1.2 誤判 FAIL），溢位值判 `invalid`；與 VM 上 glibc 的 `res_init()` 一致（`docs/evidence/freeipa-dns-client/2026-10-02-065a1c6.md`） | sre |
 | 2026-10-15 | v1.4 | Checklist 不變。寫入前的 nameserver 檢查（PR #73 follow-up 加入）改成只擋必要的情況：有回答但沒有 A／AAAA 位址、FreeIPA 不承認也不回答的 FreeIPA server、或沒有任何一台可用；只是暫時沒回答（維護停機的已登記 FreeIPA server、停掉的 dns tier、明確指定的 server）改成 WARNING 並照樣寫入。AAAA 也算位址；只有 FreeIPA DNS server 用 `+norec`，明確指定的 `127.0.0.1` 本機 cache 用遞迴查詢；`+tries=2` | pilot |
+| 2026-11-16 | v1.5 | 新增 C8（issue #168）：glibc 實際使用的每一台 nameserver（`/etc/resolv.conf` 前 3 行，systemd-resolved stub 直接算偏離並用 `resolvectl dns` 展開）都要解析得到 FreeIPA server 的 A 或 AAAA；有回答但沒有位址（NXDOMAIN、REFUSED、NOERROR 無位址）或沒有任何一台回位址就 FAIL，SERVFAIL 與沒有回答的只列出。起因：C3／C4／C6／C7 讀的是 pilot 寫入的設定、至少一筆 nameserver、第一個答案，「FreeIPA 在前、公共 DNS 在後」的清單全部 PASS，C6 的 `dig +short` 只用第一台有回答的 server。playbook 同時加上寫入前的唯讀報告與寫入後的一致性 gate（§1.5、§6）；既有 C1–C7 的 Command 與 Expected 不變 | pilot |
