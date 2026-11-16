@@ -1,0 +1,181 @@
+---
+# Shared task file: which nameservers does glibc actually ask on THIS host?
+# (docs/verification/freeipa-dns-client.md §1.5 and C8, issue #168)
+#
+# tasks/freeipa-dns-client-resolver.yml writes a resolver configuration, but
+# until this file existed nothing read back what the host really uses: C3 looked
+# for pilot's own marker or profile field, C4 for at least one nameserver, C6
+# for the first answer, C7 for the options line. A list changed after pilot
+# wrote it ("FreeIPA first, 1.1.1.1 after it", or resolv.conf pointing at the
+# systemd-resolved stub again) passed all of them.
+#
+# What it reads (read-only, check_mode: false so --check runs it too; needs no
+# dig):
+#   - /etc/resolv.conf: the first 3 lines that start with `nameserver` and a
+#     space or tab. glibc keeps at most 3 (MAXNS); line 4 and later are never
+#     asked, so they are reported as `beyond` and do not count.
+#   - when one of those is the systemd-resolved stub (127.0.0.53, 127.0.0.54):
+#     `resolvectl dns`, to name the servers behind the stub. A stub is a
+#     deviation by itself (verdict `stub`), because what sits behind it is
+#     resolved's own Global/per-link DNS, not the list this role writes.
+#   - whether pilot manages the host's resolver: on EL the active connection's
+#     ipv4.ignore-auto-dns is yes (the one persistent field only this role
+#     sets, the C3 evidence on EL); on Debian the resolved drop-in exists or
+#     /etc/resolv.conf carries pilot's marker.
+#
+# Input (set by the caller):
+#   freeipa_dns_effective_allowed       list of addresses this run writes
+#   freeipa_dns_effective_wait_seconds  optional, default 0: while the verdict
+#       is not `ok`, read again once a second for at most this many seconds
+#       (NetworkManager writes resolv.conf after a reapply asynchronously)
+# Needs from the including play: ansible_os_family,
+# freeipa_dns_client_resolved_dropin_path, freeipa_dns_client_resolv_conf_marker.
+#
+# Output fact freeipa_dns_effective:
+#   listed, beyond, stub, resolvectl (not-needed | expanded | unavailable |
+#   failed), expanded, servers (what glibc asks: listed without the stub, plus
+#   what resolvectl names), foreign (servers not in the allowed list), verdict
+#   (ok | stub | empty | foreign), managed, managed_evidence, waited.
+#   freeipa_dns_effective_source is a one-line description of what was read.
+# Nothing here handles secrets, so nothing is no_log.
+#
+# Included more than once per play (before the write, after it, after a
+# reload), so the first task resets the fact this file owns (AGENTS.md §4.5
+# item 2). No apostrophes in the comments of the script below: Ansible's
+# split_args counts them as open quotes, and no brace followed by a hash,
+# which Jinja reads as a comment.
+
+- name: "FreeIPA DNS client effective resolver — reset this file's per-include state"
+  ansible.builtin.set_fact:
+    freeipa_dns_effective: {}
+    freeipa_dns_effective_source: ""
+
+- name: "FreeIPA DNS client effective resolver — read what glibc uses (read-only)"
+  vars:
+    _allowed: "{{ freeipa_dns_effective_allowed | default([]) | map('string') | join(' ') }}"
+    _wait: "{{ freeipa_dns_effective_wait_seconds | default(0) | int }}"
+  ansible.builtin.shell: |
+    conf=/etc/resolv.conf
+    allowed={{ (' ' ~ _allowed ~ ' ') | quote }}
+    wait={{ _wait }}
+    os_family={{ ansible_os_family | quote }}
+    dropin={{ freeipa_dns_client_resolved_dropin_path | quote }}
+    marker={{ freeipa_dns_client_resolv_conf_marker | quote }}
+
+    # Addresses come from a file anyone can edit: keep only characters an IP
+    # address or a scope id can have, so the JSON below stays valid.
+    clean() { printf '%s' "${1//[^0-9A-Za-z:.%_-]/?}"; }
+    jstr() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf '%s' "$s"; }
+    json_list() {
+      local out='' x
+      for x in "$@"; do out="$out${out:+,}\"$(clean "$x")\""; done
+      printf '[%s]' "$out"
+    }
+
+    read_state() {
+      listed=(); beyond=(); servers=(); expanded=(); foreign=(); stub=''; rv=not-needed
+      local all=() combined=() a n=0 out
+      mapfile -t all < <(awk '/^nameserver[ \t]/ { print $2 }' "$conf" 2>/dev/null)
+      for a in "${all[@]}"; do
+        n=$((n + 1))
+        if [ "$n" -le 3 ]; then listed+=("$a"); else beyond+=("$a"); fi
+      done
+      for a in "${listed[@]}"; do
+        case $a in
+          127.0.0.53|127.0.0.54) stub=$a ;;
+          *) servers+=("$a") ;;
+        esac
+      done
+      if [ -n "$stub" ]; then
+        if command -v resolvectl >/dev/null 2>&1; then
+          if out=$(resolvectl dns 2>/dev/null); then
+            rv=expanded
+            mapfile -t expanded < <(awk '
+              { sub(/^(Global|Link [0-9]+ \([^)]*\)):/, "")
+                for (i = 1; i <= NF; i++) { sub(/#.*/, "", $i); if ($i != "") print $i } }' <<<"$out")
+          else
+            rv=failed
+          fi
+        else
+          rv=unavailable
+        fi
+      fi
+      combined=("${servers[@]}" "${expanded[@]}")
+      servers=()
+      for a in "${combined[@]}"; do
+        case " ${servers[*]} " in
+          *" $a "*) ;;
+          *) servers+=("$a") ;;
+        esac
+      done
+      for a in "${servers[@]}"; do
+        case "$allowed" in
+          *" $a "*) ;;
+          *) foreign+=("$a") ;;
+        esac
+      done
+      if [ -n "$stub" ]; then verdict=stub
+      elif [ -z "${servers[*]}" ]; then verdict=empty
+      elif [ -n "${foreign[*]}" ]; then verdict=foreign
+      else verdict=ok
+      fi
+    }
+
+    detect_managed() {
+      managed=false; evidence=''
+      if [ "$os_family" = RedHat ]; then
+        if command -v nmcli >/dev/null 2>&1; then
+          local active conn
+          active=$(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null)
+          active=${active%%$'\n'*}
+          if [ -n "$active" ]; then
+            conn=${active%%:*}
+            if [ "$(nmcli -g ipv4.ignore-auto-dns connection show "$conn" 2>/dev/null)" = yes ]; then
+              managed=true
+              evidence="NetworkManager connection $conn has ipv4.ignore-auto-dns=yes"
+            fi
+          fi
+        fi
+      elif [ -e "$dropin" ]; then
+        managed=true
+        evidence="$dropin exists"
+      elif grep -qF "$marker" "$conf" 2>/dev/null; then
+        managed=true
+        evidence="$conf carries the $marker marker"
+      fi
+    }
+
+    waited=0
+    while :; do
+      read_state
+      [ "$verdict" = ok ] && break
+      [ "$waited" -ge "$wait" ] && break
+      sleep 1
+      waited=$((waited + 1))
+    done
+    detect_managed
+    printf '{"listed":%s,"beyond":%s,"stub":"%s","resolvectl":"%s",' \
+      "$(json_list "${listed[@]}")" "$(json_list "${beyond[@]}")" "$(clean "$stub")" "$rv"
+    printf '"expanded":%s,"servers":%s,"foreign":%s,' \
+      "$(json_list "${expanded[@]}")" "$(json_list "${servers[@]}")" "$(json_list "${foreign[@]}")"
+    printf '"verdict":"%s","managed":%s,"managed_evidence":"%s","waited":%s}\n' \
+      "$verdict" "$managed" "$(jstr "$evidence")" "$waited"
+  args:
+    executable: /bin/bash
+  register: freeipa_dns_effective_read
+  changed_when: false
+  check_mode: false
+
+- name: "FreeIPA DNS client effective resolver — parse"
+  vars:
+    _eff: "{{ freeipa_dns_effective_read.stdout | from_json }}"
+  ansible.builtin.set_fact:
+    freeipa_dns_effective: "{{ _eff }}"
+    freeipa_dns_effective_source: >-
+      /etc/resolv.conf
+      {%- if _eff.stub %}, whose nameserver lines name the systemd-resolved stub {{ _eff.stub }},
+      {%- if _eff.resolvectl == 'expanded' %} and resolvectl dns for the servers behind it
+      {%- elif _eff.resolvectl == 'failed' %} and resolvectl dns, which failed, so the servers behind the stub are unknown
+      {%- else %} and resolvectl, which is not installed, so the servers behind the stub are unknown
+      {%- endif %}
+      {%- endif %}
