@@ -180,9 +180,9 @@ group vars 明確填入 `nexus` 的 IP。Site-wide deploy 仍必須先確認這�
 |---|---|---|---|
 | `freeipa-server-replica` | `group_vars/freeipa.yml` | 沿用 §2.1 的 `freeipa_server_ip` | replica 與 primary 共用 `freeipa` 設定；`freeipa_replica_fqdn` 可省略時用預設 `ipa2.<freeipa_domain>`，拓撲已把 `freeipa-replica` 以這個名字寫進其他節點的 `/etc/hosts` |
 | `dns` | 無 | 全部有預設 | `dns_upstream` 預設 `1.1.1.1`；FreeIPA 內部網域自動送到 FreeIPA。沒有外網的環境要改成 lab 內可達的 upstream（staging 的 `dns.yml` 也只有註解） |
-| `agent-controller` | `group_vars/agent-controller.yml` | `agent_controller_artifact_path: dist/pilot-agent-controller-linux-amd64`、`agent_controller_artifact_sha256: <dist 內 .sha256 檔的值>` | `agent_controller_dispatcher_kind` 保持預設 `fake`（沒有外部 Agent Runtime）；`site.include: false`，要用 `pilot reconcile` 部署 |
+| `agent-controller` | `group_vars/agent-controller.yml` | `agent_controller_artifact_path: dist/pilot-agent-controller-linux-amd64`、`agent_controller_artifact_sha256: <dist 內 .sha256 檔的值>` | `agent_controller_dispatcher_kind` 保持預設 `fake`（沒有外部 Agent Runtime）；`site.include: false`，不在 `site.yml` 裡：用 `pilot deploy --show-experimental` 選 `agent-controller` 部署（`pilot reconcile` 的 day-2 清單沒有它） |
 | `agent-controller` | `.vault/main.yaml` | `agent_controller_webhook_secret` | Alertmanager 送 webhook 的 bearer token |
-| `detection-engine` | `group_vars/detection-engine.yml` | `detection_engine_artifact_path: dist/pilot-detection-engine-linux-amd64`、`detection_metrics_source_host`／`detection_alertmanager_target_host`：`nexus` 的 IP | `detection_model_provider_enabled` 保持預設 `false`：staging 用的 FLM／Ollama 服務在 PoC 沒有；`site.include: false`，同樣用 `pilot reconcile` |
+| `detection-engine` | `group_vars/detection-engine.yml` | `detection_engine_artifact_path: dist/pilot-detection-engine-linux-amd64`、`detection_metrics_source_host`／`detection_alertmanager_target_host`：`nexus` 的 IP | `detection_model_provider_enabled` 保持預設 `false`：staging 用的 FLM／Ollama 服務在 PoC 沒有；contract 標為 opt-in，但 `site.yml` 有 import 它，site-wide deploy 會套用（要單獨部署時用 `pilot deploy` 選 `detection-engine`，不是 `pilot reconcile`） |
 | `pilot-access-gateway` | `host_vars/bastion.yml` | `gateway_id: poc-bastion`、`gateway_scope: all`（比照 prod `bastion-test`） | 另需 `pilot_binary_path: dist/pilot-linux-amd64`、`pilot_access_gateway_binary_path: dist/pilot-access-gateway-linux-amd64`，以及 vault 的 `ipa_admin_password` |
 
 `prometheus` 的 scrape 設定在 `nexus`：`freeipa-replica`、`bastion` 沒有 `host-monitoring`
@@ -388,10 +388,12 @@ Site-wide deploy 應只選一次 `全站部署(site.yml)`。不要以單一 comp
 7. Prometheus、Thanos Query、Alertmanager、Dashboard。
 8. Audit/FIM/log shipping 等依賴中央服務的元件。
 
-`freeipa-server-replica`、`agent-controller`、`detection-engine` 同樣是 `site.include: false`：
-site-wide deployment 不會部署它們，要在 `freeipa-server` 部署完成後、驗收前各自用
-`pilot reconcile` 部署（replica 在 primary 之後；`detection-engine` 要在 `thanos-query`、
-`alertmanager` 之後）。`dns`、`pilot-access-gateway` 有接進 `site.yml`，不需要另外 reconcile。
+`freeipa-server-replica` 與 `agent-controller` 不會被 site-wide deployment 部署，要在 `freeipa-server`
+部署完成後、驗收前各自部署：replica 用 `pilot reconcile`（在 primary 之後）；`agent-controller`
+不在 `pilot reconcile` 的 day-2 清單裡，要用 `pilot deploy --show-experimental` 選它。
+`detection-engine` 雖然在 contract 標為 opt-in，`site.yml` 有 import 它，site-wide deployment 已經套用
+（它依賴 `thanos-query`、`alertmanager`，順序由 `site.yml` 決定）；要單獨重跑時用 `pilot deploy`。
+`dns`、`pilot-access-gateway` 同樣在 `site.yml` 裡，不需要另外 reconcile。
 
 `freeipa-identity` 是 site-wide deployment 後另外執行的 day-2 reconcile；不要把
 canonical roster 當普通 group var，也不要只依賴 reconcile 成功來代表 day-1 roles 已部署。

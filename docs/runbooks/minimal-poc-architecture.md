@@ -1851,7 +1851,10 @@ automatically).
 
 ## 7. Latest verified evidence
 
-The latest record is [round 33, five-node topology](../evidence/minimal-poc-architecture/2026-11-13-round-33.md)
+The record of the latest run is always
+[`LATEST.md`](../evidence/minimal-poc-architecture/LATEST.md), which names the candidate, the tree and the
+record file. The last run reviewed in this runbook is
+[round 33, five-node topology](../evidence/minimal-poc-architecture/2026-11-13-round-33.md)
 (candidate `56e6734a`, 2026-11-13); the findings it fixed come from the
 [round 32 record](../evidence/minimal-poc-architecture/2026-11-13-round-32.md). The table below is round 30's record for the original three-node
 topology and is kept as history.

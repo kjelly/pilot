@@ -44,11 +44,13 @@
 #   --verify docs/verification/dns.md=dns
 #   --verify docs/verification/pilot-access-gateway.md=pilot-access-gateway
 #
-# agent-controller and detection-engine are opt-in (contract site.include:
-# false), so site.yml skips them: reconcile them after the site-wide deploy
-# (`pilot reconcile`) and verify docs/verification/agent-controller.md=
-# agent-controller and docs/verification/detection-engine.md=detection-engine.
-# Both need a built dist/ artifact (their *_artifact_path/_sha256 group vars).
+# agent-controller is opt-in (contract site.include: false) and not in site.yml:
+# deploy it after the site-wide deploy with `pilot deploy --show-experimental`
+# (it is not in `pilot reconcile`'s day-2 list). detection-engine is imported by
+# site.yml, so the site-wide deploy already applies it. Verify
+# docs/verification/agent-controller.md=agent-controller and
+# docs/verification/detection-engine.md=detection-engine. Both need a built
+# dist/ artifact (their *_artifact_path/_sha256 group vars).
 #
 # freeipa-ca-trust is day-2/opt-in and targets the literal `all` inventory
 # group by default (not a named per-host role in this file) — see the
