@@ -31,6 +31,7 @@ import json
 import os
 import pwd
 import grp
+from decimal import Decimal
 from pathlib import Path
 import re
 import shutil
@@ -634,6 +635,19 @@ class AuditRuntime:
     # SIGHUP, to connect syscheckd to an existing listener, and to arm its watches after the one agent restart.
     PLUGIN_WAIT, LISTENER_WAIT, CLIENT_GRACE, READY_WAIT = 60, 30, 30, 60
 
+    # Bound, in seconds, of the wait for an in-flight reload or restart of wazuh-agent.service to finish before the ensure
+    # restarts it (Issue #330): a `systemctl restart` issued while Wazuh's own `restart.sh agent reload` runs is merged
+    # into that job and leaves the old wazuh-syscheckd running. Upstream restart.sh waits up to 60 s for the unit to be
+    # active and then runs `systemctl reload`, whose ExecReload job is bounded by the unit's TimeoutSec=45 (upstream
+    # Wazuh sources as read for the Issue, not captured from a target); 120 s covers the two with margin. It is not
+    # one of the four bounds above and is never used for them.
+    SETTLE_WAIT = 120
+    AGENT_UNIT, AGENT_CGROUP, SYSCHECKD = 'wazuh-agent', 'wazuh-agent.service', '/var/ossec/bin/wazuh-syscheckd'
+    RESTART_SCRIPT = 'active-response/bin/restart.sh'
+    # `systemctl show -p ActiveState` values: a state in flight (or a queued job) means a transition is not finished.
+    STABLE_STATES = ('active', 'inactive', 'failed', 'maintenance')
+    TRANSITIONAL_STATES = ('reloading', 'activating', 'deactivating', 'refreshing')
+
     @staticmethod
     def endpoint(): return Path('/var/ossec/queue/sockets/audit')
 
@@ -772,9 +786,115 @@ class AuditRuntime:
         state = self.streams()
         return self.endpoint_kind() == 'socket' and state['listening'] and state['connected']
 
-    def armed(self):
-        """The connected stream plus the kernel watches (the list of them), or [] while either is missing."""
-        return self.watches() if self.connected() else []
+    @staticmethod
+    def boot_ticks():
+        """Clock ticks since boot, the time base of field 22 (starttime) of /proc/<pid>/stat, read from /proc/uptime.
+
+        Both are the boot-time clock at 10 ms resolution, truncated, so a process that started at or after an
+        instant read here has a starttime that is not smaller than it.
+        """
+        try:
+            return int(Decimal(Path('/proc/uptime').read_text().split()[0]) * os.sysconf('SC_CLK_TCK'))
+        except (OSError, IndexError, ValueError, ArithmeticError) as exc:
+            raise Refused('the boot-relative clock could not be read from /proc/uptime') from exc
+
+    def agent_unit(self):
+        """(ActiveState, whether a job is queued) of wazuh-agent.service, from `systemctl show` key=value lines.
+
+        Anything that is not a loaded unit with a known state and an empty or numeric Job is a typed refusal. The
+        native text of `-p LoadState -p ActiveState` is captured on AlmaLinux 9 (testdata/native-captures); the
+        `Job=` line (empty when nothing is queued, the job id otherwise) was confirmed idle on a systemd 259 host
+        and is MODELED for a queued job.
+        """
+        text = self.r.run(['systemctl', 'show', self.AGENT_UNIT, '-p', 'LoadState', '-p', 'ActiveState', '-p', 'Job'],
+                          timeout=30, operation='native Wazuh agent service state').stdout
+        values = {}
+        for line in text.splitlines():
+            key, separator, value = line.partition('=')
+            if separator:
+                if key in values:
+                    raise Refused('the Wazuh agent service state could not be read or its unit is not loaded')
+                values[key] = value.strip()
+        state, job = values.get('ActiveState'), values.get('Job', '')
+        if values.get('LoadState') != 'loaded' or state not in self.STABLE_STATES + self.TRANSITIONAL_STATES or (job and not job.isdecimal()):
+            raise Refused('the Wazuh agent service state could not be read or its unit is not loaded')
+        return state, bool(job) and int(job) > 0
+
+    def agent_processes(self):
+        """Every live process of wazuh-agent.service's cgroup as {comm, argv, exe, start}, read from /proc.
+
+        Only the service's own cgroup is looked at, so an operator's shell or another service never counts. A process
+        that exits while it is being read is skipped; any other failure to read /proc is a typed refusal.
+        """
+        found = []
+        try:
+            for entry in Path('/proc').iterdir():
+                if not entry.name.isdecimal(): continue
+                try:
+                    if not any(len(fields) == 3 and self.AGENT_CGROUP in fields[2].split('/')
+                               for fields in (line.split(':', 2) for line in (entry / 'cgroup').read_text().splitlines())):
+                        continue
+                    found.append({'comm': (entry / 'comm').read_text().strip(),
+                                  'argv': (entry / 'cmdline').read_bytes().decode(errors='replace').rstrip('\0').split('\0'),
+                                  'exe': os.readlink(entry / 'exe'),
+                                  'start': int((entry / 'stat').read_text().rsplit(') ', 1)[1].split()[19])})
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+        except (OSError, IndexError, ValueError) as exc:
+            raise Refused('the Wazuh agent service processes could not be read from /proc') from exc
+        return found
+
+    def restart_scripts(self, processes):
+        """The processes among these that are Wazuh's own restart.sh (comm, or the script in the first arguments)."""
+        suffix = '/' + self.RESTART_SCRIPT
+        return [process for process in processes if process['comm'] == 'restart.sh'
+                or any(argument == self.RESTART_SCRIPT or argument.endswith(suffix) for argument in process['argv'][:3])]
+
+    def settled(self):
+        """No reload or restart of wazuh-agent.service is in flight: its unit is in a stable state with no queued job
+        and none of its processes is restart.sh. An inactive or failed unit with nothing queued is settled (a restart
+        starts it, as before this check existed); an unreadable state is a refusal, never a pass."""
+        state, job = self.agent_unit()
+        return state in self.STABLE_STATES and not job and not self.restart_scripts(self.agent_processes())
+
+    def syscheckd_starts(self):
+        """The start times (boot ticks) of every wazuh-syscheckd of the agent service's cgroup."""
+        return sorted(process['start'] for process in self.agent_processes() if process['exe'] == self.SYSCHECKD)
+
+    def await_fresh_stream(self, mark):
+        """After the agent restart: exactly one wazuh-syscheckd, started at or after `mark`, connected, with watches.
+
+        A syscheckd that started before the endpoint was listening cannot connect to it and falls back to real-time
+        (it never recovers by itself), so one older than `mark` is refused at once: the restart did not replace it.
+        The other conditions may still be settling and are polled for READY_WAIT; at the deadline the refusal names
+        the one that holds. Every message is a fixed literal.
+        """
+        deadline = time.monotonic() + self.READY_WAIT
+        while True:
+            starts = self.syscheckd_starts()
+            if any(start < mark for start in starts):
+                raise Refused('a wazuh-syscheckd that started before the audit endpoint was listening survived the agent restart, so who-data cannot connect')
+            if len(starts) != 1:
+                why = 'process'
+            else:
+                state = self.streams() if self.endpoint_kind() == 'socket' else {'listening': False, 'connected': False}
+                if not state['listening']:
+                    why = 'endpoint'
+                elif not state['connected']:
+                    why = 'stream'
+                else:
+                    watches = self.watches()
+                    if watches: return watches
+                    why = 'watch'
+            if time.monotonic() >= deadline:
+                if why == 'process':
+                    raise Refused('the Wazuh agent service did not have exactly one wazuh-syscheckd after the agent restart')
+                if why == 'endpoint':
+                    raise Refused('the audit endpoint was no longer listening after the agent restart')
+                if why == 'stream':
+                    raise Refused('the restarted wazuh-syscheckd did not connect to the audit endpoint after the agent restart')
+                raise Refused('wazuh-syscheckd connected to the audit endpoint but no wazuh_fim kernel audit watch appeared after the agent restart')
+            time.sleep(0.5)
 
     @staticmethod
     def poll(ready, seconds):
@@ -4915,38 +5035,60 @@ class Agent(Transaction):
         one agent restart and no signal; a missing endpoint under an active plugin costs one SIGHUP to auditd,
         a bounded wait for the listening endpoint, then one agent restart (a syscheckd that started without an
         endpoint silently fell back to real-time, so it must start after it) and proof that the stream and at
-        least one wazuh_fim watch exist. Everything else is a typed refusal that changes nothing further: a
-        plugin that never becomes active (af_wazuh.conf is written by the agent's first start, so it is awaited
+        least one wazuh_fim watch exist.
+
+        The restart is issued only once no reload or restart of wazuh-agent.service is in flight (Issue #330): on
+        a fresh host Wazuh runs its own `restart.sh agent reload` when the first shared configuration arrives,
+        and a `systemctl restart` issued during it is merged into that job, which leaves the old syscheckd (started
+        before the endpoint existed) running. The instant the endpoint was first seen listening is taken as a
+        boot-clock mark; after the one restart exactly one wazuh-syscheckd must be running in the service's
+        cgroup and it must have started at or after that mark. The mark is read after the observation, never
+        before, so a process that started before the endpoint was listening can never pass.
+
+        Everything else is a typed refusal that changes nothing further, each with its own fixed text: a plugin
+        that never becomes active (af_wazuh.conf is written by the agent's first start, so it is awaited
         first), an endpoint that is not a socket, a socket nobody listens on, an endpoint that does not appear
-        after the signal (the agent is not restarted), or a stream or watch that does not appear after the
-        restart. This runs under the host-wide writer owner and the component lock of the ordinary apply.
+        after the signal (the agent is not restarted), an agent service still reloading or restarting after
+        SETTLE_WAIT (the agent is not restarted; a SIGHUP already sent stays), a syscheckd older than the mark
+        that survived the restart, and after the restart: not exactly one syscheckd, the endpoint no longer
+        listening, a syscheckd that did not connect, or a connection without a wazuh_fim watch. Any /proc or
+        systemctl probe that cannot be read is a refusal too. This runs under the host-wide writer owner and the
+        component lock of the ordinary apply.
         """
         if self.family != 'RedHat':
             raise Refused('the who-data endpoint ensure supports only the RedHat family')
         with self.lock(owner=owner):
             self.idle()
             runtime = self.audit_runtime()
-            repair = False
+            repair, mark = False, None
+
+            def listening():
+                # The mark is the boot clock read right after the endpoint was first observed listening, in every
+                # path that can lead to the restart: it is never earlier than the instant the endpoint appeared.
+                nonlocal mark
+                if not runtime.listening(): return False
+                if mark is None: mark = runtime.boot_ticks()
+                return True
             if runtime.endpoint_kind() == 'absent':
                 if not runtime.poll(runtime.plugin_active, runtime.PLUGIN_WAIT):
                     raise Refused('the Wazuh audit plugin is not active, so no who-data endpoint can exist')
                 if runtime.endpoint_kind() == 'absent':
                     runtime.reload_plugins()
-                    if not runtime.poll(runtime.listening, runtime.LISTENER_WAIT):
+                    if not runtime.poll(listening, runtime.LISTENER_WAIT):
                         raise Refused('external audit endpoint did not appear after reloading the audit daemon')
                     repair = True
             if not repair:
-                if not runtime.poll(runtime.listening, runtime.LISTENER_WAIT):
+                if not runtime.poll(listening, runtime.LISTENER_WAIT):
                     raise Refused('the external audit endpoint socket has no listener')
                 repair = not runtime.poll(runtime.connected, runtime.CLIENT_GRACE)
             if not repair:
                 return {'changed': False}
+            assert mark is not None  # every path to a restart passed a successful listening() observation
+            if not runtime.poll(runtime.settled, runtime.SETTLE_WAIT):
+                raise Refused('the Wazuh agent service did not finish an in-flight reload or restart within the bound, so it was not restarted')
             self.r.run(['systemctl', 'restart', 'wazuh-agent'], timeout=120,
                        operation='restart wazuh-agent so its who-data engine connects to the audit endpoint')
-            watches = runtime.poll(runtime.armed, runtime.READY_WAIT)
-            if not watches:
-                raise Refused('native Wazuh audit stream or watches did not appear after restarting the agent')
-            return {'changed': True, 'watches': len(watches)}
+            return {'changed': True, 'watches': len(runtime.await_fresh_stream(mark))}
 
     def audit_check(self, item, stopped=False, ready=False, capture=None):
         self.audit_runtime().check(item.get('audit_runtime'), capture or self.capture_sources(recovery=True), stopped, ready)
