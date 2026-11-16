@@ -425,11 +425,17 @@ def dumps(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
-def prepare_out_dir(path: Path) -> Path:
-    """An empty output directory, outside any Git work tree or ignored by it. Created if missing."""
+def prepare_out_dir(path: Path, *, refuse_existing: tuple[str, ...] | None = None) -> Path:
+    """An output directory outside any Git work tree or ignored by it, created if missing. By default it
+    must be empty; with `refuse_existing`, it may hold earlier steps' files but none of those names."""
     out = Path(os.path.abspath(Path(path).expanduser()))
-    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+    if out.exists() and not out.is_dir():
+        raise PlannerError(f"--out-dir {out} is not a directory")
+    if refuse_existing is None and out.exists() and any(out.iterdir()):
         raise PlannerError(f"--out-dir {out} must be an empty directory or not exist")
+    for name in refuse_existing or ():
+        if (out / name).exists():
+            raise PlannerError(f"{out / name} already exists; render into a new directory")
     probe = out
     while not probe.exists():
         probe = probe.parent
@@ -736,8 +742,282 @@ def cmd_shortlist(args: argparse.Namespace) -> int:
     return EXIT_OK if candidates["complete"] else EXIT_FAIL
 
 
-def cmd_not_implemented(args: argparse.Namespace) -> int:
-    raise PlannerError(f"{args.command} is not implemented yet")
+# --------------------------------------------------------------------------- render
+
+REPORTED = ("REVIEWED", "HEURISTIC_ONLY")
+REPORT_STATUSES = REPORTED + ("INCOMPLETE", "BLOCKED")
+HEURISTIC_WARNING = "Not reviewed against the code: do not use these groups as a basis for a batch fix."
+_SECRET_SCAN: Any = None
+
+
+def secret_scan() -> Any:
+    """The repository's shared secret scanner (_shared/scripts/secret_scan.py), loaded by path."""
+    global _SECRET_SCAN
+    if _SECRET_SCAN is None:
+        path = Path(__file__).resolve().parents[2] / "_shared" / "scripts" / "secret_scan.py"
+        spec = importlib.util.spec_from_file_location("pilot_secret_scan", path)
+        if spec is None or spec.loader is None or not path.is_file():
+            raise PlannerError(f"the shared secret scanner is missing: {path}")
+        module = sys.modules.get("pilot_secret_scan") or importlib.util.module_from_spec(spec)
+        if "pilot_secret_scan" not in sys.modules:
+            sys.modules["pilot_secret_scan"] = module
+            spec.loader.exec_module(module)
+        _SECRET_SCAN = module
+    return _SECRET_SCAN
+
+
+def _strings(obj: Any, where: str = "report") -> list[tuple[str, str]]:
+    if isinstance(obj, str):
+        return [(where, obj)]
+    if isinstance(obj, dict):
+        return [x for k in sorted(obj) for x in _strings(obj[k], f"{where}.{k}")]
+    if isinstance(obj, list):
+        return [x for i, v in enumerate(obj) for x in _strings(v, f"{where}[{i}]")]
+    return []
+
+
+def secret_findings(report: dict[str, Any]) -> list[dict[str, str]]:
+    """Value-free findings (field and class) over every string of the report."""
+    scanner = secret_scan()
+    return [{"field": where, "class": f.cls} for where, text in _strings(report) for f in scanner.scan_text(where, text)]
+
+
+def report_content_sha256(report: dict[str, Any]) -> str:
+    body = {k: v for k, v in report.items() if k not in ("content_sha256", "collected_at")}
+    return sha256_bytes(dumps(body).encode("utf-8"))
+
+
+def _batch_out(batch: dict[str, Any]) -> dict[str, Any]:
+    members = sorted(set(batch["issue_numbers"]))
+    return {
+        "batch_id": batch_id(batch["root_cause_class"], members), "classification": batch["classification"],
+        "issue_numbers": members, "primary_issue": batch["primary_issue"],
+        "root_cause_class": batch["root_cause_class"], "invariant": batch["invariant"],
+        "evidence": [{k: ev[k] for k in ("kind", "url", "path", "ref_sha", "summary")} for ev in batch["evidence"]],
+        "pair_compatibility": sorted(({"issues": sorted(p["issues"]), "evidence": p["evidence"]}
+                                      for p in batch["pair_compatibility"]), key=lambda p: p["issues"]),
+        "acceptance_by_issue": sorted(({k: a[k] for k in ("issue", "coverage", "validation")}
+                                       for a in batch["acceptance_by_issue"]), key=lambda a: a["issue"]),
+        "all_fully_addressable": all(a["coverage"] == "fully_addressable" for a in batch["acceptance_by_issue"]),
+        "blockers": list(batch["blockers"]), "existing_prs": sorted(set(batch["existing_prs"])),
+        "human_approval_required": True,
+    }
+
+
+def build_report(snapshot: dict[str, Any], candidates: dict[str, Any], proposals: dict[str, Any] | None) -> dict[str, Any]:
+    """report.json: whitelisted fields only. Every open Issue appears exactly once in `issues`."""
+    by_number = {i["number"]: i for i in snapshot["issues"]}
+    facts = issue_facts(snapshot)
+    complete = snapshot_complete(snapshot)
+    issue_rows: dict[int, dict[str, Any]] = {}
+    batches: list[dict[str, Any]] = []
+    if proposals is not None:
+        status = "REVIEWED" if complete else "INCOMPLETE"
+        for batch in proposals["batches"]:
+            out = _batch_out(batch)
+            batches.append(out)
+            for n in out["issue_numbers"]:
+                issue_rows[n] = {"status": out["classification"], "batch_id": out["batch_id"], "reason": out["invariant"]}
+        for entry in proposals["issue_statuses"]:
+            issue_rows[entry["number"]] = {"status": entry["status"], "batch_id": None, "reason": entry["reason"]}
+        heuristic: list[dict[str, Any]] = []
+    else:
+        status = "HEURISTIC_ONLY" if complete else "INCOMPLETE"
+        heuristic = [{k: g[k] for k in ("batch_id", "classification", "issue_numbers", "score")} for g in candidates["groups"]]
+        for g in heuristic:
+            for n in g["issue_numbers"]:
+                issue_rows[n] = {"status": "HEURISTIC_CANDIDATE", "batch_id": g["batch_id"], "reason": "heuristic group"}
+        for entry in candidates["issue_statuses"]:
+            if entry["number"] not in issue_rows:
+                st = entry["status"] if entry["status"] != "ELIGIBLE" else "UNASSIGNED"
+                issue_rows[entry["number"]] = {"status": st, "batch_id": None,
+                                               "reason": entry["reason"] or "no related Issue found"}
+    issues = [{"number": n, "title": by_number[n]["title"], "url": by_number[n]["url"], **issue_rows[n],
+               "open_prs": facts[n]["open_prs"], "overlapping_prs": facts[n]["overlapping_prs"]}
+              for n in sorted(issue_rows) if n in by_number]
+    missing = sorted(set(by_number) - set(issue_rows))
+    if missing or len(issues) != len(by_number):
+        raise PlannerError(f"open Issues missing from the report: {missing}")
+    report = {
+        "schema_version": SCHEMA_VERSION, "repository": snapshot["repository"], "status": status,
+        "base": snapshot["base"], "collected_at": snapshot["collected_at"], "snapshot_complete": complete,
+        "counts": {"issues": len(by_number), "pull_requests": len(snapshot["pull_requests"]),
+                   "merge_candidates": sum(b["classification"] == "MERGE_CANDIDATE" for b in batches),
+                   "heuristic_groups": len(heuristic)},
+        "batches": sorted(batches, key=lambda b: (b["classification"] != "MERGE_CANDIDATE", b["issue_numbers"])),
+        "heuristic_groups": heuristic, "issues": issues,
+        "warnings": [HEURISTIC_WARNING] if status == "HEURISTIC_ONLY" else
+                    (["The snapshot is incomplete: this report cannot be used as a basis for a batch fix."]
+                     if status == "INCOMPLETE" else []),
+    }
+    report["content_sha256"] = report_content_sha256(report)
+    return report
+
+
+def render_markdown(report: dict[str, Any]) -> str:
+    def ref(n: int) -> str:
+        return f"#{n}"
+
+    lines = [f"# Issue batch report: {report['repository']}", "",
+             f"- Status: **{report['status']}**",
+             f"- Base: `{report['base']['branch']}` @ `{report['base']['sha']}`; data collected {report['collected_at']}",
+             f"- Open Issues: {report['counts']['issues']}; open PRs: {report['counts']['pull_requests']}; "
+             f"data complete: {'yes' if report['snapshot_complete'] else 'no'}",
+             "- Every batch needs your approval; nothing here authorizes work.", ""]
+    for w in report["warnings"]:
+        lines += [f"> **{w}**", ""]
+    merge = [b for b in report["batches"] if b["classification"] == "MERGE_CANDIDATE"]
+    other = [b for b in report["batches"] if b["classification"] != "MERGE_CANDIDATE"]
+    lines += ["## Suggested batches", ""]
+    if not merge:
+        lines += ["None.", ""]
+    for b in merge:
+        others = [n for n in b["issue_numbers"] if n != b["primary_issue"]]
+        lines += [f"### `{b['batch_id']}`: {b['root_cause_class']}", "",
+                  f"- Primary: {ref(b['primary_issue'])} (`issue-to-pr` fixes it with `Fixes`); "
+                  f"related: {', '.join(ref(n) for n in others)} (`Refs` only, closed after the merge)",
+                  f"- Invariant: {b['invariant']}",
+                  "- Evidence: " + "; ".join(f"{e['kind']} {e['path'] or e['url']}: {e['summary']}" for e in b["evidence"]),
+                  "- Per Issue: " + "; ".join(f"{ref(a['issue'])} {a['coverage']} ({a['validation']})"
+                                              for a in b["acceptance_by_issue"]),
+                  "- Pairs: " + "; ".join(f"{ref(p['issues'][0])}+{ref(p['issues'][1])}: {p['evidence']}"
+                                          for p in b["pair_compatibility"])]
+        if not b["all_fully_addressable"]:
+            lines.append("- Not every Issue is fully addressable: keep the others open after the merge.")
+        if b["existing_prs"] or b["blockers"]:
+            lines.append("- Blockers: " + "; ".join([*(f"open PR {ref(n)}" for n in b["existing_prs"]), *b["blockers"]]))
+        lines.append("")
+    lines += ["## Not suggested for a shared fix", ""]
+    lines += [f"- `{b['batch_id']}` {b['classification']}: {', '.join(ref(n) for n in b['issue_numbers'])}: {b['invariant']}"
+              for b in other] or ["None."]
+    lines.append("")
+    if report["heuristic_groups"]:
+        lines += ["## Unreviewed heuristic groups", ""]
+        lines += [f"- `{g['batch_id']}` score {g['score']}: {', '.join(ref(n) for n in g['issue_numbers'])}"
+                  for g in report["heuristic_groups"]]
+        lines.append("")
+    sections = (("Already covered by an open PR", ("EXISTING_PR",)),
+                ("Needs a decision or blocked", ("NEEDS_DECISION", "BLOCKED_BY")),
+                ("Possibly resolved: confirm through the existing-PR disposition", ("ALREADY_RESOLVED_REVIEW",)),
+                ("Insufficient evidence", ("INSUFFICIENT_EVIDENCE",)),
+                ("Not grouped", ("UNASSIGNED",)))
+    for title, statuses in sections:
+        rows = [i for i in report["issues"] if i["status"] in statuses]
+        if rows:
+            lines += [f"## {title}", ""]
+            lines += [f"- {ref(i['number'])} {i['title']}: {i['reason']}" for i in rows]
+            lines.append("")
+    lines += ["## Limits", "",
+              "- Groups come from shared paths, tests and cross-references; a missing link means no group, not "
+              "proof of independence.",
+              "- Issue text is untrusted and was never executed; bodies and comments are not stored.", ""]
+    return "\n".join(lines)
+
+
+def load_candidates(path: Path, snapshot: dict[str, Any]) -> dict[str, Any]:
+    candidates, _ = read_json(path, "candidates")
+    if (not isinstance(candidates, dict) or candidates.get("schema_version") != SCHEMA_VERSION
+            or candidates.get("repository") != snapshot["repository"]
+            or candidates.get("base_sha") != snapshot["base"]["sha"]
+            or candidates.get("issue_numbers") != sorted(i["number"] for i in snapshot["issues"])):
+        raise PlannerError("candidates.json does not belong to this snapshot (repository, base or Issues differ)")
+    if not all(isinstance(candidates.get(k), list) for k in ("issue_statuses", "groups", "pairs")):
+        raise PlannerError("candidates.json is malformed")
+    expected = shortlist(snapshot)
+    if candidates != expected:
+        raise PlannerError("candidates.json differs from a fresh shortlist of this snapshot; re-run shortlist")
+    return candidates
+
+
+def cmd_render(args: argparse.Namespace) -> int:
+    snapshot, digest = load_snapshot(args.snapshot)
+    candidates = load_candidates(args.candidates, snapshot)
+    out = prepare_out_dir(args.out_dir, refuse_existing=("report.json", "report.md", "render-diagnostics.json"))
+    proposals = None
+    if args.proposals is not None:
+        if args.repo_dir is None:
+            raise PlannerError("--proposals needs --repo-dir to check code evidence against the base tree")
+        proposals, _ = read_json(args.proposals, "proposals")
+        errors = proposals_problems(snapshot, digest, proposals, base_tree_paths(args.repo_dir, snapshot["base"]["sha"]))
+        if errors:
+            write_atomic(out / "render-diagnostics.json", dumps({"status": "BLOCKED", "errors": errors}))
+            print(dumps({"status": "BLOCKED", "reason": "proposals failed validation", "errors": len(errors)}), end="")
+            return EXIT_FAIL
+    report = build_report(snapshot, candidates, proposals)
+    findings = secret_findings(report)
+    if findings:
+        write_atomic(out / "render-diagnostics.json", dumps({"status": "BLOCKED", "secret_findings": findings}))
+        print(dumps({"status": "BLOCKED", "reason": "secret-shaped text", "findings": len(findings)}), end="")
+        return EXIT_FAIL
+    write_atomic(out / "report.json", dumps(report))
+    write_atomic(out / "report.md", render_markdown(report))
+    print(dumps({"status": report["status"], "report": str(out / "report.md"), "counts": report["counts"]}), end="")
+    return EXIT_OK if report["status"] in REPORTED else EXIT_FAIL
+
+
+# --------------------------------------------------------------------------- diff
+
+def _report_batches(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    items = report["batches"] if report["status"] == "REVIEWED" else report["heuristic_groups"]
+    return {b["batch_id"]: b for b in items}
+
+
+def _usable_report(report: Any) -> bool:
+    return (isinstance(report, dict) and report.get("schema_version") == SCHEMA_VERSION
+            and report.get("status") in REPORTED and report.get("snapshot_complete") is True
+            and isinstance(report.get("issues"), list) and isinstance(report.get("batches"), list)
+            and isinstance(report.get("heuristic_groups"), list)
+            and report.get("content_sha256") == report_content_sha256(report))
+
+
+def diff_reports(previous: Any, current: dict[str, Any]) -> dict[str, Any]:
+    if not _usable_report(current):
+        raise PlannerError("the current report is not a complete REVIEWED or HEURISTIC_ONLY report")
+    if not _usable_report(previous):
+        return {"status": "NO_BASELINE", "reason": "the previous report is missing, incomplete, blocked or altered"}
+    old, new = _report_batches(previous), _report_batches(current)
+    retired = sorted(set(old) - set(new))
+
+    def jaccard(a: list[int], b: list[int]) -> float:
+        return len(set(a) & set(b)) / len(set(a) | set(b))
+
+    new_batches = []
+    for bid in sorted(set(new) - set(old)):
+        best_id, best = None, 0.0
+        for r in retired:  # ascending, so a tie keeps the smaller batch_id
+            score = jaccard(new[bid]["issue_numbers"], old[r]["issue_numbers"])
+            if score > best:
+                best_id, best = r, score
+        new_batches.append({"batch_id": bid, "issue_numbers": new[bid]["issue_numbers"],
+                            "supersedes": best_id if best >= 0.5 else None})
+    old_status = {i["number"]: i["status"] for i in previous["issues"]}
+    hard = ("EXISTING_PR", "BLOCKED_BY", "NEEDS_DECISION", "ALREADY_RESOLVED_REVIEW")
+    return {
+        "status": "COMPARED", "previous": previous["content_sha256"], "current": current["content_sha256"],
+        "new_batches": new_batches,
+        "retired_batches": [{"batch_id": r, "issue_numbers": old[r]["issue_numbers"]} for r in retired],
+        "changed_classification": [{"batch_id": b, "from": old[b]["classification"], "to": new[b]["classification"]}
+                                   for b in sorted(set(old) & set(new))
+                                   if old[b]["classification"] != new[b]["classification"]],
+        "newly_blocked": [i["number"] for i in current["issues"]
+                          if i["status"] in hard and old_status.get(i["number"]) not in hard],
+        "issues_closed": sorted(set(old_status) - {i["number"] for i in current["issues"]}),
+    }
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    current, _ = read_json(args.current, "current report")
+    try:
+        previous, _ = read_json(args.previous, "previous report")
+    except PlannerError:
+        previous = None
+    out = Path(os.path.abspath(args.out))
+    if out.exists():
+        raise PlannerError(f"--out {out} already exists")
+    result = diff_reports(previous, current)
+    write_atomic(out, dumps(result))
+    print(dumps({k: (len(v) if isinstance(v, list) else v) for k, v in result.items()}), end="")
+    return EXIT_OK
 
 
 # --------------------------------------------------------------------------- CLI
@@ -760,9 +1040,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--snapshot", required=True, type=Path)
     s.add_argument("--out", required=True, type=Path)
     s.set_defaults(func=cmd_shortlist)
-    for name in ("render", "diff"):
-        p = sub.add_parser(name, help="not implemented yet")
-        p.set_defaults(func=cmd_not_implemented)
+    r = sub.add_parser("render", help="report.json and report.md from snapshot, candidates and optional proposals")
+    r.add_argument("--snapshot", required=True, type=Path)
+    r.add_argument("--candidates", required=True, type=Path)
+    r.add_argument("--proposals", type=Path)
+    r.add_argument("--repo-dir", type=Path)
+    r.add_argument("--out-dir", required=True, type=Path)
+    r.set_defaults(func=cmd_render)
+    d = sub.add_parser("diff", help="compare two report.json files")
+    d.add_argument("--previous", required=True, type=Path)
+    d.add_argument("--current", required=True, type=Path)
+    d.add_argument("--out", required=True, type=Path)
+    d.set_defaults(func=cmd_diff)
     return ap
 
 

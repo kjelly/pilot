@@ -10,8 +10,6 @@ can fix them and the others are closed after the merge (stage 0 in
 [similar-defect scan](../issue-to-pr/references/similar-defect-scan.md)). The output is a suggestion
 for the user to approve; it never authorizes work by itself.
 
-**Status**: `collect`, `shortlist` and `validate` are implemented; `render` and `diff` are not yet and exit 2.
-
 ## Boundaries
 
 - **Read-only.** `scripts/issue_batch_planner.py` runs every external command through one runner that
@@ -39,8 +37,13 @@ outside the repository or ignored by it (for example `.verification/issue-batch-
    `INSUFFICIENT_EVIDENCE`; never promote a heuristic group without evidence.
 5. `python3 "$P" validate --snapshot <dir>/snapshot.json --proposals <dir>/proposals.json --repo-dir <clone>`.
    Fix every reported problem by re-checking the evidence, not by loosening the proposal.
-6. `python3 "$P" render --snapshot <dir>/snapshot.json --candidates <dir>/candidates.json --proposals <dir>/proposals.json --out-dir <dir>`
-   writes `report.json` and `report.md`. Without proposals the report is `HEURISTIC_ONLY`.
+6. `python3 "$P" render --snapshot <dir>/snapshot.json --candidates <dir>/candidates.json --proposals <dir>/proposals.json --repo-dir <clone> --out-dir <dir>`
+   re-validates the proposals and writes `report.json` and `report.md`. Without `--proposals` the report is
+   `HEURISTIC_ONLY`. Every string of the report goes through the shared secret scanner first; a finding
+   (or invalid proposals) writes only `render-diagnostics.json`, without values, and exits 2.
+   To see what changed since an earlier run:
+   `python3 "$P" diff --previous <old>/report.json --current <dir>/report.json --out <dir>/diff.json`
+   (`NO_BASELINE` when the earlier report is missing, incomplete, blocked or altered).
 7. Give the user `report.md`'s summary: status, base SHA, the suggested batches and why, blocked and
    undecided Issues. Do not commit the report.
 

@@ -149,8 +149,10 @@ candidates; after the PR merges, each is closed by its own later `issue-to-pr` i
 `Fixes` checks of `create_pr.py`/`mark_ready.py` do not change.
 
 1. **Find** (read-only): during the scan, SA searches open Issues (`gh issue list --search`) by class,
-   invariant and the files or components involved. A confirmed same-invariant Issue becomes a candidate
-   with `related_issue_url`; an uncertain one is `unconfirmed`.
+   invariant and the files or components involved. A recent `issue-batch-planner` report, when the user
+   provides one, is a further input: its batches name Issues that share files, tests or references, but
+   they are leads to verify, not conclusions. A confirmed same-invariant Issue becomes a candidate with
+   `related_issue_url`; an uncertain one is `unconfirmed`.
 2. **Eligibility** (read-only, per related Issue): no open PR; no claim by another session
    (`claim.py check`); still open; its claims and acceptance criteria do not conflict with this fix
    (judged per [Issue claims](issue-claims.md), without commenting on it). An ineligible Issue is

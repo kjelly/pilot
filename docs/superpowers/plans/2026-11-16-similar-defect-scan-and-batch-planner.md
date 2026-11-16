@@ -307,7 +307,7 @@ P=.agents/skills/issue-batch-planner/scripts/issue_batch_planner.py
 python3 "$P" collect   --repo OWNER/REPO --repo-dir <clone> --out-dir <dir>
 python3 "$P" shortlist --snapshot <dir>/snapshot.json --out <dir>/candidates.json
 python3 "$P" validate  --snapshot <dir>/snapshot.json --proposals <dir>/proposals.json --repo-dir <clone>
-python3 "$P" render    --snapshot <dir>/snapshot.json --candidates <dir>/candidates.json [--proposals <dir>/proposals.json] --out-dir <dir>
+python3 "$P" render    --snapshot <dir>/snapshot.json --candidates <dir>/candidates.json [--proposals <dir>/proposals.json --repo-dir <clone>] --out-dir <dir>
 python3 "$P" diff      --previous <old>/report.json --current <dir>/report.json --out <dir>/diff.json
 ```
 

@@ -85,11 +85,6 @@ class LoaderTest(unittest.TestCase):
         self.assertEqual(2, code)
         self.assertEqual("INVALID", json.loads(out.getvalue())["status"])
 
-    def test_unimplemented_subcommands_exit_2(self):
-        for name in ("render", "diff"):
-            with self.subTest(name=name), redirect_stderr(io.StringIO()):
-                self.assertEqual(2, planner.main([name]))
-
 
 if __name__ == "__main__":
     unittest.main()
