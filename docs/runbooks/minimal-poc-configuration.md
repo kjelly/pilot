@@ -24,7 +24,7 @@ Repo 已有 delivery test skill：`.agents/skills/delivery-test/SKILL.md`。它�
 整理給使用者。`tmp/pilot-semantic-actions-r15/` 的錄影只是 semantic action smoke
 coverage；它沒有驗證本拓撲的 restic、Thanos 或 Prometheus site label 值。
 
-> **2026-11-10 架構修訂（尚未在新拓撲上實跑驗證）**：PoC 由 3 台改為 5 台，對齊
+> **2026-11-10 架構修訂（已於 2026-11-13 的 round 33 在新拓撲上從零實跑驗證）**：PoC 由 3 台改為 5 台，對齊
 > `infra-config` 的 staging 與 prod，見 [`minimal-poc-architecture.md`](minimal-poc-architecture.md) §0.6。
 > 本文第 1、2.9、3、5 節已依新拓撲更新；其餘各節的內容沿用 3 台時已驗證的版本，仍然適用。
 
@@ -34,7 +34,7 @@ coverage；它沒有驗證本拓撲的 restic、Thanos 或 Prometheus site label
 
 - 五台 VM 的實際 IP、SSH user、SSH private-key path 都能連線；不可沿用舊 evidence 的 IP。
 - `freeipa-server`、`freeipa-replica` 使用 AlmaLinux 9；`nexus`、`client-vm`、`bastion` 使用 Ubuntu 24.04。
-- `nexus` 至少有 4 vCPU、8 GiB RAM、50 GiB disk；Minimal PoC 建議使用 6 vCPU、12 GiB、80 GiB。
+- `nexus` 至少有 4 vCPU、8 GiB RAM、50 GiB disk；Minimal PoC 建議使用 6 vCPU、12 GiB、120 GiB（拓撲檔與 round 33 都用 120 GiB）。
 - `freeipa-server` 與 `freeipa-replica` 各至少 2 vCPU、4 GiB RAM、30 GiB disk
   （contract 的 `minRAMMiB` 是 4096，AlmaLinux guest 只看得到配置值的約 95%，所以 VM 配置 4608 MiB）。
 - `client-vm` 至少有 2 vCPU、2.5 GiB、20 GiB（比原本多 512 MiB 給 `dns` 層）；`bastion` 2 vCPU、2 GiB、20 GiB。
@@ -171,10 +171,10 @@ prometheus_site_label: site-nexus
 group vars 明確填入 `nexus` 的 IP。Site-wide deploy 仍必須先確認這些 provider group
 在實際 inventory 中有正確 host。
 
-### 2.9 新增角色的設定（2026-11-10，尚未實跑驗證）
+### 2.9 新增角色的設定（2026-11-10 推導，round 33 已在五台拓撲部署驗證）
 
 下列值依各 role 的 `contracts/*.yaml` 推導，對照 `infra-config` 的 staging／prod 設定；
-還沒有在 5 台拓撲上實際部署過，第一次實跑時以 preflight 的 `requires input` 為準，修正後回填本節。
+這些角色已在 round 33 的五台拓撲上部署並通過各自的 spec；本表是依 contract 推導的建議值，實跑時仍以 preflight 的 `requires input` 為準。
 
 | 角色 | 檔案 | 值 | 說明 |
 |---|---|---|---|

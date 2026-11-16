@@ -1,7 +1,7 @@
 # Declarative five-node topology for docs/runbooks/minimal-poc-architecture.md.
 #
-# 2026-11-10 architecture revision (NOT YET RE-VERIFIED on this exact topology;
-# see the runbook's §0.6): grown from the verified 3-node layout so that every
+# 2026-11-10 architecture revision (verified from zero on this exact topology in
+# round 33, 2026-11-13; see the runbook's §0.6): grown from the verified 3-node layout so that every
 # role family that infra-config/staging and infra-config/prod run is present at
 # least once, with the fewest VMs:
 #   freeipa-replica  = staging stg-ipa2 / prod freeipa02 (FreeIPA HA)
