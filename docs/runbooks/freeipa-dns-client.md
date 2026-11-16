@@ -70,6 +70,15 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
   重跑 `changed=0`；沒 promote 的 replica 不寫進 `resolv.conf`（`main` 會寫）、`freeipa_setup_dns: true` 時在任何變更前擋下、
   promote 之後納入；FreeIPA 列出的 replica named 停掉時只印 WARNING。見
   [evidence](../evidence/freeipa-replica-dns-provider/2026-10-16-b82a0c9.md)。
+- **目前有效的實跑（issue #168，新增 C8，2026-11-16）**：candidate `02ee1f049a40`（tree `5e66c19d7d24`），
+  `vm-target topology test --ephemeral`（`docs/topologies/freeipa-dns-client-effective-topology.yaml`：AlmaLinux 9
+  FreeIPA server 兼自己的 consumer、Ubuntu 24.04 dns tier 兼 consumer、AlmaLinux 9 consumer）L1→L6 PASS：本檔
+  C1–C8 24/0/0、L3 check mode 在全新主機上、L6 `changed=0`。另從同一份快照對 BASE 與 candidate 逐一注入故障
+  （FreeIPA 在前、`1.1.1.1` 在後；`resolv.conf` 換回 systemd-resolved stub；EL 手改 `resolv.conf`；
+  NetworkManager global-dns 蓋過 profile；只剩不認識 zone 的 DNS；第一台是黑洞；FreeIPA server 自己；
+  `--tags C8`／`--tags C9`）：BASE 的 C1–C7 在「FreeIPA 在前、公共 DNS 在後」「EL 手改」「global-dns」三種都 PASS，
+  EL 手改的 apply 是 `changed=0` 且手改留著；candidate 的 C8 都 FAIL，apply 修回；global-dns 那一種由新的
+  gate 擋下，rescue 如實報告還原。見 [evidence](../evidence/freeipa-dns-client/LATEST.md)。
 - Vault：只需要 `freeipa-server-apply.yml` 本身的 `ipa_admin_password`
   （沿用 `~/.vault/main.yaml` 慣例）；`freeipa-dns-client-apply.yml`
   **不需要任何 vault 密碼**——它只讀 inventory IP，不碰 FreeIPA LDAP/Kerberos。
@@ -96,6 +105,15 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
   NXDOMAIN／REFUSED 等硬錯誤仍擋下。獨立 classifier harness 的實測結果見
   [2026-10-21 evidence](../evidence/freeipa-dns-client/2026-10-21-56dc024.md)，不代表整份
   resolver spec 在本輪重新驗證。
+- **寫入前的報告與寫入後的 gate（issue #168，C8）**：共用檔在建立快照之前先唯讀印出主機現在實際使用的
+  nameserver（`/etc/resolv.conf` 前 3 行；指向 systemd-resolved stub 時加讀 `resolvectl dns`）、不在這次要寫入
+  清單裡的 server、這次要寫入的清單，並分辨「這台尚未由 pilot 管理」與「管理後又偏離」；`--check` 也會印，
+  不需要 `dig`，不是 gate。寫入之後、functional proof 之前有一道 fail-closed 的 gate：生效的 nameserver 必須是
+  這次寫入清單的子集（FreeIPA server 上 installer 的 `zzz-ipa.conf` 只留 `127.0.0.1` 是合法的子集）、不能為空、
+  不能是 stub。EL 上不符時先 `nmcli general reload dns-rc`，最多 10 秒內重讀；仍不符就失敗，訊息列出完整清單
+  與來源，由 rescue 還原（§3）。失敗時先看訊息裡「不在這次寫入清單」的 server 是誰、從哪來（NetworkManager 的
+  `conf.d` `[global-dns*]`、別條 connection 或 IPv6 的 DNS、別的自動化），移除那個來源後重跑 apply。
+  `internal-endpoint-apply.yml` 的 C9 baseline 用同一支共用檔，`--tags C9` 也會跑這兩步。驗收用 spec 的 C8。
 - 本檔不建立/管理 FreeIPA server 本身，也不管理 DNS zone/record 資料
   （那是 `freeipa-dns-apply.yml` 的職責）。
 - 套用範圍：任意主機，包含 FreeIPA server/replica 自己。day-2/opt-in，
@@ -209,7 +227,7 @@ VM 收尾：兩台 `pilot vm-target down`，乾淨釋放，無殘留。
 EL 另外存作用中 connection 的 `ipv4.dns`／`ipv4.dns-search`／`ipv4.ignore-auto-dns`。
 快照失敗時還沒有改任何東西，play 直接停止。
 
-`block/rescue` 包住整個 resolver mutate 區塊。任一步驟失敗時，rescue 會：
+`block/rescue` 包住整個 resolver mutate 區塊（寫入後一致性 gate 也在區塊內，失敗走同一個 rescue）。任一步驟失敗時，rescue 會：
 
 1. 把上述檔案還原成快照，這次才新建的檔案則刪掉。
 2. Debian：重啟 systemd-resolved 並執行 `netplan apply`。EL：用 `nmcli connection
@@ -236,6 +254,12 @@ evidence；修正前（`583df40`）的 rescue 只還原 `/etc/resolv.conf`，Ubu
 
 ## 5. 踩過的雷
 
+- **只看 pilot 寫了什麼，看不到主機實際用什麼**（issue #168）：C3／C4／C6／C7 讀 pilot 的設定、
+  「至少一筆 nameserver」與 `dig +short` 的第一個答案，「FreeIPA 在前、`1.1.1.1` 在後」或 EL 上手改過
+  `resolv.conf`（profile 沒變，apply 是 `changed=0`、手改留著）全部照樣 PASS。C8 與寫入前／後的兩個步驟
+  改看 glibc 實際會問的每一台（§1）。EL 上用 `nmcli general reload dns-rc` 讓 NetworkManager 依 profile 重寫
+  `resolv.conf`；NetworkManager 的 `[global-dns*]` 之類不由 pilot 管的來源蓋過 profile 時，reload 修不好，
+  gate 會失敗（rescue 還原，主機維持原狀），要移掉那個來源。
 - **`nmcli -g` 會跳脫冒號**（2026-10-01，NetworkManager 1.54.3）：`ipv4.dns-options` 設成
   `timeout:1,attempts:2` 之後，`nmcli -g ipv4.dns-options connection show <conn>` 印的是
   `timeout\:1,attempts\:2`。rescue 原本把這個值原封不動寫回去，結果存進了反斜線，

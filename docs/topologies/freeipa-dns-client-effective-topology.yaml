@@ -1,0 +1,55 @@
+# Declarative multi-VM scenario for docs/verification/freeipa-dns-client.md C8
+# (the nameservers glibc actually asks, issue #168). Apply chain:
+# playbooks/test/dns-tier-chain.yml (FreeIPA server, dns fixtures, dns tier,
+# then the freeipa-dns-client consumers):
+#
+#   i168-ipa  FreeIPA server (--setup-dns) that is also its own
+#             freeipa-dns-client: resolv.conf holds only 127.0.0.1 (the
+#             installer's zzz-ipa.conf global DNS), the "subset" case
+#   i168-dns  dns tier (unbound) that is also a freeipa-dns-client; Ubuntu,
+#             systemd-resolved (the stub case)
+#   i168-el   AlmaLinux consumer, NetworkManager (the hand-edited
+#             resolv.conf case and the NetworkManager global-dns case)
+#
+# The node names carry the issue number so they cannot collide with another
+# disposable topology on the same host. The dns settings are the built-in
+# defaults (no workspace group_vars/dns.yml). No `services: local`: the host
+# cache stack is not required for this run.
+services: none
+nodes:
+  - name: i168-ipa
+    base_image: almalinux-9
+    # The guest sees about 95% of this, and pilot deploy needs 4096 MiB for
+    # freeipa-server (cmd/pilot/cmd/topology_resources_test.go).
+    memory: 4608
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-server
+      - freeipa-dns-client
+
+  - name: i168-dns
+    base_image: ubuntu-24.04
+    memory: 1536
+    vcpus: 1
+    disk: 15
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - dns
+      - freeipa-dns-client
+
+  - name: i168-el
+    base_image: almalinux-9
+    memory: 2048
+    vcpus: 1
+    disk: 15
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-dns-client
