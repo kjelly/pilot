@@ -647,7 +647,7 @@ func TestRegression_FreeipaDNSClientEffectiveResolverPlacement(t *testing.T) {
 	if before < 0 || report != before+1 || ask < 0 || snap < 0 || block < 0 {
 		t.Fatalf("report tasks not found in order: read=%d report=%d ask=%d snapshot=%d block=%d", before, report, ask, snap, block)
 	}
-	if !(report < ask && ask < snap && snap < block) {
+	if report >= ask || ask >= snap || snap >= block {
 		t.Errorf("the report must come before the nameserver questions and the snapshot (read=%d report=%d ask=%d snapshot=%d)", before, report, ask, snap)
 	}
 	inc, _ := tasks[before]["ansible.builtin.include_tasks"].(map[string]any)
@@ -668,8 +668,8 @@ func TestRegression_FreeipaDNSClientEffectiveResolverPlacement(t *testing.T) {
 			t.Fatalf("block task %q not found", name)
 		}
 	}
-	if !(idx["EL — fall back to `nmcli con up` if reapply was rejected"] < idx[effReadAfter] && idx[effReadAfter] < idx[effReload] &&
-		idx[effReload] < idx[effReadReloaded] && idx[effReadReloaded] < idx[effGate] && idx[effGate] < idx[resolverFunc]) {
+	if idx["EL — fall back to `nmcli con up` if reapply was rejected"] >= idx[effReadAfter] || idx[effReadAfter] >= idx[effReload] ||
+		idx[effReload] >= idx[effReadReloaded] || idx[effReadReloaded] >= idx[effGate] || idx[effGate] >= idx[resolverFunc] {
 		t.Errorf("gate tasks out of order inside the block: %v", idx)
 	}
 	for _, name := range []string{effReadAfter, effGate} {
