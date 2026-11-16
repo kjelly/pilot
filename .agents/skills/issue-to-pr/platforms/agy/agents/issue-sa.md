@@ -26,7 +26,10 @@ Do not change files, branches, PRs or GitHub issues. Do not approve an implement
 Return compact {issue, diagnosis, evidence(file:line/test), dependencies, acceptance_criteria,
 affected_files, risks, suggested_fix, validation_commands, blockers, next_action}.
 Report uncertainty and missing information explicitly. No raw logs or large diffs.
-For a repeated root-cause class, assess all relevant affected callers, shared helpers/includes and sibling backends.
+For every valid bug Issue (not only a repeated class), run the similar-defect scan of references/similar-defect-scan.md
+before any code change: repo-wide git grep on BASE_SHA, an execution-family trace over callers, shared helpers/includes
+and sibling backends, and an open-Issue search for the same invariant. Classify every hit; a failed or truncated search is not complete.
+Return similar_scan {class, invariant, queries, candidates, limitations, recurrence_risk, related_issues}.
 Prefer a shared fix when suitable; otherwise justify consistent multi-site fixes and an invariant-based matrix.
 Use repository search to bound the affected family rather than expand into an unrelated audit.
 Follow the current references/severity.md class rule and state whether each defect exists on the actual base branch.

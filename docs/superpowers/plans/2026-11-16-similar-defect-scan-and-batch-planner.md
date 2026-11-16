@@ -28,7 +28,7 @@
 | `issue_gate.git()` 遇到任何非零結束碼都丟 `GateError`，無法區分 `merge-base --is-ancestor` 的「不是祖先」（rc=1）與錯誤 | `scripts/issue_gate.py::git` |
 | `create_pr.py`、`mark_ready.py` 呼叫 `evaluate()`，只使用 `errors`，不輸出 `info` | 兩支腳本的 `evaluate(` 呼叫處 |
 | `pr-ready` 用自己的 `pr_gate.py`，不呼叫 `issue_gate.evaluate()` | `.agents/skills/pr-ready/scripts/pr_gate.py` |
-| 角色 prompt 在 `platforms/{claude,codex,agy}/agents/` 各一份，本文必須一致；`.codex/agents/*.toml` 是位元組副本；`.claude/agents/*` 是 symlink | `cmd/pilot/cmd/agent_skill_consistency_test.go` |
+| 角色 prompt 在 `platforms/{claude,codex,agy}/agents/` 各一份，本文必須一致；`.codex/agents/issue-*.toml` 與 `.claude/agents/issue-*` 都是指向 `platforms/` 的 symlink（2026-11-16 實作 W1 時更正：原寫「位元組副本」不正確） | `cmd/pilot/cmd/agent_skill_consistency_test.go` |
 | 每個含 `SKILL.md` 的 `.agents/skills/<name>` 都要有 `.claude/skills/<name>` 相對 symlink | 同上 |
 | 列在 `NAMES` 的 skill，相對連結必須在 `.claude/skills/<name>` 與 `.agents/skills/<name>` 兩種路徑下都能解析；`_shared` 只能用 repo-root 路徑文字引用，不能用相對連結 | `.agents/skills/_shared/tests/test_skill_links.py` |
 | `make skill-test` 自動跑 `.agents/skills/*/tests/test_*.py`，CI 會執行 | `Makefile` 的 `skill-test` target |
@@ -380,11 +380,10 @@ W2 與 W3 可平行。
 | `.agents/skills/issue-to-pr/platforms/{claude,codex,agy}/agents/issue-sa.*` | 回報格式加 `class`、`queries`、`candidates`、`limitations`、`recurrence_risk`；移除「repeated」限定；加入相似 Issue 查詢 |
 | `.agents/skills/issue-to-pr/platforms/{claude,codex,agy}/agents/issue-coder.*` | 修正 in-scope 站點；`recurrence_risk=yes` 時補 guard，並在 scratch 複本記錄 BASE 上的失敗摘要 |
 | `.agents/skills/issue-to-pr/platforms/{claude,codex,agy}/agents/issue-reviewer.*` | 獨立重查並回傳 `similar_scan` |
-| `.codex/agents/issue-{sa,coder,reviewer}.toml` | 與 `platforms/codex/agents/` 位元組一致 |
 | `.agents/skills/pilot-code-review/references/pilot-history-checks.md` | 「修 bug 的 PR」列加上指向新 reference 與 evidence 欄位的說明 |
 | `.agents/skills/issue-to-pr/PROJECT-CHANGES.md` | 新增一列 |
 
-九個角色檔與三個 `.codex` 副本在同一個 commit 修改，三個平台的本文必須一致。
+九個角色檔在同一個 commit 修改，三個平台的本文必須一致（`.codex/agents/` 與 `.claude/agents/` 是 symlink，不需另外修改）。
 
 **驗收**：`make skill-test` 全部通過（含 `test_skill_links.py` 與 issue-to-pr 既有測試）；`go test ./cmd/pilot/cmd -run TestAgentSkillLayout -count=1` 通過；`git diff --check` 無輸出；`git grep -n "repeated root-cause class"` 在角色檔中不再出現。
 
@@ -544,7 +543,7 @@ git diff --check
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .agents/skills/<skill>/tests -p 'test_*.py'
 ```
 
-這些 PR 只改 `.agents/**`、`.codex/agents/**` 與 `.claude/skills/**`，不涉及 playbook、spec 或 pilot runtime，預期不需要 vm-target evidence；開工時以 `.github/pr-evidence.json` 與 `repo_evidence.py` 重新確認。
+這些變更只改 `.agents/**` 與 `.claude/skills/**`，不涉及 playbook、spec 或 pilot runtime，預期不需要 vm-target evidence；開工時以 `.github/pr-evidence.json` 與 `repo_evidence.py` 重新確認。
 
 W6 的實跑會在 `kjelly/pilot`（public）建立真實的公開 Issue，只在使用者核准後執行。
 
@@ -552,7 +551,7 @@ W6 的實跑會在 `kjelly/pilot`（public）建立真實的公開 Issue，只�
 
 1. **SA 自己找、自己說完整**：靠 Reviewer 獨立重查緩解，無法機器證明；文件要如實呈現。
 2. **guard 的 CI 成本**：`internal/spec` 測試已接近 30 分鐘；新 guard 沿用既有 ratchet allowlist 與 `ci_timeout_consistency_test` 的預算規則。
-3. **角色 prompt 漂移**：九個角色檔與三個副本必須同一個 commit 修改；一致性測試會抓。
+3. **角色 prompt 漂移**：九個角色檔必須同一個 commit 修改；一致性測試會抓。
 4. **與 upstream 1.2.0 差距擴大**：每個 PR 在 `PROJECT-CHANGES.md` 加一列；新內容盡量放在新檔。
 5. **Planner 規則粗糙**：shortlist 只用來排序，報告永遠需要人工核准；不宣稱精確度。
 6. **GitHub 輸出格式變動**：fixture 來自真實擷取；遇到預期外的格式一律結束碼 2。
