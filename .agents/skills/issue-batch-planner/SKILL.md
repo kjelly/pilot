@@ -10,7 +10,7 @@ can fix them and the others are closed after the merge (stage 0 in
 [similar-defect scan](../issue-to-pr/references/similar-defect-scan.md)). The output is a suggestion
 for the user to approve; it never authorizes work by itself.
 
-**Status**: `validate` is implemented; `collect`, `shortlist`, `render` and `diff` are not yet and exit 2.
+**Status**: `collect`, `shortlist` and `validate` are implemented; `render` and `diff` are not yet and exit 2.
 
 ## Boundaries
 

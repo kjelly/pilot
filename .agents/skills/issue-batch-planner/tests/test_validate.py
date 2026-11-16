@@ -100,7 +100,7 @@ class ValidateTest(unittest.TestCase):
 
     def test_umbrella_and_likely_resolved_are_hard_statuses(self):
         snap = synthetic("snapshot")
-        snap["issues"][6]["sub_issues"] = [11]
+        snap["issues"][6]["sub_issue_count"] = 1
         snap["issues"][5]["labels"] = ["likely-resolved"]
         facts = planner.issue_facts(snap)
         self.assertEqual("UNASSIGNED", facts[17]["status"])

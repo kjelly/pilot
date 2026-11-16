@@ -1,0 +1,67 @@
+[
+  {
+    "body": "Fixes #504\n\n## Tests\n- regression",
+    "changedFiles": 1,
+    "closingIssuesReferences": [
+      {
+        "id": "I_SANITIZED_16",
+        "number": 504,
+        "repository": {
+          "id": "R_SANITIZED",
+          "name": "pilot",
+          "owner": {
+            "id": "U_SANITIZED",
+            "login": "kjelly"
+          }
+        },
+        "url": "https://github.com/kjelly/pilot/issues/504"
+      }
+    ],
+    "files": [
+      {
+        "additions": 1,
+        "changeType": "MODIFIED",
+        "deletions": 1,
+        "path": "internal/gamma/gamma.go"
+      }
+    ],
+    "headRefName": "issue/601-captured",
+    "isDraft": true,
+    "number": 601,
+    "url": "https://github.com/kjelly/pilot/pull/601"
+  },
+  {
+    "body": "Refactor only. Refs #505",
+    "changedFiles": 1,
+    "closingIssuesReferences": [],
+    "files": [
+      {
+        "additions": 1,
+        "changeType": "MODIFIED",
+        "deletions": 1,
+        "path": "scripts/delta.py"
+      }
+    ],
+    "headRefName": "issue/602-captured",
+    "isDraft": false,
+    "number": 602,
+    "url": "https://github.com/kjelly/pilot/pull/602"
+  },
+  {
+    "body": "Touches alpha.\n\nRefs #501",
+    "changedFiles": 1,
+    "closingIssuesReferences": [],
+    "files": [
+      {
+        "additions": 56,
+        "changeType": "MODIFIED",
+        "deletions": 10,
+        "path": "playbooks/apply/alpha-apply.yml"
+      }
+    ],
+    "headRefName": "issue/603-captured",
+    "isDraft": true,
+    "number": 603,
+    "url": "https://github.com/kjelly/pilot/pull/603"
+  }
+]

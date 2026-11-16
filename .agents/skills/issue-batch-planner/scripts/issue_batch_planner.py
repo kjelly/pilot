@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Callable
@@ -36,7 +40,7 @@ GITHUB_URL_RE = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+
 # The only `gh ... list` field sets the runner accepts.
 ISSUE_FIELDS = ("number,title,url,labels,body,comments,createdAt,updatedAt,"
                 "blockedBy,parent,subIssues,closedByPullRequestsReferences")
-PR_FIELDS = "number,url,isDraft,headRefName,body,closingIssuesReferences,files"
+PR_FIELDS = "number,url,isDraft,headRefName,body,closingIssuesReferences,files,changedFiles"
 # The only `git grep` pattern the runner accepts: test definitions in the base tree. Names an Issue
 # mentions are matched against this list in memory, never passed to git.
 TEST_DEF_PATTERN = r"func Test[A-Za-z0-9_]*|def test_[A-Za-z0-9_]*"
@@ -46,8 +50,27 @@ ISSUE_STATUSES = ("EXISTING_PR", "BLOCKED_BY", "NEEDS_DECISION", "ALREADY_RESOLV
 PROPOSAL_CLASSIFICATIONS = ("MERGE_CANDIDATE", "RELATED_SEPARATE", "INSUFFICIENT_EVIDENCE")
 COVERAGES = ("fully_addressable", "partial_only", "undecided")
 EVIDENCE_KINDS = ("issue", "code", "pr", "commit")
-REF_STATES = ("OPEN", "CLOSED", "MERGED")
+# blocked_by carries GitHub's Issue state (OPEN/CLOSED). closedByPullRequestsReferences carries no state:
+# collect marks a same-repository PR OPEN or NOT_OPEN against the complete open-PR list, and a PR of another
+# repository UNKNOWN. OPEN and UNKNOWN both block grouping (fail closed).
+REF_STATES = ("OPEN", "CLOSED", "NOT_OPEN", "UNKNOWN")
+BLOCKING_REF_STATES = ("OPEN", "UNKNOWN")
 MIN_BATCH, MAX_BATCH = 2, 4
+DEFAULT_LIMIT = 1000
+# `gh issue list --json comments` returns at most 100 comments per Issue (2026-11-16: two cli/cli
+# Issues with more than 120 comments came back with exactly 100). At the cap the Issue is incomplete.
+GH_COMMENT_CAP = 100
+# Path prefixes an Issue may reference; anything else in the text is ignored.
+PATH_RE = re.compile(r"(?<![\w./-])((?:playbooks|cmd|internal|contracts|\.agents|docs/verification|group_vars|scripts)"
+                     r"/[\w./-]*[\w-])")
+TEST_NAME_RE = re.compile(r"\b(Test[A-Z]\w*|test_\w+)\b")
+TEST_DEF_NAME_RE = re.compile(r"(?:func |def )(\w+)")
+TITLE_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# shortlist weights: ranking only, never a verdict (references/classification-rubric.md).
+STRONG_WEIGHTS = {"shared_paths": 25, "cross_reference": 10, "shared_tests": 20}
+WEAK_WEIGHTS = {"shared_area_label": 10, "similar_title": 5}
+PAIR_THRESHOLD = 30
+TITLE_JACCARD = 0.3
 
 
 class PlannerError(RuntimeError):
@@ -163,11 +186,13 @@ def shape_errors(value: Any, spec: Any, where: str) -> list[str]:
     return [] if pred(value) else [f"{where}: expected {desc}"]
 
 
-REF_SHAPE = {"number": POS_INT, "state": leaf(lambda v: v in REF_STATES, "OPEN, CLOSED or MERGED")}
+REF_SHAPE = {"number": POS_INT, "state": leaf(lambda v: v in REF_STATES, "one of " + ", ".join(REF_STATES)),
+             "url": STR}
 SOURCE_SHAPE = {"count": NON_NEG_INT, "limit": POS_INT, "complete": BOOL}
 SNAPSHOT_ISSUE_SHAPE = {
     "number": POS_INT, "title": STR, "url": STR, "labels": ListOf(STR),
-    "blocked_by": ListOf(REF_SHAPE), "parent": Opt(POS_INT), "sub_issues": ListOf(POS_INT),
+    "blocked_by": ListOf(REF_SHAPE), "relations_complete": BOOL, "parent": Opt(POS_INT),
+    "sub_issue_count": NON_NEG_INT,
     "closed_by_prs": ListOf(REF_SHAPE), "comments_count": NON_NEG_INT, "comments_complete": BOOL,
     "referenced_paths": ListOf(STR), "referenced_issues": ListOf(POS_INT), "referenced_tests": ListOf(STR),
 }
@@ -249,7 +274,7 @@ def load_snapshot(path: Path) -> tuple[dict[str, Any], str]:
 
 def snapshot_complete(snapshot: dict[str, Any]) -> bool:
     return (snapshot["sources"]["issues"]["complete"] and snapshot["sources"]["pull_requests"]["complete"]
-            and all(i["comments_complete"] for i in snapshot["issues"])
+            and all(i["comments_complete"] and i["relations_complete"] for i in snapshot["issues"])
             and all(p["files_complete"] for p in snapshot["pull_requests"]))
 
 
@@ -259,29 +284,35 @@ def issue_facts(snapshot: dict[str, Any]) -> dict[int, dict[str, Any]]:
     """Deterministic per-Issue facts: hard status (or None when groupable), open closing PRs, open
     blockers, and open PRs that change a path the Issue references without closing it."""
     prs = snapshot["pull_requests"]
+    own = f"https://github.com/{snapshot['repository']}/"
+
+    def name(ref: dict[str, Any]) -> str:
+        return f"#{ref['number']}" if ref["url"].lower().startswith(own.lower()) else ref["url"]
+
     facts: dict[int, dict[str, Any]] = {}
     for issue in snapshot["issues"]:
         n = issue["number"]
-        closing = {pr["number"] for pr in prs if n in pr["closing_issues"] or n in pr["body_closing_issues"]}
-        closing |= {ref["number"] for ref in issue["closed_by_prs"] if ref["state"] == "OPEN"}
-        blockers = sorted(ref["number"] for ref in issue["blocked_by"] if ref["state"] == "OPEN")
+        closing_refs = {f"#{pr['number']}" for pr in prs if n in pr["closing_issues"] or n in pr["body_closing_issues"]}
+        closing_refs |= {name(ref) for ref in issue["closed_by_prs"] if ref["state"] in BLOCKING_REF_STATES}
+        closing = sorted(int(x[1:]) for x in closing_refs if x.startswith("#"))
+        blocker_refs = sorted({name(ref) for ref in issue["blocked_by"] if ref["state"] in BLOCKING_REF_STATES})
         paths = set(issue["referenced_paths"])
         overlapping = sorted(pr["number"] for pr in prs if pr["number"] not in closing and paths & set(pr["files"]))
         labels = set(issue["labels"])
-        if closing:
-            status, reason = "EXISTING_PR", "open PR " + ", ".join(f"#{x}" for x in sorted(closing)) + " closes it"
-        elif blockers:
-            status, reason = "BLOCKED_BY", "blocked by open " + ", ".join(f"#{x}" for x in blockers)
+        if closing_refs:
+            status, reason = "EXISTING_PR", "open or unverifiable PR " + ", ".join(sorted(closing_refs)) + " closes it"
+        elif blocker_refs:
+            status, reason = "BLOCKED_BY", "blocked by open " + ", ".join(blocker_refs)
         elif "needs-decision" in labels:
             status, reason = "NEEDS_DECISION", "labelled needs-decision"
         elif "likely-resolved" in labels:
             status, reason = "ALREADY_RESOLVED_REVIEW", "labelled likely-resolved; confirm through the existing-PR disposition"
-        elif issue["sub_issues"]:
+        elif issue["sub_issue_count"]:
             status, reason = "UNASSIGNED", "umbrella Issue (has sub-issues); not fixable by itself"
         else:
             status, reason = None, ""
-        facts[n] = {"status": status, "reason": reason, "open_prs": sorted(closing),
-                    "blocked_by": blockers, "overlapping_prs": overlapping}
+        facts[n] = {"status": status, "reason": reason, "open_prs": closing,
+                    "blocked_by": blocker_refs, "overlapping_prs": overlapping}
     return facts
 
 
@@ -387,6 +418,324 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return EXIT_FAIL if errors else EXIT_OK
 
 
+# --------------------------------------------------------------------------- output files
+
+def dumps(obj: Any) -> str:
+    """Deterministic JSON: sorted keys, two-space indent, trailing newline."""
+    return json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def prepare_out_dir(path: Path) -> Path:
+    """An empty output directory, outside any Git work tree or ignored by it. Created if missing."""
+    out = Path(os.path.abspath(Path(path).expanduser()))
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise PlannerError(f"--out-dir {out} must be an empty directory or not exist")
+    probe = out
+    while not probe.exists():
+        probe = probe.parent
+    top = run_readonly(["git", "-C", str(probe), "rev-parse", "--show-toplevel"])
+    if top.returncode == 0 and top.stdout.strip():
+        ignored = run_readonly(["git", "-C", top.stdout.strip(), "check-ignore", "-q", "--", str(out)])
+        if ignored.returncode != 0:
+            raise PlannerError(f"--out-dir {out} is inside the work tree {top.stdout.strip()} and not ignored; "
+                               "use an ignored path such as .verification/issue-batch-planner/<date>")
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def write_atomic(path: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# --------------------------------------------------------------------------- collect
+
+_ISSUE_GATE: Any = None
+
+
+def issue_gate() -> Any:
+    """issue-to-pr's issue_gate.py, loaded by path: its closes_issue() is the one closing-keyword rule."""
+    global _ISSUE_GATE
+    if _ISSUE_GATE is None:
+        path = Path(__file__).resolve().parents[2] / "issue-to-pr" / "scripts" / "issue_gate.py"
+        spec = importlib.util.spec_from_file_location("pilot_issue_gate", path)
+        if spec is None or spec.loader is None or not path.is_file():
+            raise PlannerError(f"issue-to-pr's issue_gate.py is missing: {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules.setdefault("pilot_issue_gate", module)
+        spec.loader.exec_module(module)
+        _ISSUE_GATE = module
+    return _ISSUE_GATE
+
+
+def _gh_json(argv: list[str], what: str) -> Any:
+    r = run_readonly(argv)
+    if r.returncode != 0:
+        raise PlannerError(f"{what} failed: {(r.stderr or r.stdout).strip()[:300]}")
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError as exc:
+        raise PlannerError(f"{what} did not return JSON: {exc}") from exc
+
+
+def _need(obj: Any, keys: tuple[str, ...], what: str) -> dict[str, Any]:
+    if not isinstance(obj, dict) or any(k not in obj for k in keys):
+        raise PlannerError(f"unexpected {what} shape from gh (needs {', '.join(keys)})")
+    return obj
+
+
+def base_commit(repo: str, repo_dir: Path) -> tuple[str, str]:
+    view = _need(_gh_json(["gh", "repo", "view", repo, "--json", "defaultBranchRef"], "gh repo view"),
+                 ("defaultBranchRef",), "repo view")
+    branch = view["defaultBranchRef"].get("name") if isinstance(view["defaultBranchRef"], dict) else None
+    if not isinstance(branch, str) or not BRANCH_REF_RE.fullmatch(f"refs/heads/{branch}"):
+        raise PlannerError(f"unexpected default branch {branch!r}")
+    r = run_readonly(["git", "ls-remote", f"https://github.com/{repo}", f"refs/heads/{branch}"])
+    lines = [line.split("\t") for line in r.stdout.splitlines() if line.strip()]
+    if r.returncode != 0 or len(lines) != 1 or len(lines[0]) != 2 or not SHA_RE.fullmatch(lines[0][0]) \
+            or lines[0][1] != f"refs/heads/{branch}":
+        raise PlannerError(f"cannot resolve refs/heads/{branch} of {repo}: {(r.stderr or r.stdout).strip()[:200]}")
+    sha = lines[0][0]
+    ensure_commit(repo_dir, sha)
+    return branch, sha
+
+
+def base_test_names(repo_dir: Path, sha: str) -> set[str]:
+    r = run_readonly(["git", "-C", str(repo_dir), "grep", "-h", "-o", "-E", TEST_DEF_PATTERN, sha,
+                      "--", "*.go", "*.py"])
+    if r.returncode == 1 and not r.stdout:
+        return set()
+    if r.returncode != 0:
+        raise PlannerError(f"git grep for test definitions failed: {r.stderr.strip()[:200]}")
+    return {m.group(1) for line in r.stdout.splitlines() for m in [TEST_DEF_NAME_RE.match(line)] if m}
+
+
+def _issue_refs(text: str, repo: str, own: int) -> set[int]:
+    found = {int(m) for m in re.findall(r"(?<![\w/#&])#([1-9][0-9]{0,6})\b", text)}
+    found |= {int(m) for m in re.findall(re.escape(f"https://github.com/{repo}/issues/") + r"([1-9][0-9]{0,6})\b",
+                                         text, re.IGNORECASE)}
+    found.discard(own)
+    return found
+
+
+def _ref(node: Any, repo: str, kind: str, open_prs: set[int] | None) -> dict[str, Any]:
+    node = _need(node, ("number", "url"), kind)
+    if type(node["number"]) is not int or not isinstance(node["url"], str):
+        raise PlannerError(f"unexpected {kind} entry from gh")
+    if open_prs is None:  # an Issue relation: GitHub's own state
+        state = node.get("state")
+        if state not in ("OPEN", "CLOSED"):
+            raise PlannerError(f"unexpected {kind} state {state!r}")
+    elif node["url"].lower() == f"https://github.com/{repo}/pull/{node['number']}".lower():
+        state = "OPEN" if node["number"] in open_prs else "NOT_OPEN"
+    else:
+        state = "UNKNOWN"
+    return {"number": node["number"], "state": state, "url": node["url"]}
+
+
+def build_snapshot(repo: str, branch: str, sha: str, raw_issues: Any, raw_prs: Any, limit: int,
+                   tree: set[str], tests: set[str], collected_at: str) -> dict[str, Any]:
+    """snapshot.json from `gh issue list` / `gh pr list` output. Issue bodies and comments are read
+    here and dropped: only derived paths, Issue numbers and test names are kept."""
+    if not isinstance(raw_issues, list) or not isinstance(raw_prs, list):
+        raise PlannerError("gh list output is not a JSON list")
+    gate = issue_gate()
+    issue_numbers = []
+    for raw in raw_issues:
+        _need(raw, ("number",), "issue")
+        issue_numbers.append(raw["number"])
+    prs = []
+    open_pr_numbers = set()
+    for raw in raw_prs:
+        raw = _need(raw, ("number", "url", "isDraft", "body", "closingIssuesReferences", "files", "changedFiles"), "pr")
+        if type(raw["number"]) is not int or not isinstance(raw["files"], list) or type(raw["changedFiles"]) is not int:
+            raise PlannerError("unexpected pr field types from gh")
+        open_pr_numbers.add(raw["number"])
+        body = raw["body"] if isinstance(raw["body"], str) else ""
+        closing = sorted({c["number"] for c in raw["closingIssuesReferences"]
+                          if _need(c, ("number", "url"), "closing reference")["url"].lower()
+                          == f"https://github.com/{repo}/issues/{c['number']}".lower()})
+        files = sorted({_need(f, ("path",), "pr file")["path"] for f in raw["files"]})
+        prs.append({"number": raw["number"], "url": raw["url"], "is_draft": bool(raw["isDraft"]),
+                    "closing_issues": closing,
+                    "body_closing_issues": sorted(n for n in issue_numbers if gate.closes_issue(body, repo, n)),
+                    "files": files, "files_complete": len(raw["files"]) == raw["changedFiles"]})
+    issues = []
+    for raw in raw_issues:
+        raw = _need(raw, ("number", "title", "url", "labels", "body", "comments", "blockedBy", "parent",
+                          "subIssues", "closedByPullRequestsReferences"), "issue")
+        comments = raw["comments"] if isinstance(raw["comments"], list) else None
+        blocked = _need(raw["blockedBy"], ("nodes", "totalCount"), "blockedBy")
+        subs = _need(raw["subIssues"], ("totalCount",), "subIssues")
+        if comments is None or not isinstance(blocked["nodes"], list) or type(subs["totalCount"]) is not int:
+            raise PlannerError("unexpected issue field types from gh")
+        texts = [raw["body"] if isinstance(raw["body"], str) else ""]
+        texts += [c.get("body") or "" for c in comments if isinstance(c, dict)]
+        text = "\n".join(texts)
+        parent = raw["parent"]
+        issues.append({
+            "number": raw["number"], "title": str(raw["title"]), "url": str(raw["url"]),
+            "labels": sorted({_need(label, ("name",), "label")["name"] for label in raw["labels"]}),
+            "blocked_by": sorted((_ref(b, repo, "blockedBy", None) for b in blocked["nodes"]),
+                                 key=lambda r: (r["url"], r["number"])),
+            "relations_complete": len(blocked["nodes"]) == blocked["totalCount"],
+            "parent": _need(parent, ("number",), "parent")["number"] if parent else None,
+            "sub_issue_count": subs["totalCount"],
+            "closed_by_prs": sorted((_ref(c, repo, "closedByPullRequestsReferences", open_pr_numbers)
+                                     for c in raw["closedByPullRequestsReferences"]),
+                                    key=lambda r: (r["url"], r["number"])),
+            "comments_count": len(comments), "comments_complete": len(comments) < GH_COMMENT_CAP,
+            "referenced_paths": sorted({m for m in PATH_RE.findall(text) if m in tree}),
+            "referenced_issues": sorted(_issue_refs(text, repo, raw["number"])),
+            "referenced_tests": sorted({m for m in TEST_NAME_RE.findall(text) if m in tests}),
+        })
+    issues.sort(key=lambda i: i["number"])
+    prs.sort(key=lambda p: p["number"])
+    snapshot = {
+        "schema_version": SCHEMA_VERSION, "repository": repo, "base": {"branch": branch, "sha": sha},
+        "collected_at": collected_at,
+        "sources": {"issues": {"count": len(issues), "limit": limit, "complete": len(raw_issues) < limit},
+                    "pull_requests": {"count": len(prs), "limit": limit, "complete": len(raw_prs) < limit}},
+        "issues": issues, "pull_requests": prs,
+    }
+    errors = snapshot_problems(snapshot)
+    if errors:
+        raise PlannerError("collected data does not fit the snapshot shape: " + "; ".join(errors[:10]))
+    return snapshot
+
+
+def cmd_collect(args: argparse.Namespace) -> int:
+    if not REPO_RE.fullmatch(args.repo):
+        raise PlannerError("--repo must be OWNER/REPO")
+    if args.limit < 1:
+        raise PlannerError("--limit must be positive")
+    started = now_iso()
+    out = prepare_out_dir(args.out_dir)
+    repo_dir = Path(os.path.abspath(args.repo_dir))
+    branch, sha = base_commit(args.repo, repo_dir)
+    tree = base_tree_paths(repo_dir, sha)
+    tests = base_test_names(repo_dir, sha)
+    limit = str(args.limit)
+    raw_issues = _gh_json(["gh", "issue", "list", "-R", args.repo, "--state", "open", "--limit", limit,
+                           "--json", ISSUE_FIELDS], "gh issue list")
+    raw_prs = _gh_json(["gh", "pr", "list", "-R", args.repo, "--state", "open", "--limit", limit,
+                        "--json", PR_FIELDS], "gh pr list")
+    snapshot = build_snapshot(args.repo, branch, sha, raw_issues, raw_prs, args.limit, tree, tests, now_iso())
+    write_atomic(out / "snapshot.json", dumps(snapshot))
+    complete = snapshot_complete(snapshot)
+    status = "COMPLETE" if complete else "INCOMPLETE"
+    write_atomic(out / "run-metadata.json", dumps({
+        "command": "collect", "started_at": started, "finished_at": now_iso(), "status": status,
+        "gh_version": run_readonly(["gh", "--version"]).stdout.splitlines()[:1],
+        "git_version": run_readonly(["git", "--version"]).stdout.strip()}))
+    print(dumps({"status": status, "snapshot": str(out / "snapshot.json"), "base_sha": sha,
+                 "issues": len(snapshot["issues"]), "pull_requests": len(snapshot["pull_requests"])}), end="")
+    return EXIT_OK if complete else EXIT_FAIL
+
+
+# --------------------------------------------------------------------------- shortlist
+
+def _title_tokens(title: str) -> set[str]:
+    return {t for t in TITLE_TOKEN_RE.findall(title.lower()) if len(t) >= 3}
+
+
+def pair_features(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+    paths = sorted(set(a["referenced_paths"]) & set(b["referenced_paths"]))
+    tests = sorted(set(a["referenced_tests"]) & set(b["referenced_tests"]))
+    cross = a["number"] in b["referenced_issues"] or b["number"] in a["referenced_issues"]
+    areas = sorted({x for x in a["labels"] if x.startswith("area:")} & set(b["labels"]))
+    ta, tb = _title_tokens(a["title"]), _title_tokens(b["title"])
+    jaccard = len(ta & tb) / len(ta | tb) if ta | tb else 0.0
+    signals = {"shared_paths": bool(paths), "cross_reference": cross, "shared_tests": bool(tests),
+               "shared_area_label": bool(areas), "similar_title": jaccard >= TITLE_JACCARD}
+    weights = {**STRONG_WEIGHTS, **WEAK_WEIGHTS}
+    score = sum(weights[k] for k, on in signals.items() if on)
+    strong = any(signals[k] for k in STRONG_WEIGHTS)
+    return {"issues": sorted([a["number"], b["number"]]), "score": score, "candidate": strong and score >= PAIR_THRESHOLD,
+            "shared_paths": paths, "shared_tests": tests, "cross_reference": cross, "shared_area_labels": areas,
+            "title_jaccard": round(jaccard, 3)}
+
+
+def batch_id(root_cause_class: str, numbers: list[int]) -> str:
+    return hashlib.sha256(f"{root_cause_class}|{','.join(str(n) for n in sorted(numbers))}".encode()).hexdigest()[:12]
+
+
+def shortlist(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """candidates.json: per-Issue status, scored pairs and non-transitive heuristic groups. Depends only on
+    the snapshot's content, not its order or collection time."""
+    facts = issue_facts(snapshot)
+    by_number = {i["number"]: i for i in snapshot["issues"]}
+    eligible = sorted(n for n, f in facts.items() if f["status"] is None)
+    pairs = []
+    for x, y in combinations(eligible, 2):
+        f = pair_features(by_number[x], by_number[y])
+        if f["shared_paths"] or f["shared_tests"] or f["cross_reference"]:  # weak-only pairs are noise
+            pairs.append(f)
+    pairs.sort(key=lambda p: (-p["score"], p["issues"]))
+    linked = {tuple(p["issues"]) for p in pairs if p["candidate"]}
+    score_of = {tuple(p["issues"]): p["score"] for p in pairs}
+    member_of: dict[int, list[int]] = {}
+    groups: list[list[int]] = []
+    for p in pairs:
+        if not p["candidate"]:
+            continue
+        a, b = p["issues"]
+        ga, gb = member_of.get(a), member_of.get(b)
+        if ga is None and gb is None:
+            group = [a, b]
+            groups.append(group)
+            member_of[a] = member_of[b] = group
+            continue
+        if ga is not None and gb is not None:
+            continue
+        group, new = (ga, b) if ga is not None else (gb, a)
+        if len(group) < MAX_BATCH and all(tuple(sorted((m, new))) in linked for m in group):
+            group.append(new)
+            member_of[new] = group
+    out_groups = []
+    for g in groups:
+        members = sorted(g)
+        out_groups.append({"batch_id": batch_id("heuristic", members), "classification": "HEURISTIC_CANDIDATE",
+                           "issue_numbers": members,
+                           "score": sum(score_of[pair] for pair in combinations(members, 2))})
+    out_groups.sort(key=lambda g: (-g["score"], g["issue_numbers"]))
+    grouped = {n for g in out_groups for n in g["issue_numbers"]}
+    return {
+        "schema_version": SCHEMA_VERSION, "repository": snapshot["repository"], "base_sha": snapshot["base"]["sha"],
+        "complete": snapshot_complete(snapshot),
+        "issue_numbers": sorted(by_number),
+        "issue_statuses": [{"number": n, "status": facts[n]["status"] or "ELIGIBLE", "reason": facts[n]["reason"],
+                            "open_prs": facts[n]["open_prs"], "blocked_by": facts[n]["blocked_by"],
+                            "overlapping_prs": facts[n]["overlapping_prs"]} for n in sorted(facts)],
+        "pairs": pairs, "groups": out_groups,
+        "unassigned": [n for n in eligible if n not in grouped],
+    }
+
+
+def cmd_shortlist(args: argparse.Namespace) -> int:
+    snapshot, _ = load_snapshot(args.snapshot)
+    out = Path(os.path.abspath(args.out))
+    if out.exists():
+        raise PlannerError(f"--out {out} already exists")
+    if not out.parent.is_dir():
+        raise PlannerError(f"--out directory {out.parent} does not exist")
+    candidates = shortlist(snapshot)
+    write_atomic(out, dumps(candidates))
+    print(dumps({"status": "COMPLETE" if candidates["complete"] else "INCOMPLETE",
+                 "groups": len(candidates["groups"]), "pairs": len(candidates["pairs"])}), end="")
+    return EXIT_OK if candidates["complete"] else EXIT_FAIL
+
+
 def cmd_not_implemented(args: argparse.Namespace) -> int:
     raise PlannerError(f"{args.command} is not implemented yet")
 
@@ -401,7 +750,17 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--proposals", required=True, type=Path)
     v.add_argument("--repo-dir", required=True, type=Path)
     v.set_defaults(func=cmd_validate)
-    for name in ("collect", "shortlist", "render", "diff"):
+    c = sub.add_parser("collect", help="read open Issues and PRs into snapshot.json (read-only)")
+    c.add_argument("--repo", required=True)
+    c.add_argument("--repo-dir", required=True, type=Path)
+    c.add_argument("--out-dir", required=True, type=Path)
+    c.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+    c.set_defaults(func=cmd_collect)
+    s = sub.add_parser("shortlist", help="per-Issue status and heuristic groups from snapshot.json")
+    s.add_argument("--snapshot", required=True, type=Path)
+    s.add_argument("--out", required=True, type=Path)
+    s.set_defaults(func=cmd_shortlist)
+    for name in ("render", "diff"):
         p = sub.add_parser(name, help="not implemented yet")
         p.set_defaults(func=cmd_not_implemented)
     return ap

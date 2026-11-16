@@ -23,7 +23,8 @@
       "referenced_tests": [
         "TestAThing"
       ],
-      "sub_issues": [],
+      "relations_complete": true,
+      "sub_issue_count": 0,
       "title": "Synthetic Issue 11",
       "url": "https://github.com/OWNER/REPO/issues/11"
     },
@@ -45,7 +46,8 @@
         "playbooks/apply/a.yml"
       ],
       "referenced_tests": [],
-      "sub_issues": [],
+      "relations_complete": true,
+      "sub_issue_count": 0,
       "title": "Synthetic Issue 12",
       "url": "https://github.com/OWNER/REPO/issues/12"
     },
@@ -66,7 +68,8 @@
       "referenced_tests": [
         "TestAThing"
       ],
-      "sub_issues": [],
+      "relations_complete": true,
+      "sub_issue_count": 0,
       "title": "Synthetic Issue 13",
       "url": "https://github.com/OWNER/REPO/issues/13"
     },
@@ -85,7 +88,8 @@
         "playbooks/apply/b.yml"
       ],
       "referenced_tests": [],
-      "sub_issues": [],
+      "relations_complete": true,
+      "sub_issue_count": 0,
       "title": "Synthetic Issue 14",
       "url": "https://github.com/OWNER/REPO/issues/14"
     },
@@ -93,7 +97,8 @@
       "blocked_by": [
         {
           "number": 99,
-          "state": "OPEN"
+          "state": "OPEN",
+          "url": "https://github.com/OWNER/REPO/issues/99"
         }
       ],
       "closed_by_prs": [],
@@ -107,7 +112,8 @@
       "referenced_issues": [],
       "referenced_paths": [],
       "referenced_tests": [],
-      "sub_issues": [],
+      "relations_complete": true,
+      "sub_issue_count": 0,
       "title": "Synthetic Issue 15",
       "url": "https://github.com/OWNER/REPO/issues/15"
     },
@@ -125,7 +131,8 @@
       "referenced_issues": [],
       "referenced_paths": [],
       "referenced_tests": [],
-      "sub_issues": [],
+      "relations_complete": true,
+      "sub_issue_count": 0,
       "title": "Synthetic Issue 16",
       "url": "https://github.com/OWNER/REPO/issues/16"
     },
@@ -144,7 +151,8 @@
         "internal/x/y.go"
       ],
       "referenced_tests": [],
-      "sub_issues": [],
+      "relations_complete": true,
+      "sub_issue_count": 0,
       "title": "Synthetic Issue 17",
       "url": "https://github.com/OWNER/REPO/issues/17"
     }

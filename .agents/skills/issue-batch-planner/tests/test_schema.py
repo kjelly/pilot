@@ -36,7 +36,8 @@ class SnapshotShapeTest(unittest.TestCase):
         self.check(lambda s: s["issues"][0].update(number="11"), "positive integer")
         self.check(lambda s: s["issues"][0].update(number=True), "positive integer")
         self.check(lambda s: s["issues"][0].update(labels="bug"), "expected a list")
-        self.check(lambda s: s["issues"][0]["blocked_by"].append({"number": 1, "state": "open"}), "OPEN, CLOSED")
+        self.check(lambda s: s["issues"][0]["blocked_by"].append(
+            {"number": 1, "state": "open", "url": "https://github.com/OWNER/REPO/issues/1"}), "one of OPEN")
 
     def test_duplicates_and_counts(self):
         self.check(lambda s: s["issues"].append(dict(s["issues"][0])) or s["sources"]["issues"].update(count=8),
@@ -85,7 +86,7 @@ class LoaderTest(unittest.TestCase):
         self.assertEqual("INVALID", json.loads(out.getvalue())["status"])
 
     def test_unimplemented_subcommands_exit_2(self):
-        for name in ("collect", "shortlist", "render", "diff"):
+        for name in ("render", "diff"):
             with self.subTest(name=name), redirect_stderr(io.StringIO()):
                 self.assertEqual(2, planner.main([name]))
 

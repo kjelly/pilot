@@ -231,18 +231,19 @@ Issue 另有 `overlapping_prs` 旗標：它引用的路徑與某個 open PR 的�
 | 預設分支 | `gh repo view OWNER/REPO --json defaultBranchRef` |
 | base SHA | `git ls-remote https://github.com/OWNER/REPO refs/heads/<default>`（40 碼） |
 | 本地 clone 有該 commit | `git -C <repo-dir> cat-file -e <sha>^{commit}`；沒有就以結束碼 2 結束，提示使用者先 `git fetch` |
-| 路徑驗證 | `git -C <repo-dir> ls-tree -r --name-only <sha>` |
+| 路徑驗證 | `git -C <repo-dir> ls-tree -r -z --name-only <sha>` |
 | base 的測試定義 | `git -C <repo-dir> grep -h -o -E 'func Test[A-Za-z0-9_]*\|def test_[A-Za-z0-9_]*' <sha> -- '*.go' '*.py'`（固定參數；Issue 提到的名稱在記憶體裡比對，不放進指令） |
 | open Issues | `gh issue list -R OWNER/REPO --state open --limit 1000 --json number,title,url,labels,body,comments,createdAt,updatedAt,blockedBy,parent,subIssues,closedByPullRequestsReferences` |
-| open PRs | `gh pr list -R OWNER/REPO --state open --limit 1000 --json number,url,isDraft,headRefName,body,closingIssuesReferences,files` |
+| open PRs | `gh pr list -R OWNER/REPO --state open --limit 1000 --json number,url,isDraft,headRefName,body,closingIssuesReferences,files,changedFiles` |
 
-- **完整性**：清單筆數等於 `--limit` 時視為可能被截斷，標 `INCOMPLETE`。巢狀清單（`comments`、`files`、`blockedBy`、closing refs）是否有上限，先以真實擷取確認；有上限時，達上限的那一筆標 `*_complete: false`，並把上限與擷取日期寫成常數旁的註解。
+- **完整性**：清單筆數等於 `--limit` 時視為可能被截斷，標 `INCOMPLETE`。巢狀清單依 2026-11-16 的真實擷取（W4 實作時確認，見 `tests/fixtures/captured/README.md`）：`comments` 每個 Issue 最多回 100 筆，達 100 筆標 `comments_complete: false`；`files` 每個 PR 最多 100 筆，以 `changedFiles` 判斷 `files_complete`；`blockedBy` 以 `totalCount` 判斷 `relations_complete`。
+- **關聯的狀態**：`blockedBy` 節點帶 GitHub 的 `state`，而且可能是其他 repo 的 Issue，所以記 `url`。`closedByPullRequestsReferences` 沒有 state：同 repo 且在 open PR 清單裡為 `OPEN`，同 repo 但不在清單裡為 `NOT_OPEN`，其他 repo 為 `UNKNOWN`；`OPEN` 與 `UNKNOWN` 都視為阻擋。
 - **衍生欄位**（本文與留言只在記憶體中使用，不寫入任何檔案）：
   - 引用路徑：本文與留言中以 `playbooks/`、`cmd/`、`internal/`、`contracts/`、`.agents/`、`docs/verification/`、`group_vars/`、`scripts/` 開頭的路徑，只保留存在於 base tree 的。
   - 引用的同 repo Issue 編號（`#N`）。
   - 引用的測試名稱（`Test[A-Z]\w*`、`test_\w+`），只保留出現在 base 測試定義清單裡的。
   - PR body 的 closing 引用：用 `issue-to-pr/scripts/issue_gate.py` 的 `closes_issue()`，依路徑載入（比照 `load_secret_scan()`），不另寫一份正規表示式。
-- `snapshot.json`：`schema_version`、`repository`、`base{branch, sha}`、`collected_at`、`sources{issues{count, limit, complete}, pull_requests{...}}`、`issues[]`（`number`、`title`、`url`、`labels`、`blocked_by`、`parent`、`sub_issues`、`closed_by_prs`、`comments_count`、`comments_complete`、`referenced_paths`、`referenced_issues`、`referenced_tests`）、`pull_requests[]`（`number`、`url`、`is_draft`、`closing_issues`、`body_closing_issues`、`files`、`files_complete`）。不含本文與留言文字。
+- `snapshot.json`：`schema_version`、`repository`、`base{branch, sha}`、`collected_at`、`sources{issues{count, limit, complete}, pull_requests{...}}`、`issues[]`（`number`、`title`、`url`、`labels`、`blocked_by`、`relations_complete`、`parent`、`sub_issue_count`、`closed_by_prs`、`comments_count`、`comments_complete`、`referenced_paths`、`referenced_issues`、`referenced_tests`）、`pull_requests[]`（`number`、`url`、`is_draft`、`closing_issues`、`body_closing_issues`、`files`、`files_complete`）。不含本文與留言文字。
 
 ### 5.4 `shortlist`
 
@@ -251,7 +252,7 @@ Issue 另有 `overlapping_prs` 旗標：它引用的路徑與某個 open PR 的�
    - `BLOCKED_BY`：`blockedBy` 裡有 open Issue；
    - `NEEDS_DECISION`：有 `needs-decision` 標籤；
    - `ALREADY_RESOLVED_REVIEW`：有 `likely-resolved` 標籤；
-   - umbrella（有 `subIssues`）→ `UNASSIGNED` 並註明；
+   - umbrella（`subIssues.totalCount` > 0）→ `UNASSIGNED` 並註明；
    - 其餘為可分組。另算 `overlapping_prs`。
 2. **配對特徵**（只在可分組的 Issue 之間）：
    - 強特徵：共用的已驗證路徑（+25）、互相引用（+10）、共用的已驗證測試名稱（+20）。
@@ -259,7 +260,7 @@ Issue 另有 `overlapping_prs` 旗標：它引用的路徑與某個 open PR 的�
    - 配對成立的條件：至少一個強特徵，且總分 ≥ 30。只靠標題或標籤永遠不成立。權重與門檻是常數，只用於排序，由測試鎖住行為。
 3. **分組**：配對依 `(−score, 較小編號, 較大編號)` 排序後貪婪組合。只有與組內每個成員都已配對成立的 Issue 才能加入（不傳遞），每組 2–4 個，每個 Issue 最多屬於一個 heuristic 分組。其餘配對另列 `pairs`。
 4. `batch_id` = `sha256("<class>|<排序後的編號以逗號連接>")` 前 12 個 hex；未審查的分組 class 為 `heuristic`。
-5. 輸出 `candidates.json`：逐 Issue 狀態、配對（特徵與分數）、heuristic 分組、未分組清單。
+5. 輸出 `candidates.json`：`base_sha`、`issue_numbers`、`complete`、逐 Issue 狀態、配對（只列有強特徵的，附特徵與分數）、heuristic 分組、未分組清單。不含 snapshot 的雜湊與擷取時間，所以同樣內容的 snapshot 不論順序都得到位元組相同的結果（B10）；render 以 `base_sha` 與 `issue_numbers` 對應 snapshot。
 
 ### 5.5 `proposals.json`（由 agent 依 `SKILL.md` 撰寫）
 
