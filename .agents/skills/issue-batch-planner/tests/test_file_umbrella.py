@@ -137,6 +137,21 @@ class FileUmbrellaTest(unittest.TestCase):
                  patch.object(fu, "run_command", return_value=planner.Result(0, json.dumps(sample), "")):
                 self.assertEqual(sample["number"], fu.view(REPO, sample["number"])["number"])
 
+    def test_real_umbrella_shapes_after_execute(self):
+        """The views captured right after the first real --execute: the child's parent finds the umbrella,
+        and the read-back of the umbrella's sub-issues and labels parses."""
+        umbrella = copy.deepcopy(SAMPLES["umbrella_after_execute"])
+        child = copy.deepcopy(SAMPLES["child_after_execute"])
+        umbrella["body"] = f"Captured body replaced.\n{fu.marker(BATCH)}\n"
+        views = {umbrella["number"]: umbrella, child["number"]: child}
+        with patch.object(fu, "view", side_effect=lambda repo, n: views[n]):
+            found = fu.find_existing(REPO, BATCH, {child["number"]: child}, self.dir / "absent.json")
+        self.assertEqual(umbrella["number"], found)
+        self.assertEqual(umbrella["number"], child["parent"]["number"])
+        self.assertEqual({142, 216}, {n["number"] for n in umbrella["subIssues"]["nodes"]})
+        self.assertEqual(2, umbrella["subIssues"]["totalCount"])
+        self.assertTrue({"bug", "security", "area:freeipa", "P1"} <= {x["name"] for x in umbrella["labels"]})
+
     def test_f1_dry_run_writes_nothing_to_github(self):
         code, out = self.run_fu(execute=False)
         self.assertEqual(0, code, out)

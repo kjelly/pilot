@@ -8,7 +8,7 @@ re-capture instead (`AGENTS.md` section 5.6).
 | File | Captured with | Source of the shape |
 |---|---|---|
 | `gh_issue_list.json` | `gh issue list -R kjelly/pilot --state open --limit 1000 --json number,title,url,labels,body,comments,createdAt,updatedAt,blockedBy,parent,subIssues,closedByPullRequestsReferences` | kjelly/pilot Issues; `subIssues` and `parent` from cli/cli, `blockedBy` (a cross-repository blocker) from microsoft/vscode, because kjelly/pilot had none |
-| `gh_issue_view.json` | `gh issue view N -R OWNER/REPO --json number,state,url,body,parent,subIssues,labels,closedByPullRequestsReferences` (three samples, keyed by name) | `plain` and `closed_by_pr` from kjelly/pilot (#142, #330); `with_parent_and_sub_issues` from cli/cli #14529. The URLs are rewritten to `OWNER/REPO`; nested URLs (parent, sub-issues, closing PRs) keep their real form |
+| `gh_issue_view.json` | `gh issue view N -R OWNER/REPO --json number,state,url,body,parent,subIssues,labels,closedByPullRequestsReferences` (three samples, keyed by name) | `plain` and `closed_by_pr` from kjelly/pilot (#142, #330); `with_parent_and_sub_issues` from cli/cli #14529; `umbrella_after_execute` and `child_after_execute` from kjelly/pilot #354 and #142 right after the first `file_umbrella.py --execute` (2026-11-16). The URLs are rewritten to `OWNER/REPO`; nested URLs (parent, sub-issues, closing PRs) keep their real form |
 | `gh_pr_list.json` | `gh pr list -R kjelly/pilot --state open --limit 1000 --json number,url,isDraft,headRefName,body,closingIssuesReferences,files,changedFiles` | kjelly/pilot PRs |
 
 Facts observed in the same capture and relied on by `collect`:

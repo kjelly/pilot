@@ -1,6 +1,6 @@
 # Pilot：同類缺陷掃描、相似 Issue 處理與 Issue Batch Planner 實作計畫
 
-- **狀態**：W1–W6 已在分支 `feat/similar-defect-scan-batch-planner` 實作並各自 commit（2026-11-16）；W6 實跑的寫入步驟（建立真實母 Issue）等待使用者核准分組，見 §6 W6
+- **狀態**：W1–W6 已在分支 `feat/similar-defect-scan-batch-planner` 實作並各自 commit（2026-11-16）；W6 的第一次真實使用經使用者核准後完成（2026-11-16 建立 kjelly/pilot#354，子 Issue #142、#216，重跑未重複建立）
 - **來源**：合併兩份本機草稿（`issue-to-pr` 同類缺陷主動掃描、Issue Batch Planner Phase 1）與同日評估後的縮減版。不適合實作、或無法只靠 coding agent 完成的部分已移除（§2）。同日依使用者決定加入 W6（建立母 Issue）
 - **基準**：`main` @ `05e55a3d`。開工時以當下的 `main` 重驗 §1 的事實；對不上就先修正本計畫，不要照舊內容實作
 - **執行方式**（使用者 2026-11-16 指示）：在分支 `feat/similar-defect-scan-batch-planner` 依 §6 的順序實作，每完成一個工作項目 commit 一次。實跑摘要寫在該項目的 commit message（之後的 PR body 沿用），不貼原始輸出
