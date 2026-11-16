@@ -908,5 +908,165 @@ class SecretScanGateTests(LocalGitFixture):
         self.assertEqual([secret], gate.call_args.kwargs["secret_files"])
 
 
+
+class SimilarDefectScanTests(unittest.TestCase):
+    """references/similar-defect-scan.md, checked in advisory mode (U1-U14 of the plan). Every case that
+    must be reported has a passing counterpart, and each is run advisory and enforced. It borrows
+    LocalGitFixture's repository instead of inheriting it, so that class's tests do not run twice."""
+
+    save = LocalGitFixture.save
+    eval_local = LocalGitFixture.eval_local
+
+    def setUp(self):
+        LocalGitFixture.setUp(self)
+        self.base = git(self.repo, "rev-parse", "refs/remotes/origin/main")
+        self.scan = {
+            "status": "complete", "issue_kind": "bug", "class": "error-swallowed",
+            "invariant": "A failed query must never read as an absent resource",
+            "base_sha": self.base,
+            "queries": [
+                {"id": "q1", "kind": "git-grep", "scope": "repo", "pattern": "rc != 0", "hits": 2},
+                {"id": "q2", "kind": "family", "scope": "scripts", "description": "callers of the helper", "hits": 1},
+            ],
+            "candidates": [
+                {"location": "main.txt:1", "query_ids": ["q1"], "hits": 1,
+                 "classification": "same-invariant-in-scope", "resolved": True,
+                 "related_issue_url": "https://github.com/OWNER/REPO/issues/151",
+                 "evidence": "Same rc handling as the Issue, fixed on this branch"},
+                {"location": "other.txt", "query_ids": ["q1", "q2"], "hits": 1,
+                 "classification": "false-positive", "evidence": "Debug-only task followed by an rc check"},
+            ],
+            "limitations": ["docs/** not searched"],
+            "recurrence_risk": "yes",
+            "guard": {"status": "added", "path": "regression.txt",
+                      "negative_control": "On a scratch copy of base the guard fails: the file is missing"},
+            "reviewer": {"confirmed": True, "head_sha": self.sha},
+        }
+
+    def report(self, scan=None, *, enforced=False):
+        if scan is None:
+            self.evidence.pop("similar_defect_scan", None)
+        else:
+            self.evidence["similar_defect_scan"] = scan
+        self.save()
+        with patch.object(issue_gate, "SIMILAR_SCAN_ENFORCED", enforced):
+            errors, info = self.eval_local()
+        return errors, info["similar_defect_scan"]
+
+    def mutated(self, mutate):
+        scan = json.loads(json.dumps(self.scan))
+        mutate(scan)
+        return scan
+
+    def assertReported(self, mutate, needle):
+        scan = self.mutated(mutate)
+        errors, rep = self.report(scan)
+        self.assertEqual([], errors, "advisory problems must never block")
+        self.assertEqual("warn", rep["status"])
+        self.assertTrue(any(needle in p for p in rep["problems"]), rep["problems"])
+        errors, rep = self.report(scan, enforced=True)
+        self.assertTrue(any(needle in e for e in errors), errors)
+
+    def assertPasses(self, mutate=lambda s: None):
+        errors, rep = self.report(self.mutated(mutate))
+        self.assertEqual("pass", rep["status"], rep["problems"])
+        self.assertEqual([], rep["problems"])
+        self.assertEqual([], errors)
+        errors, _ = self.report(self.mutated(mutate), enforced=True)
+        self.assertEqual([], errors)
+
+    def test_u14_advisory_by_default(self):
+        self.assertIs(False, issue_gate.SIMILAR_SCAN_ENFORCED)
+
+    def test_u1_complete_scan_passes(self):
+        self.assertPasses()
+
+    def test_u2_missing_scan(self):
+        errors, rep = self.report(None)
+        self.assertEqual([], errors)
+        self.assertEqual("missing", rep["status"])
+        self.assertFalse(rep["enforced"])
+        errors, _ = self.report(None, enforced=True)
+        self.assertTrue(any("absent" in e for e in errors), errors)
+
+    def test_u3_bug_cannot_be_not_applicable(self):
+        na = {"status": "not-applicable", "issue_kind": "bug",
+              "reason": "Documentation-only wording change with no code path",
+              "reviewer": {"confirmed": True, "head_sha": self.sha}}
+        self.assertReported(lambda s: (s.clear(), s.update(na)), "bug Issue cannot be not-applicable")
+        self.assertPasses(lambda s: (s.clear(), s.update({**na, "issue_kind": "non-bug"})))
+        self.assertReported(lambda s: (s.clear(), s.update({**na, "issue_kind": "non-bug", "reason": "n/a"})),
+                            "specific reason")
+
+    def test_u4_unconfirmed_candidate(self):
+        self.assertReported(lambda s: s["candidates"][1].update(classification="unconfirmed"), "unconfirmed")
+
+    def test_u5_in_scope_site_must_be_fixed(self):
+        self.assertReported(lambda s: s["candidates"][0].update(resolved=False), "must be fixed")
+        self.assertReported(lambda s: s["candidates"][0].update(classification="shared-choke-point", resolved=None),
+                            "must be fixed")
+        self.assertPasses(lambda s: s["candidates"][0].update(classification="shared-choke-point"))
+
+    def test_u6_separate_defect_needs_a_follow_up(self):
+        sep = {"classification": "separate-defect"}
+        self.assertReported(lambda s: s["candidates"][1].update(sep), "needs follow_up_issue_url")
+        self.assertReported(lambda s: s["candidates"][1].update(
+            sep, follow_up_issue_url="https://github.com/OWNER/REPO/issues/123"), "different Issue")
+        self.assertReported(lambda s: s["candidates"][1].update(
+            sep, follow_up_issue_url="https://github.com/OTHER/REPO/issues/5"), "must be https://github.com/OWNER/REPO")
+        self.assertPasses(lambda s: s["candidates"][1].update(
+            sep, follow_up_issue_url="https://github.com/OWNER/REPO/issues/200"))
+
+    def test_u7_every_hit_is_accounted_for(self):
+        self.assertReported(lambda s: s["queries"][0].update(hits=3), "classify every hit")
+        self.assertReported(lambda s: s["candidates"].pop(1), "classify every hit")
+        self.assertPasses(lambda s: s["queries"].append(
+            {"id": "q3", "kind": "git-grep", "scope": "playbooks", "pattern": "ignore_errors", "hits": 0}))
+
+    def test_u8_needs_a_repo_grep_and_a_family_trace(self):
+        self.assertReported(lambda s: s["queries"][0].update(scope="playbooks"), "repository-wide git-grep")
+        self.assertReported(lambda s: s["queries"][1].update(kind="git-grep", pattern="helper("), "execution-family")
+
+    def test_u9_base_must_be_an_ancestor(self):
+        orphan = git(self.worktree, "commit-tree", git(self.worktree, "rev-parse", "HEAD^{tree}"), "-m", "unrelated")
+        self.assertReported(lambda s: s.update(base_sha=orphan), "not an ancestor of HEAD")
+        self.assertReported(lambda s: s.update(base_sha="abc123"), "full 40-hex SHA")
+        self.assertPasses(lambda s: s.update(base_sha=self.sha))
+
+    def test_u10_recurrence_guard(self):
+        self.assertReported(lambda s: s.update(recurrence_risk="unknown"), "recurrence_risk must be yes or no")
+        self.assertReported(lambda s: s.pop("guard"), "guard.status")
+        self.assertReported(lambda s: s["guard"].update(path="missing_test.go"), "not a file at HEAD")
+        self.assertReported(lambda s: s["guard"].update(path="../outside.go"), "repository-relative")
+        self.assertReported(lambda s: s["guard"].update(path="main.txt"), "unchanged on this branch")
+        self.assertReported(lambda s: s["guard"].update(negative_control="fails"), "negative_control")
+        self.assertPasses(lambda s: s["guard"].update(status="existing", path="main.txt"))
+        self.assertPasses(lambda s: (s.update(recurrence_risk="no"), s.pop("guard")))
+
+    def test_u11_reviewer_must_cover_head(self):
+        self.assertReported(lambda s: s["reviewer"].update(head_sha=self.base), "another HEAD")
+        self.assertReported(lambda s: s["reviewer"].update(confirmed=False), "reviewer.confirmed")
+
+        class EvidenceOnlyDelta:
+            def accepts(self, sha, label):
+                return True
+        scan = self.mutated(lambda s: s["reviewer"].update(head_sha=self.base))
+        rep = issue_gate.similar_scan_report({"similar_defect_scan": scan}, repo="OWNER/REPO", issue=123,
+                                             worktree=self.worktree, sha=self.sha, merge_base=self.base,
+                                             ctx=EvidenceOnlyDelta())
+        self.assertEqual("pass", rep["status"], rep["problems"])
+
+    def test_u12_related_issue_url(self):
+        self.assertReported(lambda s: s["candidates"][0].update(
+            related_issue_url="https://github.com/OWNER/REPO/issues/123"), "related_issue_url must be a different")
+        self.assertReported(lambda s: s["candidates"][0].update(related_issue_url="#151"), "related_issue_url must be")
+        self.assertPasses(lambda s: s["candidates"][0].pop("related_issue_url"))
+
+    def test_u13_git_failure_is_a_problem_not_a_crash(self):
+        self.assertReported(lambda s: s.update(base_sha="f" * 40), "could not be checked")
+
+    def test_class_label_format(self):
+        self.assertReported(lambda s: s.update({"class": "Error Swallowed"}), "kebab-case")
+
 if __name__ == "__main__":
     unittest.main()

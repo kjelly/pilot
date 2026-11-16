@@ -51,6 +51,19 @@ class CreatePRTest(unittest.TestCase):
         self.assertTrue(any("--draft" in a for a in emitted))
         self.assertTrue(any(a[:2] == ["git", "push"] for a in emitted))
 
+    def test_similar_scan_report_rides_along(self):
+        scan = {"enforced": False, "status": "warn", "problems": ["similar_defect_scan is absent"]}
+        info = {**self.info, "similar_defect_scan": scan}
+        with patch.object(create_pr, "evaluate", return_value=([], info)), \
+             patch.object(create_pr, "execute", return_value=""), \
+             patch.object(create_pr, "check_pr", return_value={"number": 9, "url": "https://github.com/OWNER/REPO/pull/9"}):
+            self.assertEqual(scan, self.invoke()["similar_defect_scan"])
+        with patch.object(create_pr, "evaluate", return_value=(["P2 blocker"], info)), \
+             patch.object(create_pr, "execute", side_effect=AssertionError("must not push")):
+            result = self.invoke()
+        self.assertEqual("BLOCKED", result["status"])
+        self.assertEqual(scan, result["similar_defect_scan"])
+
     def test_ready_is_explicit_opt_in(self):
         emitted = []
         with patch.object(create_pr, "evaluate", return_value=([], self.info)), \

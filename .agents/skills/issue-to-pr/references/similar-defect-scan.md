@@ -133,8 +133,14 @@ Rules:
 - No raw Issue text, comment text or matched line goes into this field: locations, numbers and
   summaries only (`.agents/skills/_shared/committed-secrets.md`).
 
-`issue_gate.py` does not read this field; Root and the independent Reviewer check it. Nothing in it
-proves that the search was sufficient, that a guard fails on base, or that the fix is correct.
+`issue_gate.py` checks this field **in advisory mode** (`SIMILAR_SCAN_ENFORCED = False`): its output
+carries `similar_defect_scan: {enforced, status: pass | warn | missing, problems}`, which
+`create_pr.py` and `mark_ready.py` repeat in their results, and no problem blocks the gate. Making the
+problems blocking is a separate change decided by the repository's owner, not part of an Issue fix. The
+gate checks structure and provenance only (the rules above, `base_sha` ancestry, the guard file at HEAD
+and on the branch, the Reviewer's HEAD); it does not prove that the search was sufficient, that the guard
+fails on base, or that the fix is correct. Root and the independent Reviewer own those judgments, and a
+`warn` or `missing` status is reported, not ignored.
 
 ## 5. Related open Issues (stage 0)
 

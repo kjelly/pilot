@@ -124,6 +124,21 @@ class MarkReadyTest(unittest.TestCase):
         self.assertIn("reviewDecision", argv[argv.index("--json") + 1].split(","))
 
 
+    def test_similar_scan_report_rides_along(self):
+        scan = {"enforced": False, "status": "warn", "problems": ["similar_defect_scan is absent"]}
+        for errors, views, status in (((), [view(), {"isDraft": False, "headRefOid": SHA, "url": "u"}], "READY_FOR_REVIEW"),
+                                      (("gate blocker",), [], "BLOCKED")):
+            with self.subTest(status=status), \
+                 patch.object(mark_ready, "evaluate", return_value=(list(errors), {**INFO, "similar_defect_scan": scan})), \
+                 patch.object(mark_ready, "command", side_effect=list(views)), \
+                 patch.object(mark_ready, "unresolved_threads", return_value=[]), \
+                 patch.object(mark_ready.pr_ci, "inspect", return_value={"status": "CI_PASSED"}), \
+                 patch.object(mark_ready, "execute", return_value=""):
+                result = mark_ready.mark_ready(repo="O/R", issue=1, pr=9, worktree=Path("/tmp"),
+                                               evidence=Path("/tmp/e.json"), confirm_complete=True)
+            self.assertEqual(status, result["status"])
+            self.assertEqual(scan, result["similar_defect_scan"])
+
     def test_success_marks_ready_and_verifies(self):
         result, calls, _ = self.run_mark(views=[view(), {"isDraft": False, "headRefOid": SHA, "url": "u"}])
         self.assertEqual("READY_FOR_REVIEW", result["status"])
