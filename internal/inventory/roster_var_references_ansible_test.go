@@ -2,7 +2,6 @@ package inventory
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -556,29 +555,32 @@ func TestImplicitVarNamesAreNeverUndefinedInAnsible(t *testing.T) {
 	}
 	cmd := exec.Command("ansible-playbook", "-i", "localhost,", filepath.Join(dir, "play.yml"))
 	cmd.Dir = dir
-	cmd.Env = append(oracleEnv(t, dir), "ANSIBLE_STDOUT_CALLBACK=json")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("ansible-playbook: %v\n%s", err, out)
+	// The default output, as ansibleVerdict reads it: the json stdout callback is
+	// not part of ansible-core 2.19.15 (it moved to the ansible.posix collection),
+	// and oracleEnv gives Ansible a home of its own where no collection is found.
+	cmd.Env = oracleEnv(t, dir)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("ansible-playbook: %v\n%s", err, out.String())
 	}
-	var result struct {
-		Plays []struct {
-			Tasks []struct {
-				Task  struct{ Name string } `json:"task"`
-				Hosts map[string]struct {
-					Failed bool            `json:"failed"`
-					Msg    json.RawMessage `json:"msg"`
-				} `json:"hosts"`
-			} `json:"tasks"`
-		} `json:"plays"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil || len(result.Plays) != 1 {
-		t.Fatalf("unexpected ansible-playbook output (%v):\n%s", err, out)
-	}
+	// Each probe's block starts at its "TASK [probe NAME]" line; the name is
+	// undefined when that block says so.
 	undefined := map[string]bool{}
-	for _, task := range result.Plays[0].Tasks {
-		name := strings.TrimPrefix(task.Task.Name, "probe ")
-		if host := task.Hosts["localhost"]; host.Failed && strings.Contains(string(host.Msg), "'"+name+"' is undefined") {
+	blocks := strings.Split(out.String(), "TASK [probe ")
+	if len(blocks) != len(names)+len(reported)+1 {
+		t.Fatalf("expected %d probe tasks in the ansible-playbook output, found %d:\n%s", len(names)+len(reported), len(blocks)-1, out.String())
+	}
+	for _, block := range blocks[1:] {
+		name, rest, ok := strings.Cut(block, "]")
+		if !ok {
+			t.Fatalf("unexpected ansible-playbook output:\n%s", out.String())
+		}
+		// Up to the next play-level banner, which only the last block reaches.
+		if i := strings.Index(rest, "PLAY RECAP"); i >= 0 {
+			rest = rest[:i]
+		}
+		if strings.Contains(rest, "'"+name+"' is undefined") {
 			undefined[name] = true
 		}
 	}
