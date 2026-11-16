@@ -105,19 +105,27 @@ func ViewEncryptedRoster(path, vaultPasswordFile string) ([]byte, error) {
 // vaultPasswordFile is not read for a plaintext roster. It writes nothing
 // and takes no lock. Callers must not print or log the plaintext.
 func ReadRosterPlaintext(path, vaultPasswordFile string) (plaintext []byte, encrypted bool, err error) {
+	return readFileMaybeVault(path, vaultPasswordFile, "roster", ErrRosterEncrypted)
+}
+
+// readFileMaybeVault is ReadRosterPlaintext for any secret source file: what
+// names the file in the decrypt error ("roster", "vars file"), and
+// encryptedErr is returned, unchanged, for an encrypted file with no
+// vaultPasswordFile.
+func readFileMaybeVault(path, vaultPasswordFile, what string, encryptedErr error) (plaintext []byte, encrypted bool, err error) {
 	data, err := readSecretSourceFile(path)
 	if err != nil {
 		return nil, false, err
 	}
-	if !strings.HasPrefix(strings.TrimSpace(string(data)), "$ANSIBLE_VAULT") {
+	if !hasVaultHeader(data) {
 		return data, false, nil
 	}
 	if vaultPasswordFile == "" {
-		return nil, true, ErrRosterEncrypted
+		return nil, true, encryptedErr
 	}
 	plaintext, err = ansibleVaultView(path, vaultPasswordFile)
 	if err != nil {
-		return nil, true, fmt.Errorf("decrypt roster %s: %w", path, err)
+		return nil, true, fmt.Errorf("decrypt %s %s: %w", what, path, err)
 	}
 	return plaintext, true, nil
 }

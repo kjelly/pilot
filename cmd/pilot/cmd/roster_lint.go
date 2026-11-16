@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 
@@ -20,6 +21,7 @@ var rosterCmd = &cobra.Command{
 var (
 	rosterLintUpgrade           bool
 	rosterLintVaultPasswordFile string
+	rosterLintVarsFile          string
 )
 
 var rosterLintCmd = &cobra.Command{
@@ -41,6 +43,27 @@ decrypts it in memory with ` + "`ansible-vault view`" + ` (the same decryption
 ` + "`pilot roster migrate`" + ` uses), writes no plaintext file, and prints
 the same report it prints for the plaintext roster. The flag is not read
 for a plaintext roster.
+
+A roster string can refer to a variable — password.initial:
+'{{ ipa_default_initial_password }}' — that apply resolves from the vars file
+` + "(`-e @.vault/main.yaml`)" + `; when the vars file lacks it, apply fails inside a
+no_log task that hides why. With --vars-file lint reads the vars file's
+top-level variable names (never its values) and reports every
+freeipa.admin.password and users[].password.initial reference that file does
+not define, as "[roster-reference] <field> references <name>, which <file>
+does not define", with the other violations. Only a bare {{ name }} (or
+{{ name.attr }}) is checked: a value with a filter such as default(''), an
+operator, a call or a {% %} block cannot be judged without evaluating it and
+is never reported, nor are !unsafe and inline !vault values and Jinja's and
+Ansible's own names (inventory_hostname, ansible_*, ...). The names the
+inventory itself defines (group_vars, host_vars) are not known to lint: for a
+variable only the inventory defines, ` + "`pilot deploy`" + ` and ` + "`pilot reconcile`" + `
+make the same check with them taken into account. --vars-file is never found
+on its own: without it lint reads and prints exactly what it always did. A
+missing, unreadable or non-YAML vars file, or an encrypted one without
+--vault-password-file, is an error. An encrypted vars file is decrypted in
+memory with the same --vault-password-file as the roster, so both must be
+encrypted with one vault password.
 
 A structurally valid roster below the current schema version passes with a
 notice pointing at ` + "`pilot roster migrate`" + `; pass --upgrade to have
@@ -75,6 +98,13 @@ even though lint still exits 0.`,
 		}
 
 		violations := inventory.ValidateRoster(root)
+		if rosterLintVarsFile != "" {
+			references, err := rosterLintReferenceViolations(path, plaintext, rosterLintVarsFile, rosterLintVaultPasswordFile)
+			if err != nil {
+				return err
+			}
+			violations = append(violations, references...)
+		}
 		if len(violations) > 0 {
 			for _, v := range violations {
 				fmt.Fprintln(cmd.OutOrStdout(), v.String())
@@ -134,6 +164,36 @@ even though lint still exits 0.`,
 	},
 }
 
+// rosterLintReferenceViolations is the findings of lint's --vars-file: every
+// secret reference of the roster that the vars file does not define. The
+// vars file is read the strict way an explicit --vars-file always is
+// (resolveDriftVarsFile: it must exist, not be a directory, be readable, and,
+// when encrypted, come with --vault-password-file). Neither the findings nor
+// the errors hold a value of the roster or the vars file: names, field
+// labels and line numbers only (inventory.VarsFileNames).
+func rosterLintReferenceViolations(rosterPath string, rosterPlaintext []byte, varsFile, vaultPasswordFile string) ([]inventory.RosterViolation, error) {
+	abs, err := resolveDriftVarsFile(io.Discard, "", varsFile, vaultPasswordFile)
+	if err != nil {
+		return nil, err
+	}
+	names, err := inventory.ReadVarsFileNames(abs, vaultPasswordFile)
+	if err != nil {
+		if errors.Is(err, inventory.ErrVarsFileEncrypted) {
+			return nil, fmt.Errorf("--vars-file %s is ansible-vault encrypted; rerun with --vault-password-file <path>", varsFile)
+		}
+		return nil, fmt.Errorf("--vars-file %s: %w", varsFile, err)
+	}
+	refs, _, err := inventory.RosterSecretVarReferences(rosterPlaintext)
+	if err != nil {
+		return nil, fmt.Errorf("check the references in roster %s: %w", rosterPath, err)
+	}
+	var out []inventory.RosterViolation
+	for _, ref := range inventory.MissingRosterVarReferences(refs, names) {
+		out = append(out, ref.Violation(varsFile))
+	}
+	return out, nil
+}
+
 // yamlErrorLine matches the "line N" positions in a yaml.v3 error.
 var yamlErrorLine = regexp.MustCompile(`line \d+`)
 
@@ -154,7 +214,8 @@ func rosterLintParseError(path string, encrypted bool, err error) error {
 
 func init() {
 	rosterLintCmd.Flags().BoolVar(&rosterLintUpgrade, "upgrade", false, "if the roster isn't the current schema version, upgrade it via the same engine as `pilot roster migrate` before reporting")
-	rosterLintCmd.Flags().StringVar(&rosterLintVaultPasswordFile, "vault-password-file", "", "ansible-vault password file, for an encrypted roster (decrypted in memory; no plaintext file is written)")
+	rosterLintCmd.Flags().StringVar(&rosterLintVaultPasswordFile, "vault-password-file", "", "ansible-vault password file, for an encrypted roster and for an encrypted --vars-file, which then share one vault password (decrypted in memory; no plaintext file is written)")
+	rosterLintCmd.Flags().StringVar(&rosterLintVarsFile, "vars-file", "", "ansible vars file (e.g. .vault/main.yaml, plain or ansible-vault encrypted) the roster's {{ name }} password references must be defined in; reports the missing names, never values (never searched for: without this flag lint does not check references)")
 	rosterCmd.AddCommand(rosterLintCmd)
 	rootCmd.AddCommand(rosterCmd)
 }
