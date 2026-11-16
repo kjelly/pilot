@@ -36,6 +36,17 @@ Issue #330 adds the race the atomic restart model above used to hide. Declared l
     watch count stayed 0 for 60 s) and arm A' of docs/evidence/wazuh-fim/issue-323.md (`ss`/`auditctl` sampled 8 s
     after the HUP: one LISTEN, no ESTAB, no watch). A survivor that stays unconnected after an agent restart, and the
     merge itself, are MODELED here and pending the native run of Issue #330.
+A native vm-target run of Issue #330 (candidate d094e0f2, AlmaLinux 9.8, systemd 252, Wazuh 4.14.1; its record is
+written separately under docs/evidence/wazuh-fim/) showed the settle wait working but a restart right after it killing
+a syscheckd that Wazuh's own reload had started after the endpoint existed, and the next syscheckd then failing its
+audit health check. The model of that is declared too, as MODELED observations and not as a proven mechanism:
+  * a syscheckd started after the endpoint is connected at once, logs its who-data engine start `engine_delay` seconds
+    later and has its kernel watches `arm_delay` seconds after the start (the native one needed several seconds; the
+    value is a stand-in);
+  * `kill_mid_init_poisons_next`: a syscheckd killed after its engine started and before it armed makes the NEXT
+    syscheckd connect but never arm (the observed correlation: 2 failures in which the first syscheckd had passed its
+    engine start, 3 passes in which it had not; the mechanism was not established);
+  * `fallback_starts`: the next N syscheckd starts fall back to real-time: connected, never armed.
 This does not certify auditd, systemd or Wazuh: the native VM run is separately required evidence.
 """
 import ast
@@ -111,6 +122,13 @@ class Host:
         self.uptime_unreadable = False
         self.before_restart = None       # runs at the instant the restart command is issued (after the last probe)
         self.syscheckd_pids, self.syscheckd_started, self.next_pid = [], None, 810
+        # --- how a syscheckd arms (Issue #330 native follow-up; MODELED, see the module docstring) ---
+        self.arm_delay = 0.0             # seconds from a syscheckd start to its kernel watches (0: immediately)
+        self.engine_delay = 2.0          # seconds from a start to its who-data engine having started
+        self.fallback_starts = 0         # the next N starts fall back to real-time: connected, never armed
+        self.kill_mid_init_poisons_next = False  # MODELED correlation, not a proven mechanism
+        self.poisoned = False            # the next start's audit health check will fail
+        self.syscheckd_gen, self.arm_at = 0, None
         clock.hooks.append(self.tick)
         self.process(self.AUDITD, 1, '/usr/sbin/auditd', ['/sbin/auditd'])
         self.process(self.AGENTD, 1, '/var/ossec/bin/wazuh-agentd', ['/var/ossec/bin/wazuh-agentd'], cgroup=AGENT_CGROUP,
@@ -147,15 +165,37 @@ class Host:
     def drop_process(self, pid):
         shutil.rmtree(self.proc / str(pid), ignore_errors=True)
 
-    def place_syscheckd(self, start, pid=None):
-        """The one wazuh-syscheckd of the agent service, started `start` seconds into the run."""
+    def kill_syscheckd(self):
+        """Every syscheckd of the agent service stops. MODELED correlation (Issue #330 native run, no proven mechanism):
+        one stopped after its who-data engine started and before it armed makes the NEXT syscheckd's audit health check
+        fail, so that one connects and never arms."""
+        if (self.kill_mid_init_poisons_next and self.syscheckd_pids and self.arm_at is not None
+                and self.syscheckd_started + self.engine_delay <= self.clock.now < self.arm_at):
+            self.poisoned = True
         for old in self.syscheckd_pids:
             self.drop_process(old)
+        self.syscheckd_pids, self.arm_at = [], None
+        self.syscheckd_gen += 1  # the arming of the one that died never happens
+
+    def place_syscheckd(self, start, pid=None):
+        """The one wazuh-syscheckd of the agent service, started `start` seconds into the run (the old one is gone)."""
+        self.kill_syscheckd()
         pid = pid or self.next_pid
         self.next_pid = max(self.next_pid, pid) + 1
         self.syscheckd_pids, self.syscheckd_started = [pid], start
         self.process(pid, 1, SYSCHECKD, [SYSCHECKD], cgroup=AGENT_CGROUP, comm='wazuh-syscheckd', start=start)
         return pid
+
+    def add_syscheckd(self, start):
+        """A second wazuh-syscheckd in the agent service's cgroup (a restart stops it with the first)."""
+        pid = self.add_process(SYSCHECKD, [SYSCHECKD], AGENT_CGROUP, 'wazuh-syscheckd', start)
+        self.syscheckd_pids.append(pid)
+        return pid
+
+    def arm(self, generation):
+        if generation == self.syscheckd_gen:
+            self.watches = True
+            self.log.append((self.clock.now, 'armed'))
 
     def add_process(self, exe, argv, cgroup, comm, start):
         pid = self.next_pid
@@ -220,17 +260,29 @@ class Host:
                 self.note('endpoint-created')
             self.at(self.clock.now + self.endpoint_delay, open_endpoint)
 
-    def start_syscheckd(self, start=None):
+    def start_syscheckd(self, start=None, arm_after=None):
         # Native (AlmaLinux 9, fresh x3): a syscheckd that starts while the endpoint exists connects to it and arms the
         # kernel watches after its audit health check; one that starts without it logs "Who-data engine could not
-        # start. Switching who-data to real-time." and arms nothing, and (MODELED) never connects later. Natively
-        # observed so far: after a HUP alone the watch count stayed 0 for 60 s (spec section 2 sequence probes) and
-        # arm A' of #323 sampled no ESTAB 8 s after the HUP; nothing observed a stale syscheckd after an agent restart.
-        self.place_syscheckd(self.clock.now if start is None else start)
+        # start. Switching who-data to real-time." and arms nothing, and (MODELED, native arm A' saw it for at least
+        # 60 s) never connects later. Natively observed so far: after a HUP alone the watch count stayed 0 for 60 s
+        # (spec section 2 sequence probes) and arm A' of #323 sampled no ESTAB 8 s after the HUP; nothing observed a
+        # stale syscheckd after an agent restart. The delay before arming and the poison/fallback fates are MODELED.
+        start = self.clock.now if start is None else start
+        self.place_syscheckd(start)
+        self.log.append((self.clock.now, 'syscheckd-start'))
+        poisoned, self.poisoned = self.poisoned, False
+        fallback = self.fallback_starts > 0
+        self.fallback_starts = max(0, self.fallback_starts - 1)
         up = self.listening and not self.health_check_fails
         self.connected = up
-        self.watches = up and self.arms_watches
         self.crossed = False  # a new syscheckd process opens a new stream to the endpoint
+        delay = self.arm_delay if arm_after is None else arm_after
+        arms = up and self.arms_watches and not poisoned and not fallback
+        self.arm_at = start + delay if arms else None
+        self.watches = arms and delay <= 0
+        if arms and delay > 0:
+            generation = self.syscheckd_gen
+            self.at(self.arm_at, lambda: self.arm(generation))
 
     def begin_reload(self, state='reloading', job='4711', script=True):
         """MODELED: Wazuh's own `restart.sh agent reload` (run by the agent after a shared configuration push) starts:
@@ -282,9 +334,7 @@ class Host:
             if self.bad_stat_on_restart:
                 (self.proc / str(self.syscheckd_pids[0]) / 'stat').write_text('garbage')
         else:
-            for pid in self.syscheckd_pids:
-                self.drop_process(pid)
-            self.syscheckd_pids = []
+            self.kill_syscheckd()
             self.connected = self.watches = False
 
     def show(self):
@@ -502,22 +552,32 @@ class WhodataEnsureTests(unittest.TestCase):
             self.assertEqual(model.events, [('sighup', int(w.signal.SIGHUP))], 'one signal, no retry and no agent restart')
 
     # ---- Issue #330: the agent's own reload racing the ensure's restart ----
-    def test_an_in_flight_self_reload_is_waited_out_before_the_one_restart(self):
+    def test_an_in_flight_self_reload_is_waited_out_before_any_restart(self):
         # The failure of Issue #330: on a fresh host the agent runs `restart.sh agent reload` for the first shared
         # configuration while the ensure waits for the endpoint, and a restart issued inside that job is merged into it
-        # and leaves the pre-endpoint syscheckd running. The ensure must restart only once the reload is over.
+        # and leaves the pre-endpoint syscheckd running. The ensure must act only once the reload is over. What it does
+        # then depends on the syscheckd it finds: the old one (it never saw the endpoint) is restarted, once; one that
+        # the reload itself started after the endpoint existed is left alone (see the arm-window tests).
         for case, reload_replaces_syscheckd in (('the reload leaves syscheckd alone', False), ('the reload replaces syscheckd itself', True)):
             with self.subTest(case=case), self.host() as (agent, model):
                 model.plugin_conf()
                 model.at(1.0, lambda: model.begin_reload())
                 model.at(15.0, lambda: model.end_reload(restarts_syscheckd=reload_replaces_syscheckd))
                 self.assertEqual(agent.whodata_ensure(OWNER), {'changed': True, 'watches': 2})
-                self.assertEqual(self.steps(model), ['sighup', 'endpoint-created', 'restart'], 'one signal, one restart, never merged')
-                self.assertGreaterEqual(model.times('restart')[0], model.times('reload-finished')[0], 'restarted only after the reload ended')
-                self.assertEqual(self.restarts(model), 1)
-                # The effective state: one syscheckd, started after the endpoint was listening, connected, with watches.
+                if reload_replaces_syscheckd:
+                    # Legitimately changed with Issue #330's refinement: the reload's own syscheckd started after the
+                    # endpoint (15.0 >= 2.0) and is armed, so there is nothing to restart (it used to be restarted a
+                    # second time for nothing).
+                    self.assertEqual(self.steps(model), ['sighup', 'endpoint-created'], 'one signal, no restart of a healthy post-endpoint syscheckd')
+                    self.assertEqual(self.restarts(model), 0)
+                    self.assertEqual(model.syscheckd_started, 15.0, 'the reload\'s syscheckd is the one that serves')
+                else:
+                    self.assertEqual(self.steps(model), ['sighup', 'endpoint-created', 'restart'], 'one signal, one restart, never merged')
+                    self.assertGreaterEqual(model.times('restart')[0], model.times('reload-finished')[0], 'restarted only after the reload ended')
+                    self.assertEqual(self.restarts(model), 1)
+                    # The effective state: one syscheckd, started after the endpoint was listening, connected, with watches.
+                    self.assertGreaterEqual(model.syscheckd_started, model.times('endpoint-created')[0])
                 self.assertEqual(len(model.syscheckd_pids), 1)
-                self.assertGreaterEqual(model.syscheckd_started, model.times('endpoint-created')[0])
                 self.assertTrue(model.connected and model.watches)
                 self.invariants(model)
                 model.events.clear()
@@ -609,6 +669,139 @@ class WhodataEnsureTests(unittest.TestCase):
             self.assertEqual(self.steps(model), ['sighup', 'endpoint-created', 'restart-merged'])
             self.assertGreaterEqual(model.syscheckd_started, model.times('endpoint-created')[0])
             self.assertLess(model.syscheckd_started, model.times('restart-merged')[0])
+            self.invariants(model)
+
+    # ---- Issue #330, native follow-up: a syscheckd that came up after the endpoint is not killed while it arms ----
+    def reload_spawns_syscheckd(self, model, spawn_at=4.0, end_at=7.0):
+        """MODELED after the native observation of Issue #330: Wazuh's own reload begins while pilot waits for the
+        endpoint, its `wazuh-control reload` starts a syscheckd after the endpoint exists (spawn_at), and the reload
+        job ends later (end_at), which is when the ensure's settle wait is over."""
+        model.at(1.0, lambda: model.begin_reload())
+        model.at(spawn_at, lambda: model.start_syscheckd())
+        model.at(end_at, lambda: model.end_reload(restarts_syscheckd=False))
+
+    def assert_served_by_the_reloads_syscheckd(self, agent, model):
+        self.assertEqual(self.restarts(model), 0, 'a syscheckd that came up after the endpoint is never restarted by pilot')
+        self.assertEqual(self.steps(model), ['sighup', 'endpoint-created'])
+        self.assertEqual(model.times('syscheckd-start'), [4.0], 'the reload\'s syscheckd is the only one that ever started')
+        self.assertGreaterEqual(model.clock.now, 4.0 + model.arm_delay, 'it waited for that syscheckd to arm')
+        self.assertTrue(model.connected and model.watches)
+        self.invariants(model)
+        model.events.clear()
+        model.commands.clear()
+        self.assertEqual(agent.whodata_ensure(OWNER), {'changed': False}, 'a second apply is a no-op')
+        self.untouched(model)
+
+    def test_a_syscheckd_that_came_up_after_the_endpoint_is_given_time_to_arm_and_is_not_restarted(self):
+        # T-A: the reload-spawned syscheckd needs ~10 s to arm (the native one needed several seconds). The ensure
+        # sent the SIGHUP, so it reports a change; it restarts nothing.
+        with self.host() as (agent, model):
+            model.plugin_conf()
+            model.arm_delay = 10.0
+            self.reload_spawns_syscheckd(model)
+            self.assertEqual(agent.whodata_ensure(OWNER), {'changed': True, 'watches': 2})
+            self.assert_served_by_the_reloads_syscheckd(agent, model)
+
+    def test_pilot_never_kills_a_post_endpoint_syscheckd_inside_its_arm_window(self):
+        # T-B: the observed correlation as a model: a syscheckd stopped after its engine started and before it armed
+        # makes the next one fail its audit health check. Restarting right after the settle (the previous behaviour)
+        # kills the reload's syscheckd at 7.0, 3 s into its initialisation, and the next one never arms.
+        with self.host() as (agent, model):
+            model.plugin_conf()
+            model.arm_delay = 10.0
+            model.kill_mid_init_poisons_next = True
+            self.reload_spawns_syscheckd(model)
+            try:
+                result = agent.whodata_ensure(OWNER)
+            except w.Refused as exc:
+                self.fail('pilot restarted a syscheckd that was initialising and the next one never armed: %s' % exc)
+            self.assertEqual(result, {'changed': True, 'watches': 2})
+            self.assert_served_by_the_reloads_syscheckd(agent, model)
+
+    def test_the_poison_model_only_bites_when_a_syscheckd_is_killed_between_its_engine_start_and_arming(self):
+        # Negative control of the model behind the test above, so that test cannot pass because the model never bites.
+        for age, bites in ((1.0, False), (3.0, True), (9.9, True), (10.0, False), (30.0, False)):
+            with self.subTest(killed_at_age=age), self.host() as (agent, model):
+                model.listening = True
+                model.arm_delay = 10.0
+                model.kill_mid_init_poisons_next = True
+                model.start_syscheckd(0.0)
+                model.clock.now = age
+                model.start_syscheckd()
+                self.assertEqual(model.watches, False)
+                model.clock.sleep(model.arm_delay + 1)
+                self.assertEqual(model.watches, not bites, 'the next syscheckd %s' % ('never arms' if bites else 'arms normally'))
+                self.assertEqual(model.connected, True)
+
+    def test_a_post_endpoint_syscheckd_that_never_arms_costs_exactly_one_restart_after_the_window(self):
+        # T-C: the reload's syscheckd fell back to real-time (connected, never armed; the next start is healthy). It
+        # gets READY_WAIT, then the one restart replaces it and the proof passes.
+        with self.host() as (agent, model):
+            model.plugin_conf()
+            model.fallback_starts = 1
+            self.reload_spawns_syscheckd(model)
+            self.assertEqual(agent.whodata_ensure(OWNER), {'changed': True, 'watches': 2})
+            self.assertEqual(self.steps(model), ['sighup', 'endpoint-created', 'restart'])
+            self.assertEqual(self.restarts(model), 1)
+            self.assertGreaterEqual(model.times('restart')[0], 7.0 + w.AuditRuntime.READY_WAIT, 'the window was given before restarting')
+            self.assertEqual(model.times('syscheckd-start')[0], 4.0)
+            self.assertGreater(model.syscheckd_started, 4.0, 'the restart replaced it')
+            self.assertTrue(model.connected and model.watches)
+            self.invariants(model)
+
+    def test_a_post_endpoint_syscheckd_that_never_arms_even_after_the_one_restart_is_the_typed_refusal(self):
+        # T-E: the restart does not help either: the existing refusal for a connection without a watch, after exactly
+        # one restart, with both waits spent.
+        text, model = self.raised(lambda m: (setattr(m, 'fallback_starts', 2), self.reload_spawns_syscheckd(m)))
+        self.assertEqual(text, self.NEW_REFUSALS['watch'])
+        self.assertEqual(self.steps(model), ['sighup', 'endpoint-created', 'restart'])
+        self.assertEqual(self.restarts(model), 1)
+        self.assertGreaterEqual(model.clock.now, 7.0 + 2 * w.AuditRuntime.READY_WAIT)
+
+    def test_a_stale_syscheckd_is_restarted_at_once_without_an_arm_window(self):
+        # T-D: a syscheckd that started before the endpoint is past its initialisation and cannot connect; waiting for it
+        # to arm would only add READY_WAIT. Treating it as healthy would wait and then restart late, or never.
+        with self.host() as (agent, model):
+            model.plugin_conf()
+            model.arm_delay = 10.0
+            self.assertEqual(agent.whodata_ensure(OWNER), {'changed': True, 'watches': 2})
+            self.assertEqual(self.steps(model), ['sighup', 'endpoint-created', 'restart'])
+            self.assertEqual(model.times('restart')[0], model.times('endpoint-created')[0], 'restarted in the same instant, no waiting')
+            self.invariants(model)
+
+    def test_no_syscheckd_or_more_than_one_is_restarted_at_once(self):
+        # T-F: only exactly one post-endpoint syscheckd earns the arm window (listener path: the endpoint was already
+        # there, nothing connected within the grace).
+        def listener_not_connected(model):
+            model.plugin_conf()
+            model.socket_file()
+            model.listening = True
+            model.health_check_fails = True
+            model.at(29.0, lambda: setattr(model, 'health_check_fails', False))
+        for case, setup in (('no syscheckd', lambda m: m.kill_syscheckd()),
+                            ('two post-endpoint syscheckd', lambda m: m.at(5.0, lambda: (m.start_syscheckd(), m.add_syscheckd(5.0))))):
+            with self.subTest(case=case), self.host() as (agent, model):
+                listener_not_connected(model)
+                setup(model)
+                self.assertEqual(agent.whodata_ensure(OWNER), {'changed': True, 'watches': 2})
+                self.assertEqual(self.steps(model), ['restart'])
+                self.assertEqual(model.times('restart')[0], w.AuditRuntime.CLIENT_GRACE, 'restarted right after the grace, no arm window')
+                self.assertEqual(len(model.syscheckd_pids), 1)
+                self.invariants(model)
+
+    def test_a_post_endpoint_syscheckd_that_arms_in_the_window_of_the_listener_path_changes_nothing(self):
+        # `changed` is true only if this call signalled or restarted: no SIGHUP and no restart means false.
+        with self.host() as (agent, model):
+            model.plugin_conf()
+            model.socket_file()
+            model.listening = True
+            model.health_check_fails = True
+            model.at(10.0, lambda: model.start_syscheckd())  # a syscheckd after the endpoint that is not connected yet
+            model.at(45.0, lambda: (setattr(model, 'connected', True), setattr(model, 'watches', True)))
+            self.assertEqual(agent.whodata_ensure(OWNER), {'changed': False, 'watches': 2})
+            self.untouched(model)
+            self.assertEqual(self.restarts(model), 0)
+            self.assertGreaterEqual(model.clock.now, 45.0)
             self.invariants(model)
 
     def test_a_syscheckd_that_started_before_the_endpoint_and_survived_the_restart_is_a_distinct_refusal(self):
@@ -743,7 +936,8 @@ class WhodataEnsureTests(unittest.TestCase):
                 for function in (n for n in node.body if isinstance(n, ast.FunctionDef)):
                     if (node.name, function.name) in (('Agent', 'whodata_ensure'), ('AuditRuntime', 'boot_ticks'), ('AuditRuntime', 'agent_unit'),
                                                       ('AuditRuntime', 'agent_processes'), ('AuditRuntime', 'await_fresh_stream'),
-                                                      ('AuditRuntime', 'settled'), ('AuditRuntime', 'syscheckd_starts'), ('AuditRuntime', 'restart_scripts')):
+                                                      ('AuditRuntime', 'settled'), ('AuditRuntime', 'syscheckd_starts'), ('AuditRuntime', 'restart_scripts'),
+                                                      ('AuditRuntime', 'fresh_armed')):
                         for call in (n for n in ast.walk(function) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'Refused'):
                             self.assertEqual(len(call.args), 1)
                             self.assertIsInstance(call.args[0], ast.Constant, 'line %d: a refusal here must be a fixed literal' % call.lineno)

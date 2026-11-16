@@ -861,14 +861,22 @@ class AuditRuntime:
         """The start times (boot ticks) of every wazuh-syscheckd of the agent service's cgroup."""
         return sorted(process['start'] for process in self.agent_processes() if process['exe'] == self.SYSCHECKD)
 
+    def fresh_armed(self, mark):
+        """The wazuh_fim watches (a non-empty list) when the agent service has exactly one syscheckd that started at
+        or after `mark` and it is connected to the live endpoint; [] while any of that is missing."""
+        starts = self.syscheckd_starts()
+        if len(starts) != 1 or starts[0] < mark: return []
+        return self.watches() if self.connected() else []
+
     def await_fresh_stream(self, mark):
         """After the agent restart: exactly one wazuh-syscheckd, started at or after `mark`, connected, with watches.
 
         A syscheckd that started before the endpoint was listening cannot connect to it and falls back to real-time.
-        That it also never recovers by itself is a MODELED premise, not a native observation (the committed natives
-        are a HUP alone leaving the watch count at 0 for 60 s and an 8 s sample in arm A' of #323; nothing observed
-        a stale syscheckd after an agent restart), pending the native run of Issue #330. On that premise one older
-        than `mark` is refused at once instead of waiting: the restart did not replace it.
+        That it also stays unarmed was seen natively only in the BASE arms of the Issue #330 vm-target run (the merged
+        restart left it, and no watch existed after READY_WAIT; the record is written separately under
+        docs/evidence/wazuh-fim/); the committed natives are a HUP alone leaving the watch count at 0 for 60 s and an
+        8 s sample in arm A' of #323. On that basis one older than `mark` is refused at once instead of waiting: the
+        restart did not replace it.
         The other conditions may still be settling and are polled for READY_WAIT; at the deadline the refusal names
         the one that holds. Every message is a fixed literal.
         """
@@ -5035,18 +5043,30 @@ class Agent(Transaction):
         while the endpoint and the connection survived stays a no-op, so a second apply reports no change.
         Mutation happens only when needed and at most once each: an endpoint that is a listening socket with a
         connected syscheckd is only verified; a listener with no connected syscheckd after a bounded grace costs
-        one agent restart and no signal; a missing endpoint under an active plugin costs one SIGHUP to auditd,
-        a bounded wait for the listening endpoint, then one agent restart (a syscheckd that started without an
-        endpoint silently fell back to real-time, so it must start after it) and proof that the stream and at
-        least one wazuh_fim watch exist.
+        at most one agent restart and no signal; a missing endpoint under an active plugin costs one SIGHUP to
+        auditd, a bounded wait for the listening endpoint, then at most one agent restart (a syscheckd that started
+        without an endpoint silently fell back to real-time, so it must start after it) and proof that the stream
+        and at least one wazuh_fim watch exist. `changed` is true iff this call sent the SIGHUP or restarted.
 
         The restart is issued only once no reload or restart of wazuh-agent.service is in flight (Issue #330): on
         a fresh host Wazuh runs its own `restart.sh agent reload` when the first shared configuration arrives,
         and a `systemctl restart` issued during it is merged into that job, which (as recorded in Issue #330, not yet
-        in a committed evidence record) leaves the old syscheckd (started before the endpoint existed) running. The instant the endpoint was first seen listening is taken as a
-        boot-clock mark; after the one restart exactly one wazuh-syscheckd must be running in the service's
-        cgroup and it must have started at or after that mark. The mark is read after the observation, never
-        before, so a process that started before the endpoint was listening can never pass.
+        in a committed evidence record) leaves the old syscheckd (started before the endpoint existed) running.
+        The instant the endpoint was first seen listening is taken as a boot-clock mark; the mark is read after the
+        observation, never before, so a process that started before the endpoint was listening can never pass.
+
+        After the settle the agent's syscheckd is looked at once more before anything is restarted. Exactly one
+        syscheckd that started at or after the mark (it came up after the endpoint, e.g. spawned by Wazuh's own
+        reload) is NOT restarted: it is given READY_WAIT to be connected with at least one wazuh_fim watch, and if it
+        is, the call succeeds without a restart. A native vm-target run (Issue #330, candidate d094e0f2) saw the
+        restart kill such a syscheckd shortly after its who-data engine started and before it armed, followed by a
+        syscheckd whose audit health check failed (no watch ever); that is a recorded correlation (2 failures against
+        3 passes in which the first syscheckd had not yet started its engine), not a proven mechanism. Only if that
+        syscheckd did not arm in time, or there is none, more than one, or one older than the mark, is the one
+        restart issued; after it exactly one syscheckd must be running in the service's cgroup and it must have
+        started at or after the mark. Worst case: PLUGIN 60 + LISTENER 30 + SETTLE 120 + READY 60 (the chance given
+        to a post-endpoint syscheckd) + restart (up to 120) + READY 60 seconds. No Wazuh process is ever signalled
+        or killed by pilot other than through that one `systemctl restart`.
 
         Everything else is a typed refusal that changes nothing further, each with its own fixed text: a plugin
         that never becomes active (af_wazuh.conf is written by the agent's first start, so it is awaited
@@ -5069,7 +5089,7 @@ class Agent(Transaction):
         with self.lock(owner=owner):
             self.idle()
             runtime = self.audit_runtime()
-            repair, mark = False, None
+            repair, mark, signalled = False, None, False
 
             def listening():
                 # The mark is the boot clock read right after the endpoint was first observed listening, in every
@@ -5083,6 +5103,7 @@ class Agent(Transaction):
                     raise Refused('the Wazuh audit plugin is not active, so no who-data endpoint can exist')
                 if runtime.endpoint_kind() == 'absent':
                     runtime.reload_plugins()
+                    signalled = True
                     if not runtime.poll(listening, runtime.LISTENER_WAIT):
                         raise Refused('external audit endpoint did not appear after reloading the audit daemon')
                     repair = True
@@ -5095,6 +5116,15 @@ class Agent(Transaction):
             assert mark is not None  # every path to a restart passed a successful listening() observation
             if not runtime.poll(runtime.settled, runtime.SETTLE_WAIT):
                 raise Refused('the Wazuh agent service did not finish an in-flight reload or restart within the bound, so it was not restarted')
+            starts = runtime.syscheckd_starts()
+            if len(starts) == 1 and starts[0] >= mark:
+                # A syscheckd that came up after the endpoint was listening (spawned by Wazuh's own reload) is given
+                # its bounded chance to arm instead of being killed while it initialises: a restart right after the
+                # settle was observed (Issue #330, one vm-target run) to be followed by a syscheckd whose audit health
+                # check failed. Nothing is signalled or killed here; if it did not arm, the one restart follows.
+                watches = runtime.poll(lambda: runtime.fresh_armed(mark), runtime.READY_WAIT)
+                if watches:
+                    return {'changed': signalled, 'watches': len(watches)}
             self.r.run(['systemctl', 'restart', 'wazuh-agent'], timeout=120,
                        operation='restart wazuh-agent so its who-data engine connects to the audit endpoint')
             return {'changed': True, 'watches': len(runtime.await_fresh_stream(mark))}
