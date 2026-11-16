@@ -97,7 +97,7 @@ pilot deploy --dir <workspace> -i inventory.yml --component wazuh-fim --limit <�
   Wazuh 的 run 還在進行（沒有 `ansible`／`wazuh-agent-hotfix.py`／`wazuh-transaction.py` 程序，也沒有別的 session 在
   操作），再讀 marker（`component` 應為 `agent`、`mode` 為 `apply`，`owner` 是 32 位十六進位），確定是這次 hotfix 留下的才手動
   移除它；`agent-active.json`／`central-active.json` 是未完成的 transaction journal，不是 hotfix 的東西，要走既有的
-  recovery，不要刪。**這段手動復原只有本機單元／整合測試涵蓋（marker 被拒絕、`always` 區段釋放），沒有在 target 上實跑。**
+  recovery，不要刪。**這段手動復原在 target 上實跑過（purge 期間 `SIGKILL` controller：下一次 run 指名拒絕、依上面的檢查移除 marker、重跑完成，見 evidence），也有本機單元／整合測試涵蓋（marker 被拒絕、`always` 區段釋放）。**
 - **卸載本身被殺掉**：dpkg／rpm 可能留下半移除的套件狀態，`inspect` 會以 `unknown agent package state` 按名拒絕；
   要先用該平台的套件管理員把 `wazuh-agent` 收尾成「已安裝」或「已移除」其中一個明確的狀態，再重跑。這一段同樣沒有在
   target 上實跑，所以這裡不列指令。
@@ -106,7 +106,7 @@ pilot deploy --dir <workspace> -i inventory.yml --component wazuh-fim --limit <�
 
 - 只支援單一 `wazuh-manager` 主機。
 - 不支援 `--actions`／`--presentation`／`--trace-out`（它們綁在 edit scenario schema 的 `deploy`／`reconcile` action 上）。
-- 互動的確認提示（預設 No）：「拒絕就什麼都不做」由單元測試以預設值驅動器涵蓋；真正的終端機 widget 與互動式選 stage 沒有實機驗證，實機只跑過 `--preview-only` 與 `--force`。
+- 互動的確認提示（預設 No）：「拒絕就什麼都不做」由單元測試以預設值驅動器涵蓋，也在真實終端機（PTY）實跑過：預設 No 不動任何主機、答 Yes 才移除；`--stage staging` 在 manager 也屬 staging 的 inventory 實跑過，prod 的核准路徑沒有實機驗證（見 evidence）。
 - 只處理 `wazuh-fim` group 的主機；agent 被安裝在 group 之外的主機不在偵測範圍。
 
 ## 3. 為什麼 spec 有 8 個 row、為什麼 C6 長那樣
