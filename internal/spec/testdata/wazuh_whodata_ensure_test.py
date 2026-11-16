@@ -29,9 +29,13 @@ Issue #330 adds the race the atomic restart model above used to hide. Declared l
     kernel's documented /proc/<pid>/stat field 22; /proc/uptime is the same clock);
   * a `systemctl restart` issued while a reload job runs is merged into it and leaves the old wazuh-syscheckd
     running (the journal of the failed apply of Issue #330: `remains running after unit stopped`, then `wazuh-syscheckd
-    already running`), a syscheckd that started before the endpoint existed never connects (the native arm A' of
-    docs/evidence/wazuh-fim/issue-323.md saw it unconnected for at least 60 s; the model keeps it unconnected for
-    good), and a reload's own `wazuh-control reload` replaces syscheckd. None of this is observed natively here.
+    already running`; that journal is quoted by Issue #330 and the hotfix runbook, it is not in a committed evidence
+    record), a syscheckd that started before the endpoint existed stays unconnected for good, and a reload's own
+    `wazuh-control reload` replaces syscheckd. The committed native observations are narrower and all taken after a
+    HUP alone with no agent restart: the sequence probes in docs/verification/wazuh-fim.md section 2 (the wazuh_fim
+    watch count stayed 0 for 60 s) and arm A' of docs/evidence/wazuh-fim/issue-323.md (`ss`/`auditctl` sampled 8 s
+    after the HUP: one LISTEN, no ESTAB, no watch). A survivor that stays unconnected after an agent restart, and the
+    merge itself, are MODELED here and pending the native run of Issue #330.
 This does not certify auditd, systemd or Wazuh: the native VM run is separately required evidence.
 """
 import ast
@@ -219,8 +223,9 @@ class Host:
     def start_syscheckd(self, start=None):
         # Native (AlmaLinux 9, fresh x3): a syscheckd that starts while the endpoint exists connects to it and arms the
         # kernel watches after its audit health check; one that starts without it logs "Who-data engine could not
-        # start. Switching who-data to real-time." and arms nothing, and (MODELED, native arm A' saw it for at least
-        # 60 s) never connects later.
+        # start. Switching who-data to real-time." and arms nothing, and (MODELED) never connects later. Natively
+        # observed so far: after a HUP alone the watch count stayed 0 for 60 s (spec section 2 sequence probes) and
+        # arm A' of #323 sampled no ESTAB 8 s after the HUP; nothing observed a stale syscheckd after an agent restart.
         self.place_syscheckd(self.clock.now if start is None else start)
         up = self.listening and not self.health_check_fails
         self.connected = up

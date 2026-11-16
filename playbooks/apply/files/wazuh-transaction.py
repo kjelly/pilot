@@ -864,8 +864,11 @@ class AuditRuntime:
     def await_fresh_stream(self, mark):
         """After the agent restart: exactly one wazuh-syscheckd, started at or after `mark`, connected, with watches.
 
-        A syscheckd that started before the endpoint was listening cannot connect to it and falls back to real-time
-        (it never recovers by itself), so one older than `mark` is refused at once: the restart did not replace it.
+        A syscheckd that started before the endpoint was listening cannot connect to it and falls back to real-time.
+        That it also never recovers by itself is a MODELED premise, not a native observation (the committed natives
+        are a HUP alone leaving the watch count at 0 for 60 s and an 8 s sample in arm A' of #323; nothing observed
+        a stale syscheckd after an agent restart), pending the native run of Issue #330. On that premise one older
+        than `mark` is refused at once instead of waiting: the restart did not replace it.
         The other conditions may still be settling and are polled for READY_WAIT; at the deadline the refusal names
         the one that holds. Every message is a fixed literal.
         """
@@ -5039,8 +5042,8 @@ class Agent(Transaction):
 
         The restart is issued only once no reload or restart of wazuh-agent.service is in flight (Issue #330): on
         a fresh host Wazuh runs its own `restart.sh agent reload` when the first shared configuration arrives,
-        and a `systemctl restart` issued during it is merged into that job, which leaves the old syscheckd (started
-        before the endpoint existed) running. The instant the endpoint was first seen listening is taken as a
+        and a `systemctl restart` issued during it is merged into that job, which (as recorded in Issue #330, not yet
+        in a committed evidence record) leaves the old syscheckd (started before the endpoint existed) running. The instant the endpoint was first seen listening is taken as a
         boot-clock mark; after the one restart exactly one wazuh-syscheckd must be running in the service's
         cgroup and it must have started at or after that mark. The mark is read after the observation, never
         before, so a process that started before the endpoint was listening can never pass.
@@ -5048,12 +5051,18 @@ class Agent(Transaction):
         Everything else is a typed refusal that changes nothing further, each with its own fixed text: a plugin
         that never becomes active (af_wazuh.conf is written by the agent's first start, so it is awaited
         first), an endpoint that is not a socket, a socket nobody listens on, an endpoint that does not appear
-        after the signal (the agent is not restarted), an agent service still reloading or restarting after
-        SETTLE_WAIT (the agent is not restarted; a SIGHUP already sent stays), a syscheckd older than the mark
+        after the signal (this step does not restart the agent), an agent service still reloading or restarting
+        after SETTLE_WAIT (this step does not restart the agent; a SIGHUP already sent stays), a syscheckd older than the mark
         that survived the restart, and after the restart: not exactly one syscheckd, the endpoint no longer
         listening, a syscheckd that did not connect, or a connection without a wazuh_fim watch. Any /proc or
         systemctl probe that cannot be read is a refusal too. This runs under the host-wide writer owner and the
         component lock of the ordinary apply.
+
+        "Does not restart the agent" is about this step's own command only. The playbook's rescue (unchanged
+        ConfigSnapshots.restore) restores ossec.conf and /etc/hosts when this apply also changed them and then runs
+        `systemctl restart wazuh-agent` if the agent was active before; it does not wait for the unit to settle.
+        The no-op path (listening endpoint, connected syscheckd) probes no agent unit, signals and restarts nothing and
+        reads no audit rules; its only new action is one read-only /proc/uptime read, which is a refusal if unreadable.
         """
         if self.family != 'RedHat':
             raise Refused('the who-data endpoint ensure supports only the RedHat family')

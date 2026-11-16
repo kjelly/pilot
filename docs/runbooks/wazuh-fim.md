@@ -276,11 +276,15 @@ C11 的邊界：只涵蓋 EL（RedHat family），Debian family 不斷言；不�
 讀 apply 輸出的 typed 原因，再看 `ss -xHap`（endpoint 路徑上的 LISTEN 與 ESTAB、以及 syscheckd 的 ESTAB）、
 `auditctl -l`（有沒有 `wazuh_fim` 規則）與 `/etc/audit/plugins.d/af_wazuh.conf`（是否 `active = yes`）。
 重啟 `wazuh-agent` 之後的失敗原因各有固定訊息（Issue #330），指出缺的是哪一個條件：「did not finish an in-flight
-reload or restart」＝agent 自己的 reload/restart 在 120 秒內沒結束，agent 沒有被重啟（看 `systemctl status
-wazuh-agent` 與 `/var/ossec/logs/active-responses.log` 是否有 `restart.sh`）；「survived the agent restart」＝比
+reload or restart」＝agent 自己的 reload/restart 在 120 秒內沒結束，Step 11a 自己沒有重啟 agent（看 `systemctl status
+wazuh-agent` 與 `/var/ossec/logs/active-responses.log` 是否有 `restart.sh`）。注意：若同一次套用也改了
+`/var/ossec/etc/ossec.conf` 或 `/etc/hosts`，既有的 rescue（未變更）會還原這些檔案並重啟 agent，所以「沒有重啟」只指 Step 11a
+的指令，不是這次套用的整體；「survived the agent restart」＝比
 endpoint 更早啟動的 `wazuh-syscheckd` 在重啟後仍在，重啟沒有換掉它（看 journal 有沒有 `remains running after unit
-stopped`、`wazuh-syscheckd already running`；#323 的原生 arm A' 看到這種 syscheckd 至少 60 秒不會自己連上
-endpoint，Issue #330 記載重跑一般套用後收斂）；「exactly one
+stopped`、`wazuh-syscheckd already running`；這兩行 journal 來自 Issue #330 與 hotfix runbook 的引述，不在已提交的
+evidence record 裡。已提交的原生觀察只有 spec §2 順序探測（單獨 HUP 之後 `wazuh_fim` watch 數 60 秒內持續為 0）與 #323 的
+arm A'（單獨 HUP 之後 8 秒取樣：有 LISTEN、沒有 ESTAB、沒有 watch），沒有直接看到「倖存的舊 syscheckd 之後仍連不上」，那是 harness 的
+modeled 前提；Issue #330 記載重跑一般套用後收斂）；「exactly one
 wazuh-syscheckd」、「no longer listening」、「did not connect」、「no wazuh_fim kernel audit watch」各對應 syscheckd
 行程數、endpoint 的 listener、stream、kernel watch。這些訊息的條件與判斷方式見
 `docs/verification/wazuh-fim.md` §2 Step 11a；該修復的原生 target 實跑結果尚待 evidence record 記錄，在那之前上面
