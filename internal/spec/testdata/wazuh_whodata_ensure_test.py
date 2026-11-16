@@ -28,24 +28,21 @@ Issue #330 adds the race the atomic restart model above used to hide. Declared l
     KillMode=process and TimeoutSec=45), and a wazuh-syscheckd whose starttime is the boot clock in ticks (the
     kernel's documented /proc/<pid>/stat field 22; /proc/uptime is the same clock);
   * a `systemctl restart` issued while a reload job runs is merged into it and leaves the old wazuh-syscheckd
-    running (the journal of the failed apply of Issue #330: `remains running after unit stopped`, then `wazuh-syscheckd
-    already running`; that journal is quoted by Issue #330 and the hotfix runbook, it is not in a committed evidence
-    record), a syscheckd that started before the endpoint existed stays unconnected for good, and a reload's own
-    `wazuh-control reload` replaces syscheckd. The committed native observations are narrower and all taken after a
-    HUP alone with no agent restart: the sequence probes in docs/verification/wazuh-fim.md section 2 (the wazuh_fim
-    watch count stayed 0 for 60 s) and arm A' of docs/evidence/wazuh-fim/issue-323.md (`ss`/`auditctl` sampled 8 s
-    after the HUP: one LISTEN, no ESTAB, no watch). A survivor that stays unconnected after an agent restart, and the
-    merge itself, are MODELED here and pending the native run of Issue #330.
-A native vm-target run of Issue #330 (candidate d094e0f2, AlmaLinux 9.8, systemd 252, Wazuh 4.14.1; its record is
-written separately under docs/evidence/wazuh-fim/) showed the settle wait working but a restart right after it killing
-a syscheckd that Wazuh's own reload had started after the endpoint existed, and the next syscheckd then failing its
-audit health check. The model of that is declared too, as MODELED observations and not as a proven mechanism:
+    running, a syscheckd that started before the endpoint existed stays unconnected for good, and a reload's own
+    `wazuh-control reload` replaces syscheckd. All of that is MODELED here. The Issue #330 vm-target run observed a
+    merged restart leaving the old syscheckd running and unarmed (its sanitized record is
+    docs/evidence/wazuh-fim/LATEST.md when it lists this change). The observations in the committed documents are
+    narrower and were taken after a HUP alone with no agent restart: the sequence probes in
+    docs/verification/wazuh-fim.md section 2 (the wazuh_fim watch count stayed 0 for 60 s) and arm A' of
+    docs/evidence/wazuh-fim/issue-323.md (`ss`/`auditctl` sampled 8 s after the HUP: one LISTEN, no ESTAB, no watch).
+In the Issue #330 vm-target run the settle wait worked, but a restart right after it killed a syscheckd that Wazuh's
+own reload had started after the endpoint existed, and the next syscheckd then failed its audit health check. The model
+of that is declared too, as a MODELED observation and not as a proven mechanism:
   * a syscheckd started after the endpoint is connected at once, logs its who-data engine start `engine_delay` seconds
     later and has its kernel watches `arm_delay` seconds after the start (the native one needed several seconds; the
     value is a stand-in);
   * `kill_mid_init_poisons_next`: a syscheckd killed after its engine started and before it armed makes the NEXT
-    syscheckd connect but never arm (the observed correlation: 2 failures in which the first syscheckd had passed its
-    engine start, 3 passes in which it had not; the mechanism was not established);
+    syscheckd connect but never arm (a correlation seen across the run's arms; the mechanism was not established);
   * `fallback_starts`: the next N syscheckd starts fall back to real-time: connected, never armed.
 This does not certify auditd, systemd or Wazuh: the native VM run is separately required evidence.
 """
@@ -263,10 +260,10 @@ class Host:
     def start_syscheckd(self, start=None, arm_after=None):
         # Native (AlmaLinux 9, fresh x3): a syscheckd that starts while the endpoint exists connects to it and arms the
         # kernel watches after its audit health check; one that starts without it logs "Who-data engine could not
-        # start. Switching who-data to real-time." and arms nothing, and (MODELED, native arm A' saw it for at least
-        # 60 s) never connects later. Natively observed so far: after a HUP alone the watch count stayed 0 for 60 s
-        # (spec section 2 sequence probes) and arm A' of #323 sampled no ESTAB 8 s after the HUP; nothing observed a
-        # stale syscheckd after an agent restart. The delay before arming and the poison/fallback fates are MODELED.
+        # start. Switching who-data to real-time." and arms nothing, and (MODELED) never connects later. Observed
+        # natively with a HUP alone and no agent restart: the watch count stayed 0 for 60 s (spec section 2 sequence
+        # probes) and arm A' of #323 sampled no ESTAB 8 s after the HUP; the Issue #330 vm-target run observed a merged
+        # restart leaving the old syscheckd unarmed. The delay before arming and the poison/fallback fates are MODELED.
         start = self.clock.now if start is None else start
         self.place_syscheckd(start)
         self.log.append((self.clock.now, 'syscheckd-start'))
@@ -434,14 +431,18 @@ class WhodataEnsureTests(unittest.TestCase):
         self.assertFalse([argv for argv in model.commands if argv[0] in ('kill', 'pkill', 'killall')])
         self.assertEqual(os.readlink(model.proc / str(model.AUDITD) / 'exe'), '/usr/sbin/auditd', 'auditd is the same process')
 
-    def raised(self, setup):
+    def raised(self, setup, unobserved=False):
         """Run the ensure on a RedHat host with an active plugin and no endpoint, prepared by setup(model); returns
-        the text of the typed refusal and the model."""
+        the text of the typed refusal and the model. `unobserved` makes every bounded poll succeed without calling
+        its probe, so the endpoint is never actually observed listening (reaches the missing-mark guard)."""
         with self.host() as (agent, model):
             model.plugin_conf()
             setup(model)
-            with self.assertRaises(w.Refused) as caught:
-                agent.whodata_ensure(OWNER)
+            with contextlib.ExitStack() as stack:
+                if unobserved:
+                    stack.enter_context(mock.patch.object(w.AuditRuntime, 'poll', staticmethod(lambda ready, seconds: True)))
+                with self.assertRaises(w.Refused) as caught:
+                    agent.whodata_ensure(OWNER)
             self.invariants(model)
             return str(caught.exception), model
 
@@ -804,6 +805,65 @@ class WhodataEnsureTests(unittest.TestCase):
             self.assertGreaterEqual(model.clock.now, 45.0)
             self.invariants(model)
 
+    def window_setup(self, model):
+        """MODELED: a reload-spawned syscheckd that never arms (the arm window is 7.0 -> 67.0), then a second Wazuh
+        self-reload that starts inside that window (30.0)."""
+        model.fallback_starts = 1
+        self.reload_spawns_syscheckd(model)
+        model.at(30.0, lambda: model.begin_reload('reloading', '4715'))
+
+    def test_a_reload_that_starts_inside_the_arm_window_and_never_ends_blocks_the_restart(self):
+        # The settle used to be checked only before the window. A restart issued at its end would be merged into the
+        # reload that began inside it (the failure shape of Issue #330): the settle is checked again, and a unit that
+        # does not settle is refused with the settle text and no restart.
+        text, model = self.raised(self.window_setup)
+        self.assertEqual(text, self.NEW_REFUSALS['settle'])
+        self.assertEqual(self.restarts(model), 0, 'nothing is restarted into an in-flight reload')
+        self.assertEqual(self.steps(model), ['sighup', 'endpoint-created'])
+        spent = 7.0 + w.AuditRuntime.READY_WAIT + w.AuditRuntime.SETTLE_WAIT
+        self.assertGreaterEqual(model.clock.now, spent, 'the arm window and the second settle bound were both spent')
+        self.assertLessEqual(model.clock.now, spent + 1.0, 'and nothing more')
+
+    def test_a_reload_that_starts_inside_the_arm_window_is_waited_out_before_the_one_restart(self):
+        # The reload outlasts the window but settles within the second bound: the restart waits for it. (One that ends
+        # before the window ends changes nothing: the restart still comes exactly at the end of the window.)
+        for case, ends_at, restart_at in (('outlasts the window', 80.0, 80.0), ('ends inside the window', 40.0, 67.0)):
+            with self.subTest(case=case), self.host() as (agent, model):
+                model.plugin_conf()
+                self.window_setup(model)
+                model.at(ends_at, lambda: model.end_reload(restarts_syscheckd=False))
+                self.assertEqual(agent.whodata_ensure(OWNER), {'changed': True, 'watches': 2})
+                self.assertEqual(self.steps(model), ['sighup', 'endpoint-created', 'restart'])
+                self.assertEqual(self.restarts(model), 1)
+                self.assertEqual(model.times('restart')[0], restart_at)
+                self.assertGreaterEqual(model.times('restart')[0], model.times('reload-finished')[-1], 'restarted only after the reload ended')
+                self.assertGreaterEqual(model.times('restart')[0], 7.0 + w.AuditRuntime.READY_WAIT, 'after the arm window')
+                self.assertTrue(model.connected and model.watches)
+                self.invariants(model)
+
+    def test_kernel_rules_without_a_connection_do_not_make_a_post_endpoint_syscheckd_armed(self):
+        # Should-trigger: the wazuh_fim rules are loaded (by another role, say) but this syscheckd is not connected to
+        # the endpoint, so it is not armed: the window runs out and then the one restart replaces it.
+        with self.host() as (agent, model):
+            model.plugin_conf()
+            model.socket_file()
+            model.listening = True
+            model.health_check_fails = True
+            model.at(10.0, lambda: (model.start_syscheckd(), setattr(model, 'watches', True)))
+            model.at(29.0, lambda: setattr(model, 'health_check_fails', False))
+            self.assertEqual(agent.whodata_ensure(OWNER), {'changed': True, 'watches': 2})
+            self.assertEqual(self.steps(model), ['restart'])
+            self.assertGreaterEqual(model.times('restart')[0], w.AuditRuntime.CLIENT_GRACE + w.AuditRuntime.READY_WAIT)
+            self.assertGreater(model.syscheckd_started, 10.0, 'the restart replaced it')
+            self.invariants(model)
+
+    def test_a_missing_endpoint_mark_is_a_typed_refusal_and_not_an_assert(self):
+        # Unreachable by construction; if it were reached the ensure would refuse with a fixed text, restart nothing
+        # and never compare against None.
+        text, model = self.raised(lambda m: None, unobserved=True)
+        self.assertEqual(text, self.NEW_REFUSALS['mark'])
+        self.assertEqual(self.restarts(model), 0)
+
     def test_a_syscheckd_that_started_before_the_endpoint_and_survived_the_restart_is_a_distinct_refusal(self):
         survived = 'a wazuh-syscheckd that started before the audit endpoint was listening survived the agent restart, so who-data cannot connect'
         # (a) Something the unit shows nothing of swallowed the restart: the syscheckd of long before survives.
@@ -923,6 +983,7 @@ class WhodataEnsureTests(unittest.TestCase):
         'endpoint': 'the audit endpoint was no longer listening after the agent restart',
         'stream': 'the restarted wazuh-syscheckd did not connect to the audit endpoint after the agent restart',
         'watch': 'wazuh-syscheckd connected to the audit endpoint but no wazuh_fim kernel audit watch appeared after the agent restart',
+        'mark': 'the audit endpoint was not observed listening, so no restart or proof of a fresh syscheckd is possible',
     }
 
     def test_every_new_refusal_is_a_typed_clean_fixed_literal_with_its_own_scenario(self):
@@ -959,11 +1020,12 @@ class WhodataEnsureTests(unittest.TestCase):
             'endpoint': lambda m: setattr(m, 'endpoint_lost_on_restart', True),
             'stream': lambda m: setattr(m, 'health_check_fails', True),
             'watch': lambda m: setattr(m, 'arms_watches', False),
+            'mark': lambda m: None,
         }
         self.assertEqual(set(scenarios), set(self.NEW_REFUSALS))
         for key, setup in scenarios.items():
             with self.subTest(refusal=key):
-                text, _ = self.raised(setup)
+                text, _ = self.raised(setup, unobserved=(key == 'mark'))
                 self.assertEqual(text, self.NEW_REFUSALS[key])
 
     def test_an_endpoint_that_is_not_a_socket_is_refused_and_never_repaired(self):
