@@ -1,0 +1,52 @@
+# Disposable topology for the Wazuh agent version-skew hotfix
+# (docs/verification/wazuh-fim-agent-skew-hotfix.md, `pilot hotfix wazuh-agent-skew`).
+#
+# - wsk-manager runs docker and the Wazuh manager (4.14.1, the repo default) and is NOT in
+#   wazuh-fim: spec row C6 is verified there, and rows C1-C5/C7 hold trivially (no agent).
+# - wsk-ok is an ordinary compatible agent (the manager's own release): the hotfix must leave
+#   it, its package hold, its client.keys and its manager registration untouched.
+# - wsk-deb (Ubuntu 24.04, APT hold) and wsk-el (AlmaLinux 9, DNF versionlock) form the group
+#   wazuh-skewed: playbooks/test/fixtures/wazuh-agent-skew-fixtures.yml upgrades their agent
+#   to 4.14.9, which is newer than the manager, the state the hotfix exists for.
+#
+# Groups: the hotfix targets wazuh-fim (all three agents); the spec's C1-C5/C7 are verified
+# against wazuh-skewed (the hosts the hotfix removes) and C6 against wazuh-manager.
+services: none
+nodes:
+  - name: wsk-manager
+    base_image: ubuntu-24.04
+    # Guest-visible RAM must exceed the central contract's 8192 MiB.
+    memory: 9216
+    vcpus: 4
+    disk: 100
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [sandbox, docker, wazuh-manager]
+  - name: wsk-ok
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [sandbox, wazuh-fim]
+  - name: wsk-deb
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [sandbox, wazuh-fim, wazuh-skewed]
+  - name: wsk-el
+    base_image: almalinux-9
+    memory: 2048
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [sandbox, wazuh-fim, wazuh-skewed]
