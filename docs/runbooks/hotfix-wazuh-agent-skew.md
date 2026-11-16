@@ -174,7 +174,11 @@ fixture 的前三步（docker、manager、agent）只能跑一次：一旦有主
    於是舊版 coordinator 以 `native Wazuh audit stream or watches did not appear after restarting the agent` 在約 60 秒後讓
    apply 失敗。在 pilot 自己的一般 `wazuh-fim-apply.yml`（還沒有 hotfix 參與）也發生過一次，同一台主機重跑即通過。
    根因由 Issue #330 處理，修在 coordinator 的 `agent-whodata-ensure`（不是 hotfix 的 workaround）：重啟前等 agent 服務沒有進行中的
-   reload/restart（有上限，逾時則不重啟），重啟後要求恰好一個比 endpoint 晚啟動的 syscheckd，並把失敗拆成各自固定訊息
-   （`docs/verification/wazuh-fim.md` §2 Step 11a）。這個修復目前只有本機 harness（systemd/`/proc`/Wazuh 行為為 modeled）的證明，
-   原生 target 實跑結果尚待 evidence record 記錄；在那之前，若 hotfix 之後的重裝在 EL 卡在這一步，**直接重跑
+   reload/restart（有上限，逾時則不重啟）；之後若 agent 只有一個 syscheckd、而且是在 endpoint 之後啟動的（例如 Wazuh 自己的
+   reload 啟動的），不重啟也不殺它，給它時限就緒；其餘情形才重啟一次，並把失敗拆成各自固定訊息
+   （`docs/verification/wazuh-fim.md` §2 Step 11a）。vm-target 實跑重現了舊版的 race，也看到只等 reload 結束的第一版修復
+   在 reload 啟動的 syscheckd 初始化中把它殺掉、下一個 syscheckd 就緒失敗的相關現象（機制未證明）；evidence record 由
+   evidence-only commit 寫入 `docs/evidence/wazuh-fim/`，最新摘要見 [LATEST.md](../evidence/wazuh-fim/LATEST.md)，在它進 Git
+   之前不是已提交的證據。目前新規則只有本機 harness（模型）與那次實跑的觀察支持，沒有它自己的原生通過紀錄；在那之前，若
+   hotfix 之後的重裝在 EL 卡在這一步，**直接重跑 `pilot deploy` 仍是恢復方式**。
    `pilot deploy` 仍是恢復方式**。
