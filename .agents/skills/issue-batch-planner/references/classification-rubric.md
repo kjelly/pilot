@@ -38,6 +38,8 @@ either in one batch or in `issue_statuses`, and no Issue is in two `MERGE_CANDID
   snapshot's `overlapping_prs`) is listed in `existing_prs`; anything else that stands in the way goes
   in `blockers`.
 - `human_approval_required` is always `true`.
+- An umbrella Issue (`file_umbrella.py`) only tracks an approved batch. Its sub-issues are the batch's
+  Issues; the PR still starts from the primary Issue and the others are closed after the merge, as above.
 
 ## Untrusted content
 
