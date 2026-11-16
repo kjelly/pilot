@@ -793,7 +793,8 @@ class AuditRuntime:
         """Clock ticks since boot, the time base of field 22 (starttime) of /proc/<pid>/stat, read from /proc/uptime.
 
         Both are the boot-time clock at 10 ms resolution, truncated, so a process that started at or after an
-        instant read here has a starttime that is not smaller than it.
+        instant read here has a starttime that is not smaller than it. Captured starttime and uptime pairs from
+        AlmaLinux 9.8 (testdata/native-captures/proc-sampler.syscheckd) are on this base.
         """
         try:
             return int(Decimal(Path('/proc/uptime').read_text().split()[0]) * os.sysconf('SC_CLK_TCK'))
@@ -804,9 +805,9 @@ class AuditRuntime:
         """(ActiveState, whether a job is queued) of wazuh-agent.service, from `systemctl show` key=value lines.
 
         Anything that is not a loaded unit with a known state and an empty or numeric Job is a typed refusal. The
-        native text of `-p LoadState -p ActiveState` is captured on AlmaLinux 9 (testdata/native-captures); the
-        `Job=` line (empty when nothing is queued, the job id otherwise) was confirmed idle on a systemd 259 host
-        and is MODELED for a queued job.
+        texts of the not-found, loaded-inactive, activating, active, deactivating and reloading states, with `Job=`
+        empty when nothing is queued and the job id otherwise, are captured on AlmaLinux 9.8
+        (testdata/native-captures/systemctl-show-wazuh-agent-job.*).
         """
         text = self.r.run(['systemctl', 'show', self.AGENT_UNIT, '-p', 'LoadState', '-p', 'ActiveState', '-p', 'Job'],
                           timeout=30, operation='native Wazuh agent service state').stdout
@@ -826,7 +827,9 @@ class AuditRuntime:
         """Every live process of wazuh-agent.service's cgroup as {comm, argv, exe, start}, read from /proc.
 
         Only the service's own cgroup is looked at, so an operator's shell or another service never counts. A process
-        that exits while it is being read is skipped; any other failure to read /proc is a typed refusal.
+        that exits while it is being read is skipped; any other failure to read /proc is a typed refusal. The comm,
+        cmdline, exe, cgroup and stat starttime of Wazuh's restart.sh and of wazuh-syscheckd are captured on AlmaLinux
+        9.8 (testdata/native-captures/proc-sampler.*).
         """
         found = []
         try:

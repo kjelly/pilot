@@ -140,7 +140,10 @@ EL 的 who-data endpoint 由一般套用建立，否則套用失敗（Issue #323
   而且在 endpoint 之前啟動的行程絕不會通過；(2) 等到 `wazuh-agent.service` 沒有進行中的轉換——`systemctl show` 的
   `ActiveState` 不是 `reloading`/`activating`/`deactivating`/`refreshing`、沒有排隊中的 job、且該 service 的 cgroup
   內沒有 `restart.sh` 行程（只看這個 service 自己的 cgroup，其他行程不算；`inactive`/`failed` 且沒有排隊 job 不是轉換，
-  重啟會把它啟動，與先前相同）。這是有上限、fail-closed 的等待（`SETTLE_WAIT`＝120 秒），依上游行為（`restart.sh` 最多等
+  重啟會把它啟動，與先前相同）。判斷所讀的文字與行程形狀取自 AlmaLinux 9.8 的原生擷取（`internal/spec/testdata/
+  native-captures/` 的 `systemctl-show-wazuh-agent-job.*` 與 `proc-sampler.*`）：`systemctl show` 的各狀態文字與空白或
+  數字的 `Job=`、`restart.sh` 的 comm／cmdline／cgroup、`wazuh-syscheckd` 的 exe／cgroup／starttime，以及 starttime 與
+  `/proc/uptime` 同一個開機時鐘；事件之間的先後效應（併入、殺掉後的下一個 syscheckd、就緒延遲）不在擷取內。這是有上限、fail-closed 的等待（`SETTLE_WAIT`＝120 秒），依上游行為（`restart.sh` 最多等
   unit 變 active 60 秒，之後 `systemctl reload` 的 ExecReload 在 unit 的 `TimeoutSec=45` 下執行）與一次原生觀察（一個卡住
   的 reload job 歷經兩次 45 秒的 `Reload operation timed out` 才 `Reload failed`）訂定；reload 留在進行中超過上限就
   typed refusal、Step 11a 自己**不重啟**（已經送出的 SIGHUP 不回復；既有 rescue 見下），下一次套用即可恢復；(3) 在 settle

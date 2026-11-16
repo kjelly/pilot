@@ -18,15 +18,17 @@ Declared leaves, each shaped from the captures of an AlmaLinux 9 VM in native-ca
     AlmaLinux capture by renaming the listening program; no native capture of it is committed;
   * time is simulated: sleeping advances a clock and lets the modeled host react, nothing really waits.
 Issue #330 adds the race the atomic restart model above used to hide. Declared leaves of that model:
-  * `systemctl show wazuh-agent -p LoadState -p ActiveState -p Job` answers from the AlmaLinux 9 capture
-    (systemctl-show-wazuh-agent.active.almalinux9, .not-found.almalinux9) with only ActiveState substituted; the `Job=`
-    line is MODELED (empty when idle was confirmed on a systemd 259 workstation, a queued job's id is not captured),
-    and so are the `reloading`, `activating`, `deactivating` answers;
-  * the processes of the Wazuh agent service (/proc/<pid>/cgroup, comm, cmdline, exe, stat starttime) are MODELED:
-    the unified-hierarchy cgroup line, restart.sh run as `sh active-response/bin/restart.sh agent reload` (upstream
-    Wazuh sources as read for the Issue: execd/wcom start it with that relative path, the unit is Type=forking with
-    KillMode=process and TimeoutSec=45), and a wazuh-syscheckd whose starttime is the boot clock in ticks (the
-    kernel's documented /proc/<pid>/stat field 22; /proc/uptime is the same clock);
+  * NATIVE shapes, captured on AlmaLinux 9.8 during a natural fresh apply (native-captures/, each file's header says how):
+    the `systemctl show wazuh-agent` texts with `Job=` empty or numeric for the not-found, loaded-inactive, activating,
+    active, deactivating and reloading states (systemctl-show-wazuh-agent-job.*); Wazuh's own restart.sh as a process of
+    the wazuh-agent.service cgroup (comm `restart.sh`, cmdline `/bin/sh active-response/bin/restart.sh agent reload`,
+    exe /usr/bin/bash, cgroup `0::/system.slice/wazuh-agent.service`; proc-sampler.restart-sh) and wazuh-syscheckd
+    (comm, exe /var/ossec/bin/wazuh-syscheckd, the same cgroup, stat field 22 starttime in the same boot-clock base as
+    /proc/uptime; proc-sampler.syscheckd). The Host model below builds its /proc entries and `systemctl show` answers
+    from those values, and NativeShapeTests feeds the real texts to the parsers. Only the `refreshing`, `failed` and
+    `maintenance` unit states have no capture (the model substitutes ActiveState into the active text);
+  * MODELED, not captured: the stat filler fields around starttime, the effect of each event on the others (below), and
+    that the unit is Type=forking with KillMode=process and TimeoutSec=45 (upstream Wazuh sources as read for the Issue);
   * a `systemctl restart` issued while a reload job runs is merged into it and leaves the old wazuh-syscheckd
     running, a syscheckd that started before the endpoint existed stays unconnected for good, and a reload's own
     `wazuh-control reload` replaces syscheckd. All of that is MODELED here. The Issue #330 vm-target run observed a
@@ -51,23 +53,48 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from unittest import mock
 import wazuh_models
 import wazuh_transaction_test as existing
 
 w = existing.w
+
+
+def native(name):
+    """A capture from native-captures/ without its `# ` provenance header."""
+    return ''.join(line for line in wazuh_models.capture(name).splitlines(True) if not line.startswith('# '))
+
+
+def native_samples(name):
+    """The `== kind:pid first seen [t]` blocks of a proc-sampler capture as dicts of their key=value lines."""
+    samples, current = [], None
+    for line in native(name).splitlines():
+        if line.startswith('== '):
+            current = {'title': line}
+            current.update(re.findall(r'(uptime_now)=([0-9.]+)', line))
+            samples.append(current)
+        elif current is not None and '=' in line:
+            key, _, value = line.partition('=')
+            current[key] = value
+    return samples
+
+
+NATIVE_RESTART = native_samples('proc-sampler.restart-sh.almalinux9.txt')[0]
+NATIVE_SYSCHECKD = native_samples('proc-sampler.syscheckd.almalinux9.txt')
 ENDPOINT = '/var/ossec/queue/sockets/audit'
 OWNER = 'd' * 32
 BOOT = 5000.0  # MODELED: seconds of uptime when the simulated clock reads 0; starttimes are compared in this base
 HZ = os.sysconf('SC_CLK_TCK')
-SYSCHECKD = '/var/ossec/bin/wazuh-syscheckd'
-AGENT_CGROUP = '0::/system.slice/wazuh-agent.service\n'  # MODELED: the unified-hierarchy line of a service process
+SYSCHECKD = NATIVE_SYSCHECKD[0]['exe']  # NATIVE: /var/ossec/bin/wazuh-syscheckd
+AGENT_CGROUP = NATIVE_RESTART['cgroup'] + '\n'  # NATIVE: the unified-hierarchy line of a service process
 OTHER_CGROUP = '0::/user.slice/user-1000.slice/session-3.scope\n'
 
 
@@ -146,10 +173,10 @@ class Host:
             return
         (self.proc / 'uptime').write_text('%.2f %.2f\n' % (BOOT + self.clock.now, 0.0))
 
-    def process(self, pid, ppid, exe, argv, cgroup='0::/system.slice/auditd.service\n', comm='modeled', start=None):
+    def process(self, pid, ppid, exe, argv, cgroup='0::/system.slice/auditd.service\n', comm='modeled', start=None, ticks=None):
         folder = self.proc / str(pid)
         folder.mkdir(parents=True, exist_ok=True)
-        starttime = '4242' if start is None else str(self.ticks(start))
+        starttime = str(ticks) if ticks is not None else '4242' if start is None else str(self.ticks(start))
         (folder / 'stat').write_text('%d (%s) S %d %s %s' % (pid, comm, ppid, ' '.join(['0'] * 17), starttime))
         (folder / 'comm').write_text(comm + '\n')
         (folder / 'cgroup').write_text(cgroup)
@@ -180,7 +207,7 @@ class Host:
         pid = pid or self.next_pid
         self.next_pid = max(self.next_pid, pid) + 1
         self.syscheckd_pids, self.syscheckd_started = [pid], start
-        self.process(pid, 1, SYSCHECKD, [SYSCHECKD], cgroup=AGENT_CGROUP, comm='wazuh-syscheckd', start=start)
+        self.process(pid, 1, SYSCHECKD, [SYSCHECKD], cgroup=AGENT_CGROUP, comm=NATIVE_SYSCHECKD[0]['comm'], start=start)
         return pid
 
     def add_syscheckd(self, start):
@@ -282,14 +309,15 @@ class Host:
             self.at(self.arm_at, lambda: self.arm(generation))
 
     def begin_reload(self, state='reloading', job='4711', script=True):
-        """MODELED: Wazuh's own `restart.sh agent reload` (run by the agent after a shared configuration push) starts:
-        its `systemctl reload` puts the unit in `reloading` with a queued job while restart.sh is alive; `state`
-        `active` with no job is the moment before restart.sh has issued the reload."""
+        """Wazuh's own `restart.sh agent reload` starts. The process has its NATIVE shape (comm, cmdline, exe, cgroup of
+        proc-sampler.restart-sh); that its `systemctl reload` puts the unit in `reloading` with a queued job while
+        restart.sh is alive is the natively seen state sequence; `state` `active` with no job is the moment before
+        restart.sh has issued the reload (a MODELED moment). The timing is MODELED."""
         self.reload_active = True
         self.unit_state, self.job = state, job
         if script:
-            self.process(self.RESTART_SH, self.AGENTD, '/usr/bin/bash', ['/bin/sh', 'active-response/bin/restart.sh', 'agent', 'reload'],
-                         cgroup=AGENT_CGROUP, comm='restart.sh', start=self.clock.now)
+            self.process(self.RESTART_SH, self.AGENTD, NATIVE_RESTART['exe'], NATIVE_RESTART['cmdline'].split(),
+                         cgroup=AGENT_CGROUP, comm=NATIVE_RESTART['comm'], start=self.clock.now)
         self.note('reload-begin')
 
     def settle_unit(self):
@@ -334,9 +362,20 @@ class Host:
             self.kill_syscheckd()
             self.connected = self.watches = False
 
+    NATIVE_UNIT_TEXTS = {'active': 'active-running', 'activating': 'activating-start', 'deactivating': 'deactivating-stop',
+                         'reloading': 'reloading-reload', 'inactive': 'loaded-inactive'}
+
     def show(self):
-        text = wazuh_models.capture('systemctl-show-wazuh-agent.active.almalinux9.rc0.txt')
-        return text.replace('ActiveState=active', 'ActiveState=' + self.unit_state) + 'Job=' + self.job + '\n'
+        """What `systemctl show wazuh-agent` prints: the NATIVE text of the unit state (native-captures/
+        systemctl-show-wazuh-agent-job.*) with the model's job id; refreshing, failed and maintenance have no capture, so
+        for them only ActiveState is substituted into the active text (MODELED)."""
+        name = self.NATIVE_UNIT_TEXTS.get(self.unit_state)
+        if name:
+            text = native('systemctl-show-wazuh-agent-job.%s.almalinux9.txt' % name)
+        else:
+            text = native('systemctl-show-wazuh-agent-job.active-running.almalinux9.txt').replace(
+                'ActiveState=active', 'ActiveState=' + self.unit_state)
+        return re.sub(r'(?m)^Job=.*$', 'Job=' + self.job, text)
 
     def run(self, argv, **kwargs):
         argv = [str(value) for value in argv]
@@ -1133,6 +1172,183 @@ class WhodataEnsureTests(unittest.TestCase):
         value = json.loads(out.getvalue())
         self.assertEqual(value['error_kind'], 'refused')
         self.assertIn('supports only the RedHat family', value['error'])
+
+
+class StubRunner:
+    """Answers every command with one fixed stdout and remembers what was asked."""
+
+    def __init__(self, text):
+        self.text, self.calls = text, []
+
+    def run(self, argv, **kwargs):
+        self.calls.append([str(value) for value in argv])
+        return subprocess.CompletedProcess(argv, 0, self.text, '')
+
+
+NATIVE_UNITS = {  # capture -> what AuditRuntime.agent_unit returns (None: a typed refusal, the unit is not loaded)
+    'not-found': None, 'loaded-inactive': ('inactive', False), 'activating-start': ('activating', True),
+    'active-running': ('active', False), 'deactivating-stop': ('deactivating', True), 'reloading-reload': ('reloading', True)}
+NATIVE_FILES = ['systemctl-show-wazuh-agent-job.%s.almalinux9.txt' % name for name in NATIVE_UNITS] + [
+    'proc-sampler.restart-sh.almalinux9.txt', 'proc-sampler.syscheckd.almalinux9.txt']
+
+
+class NativeShapeTests(unittest.TestCase):
+    """The parsers against the shapes captured on a real AlmaLinux 9.8 host (native-captures/, headers say how).
+
+    Real texts go in, the coordinator's own parsers read them, and each parser also has a case it must NOT accept, so
+    none of this can pass because the fixture is empty or the parser accepts everything. The events between the shapes
+    (merge, poison, arming delay) stay MODELED in the Host model of the tests above.
+    """
+    host = WhodataEnsureTests.host
+    RESTART_ARGV = ['/bin/sh', 'active-response/bin/restart.sh', 'agent', 'reload']
+
+    @staticmethod
+    def unit_text(name):
+        return native('systemctl-show-wazuh-agent-job.%s.almalinux9.txt' % name)
+
+    @staticmethod
+    def agent_only_host(model):
+        """Remove the Host's default agent processes: the cgroup then holds only what a test puts there."""
+        model.drop_process(model.AGENTD)
+        model.kill_syscheckd()
+
+    @staticmethod
+    def put(model, sample, pid, ppid=1, comm=None, cgroup=None, exe=None):
+        """A /proc entry from a native sample: comm, cmdline (NUL separated), exe, cgroup and the starttime of stat field
+        22. The sampler did not capture the other stat fields, so they are their own field numbers (a parser that reads
+        the wrong field gets a wrong number); a syscheckd's cmdline was not captured either, its exe stands in."""
+        name = comm or sample['comm']
+        model.process(pid, ppid, exe or sample['exe'], sample.get('cmdline', sample['exe']).split(),
+                      cgroup=(cgroup or sample['cgroup']) + '\n', comm=name, ticks=int(sample['starttime']))
+        fields = ['S', str(ppid)] + [str(number) for number in range(5, 22)] + [sample['starttime']]
+        (model.proc / str(pid) / 'stat').write_text('%d (%s) %s' % (pid, name, ' '.join(fields)))
+
+    def test_the_fixtures_are_the_real_job_forms_and_are_sanitized(self):
+        blank = {'not-found', 'loaded-inactive', 'active-running'}
+        for name in NATIVE_UNITS:
+            text = self.unit_text(name)
+            self.assertEqual([line.partition('=')[0] for line in text.splitlines()], ['LoadState', 'ActiveState', 'SubState', 'Job'], name)
+            self.assertRegex(text, r'(?m)^Job=$' if name in blank else r'(?m)^Job=[0-9]+$', name)
+        for name in NATIVE_FILES:
+            raw = wazuh_models.capture(name)
+            header = [line for line in raw.splitlines() if line.startswith('# ')]
+            self.assertTrue(header and 'kernel 5.14.0-687.5.3.el9_8.x86_64' in header[0] and 'systemd 252' in header[0]
+                            and 'Wazuh 4.14.1' in header[0], name + ' states what it was captured on')
+            self.assertEqual(re.findall(r'\d{4}-\d\d-\d\d|\d\d:\d\d:\d\d|wf244|\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', raw), [],
+                             name + ' carries no wall-clock time, host name or address')
+        self.assertEqual({sample['cgroup'] for sample in [NATIVE_RESTART] + NATIVE_SYSCHECKD}, {'0::/system.slice/wazuh-agent.service'})
+
+    def test_agent_unit_reads_every_captured_systemctl_show_text(self):
+        for name, want in NATIVE_UNITS.items():
+            with self.subTest(capture=name):
+                runner = StubRunner(self.unit_text(name))
+                runtime = w.AuditRuntime(runner)
+                if want is None:
+                    with self.assertRaisesRegex(w.Refused, 'could not be read or its unit is not loaded'):
+                        runtime.agent_unit()
+                else:
+                    self.assertEqual(runtime.agent_unit(), want)
+                self.assertEqual(runner.calls, [['systemctl', 'show', 'wazuh-agent', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'Job']])
+
+    def test_agent_unit_refuses_what_the_captured_texts_are_not(self):
+        active = self.unit_text('active-running')
+        cases = {'a Job that is not a number': active.replace('Job=\n', 'Job=1316x\n'),
+                 'no LoadState': active.replace('LoadState=loaded\n', ''),
+                 'an ActiveState nobody knows': active.replace('ActiveState=active', 'ActiveState=bogus'),
+                 'a repeated ActiveState': active + 'ActiveState=inactive\n',
+                 'a not-found unit that claims to be active': self.unit_text('not-found').replace('ActiveState=inactive', 'ActiveState=active')}
+        for name, text in cases.items():
+            with self.subTest(case=name), self.assertRaises(w.Refused):
+                w.AuditRuntime(StubRunner(text)).agent_unit()
+
+    def test_settled_on_the_captured_unit_states(self):
+        expected = {'loaded-inactive': True, 'active-running': True, 'activating-start': False,
+                    'deactivating-stop': False, 'reloading-reload': False}
+        with self.host() as (agent, model):
+            self.agent_only_host(model)
+            runtime = w.AuditRuntime(model)
+            for name, settled in expected.items():
+                with self.subTest(capture=name):
+                    model.show_output = self.unit_text(name)
+                    self.assertIs(runtime.settled(), settled)
+            model.show_output = self.unit_text('reloading-reload').replace('Job=1496', 'Job=')
+            self.assertIs(runtime.settled(), False, 'the state alone holds it, without a queued job')
+            model.show_output = self.unit_text('active-running').replace('Job=\n', 'Job=1496\n')
+            self.assertIs(runtime.settled(), False, 'a queued job alone holds it')
+            model.show_output = self.unit_text('not-found')
+            with self.assertRaises(w.Refused):
+                runtime.settled()
+            # The captured restart.sh in the cgroup holds a unit that otherwise looks idle (both signals are native: it
+            # was seen while the unit was `activating`).
+            model.show_output = self.unit_text('active-running')
+            self.put(model, NATIVE_RESTART, 29611)
+            self.assertIs(runtime.settled(), False)
+
+    def test_the_captured_restart_sh_is_found_by_its_comm_and_by_its_arguments(self):
+        with self.host() as (agent, model):
+            self.agent_only_host(model)
+            self.put(model, NATIVE_RESTART, 29611)
+            runtime = w.AuditRuntime(model)
+            processes = runtime.agent_processes()
+            self.assertEqual([(p['comm'], p['argv'], p['exe'], p['start']) for p in processes],
+                             [('restart.sh', self.RESTART_ARGV, '/usr/bin/bash', 36197)])
+            self.assertEqual(runtime.restart_scripts(processes), processes, 'found although its exe is bash, not restart.sh')
+            process = processes[0]
+            found = lambda **change: bool(runtime.restart_scripts([dict(process, **change)]))
+            self.assertTrue(found(comm='sh'), 'by the script among the first three arguments, comm aside')
+            self.assertTrue(found(argv=['/bin/sh', '-c', 'true']), 'by comm, arguments aside')
+            self.assertTrue(found(comm='sh', argv=['/bin/sh', '-x', 'active-response/bin/restart.sh', 'agent', 'reload']),
+                            'the script as the third argument (interpreter, one option, script)')
+            # What it must not find. The rule looks at the first three arguments: a script behind two options is outside it.
+            self.assertFalse(found(comm='sh', argv=['/bin/sh', '-c', 'true']), 'neither comm nor script')
+            self.assertFalse(found(comm='sh', argv=['/bin/sh', '-x', '-e', 'active-response/bin/restart.sh', 'agent', 'reload']),
+                             'the script as the fourth argument is not looked at (the rule is argv[:3])')
+            self.assertFalse(found(comm='sh', argv=['/bin/sh'], exe='/usr/bin/restart.sh'), 'exe is not what is matched')
+
+    def test_a_restart_sh_outside_the_agent_cgroup_is_ignored(self):
+        with self.host() as (agent, model):
+            self.agent_only_host(model)
+            self.put(model, NATIVE_RESTART, 29611, cgroup='0::/user.slice/user-1000.slice/session-3.scope')
+            runtime = w.AuditRuntime(model)
+            self.assertEqual(runtime.agent_processes(), [])
+            self.assertEqual(runtime.restart_scripts(runtime.agent_processes()), [])
+
+    def test_the_captured_syscheckd_shapes_give_their_starttimes(self):
+        with self.host() as (agent, model):
+            self.agent_only_host(model)
+            runtime = w.AuditRuntime(model)
+            first, second = NATIVE_SYSCHECKD[0], NATIVE_SYSCHECKD[1]
+            self.put(model, first, int(first['title'].split(':')[1].split()[0]))
+            self.assertEqual(runtime.syscheckd_starts(), [35367], 'stat field 22, not a neighbouring field')
+            self.put(model, second, 29702)
+            self.assertEqual(runtime.syscheckd_starts(), [35367, 36280])
+            # What it must not count: another process of the cgroup, the same exe elsewhere, a syscheckd-named process
+            # with another exe.
+            self.put(model, NATIVE_RESTART, 29611)
+            self.put(model, NATIVE_SYSCHECKD[2], 30920, cgroup='0::/system.slice/docker-0.scope')
+            self.put(model, NATIVE_SYSCHECKD[3], 32442, exe='/usr/bin/sleep')
+            self.assertEqual(runtime.syscheckd_starts(), [35367, 36280])
+            self.assertEqual(len(runtime.agent_processes()), 4)
+
+    def test_a_captured_starttime_and_uptime_pair_are_on_the_same_clock(self):
+        # Each sample is a syscheckd first seen at the uptime it logged. With CLK_TCK 100, the standard USER_HZ (the
+        # comparison of starttime with uptime in the capture assumes it), the process started at most a second before.
+        marks = []
+        for sample in NATIVE_SYSCHECKD:
+            with self.subTest(sample=sample['title']), self.host() as (agent, model):
+                (model.proc / 'uptime').write_text('%s 0.00\n' % sample['uptime_now'])  # the idle field was not captured
+                with mock.patch.object(w.os, 'sysconf', lambda name: 100):
+                    mark = w.AuditRuntime.boot_ticks()
+                start = int(sample['starttime'])
+                self.assertEqual(mark, int(Decimal(sample['uptime_now']) * 100))
+                self.assertTrue(0 <= mark - start < 100, 'started within a second before it was seen: the same base')
+                # Control: a mark on a clock ten times slower would call this process, which started before the mark,
+                # fresh (start >= mark), the false success the mark exists to prevent.
+                self.assertGreater(start, int(Decimal(sample['uptime_now']) * 10))
+                marks.append((mark, start))
+        # A mark taken when the first syscheckd was seen: it is older than that mark, the next ones are newer.
+        mark = marks[0][0]
+        self.assertTrue(marks[0][1] < mark <= min(start for _, start in marks[1:]))
 
 
 if __name__ == '__main__':
