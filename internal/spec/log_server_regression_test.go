@@ -74,23 +74,50 @@ not running postrotate script, since no logs were rotated
 switching euid from 102 to 0 and egid from 102 to 0 (pid 3228)
 `
 
-const (
-	logrotateSwitchTo   = "switching euid from 0 to 102 and egid from 0 to 102 (pid 3228)\n"
-	logrotateSwitchBack = "switching euid from 102 to 0 and egid from 102 to 0 (pid 3228)\n"
-)
+// logrotateSwitchTo is the first `switching` line of the capture above, used to
+// build variants of it (another uid, gid, or no line) by replacing that line.
+const logrotateSwitchTo = "switching euid from 0 to 102 and egid from 0 to 102 (pid 3228)\n"
 
-// logrotateDebugUbuntuBase is what the same VM printed for the policy as it was
-// before v2.1 (no `su`): the capture above without its two `switching` lines.
-// rc was 0 for both. On AlmaLinux 9.8 (logrotate 3.18.0, rsyslog 8.2510, a root:root
-// tree, rsyslogd running as root) `su root root` also printed no `switching`
-// line, so the output there is this one; C12 passes that case by its root-owned
-// short-circuit, not by reading logrotate's output.
-var logrotateDebugUbuntuBase = strings.NewReplacer(logrotateSwitchTo, "", logrotateSwitchBack, "").Replace(logrotateDebugUbuntuSu)
+// logrotateDebugUbuntuBase is a second real capture from the same Ubuntu 24.04.4
+// VM (logrotate 3.21.0, rsyslog 8.2312.0): `LC_ALL=C logrotate -d
+// /etc/logrotate.d/siem-incoming 2>&1` as root on the policy as it was before
+// v2.1 (no `su`), rc=0. It is the policy as installed at /etc/logrotate.d, not
+// the copy with `su syslog syslog` that the capture above was read from, so the
+// config path differs from that one; it has no `switching` line at all.
+// AlmaLinux 9.8 (logrotate 3.18.0, a root:root tree, rsyslogd as root) printed no
+// `switching` line for `su root root` either, and its output was otherwise the
+// same as this one; the full AlmaLinux text was not kept, so the root-owned case
+// below feeds this output and passes by C12's root-owned short-circuit, not by
+// anything logrotate prints.
+const logrotateDebugUbuntuBase = `warning: logrotate in debug mode does nothing except printing debug messages!  Consider using verbose mode (-v) instead if this is not what you want.
+
+reading config file /etc/logrotate.d/siem-incoming
+Reading state from file: /var/lib/logrotate/status
+state file /var/lib/logrotate/status does not exist
+Allocating hash table for state file, size 64 entries
+
+Handling 1 logs
+
+rotating pattern: /var/log/siem/*/*.log  after 1 days (14 rotations)
+empty log files are not rotated, old logs are removed
+considering log /var/log/siem/i93-dev-deb/audit.log
+Creating new state
+  Now: 2026-11-17 07:12
+  Last rotated at 2026-11-17 07:00
+  log does not need rotating (log has already been rotated)
+considering log /var/log/siem/i93-dev-deb/auth.log
+Creating new state
+  Now: 2026-11-17 07:12
+  Last rotated at 2026-11-17 07:00
+  log does not need rotating (log has already been rotated)
+not running postrotate script, since no logs were rotated
+`
 
 // TestRegression_LogServerC12ReadsTheEffectiveRotationIdentity runs C12's
 // command against a fake logrotate that prints real captures (above), with and
-// without the lines logrotate prints when the policy's `su` is in effect. The row has to pass only for the identity that owns the
-// landing root, and fail for the policy as it was before `su` was rendered.
+// without the lines logrotate prints when the policy's `su` is in effect. The
+// row has to pass only for the identity that owns the landing root, and fail
+// for the policy as it was before `su` was rendered.
 func TestRegression_LogServerC12ReadsTheEffectiveRotationIdentity(t *testing.T) {
 	s, err := Parse("../../docs/verification/log-server.md")
 	if err != nil {
@@ -155,6 +182,9 @@ esac
 
 	const uid, gid = "102", "102" // the syslog user and group on the captured Ubuntu 24.04 VM
 	su := logrotateDebugUbuntuSu
+	if !strings.Contains(su, logrotateSwitchTo) {
+		t.Fatal("the switching line the variants replace is not in the capture")
+	}
 	// Variants of the real capture: only the first switching line changes.
 	withTo := func(line string) string { return strings.Replace(su, logrotateSwitchTo, line, 1) }
 	for _, tc := range []struct {
@@ -247,8 +277,7 @@ esac
 		meGid := strings.NewReplacer("egid from 0 to 102", "egid from 0 to "+fmt.Sprint(os.Getgid())).Replace(me)
 		for _, tc := range []struct{ name, out, want string }{
 			{"su in effect", meGid, "0"},
-			{"policy without su", strings.NewReplacer(
-				"switching euid from 0 to "+fmt.Sprint(os.Getuid())+" and egid from 0 to "+fmt.Sprint(os.Getgid())+" (pid 3228)\n", "").Replace(meGid), "1"},
+			{"policy without su", logrotateDebugUbuntuBase, "1"},
 		} {
 			cmd := exec.Command("sh", "-c", command)
 			cmd.Env = append(os.Environ(), "PATH="+realShims+string(os.PathListSeparator)+os.Getenv("PATH"),

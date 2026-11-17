@@ -34,11 +34,31 @@ import (
 // evaluate, and a writer module other than copy/template are failures, never
 // skips.
 //
-// What it does not see: a policy written by a shell/command task or by a
-// module not listed here, and a dest held in a variable that neither names
-// logrotate nor is defined in the play's vars. Those need review; none exists
-// on the base this guard was added to (git grep for logrotate over playbooks,
-// Go, images, scripts, contracts and group_vars).
+// Besides the writers it can resolve to /etc/logrotate.conf or /etc/logrotate.d/*,
+// the guard sniffs the content of every copy, template, blockinfile, lineinfile
+// and replace task (literal content, or the src file it can find): content that
+// contains a logrotate stanza (an absolute path or glob followed by `{` at the
+// end of a line, and a logrotate directive such as daily, rotate or postrotate
+// before the closing `}`) must be written to a logrotate policy path. Content of
+// that shape written to any other dest, or to one the guard cannot resolve (a
+// variable set by set_fact, a loop item), is a failure, so a policy cannot slip
+// past by hiding its destination.
+//
+// What it still does not see, honestly:
+//   - a policy written by a shell/command/raw task (a heredoc, `tee`, `printf >`,
+//     `cat > /etc/logrotate.d/x`) or by a module other than the ones above;
+//   - a policy assembled at runtime (built from fragments by a shell script, a
+//     lookup, a filter or a registered result) so that no stanza is in the YAML
+//     or in a src file the guard finds; and a src file it cannot locate when the
+//     dest is not recognisably a logrotate path;
+//   - the host-derived writers: a copy with remote_src puts a file that already
+//     is on the target in place, so its text is not here. They are listed in
+//     logrotateHostDerivedWriters and reviewed by hand, not read;
+//   - a dest held in a variable that neither names logrotate nor is defined in the
+//     play's vars, when the content is not logrotate-shaped either.
+// None of these exists on the base this guard was added to (git grep for
+// logrotate over playbooks, Go, images, scripts, contracts and group_vars);
+// each needs review when it appears.
 
 // logrotateIdentityAllowlist names the policies that are known not to declare
 // `su`, with the reason. Each entry is checked both ways: one that now passes
@@ -59,6 +79,11 @@ var logrotateHostDerivedWriters = map[string]string{
 		"the distribution's own /etc/logrotate.d/rsyslog without one path; it adds no path to any policy, so the identity it rotates the rest as is the distribution's own.",
 }
 
+// logrotatePathToken is one path of a stanza header: absolute, ~ or a {{ }}
+// (rendered as JINJA) standing for the path or its start, bare or quoted (a
+// quoted path may hold spaces).
+const logrotatePathToken = `(?:"(?:/|~/|JINJA)[^"]*"|'(?:/|~/|JINJA)[^']*'|(?:/|~/|JINJA)[^\s{}"']*)`
+
 var (
 	logrotatePolicyDest  = regexp.MustCompile(`^/etc/logrotate(\.d/.*|\.conf)$`)
 	logrotateJinjaExpr   = regexp.MustCompile(`(?s)\{\{.*?\}\}`)
@@ -66,6 +91,19 @@ var (
 	logrotateSimpleVar   = regexp.MustCompile(`\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
 	logrotateFreeFormKV  = regexp.MustCompile(`(?:^|\s)(dest|path|src|remote_src|content)=("[^"]*"|'[^']*'|\S+)`)
 	logrotateScriptWords = map[string]bool{"postrotate": true, "prerotate": true, "firstaction": true, "lastaction": true, "preremove": true}
+
+	// A stanza header: one or more absolute paths or globs (a leading ~, or a
+	// {{ }} standing for a whole path or its start, counts), optionally quoted,
+	// with `{` after them on the same line (group 1 is what follows it, which is
+	// the whole stanza in the one-line form). Text such as an rsyslog `ruleset(...) {`, an nginx
+	// `location /x {` or a JSON object does not start with a path.
+	logrotateStanzaHeader = regexp.MustCompile(`^(?:` + logrotatePathToken + `\s+)*` + logrotatePathToken + `\s*\{(.*)$`)
+	// Directives that only a logrotate stanza has among the lines of a stanza
+	// whose header looks like a path.
+	logrotateStanzaDirective = map[string]bool{
+		"daily": true, "weekly": true, "monthly": true, "yearly": true, "rotate": true, "postrotate": true,
+		"prerotate": true, "maxage": true, "size": true, "minsize": true, "maxsize": true,
+	}
 
 	// copy/template author the file; the others change a file in place or fetch
 	// one, which the guard cannot evaluate, so touching a logrotate policy with
@@ -199,30 +237,43 @@ func logrotateSites(relPath, file string, doc any) []logrotateSite {
 				break
 			}
 		}
-		if raw == "" {
-			return
+		dest, unresolved := raw, false
+		if raw != "" {
+			dest, unresolved = logrotateResolveVars(raw, vars)
 		}
-		dest, unresolved := logrotateResolveVars(raw, vars)
+		policyDest := raw != "" && !unresolved && logrotatePolicyDest.MatchString(dest)
 		related := strings.Contains(strings.ToLower(raw), "logrotate") ||
 			strings.Contains(strings.ToLower(fmt.Sprint(task["loop"], task["with_items"])), "logrotate")
-		if unresolved && !related {
-			return // not recognisably a logrotate policy
-		}
-		if !unresolved && !logrotatePolicyDest.MatchString(dest) {
-			return
-		}
 
 		name, _ := task["name"].(string)
 		if name == "" {
 			name = fmt.Sprintf("(unnamed %s task writing %s)", module, raw)
 		}
-		key := relPath + "::" + name
-		if seen[key]++; seen[key] > 1 {
-			key = fmt.Sprintf("%s (#%d)", key, seen[key])
+		newSite := func() *logrotateSite {
+			key := relPath + "::" + name
+			if seen[key]++; seen[key] > 1 {
+				key = fmt.Sprintf("%s (#%d)", key, seen[key])
+			}
+			sites = append(sites, logrotateSite{key: key, dest: dest})
+			return &sites[len(sites)-1]
 		}
-		site := logrotateSite{key: key, dest: dest}
-		fail := func(format string, a ...any) { site.problems = append(site.problems, fmt.Sprintf(format, a...)) }
 
+		if !policyDest && !(unresolved && related) {
+			// Not recognisably a logrotate policy by its dest: it must not be
+			// one by its content either.
+			if text, ok := logrotateWrittenText(file, module, args, vars); ok && logrotateStanzaShaped(text) {
+				site := newSite()
+				shown := raw
+				if shown == "" {
+					shown = "(no dest or path)"
+				}
+				site.problems = append(site.problems, fmt.Sprintf("logrotate-shaped content written to %s, which is not /etc/logrotate.conf or /etc/logrotate.d/* (or cannot be resolved); a policy has to be written to its policy path so that its su can be checked", shown))
+			}
+			return
+		}
+
+		site := newSite()
+		fail := func(format string, a ...any) { site.problems = append(site.problems, fmt.Sprintf(format, a...)) }
 		switch {
 		case unresolved:
 			fail("unresolvable logrotate dest %q (not a literal and not a plain variable of the play's vars); write the path, or define it in the play's vars", raw)
@@ -238,9 +289,72 @@ func logrotateSites(relPath, file string, doc any) []logrotateSite {
 				site.problems = append(site.problems, logrotateIdentityProblems(text)...)
 			}
 		}
-		sites = append(sites, site)
 	})
 	return sites
+}
+
+// logrotateWrittenText returns the text a task puts into its file, when it is
+// in the repository: the content or the src file of copy/template (nothing for
+// remote_src), the block/line/replacement of blockinfile/lineinfile/replace.
+// ok is false when there is no text to read (assemble, get_url, unarchive, a src
+// the guard cannot find).
+func logrotateWrittenText(file, module string, args, vars map[string]any) (string, bool) {
+	switch module {
+	case "copy", "template":
+		if logrotateIsTrue(args["remote_src"]) {
+			return "", false
+		}
+		text, problem := logrotatePolicyText(file, args, vars)
+		return text, problem == ""
+	case "blockinfile", "lineinfile", "replace":
+		var parts []string
+		for _, k := range []string{"block", "line", "replace", "content"} {
+			if s, ok := args[k].(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, "\n"), len(parts) > 0
+	}
+	return "", false
+}
+
+// logrotateStanzaShaped reports whether text contains a logrotate stanza: a
+// header line (absolute paths or globs, then `{`) followed, before the closing
+// `}`, by at least one directive only logrotate policies have.
+func logrotateStanzaShaped(text string) bool {
+	text = logrotateJinjaCmt.ReplaceAllStringFunc(text, func(m string) string { return strings.Repeat("\n", strings.Count(m, "\n")) })
+	lines := strings.Split(logrotateJinjaExpr.ReplaceAllStringFunc(text, func(m string) string {
+		return "JINJA" + strings.Repeat("\n", strings.Count(m, "\n"))
+	}), "\n")
+	for i, raw := range lines {
+		m := logrotateStanzaHeader.FindStringSubmatch(strings.TrimSpace(raw))
+		if m == nil {
+			continue
+		}
+		// What follows the `{` on the header line, up to a `}` on that line.
+		rest, closed := m[1], false
+		if j := strings.Index(rest, "}"); j >= 0 {
+			rest, closed = rest[:j], true
+		}
+		for _, w := range strings.Fields(rest) {
+			if logrotateStanzaDirective[w] {
+				return true
+			}
+		}
+		if closed {
+			continue
+		}
+		for _, l := range lines[i+1:] {
+			line := strings.TrimSpace(l)
+			if strings.HasPrefix(line, "}") {
+				break
+			}
+			if f := strings.Fields(line); len(f) > 0 && logrotateStanzaDirective[f[0]] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func logrotateIsTrue(v any) bool {
@@ -511,7 +625,8 @@ func TestLogrotateIdentityGuardParsesWhatItClaimsTo(t *testing.T) {
 			map[string]string{"t": "unresolvable logrotate dest"},
 		},
 		{"an unrelated copy with a variable dest is not a logrotate writer", play("", copyTask("t", `"{{ some_path }}"`, "x\n")), map[string]string{}},
-		{"an unrelated literal dest", play("", copyTask("t", "/etc/other.conf", stanza(""))), map[string]string{}},
+		{"an unrelated literal dest with no logrotate content", play("", copyTask("t", "/etc/other.conf", "key = value\n")), map[string]string{}},
+		{"a stanza written to an unrelated literal dest", play("", copyTask("t", "/etc/other.conf", stanza(""))), map[string]string{"t": "logrotate-shaped content written to /etc/other.conf"}},
 		{
 			"content that is only an expression",
 			play("", copyTask("t", "/etc/logrotate.d/x", `"{{ lookup('file', 'x') }}"`)),
@@ -552,6 +667,57 @@ func TestLogrotateIdentityGuardParsesWhatItClaimsTo(t *testing.T) {
 			"edited in place",
 			"- hosts: all\n  tasks:\n    - name: t\n      ansible.builtin.blockinfile:\n        path: /etc/logrotate.d/x\n        block: |\n          su r r\n",
 			map[string]string{"t": "in place"},
+		},
+		// The content sniff: a stanza written anywhere but a policy path is a failure.
+		{
+			"logrotate content written to /tmp/x",
+			play("", copyTask("t", "/tmp/x", stanza("    su r r\n"))),
+			map[string]string{"t": "logrotate-shaped content written to /tmp/x"},
+		},
+		{
+			"logrotate content through a set_fact dest",
+			play("", "    - name: pick\n      ansible.builtin.set_fact:\n        policy_path: /etc/logrotate.d/x\n"+copyTask("t", `"{{ policy_path }}"`, stanza("    su r r\n"))),
+			map[string]string{"t": "logrotate-shaped content written to {{ policy_path }}"},
+		},
+		{
+			"logrotate content through a loop item dest",
+			play("", "    - name: t\n      ansible.builtin.copy:\n        dest: \"{{ item }}\"\n        content: |\n          /a/*.log {\n              weekly\n          }\n      loop: ['/etc/other/a']\n"),
+			map[string]string{"t": "logrotate-shaped content written to {{ item }}"},
+		},
+		{
+			"logrotate content with a variable path header",
+			play("", copyTask("t", "/etc/other.conf", "{{ some_log }} {\n    rotate 7\n}\n")),
+			map[string]string{"t": "logrotate-shaped content written to /etc/other.conf"},
+		},
+		{
+			"logrotate content in a blockinfile",
+			"- hosts: all\n  tasks:\n    - name: t\n      ansible.builtin.blockinfile:\n        path: /etc/other.conf\n        block: |\n          /a/*.log {\n              daily\n          }\n",
+			map[string]string{"t": "logrotate-shaped content written to /etc/other.conf"},
+		},
+		{
+			"logrotate content in a template src written elsewhere",
+			"- hosts: all\n  tasks:\n    - name: t\n      ansible.builtin.template:\n        src: no-su.j2\n        dest: /etc/other.conf\n",
+			map[string]string{"t": "logrotate-shaped content written to /etc/other.conf"},
+		},
+		{
+			"one-line logrotate stanza with no dest at all",
+			"- hosts: all\n  tasks:\n    - name: t\n      ansible.builtin.lineinfile:\n        line: '/a/*.log { daily }'\n",
+			map[string]string{"t": "logrotate-shaped content written to (no dest or path)"},
+		},
+		{
+			"rsyslog RainerScript with braces is not a logrotate policy",
+			play("", copyTask("t", "/etc/rsyslog.d/10-x.conf", "module(load=\"imtcp\")\nruleset(name=\"siemReceiver\") {\n    if $syslogfacility-text == 'local6' then {\n        action(type=\"omfile\" dynaFile=\"SiemAuditPath\" createDirs=\"on\")\n    }\n    stop\n}\ntemplate(name=\"P\" type=\"string\" string=\"/var/log/siem/%HOSTNAME%/a.log\")\n")),
+			map[string]string{},
+		},
+		{
+			"JSON with braces and logrotate-looking keys is not a logrotate policy",
+			play("", copyTask("t", "/etc/x.json", "{\n  \"daily\": {\n    \"rotate\": 5,\n    \"size\": 10\n  }\n}\n")),
+			map[string]string{},
+		},
+		{
+			"a path block without any logrotate directive is not a policy",
+			play("", copyTask("t", "/etc/x.conf", "/var/lib/x {\n    mode 0755\n}\n")),
+			map[string]string{},
 		},
 		{
 			"block and rescue in a task file",
@@ -600,6 +766,37 @@ func TestLogrotateIdentityGuardParsesWhatItClaimsTo(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLogrotateStanzaSniff(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		want       bool
+	}{
+		{"path, brace, directive", "/var/log/a/*.log {\n    daily\n}\n", true},
+		{"quoted path", "\"/var/log/a b/*.log\" {\n    rotate 3\n}\n", true},
+		{"several paths on one line", "/var/log/a.log /var/log/b.log {\n    weekly\n}\n", true},
+		{"variable path", "{{ log_path }} {\n    size 10M\n}\n", true},
+		{"variable root with a glob", "{{ root }}/*/*.log {\n    maxage 9\n}\n", true},
+		{"directive after another stanza's close", "/a {\n    mode 1\n}\n/b {\n    monthly\n}\n", true},
+		{"postrotate is a directive", "/a/*.log {\n    postrotate\n    endscript\n}\n", true},
+		{"comment line is not a header", "# /a/*.log {\n#    daily\n", false},
+		{"header without a directive", "/var/lib/x {\n    mode 0755\n}\n", false},
+		{"directive after the closing brace", "/var/lib/x {\n}\ndaily\n", false},
+		{"one-line stanza", "/a/*.log { daily }\n", true},
+		{"one-line stanza whose directive is not logrotate's", "/a/*.log { mode 1 }\n", false},
+		{"brace then the directive on the next line", "/a/*.log {  \n    daily\n}\n", true},
+		{"ruleset block", "ruleset(name=\"r\") {\n    daily\n}\n", false},
+		{"nginx location block", "location /x {\n    size 1\n}\n", false},
+		{"bare brace", "{\n    daily\n}\n", false},
+		{"json object", "{\n  \"daily\": {\n    \"size\": 1\n  }\n}\n", false},
+		{"jinja comment hiding the header", "{# /a/*.log { #}\n    daily\n", false},
+		{"empty", "", false},
+	} {
+		if got := logrotateStanzaShaped(tc.text); got != tc.want {
+			t.Errorf("%s: logrotateStanzaShaped = %v, want %v for %q", tc.name, got, tc.want, tc.text)
+		}
 	}
 }
 

@@ -6,11 +6,7 @@
 > rsyslog 轉送）提供中央接收端，兩份 spec 搭配構成一組 Shape 3（server+client）。
 > 維護者：sre
 
-> 最後驗證：2026-10-20，candidate `34cfabea416eb9645aaa323e541198ae39bbbe96`，
-> tree `67f0299bcd8a39fc77ffd0e85821e6576ebd7211`。全新三機 L3/L4 通過，
-> receiver 11/11、sender 66/66、L6 三台 changed=0；12 項 TLS rollback 與兩項 C19 負例通過。
-> 負例後再次 77/77、全鏈 changed=0。大流量、輪替與 decommission 本輪未重跑。
-> [完整驗證摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
+> 實跑證據：[evidence LATEST](../evidence/log-server/LATEST.md)（每次重新驗證只更新 evidence 目錄）。
 
 ## 1. 目標系統
 
@@ -193,4 +189,4 @@ go run ./cmd/pilot vm-target run --name log-server \
 | 2026-10-15 | v1.8 | 只改說明，row 不變：v1.7 拿掉 §6 表格中間的說明時留下一個空行，C9/C10 那列仍然沒有算在表格裡（GitHub 把它顯示成表格後的一段文字）；拿掉這個空行 | pilot |
 | 2026-10-16 | v1.9 | 只改說明，row 不變：§1、§6 補上換根目錄時 AppArmor 規則的兩階段處理（重啟前保留舊根目錄的規則，Step 7 確認 rsyslog 以新設定在監聽後才拿掉）、Step 6a 對啟動時間早於設定檔的 rsyslog 也重啟，以及 rescue 對 AppArmor local 檔與接收設定修改時間的處理。起因：Step 2a 重新載入只含新根目錄的 profile 後、rsyslog 重啟前，正在跑的 rsyslogd 不能寫舊根目錄，訊息遺失（PR #79，2026-10-16 在 pr79-log 實測） | pilot |
 | 2026-10-20 | v2.0 | RELP/mTLS 接收與 loopback-only legacy TCP；C4 驗證已載入的實際 transport，C11 允許 ruleset 後的 input 屬性。驗收見本輪 evidence 摘要 | pilot |
-| 2026-11-17 | v2.1 | 新增 C12：落地檔以落地根目錄擁有者的身分輪替。根因：`/etc/logrotate.d/siem-incoming` 沒有 `su`，logrotate 以 root 展開 `siem_log_root/*/*.log` 後依完整路徑 rename、create、compress、刪除；它拒絕 symlink 與 hard link 的 log 檔，卻不擋路徑中間的 symlink 目錄，而 Ubuntu 上 `siem_log_root` 與各來源目錄由 `syslog`（rsyslogd 降權後的身分）擁有，`syslog` 身分的行程可以把 `<root>/<host>` 換成 symlink，讓 root 的每日輪替在目標目錄裡動手；Ubuntu 的全域 `su root adm` 也讓 logrotate 自己的 insecure-parent 檢查不再作用。修法：策略檔無條件寫 `su {{ siem_log_owner }} {{ siem_log_owner }}`（EL 上 `siem_log_owner` 是 root，等於不切換），輪替改用 rsyslog 帳號的權限；postrotate 腳本仍以 root 執行（logrotate 先切回 root 才 fork 腳本），原本的 `systemctl kill -s HUP rsyslog.service` 不變。playbook 的每個 task 補上 C12 tag。row C1–C11 不變 | pilot |
+| 2026-11-17 | v2.1 | 新增 C12：落地檔以落地根目錄擁有者的身分輪替。根因：`/etc/logrotate.d/siem-incoming` 沒有 `su`，logrotate 以 root 展開 `siem_log_root/*/*.log` 後依完整路徑 rename、create、compress、刪除；它拒絕 symlink 與 hard link 的 log 檔，卻不擋路徑中間的 symlink 目錄，而 Ubuntu 上 `siem_log_root` 與各來源目錄由 `syslog`（rsyslogd 降權後的身分）擁有，`syslog` 身分的行程可以把 `<root>/<host>` 換成 symlink，讓 root 的每日輪替在目標目錄裡動手；Ubuntu 的全域 `su root adm` 也讓 logrotate 自己的 insecure-parent 檢查不再作用。修法：策略檔無條件寫 `su {{ siem_log_owner }} {{ siem_log_owner }}`（EL 上 `siem_log_owner` 是 root，等於不切換），輪替改用 rsyslog 帳號的權限；postrotate 腳本仍以 root 執行（logrotate 先切回 root 才 fork 腳本），原本的 `systemctl kill -s HUP rsyslog.service` 不變。playbook 的每個 task 補上 C12 tag。row C1–C11 不變。標頭原本的「最後驗證」單次摘要改為指向 `../evidence/log-server/LATEST.md` 的固定連結（AGENTS.md §1.2：spec 不累積單次驗證結果） | pilot |

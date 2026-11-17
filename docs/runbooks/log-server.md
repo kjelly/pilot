@@ -26,8 +26,8 @@ Fresh L3/L4 通過，receiver **11/11**、sender **66/66**，L6 三台 **changed
 golangci-lint 與阻擋性 playbook／CI 同等檢查通過；L2 ansible-lint 仍有 advisory findings。
 測試 VM 已清理，共用 cache services 保留運行。
 
-本輪未重跑大流量、輪替與 decommission；歷史結果保留原候選歸屬。
-完整版本、指紋與驗證範圍見 [本輪證據摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
+以上數字屬於 2026-10-20 的候選；該輪未重跑大流量、輪替與 decommission，歷史結果保留原候選歸屬。
+最新一次實跑的完整版本、指紋與驗證範圍見 [evidence LATEST](../evidence/log-server/LATEST.md)。
 
 ## 1. 目標與輸入
 
@@ -55,7 +55,7 @@ postrotate 腳本仍以 root 執行，`systemctl kill -s HUP rsyslog.service` �
 ## 2. 部署與驗收流程
 
 先讀實際 inventory，確認接收端與同機 forwarding 的角色都存在，再部署 receiver、sender。
-本輪使用 [三機拓樸](../topologies/audit-forward-queue-topology.yaml) 與
+2026-10-20 的驗收使用 [三機拓樸](../topologies/audit-forward-queue-topology.yaml) 與
 [RELP 測試 chain](../../playbooks/test/siem-relp-chain.yml) 跑全新 target 的
 check mode → apply → verify → 第二次 apply。上游套件前置只限測試 VM，
 正式主機由部署方先提供具有必要能力的套件與 PKI。
@@ -89,6 +89,6 @@ block/rescue 還原本輪前的 drop-in、logrotate、TLS profile 與材料；
 ## 5. 維護注意事項
 
 - 重啟必須由設定／材料／有效權限或載入時間的變更觸發，不能每次 apply 都 restarted。
-- UFW/firewalld 的站台政策仍需另行驗證；本輪拋棄式環境未啟用它們。
+- UFW/firewalld 的站台政策仍需另行驗證；2026-10-20 的拋棄式環境未啟用它們。
 - RELP 啟用時只對網路開放 mTLS listener；舊 TCP 只留 loopback，其他遠端 TCP client 需同步遷移。
 - ACK、容量、重複、葉憑證輪替與單張撤銷的邊界，以 RELP runbook 為準。
