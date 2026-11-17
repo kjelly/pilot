@@ -1,6 +1,6 @@
 # Verification Spec — alertmanager (central Alertmanager for all sites)
 
-> 版本：v1.14
+> 版本：v1.15
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `prometheus.md` / `thanos-query.md` 的 docker container 模式）
 > 維護者：sre
 
@@ -106,7 +106,11 @@ external label），兩個站台用了相同主機名稱時不會互相抑制。
 
 `null` 與 `teams` 模式內建這兩條規則（`playbooks/apply/alertmanager-apply.yml` 的
 `alertmanager_default_config`/`alertmanager_teams_config`）。`custom` 模式由 operator
-自帶整份 `alertmanager_config`，**必須自行加入同樣的兩條**（C10 會檢查）：
+自帶整份 `alertmanager_config`，**必須自行加入同樣的兩條**（C10 會檢查）。注意只要 `alertmanager_config` 有定義而沒有設
+`alertmanager_receiver_mode`，就視為 legacy `custom`，內建設定整份被取代：所以
+`group_vars/alertmanager.example.yml` 不帶生效中的 `alertmanager_config`（只留註解），
+由 `pilot inventory generate` 複製出來的 workspace 才會走內建的 `null` 設定、帶著這兩條規則：
+
 
 ```yaml
 inhibit_rules:
@@ -195,6 +199,7 @@ CI 的 `Playbook lint` job 會跑 `make alert-rules-test`：pull image，並且�
 
 | 日期 | 版本 | 變更 | 變更者 |
 |------|------|------|--------|
+| 2026-11-13 | v1.15 | minimal-PoC 五節點實跑發現（F1）：範例 `group_vars/alertmanager.example.yml` 帶著生效中的 `alertmanager_config`（只有 `null` receiver），複製成 workspace 後被視為 legacy `custom`，內建的兩條 inhibit 規則整份被取代，C10 在每個由骨架建出的 workspace 都失敗。範例改成只留註解；新增 `TestRegression_AlertmanagerExampleDoesNotOverrideTheBuiltInConfig`、`TestRegression_AlertmanagerBuiltInConfigsCarryTheInhibitRules`。row 與 Expected 未變 | sre |
 | 2026-10-20 | v1.14 | #123：probe-round bound 改為嚴格小於；Go duration 完整錨定與整數奈秒溢位檢查；keep_firing_for 上限 5m；時間參數必須持久化於 inventory。row 未變 | sre |
 | 2026-10-16 | v1.13 | PR #80 第八輪 review：第 2 點的 probe 間隔上限改為 interval + timeout + 15s + 2 × scrape（`changes()` 看到的一次變化只維持 時間窗 − scrape），預設時間窗 150s，兩個 apply 跑同一份 gate；寫明 `login_probe_concurrency` 排隊不在模型內與對應的訊號、`host_metrics_missing_for` 上限改為 9m、`keep_firing_for` 對 `HostDown` 放行時間的影響、15s 寫出假設；新增「login-probe 主機自己的監控資料缺口」未涵蓋（#121）；§3 改為指向 runbook §0.5，evidence-only commit 不再改 spec | sre |
 | 2026-10-16 | v1.12 | PR #80 第七輪 review：第 1 點寫明餘裕（時間窗 + 15s textfile 寫出 ≤ `host_metrics_missing_for`）；第 2 點補上 probe 太慢時的 fail-safe 行為；`host_metrics_missing_success_window` 預設改為 140s，`prometheus-apply.yml` 新增兩道 gate（時間窗 + 15s ≤ `for`；probe 主機的 interval + total_timeout + 15s + 一次 scrape ≤ 時間窗），promtool 鎖住邊界 | sre |
