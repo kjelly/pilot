@@ -287,4 +287,14 @@ func TestRegression_LogServerPolicyIsRotatedAsItsSuByRealLogrotate(t *testing.T)
 	if out := debug(rendered); !switched.MatchString(out) {
 		t.Errorf("logrotate does not switch to the su identity for the policy Step 4 renders; it would rotate as root:\n%s\n--- policy:\n%s", out, rendered)
 	}
+
+	// The switch is printed without any landing file too (the pattern is
+	// considered even when nothing matches; measured on Ubuntu 24.04 with
+	// logrotate 3.21.0), which is why spec row C12 needs no C7/C8 before it.
+	if err := os.Remove(filepath.Join(root, "host-a", "audit.log")); err != nil {
+		t.Fatal(err)
+	}
+	if out := debug(rendered); !switched.MatchString(out) {
+		t.Errorf("with no *.log under the root logrotate does not report the su switch for the rendered policy:\n%s", out)
+	}
 }

@@ -104,8 +104,9 @@
 > 看 logrotate 是否真的列出 `switching euid from 0 to <根目錄 uid> and egid from 0 to
 > <根目錄 gid> `。判讀注意：
 >
-> - 這一行只有在至少一個 `*.log` 被展開時才會出現；C7/C8 在同一次驗證稍早就會建出
->   `audit.log`/`auth.log`，單獨只跑 C12 的環境要先有落地檔。
+> - 落地根目錄底下沒有任何 `*.log` 時，這一行照樣會印出：Ubuntu 24.04（logrotate 3.21.0）上，
+>   策略檔有 `missingok`，pattern 本身仍會被「考慮」，停掉 rsyslog 並移走所有 `*.log` 後
+>   實測仍印出 switching 行（2026-11-17）。C12 因此不依賴 C7/C8 先建出落地檔。
 > - 根目錄屬於 root（EL，`siem_log_owner` 是 root）時直接回 0：`su root root` 沒有
 >   權限切換可以證明。
 > - 比對字串結尾的空白不能省，否則 gid `110` 會被 `1100` 之類的前綴誤判符合。

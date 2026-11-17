@@ -26,7 +26,9 @@ Fresh L3/L4 通過，receiver **11/11**、sender **66/66**，L6 三台 **changed
 golangci-lint 與阻擋性 playbook／CI 同等檢查通過；L2 ansible-lint 仍有 advisory findings。
 測試 VM 已清理，共用 cache services 保留運行。
 
-以上數字屬於 2026-10-20 的候選；該輪未重跑大流量、輪替與 decommission，歷史結果保留原候選歸屬。
+以上數字屬於 2026-10-20 的候選，其完整版本、指紋與驗證範圍見
+[該輪證據摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)；
+該輪未重跑大流量、輪替與 decommission，歷史結果保留原候選歸屬。
 最新一次實跑的完整版本、指紋與驗證範圍見 [evidence LATEST](../evidence/log-server/LATEST.md)。
 
 ## 1. 目標與輸入
@@ -65,7 +67,8 @@ C7/C8 每次注入新的 local6/authpriv nonce，等待它寫入目前設定的�
 它們是同機 selftest；跨主機訊息與故障補送的證明由
 [audit forwarding 流程](./audit-log-forwarding.md) 提供。
 C12 對 logrotate 策略跑 `logrotate -d`，確認它列出的 euid/egid 切換是落地根目錄擁有者的身分
-（根目錄屬於 root 時直接通過）；這一行要有至少一個落地檔才會出現。
+（根目錄屬於 root 時直接通過）。Ubuntu 24.04（logrotate 3.21.0）上，即使還沒有任何落地檔，
+logrotate 也會印出這一行（2026-11-17 實測），所以 C12 不必等 C7/C8 先建出落地檔。
 
 ## 3. 自我轉送與來源身分
 

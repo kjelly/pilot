@@ -113,6 +113,32 @@ Creating new state
 not running postrotate script, since no logs were rotated
 `
 
+// logrotateDebugUbuntuSuNoLogs is a third real capture from the Ubuntu 24.04.4
+// VM (logrotate 3.21.0, rsyslog 8.2312.0), 2026-11-17: `LC_ALL=C logrotate -d
+// /etc/logrotate.d/siem-incoming 2>&1` as root, rc=0, on the candidate policy
+// (`su syslog syslog`, with `missingok`) with syslog.socket and rsyslog stopped
+// and every *.log under the SIEM tree moved away (count 0). The pattern is still
+// "considered" (and skipped as missing), so the switch is printed with no
+// landing files at all, and C12 does not depend on C7/C8 having created any.
+const logrotateDebugUbuntuSuNoLogs = `warning: logrotate in debug mode does nothing except printing debug messages!  Consider using verbose mode (-v) instead if this is not what you want.
+
+reading config file /etc/logrotate.d/siem-incoming
+Reading state from file: /var/lib/logrotate/status
+state file /var/lib/logrotate/status does not exist
+Allocating hash table for state file, size 64 entries
+
+Handling 1 logs
+
+rotating pattern: /var/log/siem/*/*.log  after 1 days (14 rotations)
+empty log files are not rotated, old logs are removed
+switching euid from 0 to 102 and egid from 0 to 102 (pid 4250)
+considering log /var/log/siem/*/*.log
+  log /var/log/siem/*/*.log does not exist -- skipping
+Creating new state
+not running postrotate script, since no logs were rotated
+switching euid from 102 to 0 and egid from 102 to 0 (pid 4250)
+`
+
 // TestRegression_LogServerC12ReadsTheEffectiveRotationIdentity runs C12's
 // command against a fake logrotate that prints real captures (above), with and
 // without the lines logrotate prints when the policy's `su` is in effect. The
@@ -195,6 +221,7 @@ esac
 		logrotateRuns       bool
 	}{
 		{name: "su in effect (real Ubuntu 24.04 / logrotate 3.21.0 output)", uid: uid, gid: gid, out: su, want: "0", logrotateRuns: true},
+		{name: "no landing files yet, logrotate 3.21 still reports the switch (real capture)", uid: uid, gid: gid, out: logrotateDebugUbuntuSuNoLogs, want: "0", logrotateRuns: true},
 		{name: "su in effect, logrotate rc=1 for an unrelated diagnostic", uid: uid, gid: gid, out: su, rc: "1", want: "0", logrotateRuns: true},
 		{name: "policy without su (real output for the policy before v2.1)", uid: uid, gid: gid, out: logrotateDebugUbuntuBase, want: "1", logrotateRuns: true},
 		// The only switching line left is the switch back to root afterwards.

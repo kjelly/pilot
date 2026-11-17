@@ -37,12 +37,14 @@ import (
 // Besides the writers it can resolve to /etc/logrotate.conf or /etc/logrotate.d/*,
 // the guard sniffs the content of every copy, template, blockinfile, lineinfile
 // and replace task (literal content, or the src file it can find): content that
-// contains a logrotate stanza (an absolute path or glob followed by `{` at the
-// end of a line, and a logrotate directive such as daily, rotate or postrotate
-// before the closing `}`) must be written to a logrotate policy path. Content of
-// that shape written to any other dest, or to one the guard cannot resolve (a
-// variable set by set_fact, a loop item), is a failure, so a policy cannot slip
-// past by hiding its destination.
+// contains a logrotate stanza must be written to a logrotate policy path. A
+// stanza here is one or more absolute paths or globs (also ~/ and {{ }} paths,
+// quoted or not) followed by `{`, on the same line or alone on a following line
+// (blank and comment lines may come between), and at least one directive from
+// logrotateStanzaDirective before the closing `}`; the one-line `/p { daily }`
+// form counts. Content of that shape written to any other dest, or to one the
+// guard cannot resolve (a variable set by set_fact, a loop item) or to none, is
+// a failure, so a policy cannot slip past by hiding its destination.
 //
 // What it still does not see, honestly:
 //   - a policy written by a shell/command/raw task (a heredoc, `tee`, `printf >`,
@@ -55,7 +57,12 @@ import (
 //     is on the target in place, so its text is not here. They are listed in
 //     logrotateHostDerivedWriters and reviewed by hand, not read;
 //   - a dest held in a variable that neither names logrotate nor is defined in the
-//     play's vars, when the content is not logrotate-shaped either.
+//     play's vars, when the content is not logrotate-shaped either;
+//   - a stanza whose directives are all outside logrotateStanzaDirective (for
+//     example only `mail`, `extension` or `dateformat`): the list is the common
+//     vocabulary, not every keyword, and growing it is cheap while a path-start
+//     header keeps false positives rare (the repo-wide probe in the commit that
+//     widened it found none).
 // None of these exists on the base this guard was added to (git grep for
 // logrotate over playbooks, Go, images, scripts, contracts and group_vars);
 // each needs review when it appears.
@@ -93,16 +100,26 @@ var (
 	logrotateScriptWords = map[string]bool{"postrotate": true, "prerotate": true, "firstaction": true, "lastaction": true, "preremove": true}
 
 	// A stanza header: one or more absolute paths or globs (a leading ~, or a
-	// {{ }} standing for a whole path or its start, counts), optionally quoted,
-	// with `{` after them on the same line (group 1 is what follows it, which is
-	// the whole stanza in the one-line form). Text such as an rsyslog `ruleset(...) {`, an nginx
+	// {{ }} standing for a whole path or its start, counts), optionally quoted.
+	// logrotateStanzaHeader has the `{` after them on the same line (group 1 is
+	// what follows it, which is the whole stanza in the one-line form);
+	// logrotatePathsOnly is a line that is only the paths, the `{` coming alone on
+	// a later line. Text such as an rsyslog `ruleset(...) {`, an nginx
 	// `location /x {` or a JSON object does not start with a path.
 	logrotateStanzaHeader = regexp.MustCompile(`^(?:` + logrotatePathToken + `\s+)*` + logrotatePathToken + `\s*\{(.*)$`)
-	// Directives that only a logrotate stanza has among the lines of a stanza
-	// whose header looks like a path.
+	logrotatePathsOnly    = regexp.MustCompile(`^(?:` + logrotatePathToken + `\s+)*` + logrotatePathToken + `\s*$`)
+	// Directives that a logrotate stanza has and, among the lines of a stanza
+	// whose header is a path, little else does. The common vocabulary of
+	// logrotate.conf(5), not all of it.
 	logrotateStanzaDirective = map[string]bool{
-		"daily": true, "weekly": true, "monthly": true, "yearly": true, "rotate": true, "postrotate": true,
-		"prerotate": true, "maxage": true, "size": true, "minsize": true, "maxsize": true,
+		"hourly": true, "daily": true, "weekly": true, "monthly": true, "yearly": true,
+		"rotate": true, "maxage": true, "size": true, "minsize": true, "maxsize": true,
+		"postrotate": true, "prerotate": true, "firstaction": true, "lastaction": true, "preremove": true,
+		"create": true, "nocreate": true, "dateext": true, "nodateext": true,
+		"compress": true, "nocompress": true, "delaycompress": true, "nodelaycompress": true,
+		"copytruncate": true, "nocopytruncate": true, "missingok": true, "nomissingok": true,
+		"notifempty": true, "ifempty": true, "sharedscripts": true, "nosharedscripts": true,
+		"su": true, "olddir": true, "noolddir": true,
 	}
 
 	// copy/template author the file; the others change a file in place or fetch
@@ -319,20 +336,33 @@ func logrotateWrittenText(file, module string, args, vars map[string]any) (strin
 }
 
 // logrotateStanzaShaped reports whether text contains a logrotate stanza: a
-// header line (absolute paths or globs, then `{`) followed, before the closing
-// `}`, by at least one directive only logrotate policies have.
+// header (absolute paths or globs, then `{` on the same line, or `{` alone on
+// a later line after a line of paths) followed, before the closing `}`, by at
+// least one directive from logrotateStanzaDirective.
 func logrotateStanzaShaped(text string) bool {
 	text = logrotateJinjaCmt.ReplaceAllStringFunc(text, func(m string) string { return strings.Repeat("\n", strings.Count(m, "\n")) })
 	lines := strings.Split(logrotateJinjaExpr.ReplaceAllStringFunc(text, func(m string) string {
 		return "JINJA" + strings.Repeat("\n", strings.Count(m, "\n"))
 	}), "\n")
+	prevPaths := false // the previous significant line is only paths
 	for i, raw := range lines {
-		m := logrotateStanzaHeader.FindStringSubmatch(strings.TrimSpace(raw))
-		if m == nil {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// What follows the `{` on the header line, up to a `}` on that line.
-		rest, closed := m[1], false
+		var rest string
+		opened := false
+		if m := logrotateStanzaHeader.FindStringSubmatch(line); m != nil {
+			rest, opened = m[1], true
+		} else if prevPaths && strings.HasPrefix(line, "{") {
+			rest, opened = line[1:], true
+		}
+		prevPaths = logrotatePathsOnly.MatchString(line)
+		if !opened {
+			continue
+		}
+		// What follows the `{` on its line, up to a `}` on that line.
+		closed := false
 		if j := strings.Index(rest, "}"); j >= 0 {
 			rest, closed = rest[:j], true
 		}
@@ -345,11 +375,11 @@ func logrotateStanzaShaped(text string) bool {
 			continue
 		}
 		for _, l := range lines[i+1:] {
-			line := strings.TrimSpace(l)
-			if strings.HasPrefix(line, "}") {
+			body := strings.TrimSpace(l)
+			if strings.HasPrefix(body, "}") {
 				break
 			}
-			if f := strings.Fields(line); len(f) > 0 && logrotateStanzaDirective[f[0]] {
+			if f := strings.Fields(body); len(f) > 0 && logrotateStanzaDirective[f[0]] {
 				return true
 			}
 		}
@@ -434,11 +464,14 @@ func logrotateIdentityProblems(text string) []string {
 		}
 		inStanza = false
 	}
+	lastSig := -1 // the previous significant line, the path line of a split header
 	for i, raw := range cleaned {
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		prev := lastSig
+		lastSig = i
 		if script != "" {
 			if line == "endscript" {
 				script = ""
@@ -454,6 +487,9 @@ func logrotateIdentityProblems(text string) []string {
 		case !inStanza && strings.Contains(line, "{"):
 			stanzas++
 			inStanza, stanzaSu, stanzaAt = true, false, i
+			if strings.HasPrefix(line, "{") && prev >= 0 {
+				stanzaAt = prev // the paths are on the line before a lone `{`
+			}
 			if open, close := strings.Index(line, "{"), strings.LastIndex(line, "}"); close > open {
 				// one-line stanza: `/path { daily su a b }`
 				body := strings.Fields(line[open+1 : close])
@@ -685,6 +721,26 @@ func TestLogrotateIdentityGuardParsesWhatItClaimsTo(t *testing.T) {
 			map[string]string{"t": "logrotate-shaped content written to {{ item }}"},
 		},
 		{
+			"split-header policy without su",
+			play("", copyTask("t", "/etc/logrotate.d/x", "/var/log/a/*.log\n{\n    daily\n}\n")),
+			map[string]string{"t": `("/var/log/a/*.log")`},
+		},
+		{
+			"split-header policy with su",
+			play("", copyTask("t", "/etc/logrotate.d/x", "/var/log/a/*.log\n\n{\n    daily\n    su r r\n}\n")),
+			map[string]string{"t": ""},
+		},
+		{
+			"split-header logrotate stanza written to /tmp/x",
+			play("", copyTask("t", "/tmp/x", "/var/log/a/*.log\n{\n    daily\n    su r r\n}\n")),
+			map[string]string{"t": "logrotate-shaped content written to /tmp/x"},
+		},
+		{
+			"stanza whose only directives are create and missingok written to /tmp/x",
+			play("", copyTask("t", "/tmp/x", "/var/log/a/*.log {\n    create 0640 r r\n    missingok\n}\n")),
+			map[string]string{"t": "logrotate-shaped content written to /tmp/x"},
+		},
+		{
 			"logrotate content with a variable path header",
 			play("", copyTask("t", "/etc/other.conf", "{{ some_log }} {\n    rotate 7\n}\n")),
 			map[string]string{"t": "logrotate-shaped content written to /etc/other.conf"},
@@ -787,6 +843,29 @@ func TestLogrotateStanzaSniff(t *testing.T) {
 		{"one-line stanza", "/a/*.log { daily }\n", true},
 		{"one-line stanza whose directive is not logrotate's", "/a/*.log { mode 1 }\n", false},
 		{"brace then the directive on the next line", "/a/*.log {  \n    daily\n}\n", true},
+		// logrotate 3.22 accepts the paths on one line and the `{` alone on a later one.
+		{"path line, then a lone brace", "/var/log/a/*.log\n{\n    daily\n}\n", true},
+		{"blank lines before the lone brace", "/var/log/a/*.log\n\n\n{\n    weekly\n}\n", true},
+		{"comment line before the lone brace", "/var/log/a/*.log\n# rotation\n{\n    rotate 4\n}\n", true},
+		{"several path lines, then a lone brace", "/var/log/a.log\n/var/log/b.log\n{\n    monthly\n}\n", true},
+		{"variable path line, then a lone brace", "{{ log_path }}\n{\n    size 1M\n}\n", true},
+		{"lone brace with the directive on its line", "/var/log/a.log\n{ daily }\n", true},
+		{"path line, lone brace, a directive that is not logrotate's", "/var/lib/x\n{\n    mode 0755\n}\n", false},
+		{"lone brace after a line that is not paths", "key = value\n{\n    daily\n}\n", false},
+		{"path line without a brace after it", "/var/log/a/*.log\n    daily\n", false},
+		{"lone brace after a path line, directive after the close", "/var/log/a.log\n{\n}\ndaily\n", false},
+		// A stanza is still one when its directives are outside the original set.
+		{"hourly only", "/a/*.log {\n    hourly\n}\n", true},
+		{"firstaction only", "/a/*.log {\n    firstaction\n    endscript\n}\n", true},
+		{"lastaction only", "/a/*.log {\n    lastaction\n    endscript\n}\n", true},
+		{"preremove only", "/a/*.log {\n    preremove\n    endscript\n}\n", true},
+		{"create only", "/a/*.log {\n    create 0640 syslog adm\n}\n", true},
+		{"dateext only", "/a/*.log {\n    dateext\n}\n", true},
+		{"compress only", "/a/*.log {\n    compress\n}\n", true},
+		{"copytruncate only", "/a/*.log {\n    copytruncate\n}\n", true},
+		{"missingok only", "/a/*.log {\n    missingok\n}\n", true},
+		{"su only", "/a/*.log {\n    su r r\n}\n", true},
+		{"a path block with unrelated directives stays negative", "/a/*.log {\n    mode 0640\n    owner x\n}\n", false},
 		{"ruleset block", "ruleset(name=\"r\") {\n    daily\n}\n", false},
 		{"nginx location block", "location /x {\n    size 1\n}\n", false},
 		{"bare brace", "{\n    daily\n}\n", false},
