@@ -36,10 +36,22 @@
 > 下一次全站 `pilot deploy` 就會把那些主機升級成 replica**（約 8–12 分鐘，依序在 primary 之後）；
 > 以前全站部署會靜默略過、要另外單獨跑這支 playbook，所以重建過的 replica 主機只會看到
 > 「全站部署成功」卻沒有 FreeIPA。沒有主機被指定時，行為跟以前一樣。三道檢查在任何變更之前明確失敗：
-> 缺 `ipa_server_ip`（改由 `freeipa-server` 主機的 `ansible_host` 推導）、多台 replica 沒有各自的
-> `freeipa_replica_fqdn` 或 FQDN 重複／等於 primary 的、以及 primary 沒有原生 DNS 卻解析不到
-> replica 的 FQDN（`docs/verification/freeipa-server-replica.md` §5 的手動前置步驟）。
-> 對同一個 primary 一次升級多台 replica 的併發限制見該檔 §5。
+> 缺 `ipa_server_ip`（改由 `freeipa-server` 主機的 `ansible_host` 推導，`G-ip`）、多台 replica 沒有各自的
+> `freeipa_replica_fqdn` 或 FQDN 重複／等於 primary 的（`G-pool`）、以及 primary 沒有原生 DNS 卻解析不到
+> replica 的 FQDN（`G-resolve`，`docs/verification/freeipa-server-replica.md` §5 的手動前置步驟）。
+> `G-resolve` 的精確語意：delegate 到 primary 的 `getent ahostsv4 <replica FQDN>`（只查 IPv4）要結束碼 0，
+> 回傳的位址清單要**包含** `ipa_replica_ip`（預設是 replica 的 `ansible_host`；replica 另有位址，例如多張網卡、
+> 或 `ansible_host` 是主機名稱時，設 `freeipa_replica_ip`）；這道 gate 每次 apply 都跑，**已經 promote 的
+> replica 重跑也一樣**。
+>
+> **一次升級一台**：這支 playbook 的 play 帶 `serial: 1`，所以全站部署（`ansible.cfg` 的 `forks = 20`）
+> 一台一台升級 replica，前一台做完才開始下一台（`docs/verification/freeipa-server-replica.md` §5：同時對同一個
+> primary 跑多個 `ipa-replica-install` 有 389-ds 複寫競態；另見 issue #110，兩台同時 self-register DNS 時
+> 偶發 `No valid Negotiate header`——序列化避開同時執行，但還沒有用兩台 replica 的 VM run 驗證，不宣稱已修）。
+> 任何一台失敗或連不上，後面的 replica 不會開始，`site.yml` 後面的 play 也不跑（ansible-playbook 結束碼 2），
+> 已升級的 replica 不會被還原；修好那台主機後重跑。`G-pool` 讀整個 group，在第一台的批次就失敗，沒有任何 replica
+> 被改動；`G-ip`、`G-resolve` 與其餘 pre_tasks 逐台檢查，輪到那一台才跑。`serial: 1` 只管同一個
+> ansible-playbook process；自己同時開兩個 process 對同一個 primary 升級，仍受該檔 §5 的併發限制。
 
 ---
 

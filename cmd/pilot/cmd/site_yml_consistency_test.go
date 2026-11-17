@@ -129,7 +129,10 @@ func readSiteYMLImports(t *testing.T, root string) []siteYMLImport {
 // freeipa-dns-client are, since #362); anything else stays standalone and is
 // listed here. The list is a ratchet: an entry whose component has since
 // been imported (or removed, or switched to role "all") fails the test, so
-// it cannot rot into an unexplained exemption.
+// it cannot rot into an unexplained exemption. A site-wide deploy still does
+// not list the hosts the inventory assigned one of these roles to (the
+// host-role ones: agent-controller, pilot-access-target-policy); that
+// reporting gap is kjelly/pilot#367.
 var siteYMLStandaloneComponents = map[string]string{
 	"agent-controller":           "criterion 2: its always-tagged backup Steps 3-5 report changed on every run, so a site-wide second apply would never be changed=0 (#195); experimental Phase 1. Import it once #195 is fixed",
 	"freeipa-dns":                "criterion 1: a manifest-driven day-2 reconciler, not a host role; its role (freeipa-server) is shared with freeipa-server, so importing it would sweep it into every deploy that has a FreeIPA server host (the 2026-09-14 incident)",
@@ -147,9 +150,11 @@ var siteYMLStandaloneComponents = map[string]string{
 // selected that way. os-patch-sla is nobody's dependency, so nothing
 // selects it by ID today; its contract site.tags ([maintenance,
 // os-patch-sla]) vs the import's tags ([patch]) is a separate drift
-// tracked as a follow-up to #362. The entry is a ratchet like the one above.
+// tracked in kjelly/pilot#368 (contract site.tags against the import tags on 8
+// components, os-patch-sla's missing ID tag among them). The entry is a
+// ratchet like the one above.
 var siteYMLImportTagIDAllowlist = map[string]string{
-	"os-patch-sla": "import tags are [patch]; no component depends on os-patch-sla, so --limit dependency expansion never needs its ID; separate site.tags drift, follow-up to #362",
+	"os-patch-sla": "import tags are [patch]; no component depends on os-patch-sla, so --limit dependency expansion never needs its ID; separate site.tags drift, tracked in #368",
 }
 
 // siteYMLOrderRule says that component Before must run earlier in site.yml

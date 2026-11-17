@@ -124,6 +124,13 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
   就會改寫那些主機的 resolver**；以前全站部署會靜默略過這個角色，要另外單獨跑。沒有主機被指定時，
   行為跟以前一樣。部分 `--limit` 的全站部署只會在被限定的主機上套用它，並依 `--limit` 的依賴展開
   帶進 FreeIPA server。不想讓某台主機被改寫，先把它從 `freeipa-dns-client` group 移除。
+- **套用之後，這台主機解析外部名稱都經過 FreeIPA DNS（issue #362）**：同一次 `site.yml` 裡排在這支
+  playbook 之後、在這台主機上的 play（apt 更新、`get_url` 下載、`docker pull` 等）解析外部名稱，走的是
+  FreeIPA DNS：它的 forwarders，沒有 forwarders 時從 root 開始遞迴。隔離網路、或 FreeIPA 沒有可用對外 DNS 的環境，
+  指定 `freeipa-dns-client` 給主機**之前**要先設好 `freeipa_dns_forwarders`（`group_vars/freeipa.example.yml`；
+  `ipa_dns_forwarders` 以 `-e` 或 inventory 提供時優先，空值代表不帶 forwarder；primary 兩者都沒設時預設
+  `8.8.8.8` 並成為 realm 的全域 forwarders，replica 兩者都沒設時沿用全域清單），或先有 `dns` 快取層（上游自己設定）。
+  否則第一次套用後，後面的套件下載與映像拉取會因為解析不到名稱而失敗。
 - 兩種 OS 路徑：
   - Debian/Ubuntu：`systemd-resolved.conf.d` drop-in（nss-resolve/`resolvectl`
     路徑）+ 直寫 `/etc/resolv.conf`（`dig`/傳統 glibc resolver 路徑，繞過
