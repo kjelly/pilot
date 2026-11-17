@@ -201,9 +201,9 @@ identity-ssh-cache-live-test: ## Require an external private fixture config for 
 
 identity-secret-test: ## Require real Ansible for password transport, failure, cleanup and rerun regressions (issue 118).
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^(TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText|FreeIPANFSServerAdminPasswordDriftGate|FreeIPANFSServerAdminPasswordGateIsVisible)|TestIdentityDriftSharedNormalizationInAnsible)$$' ./internal/spec/
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^(TestYAML11NonStringMatchesAnsible|TestAnsibleTagsMatchTheClassifier)$$' ./internal/inventory/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^(TestYAML11NonStringMatchesAnsible|TestAnsibleTagsMatchTheClassifier|TestRosterRenderedFieldsMatchAnsible|TestRosterUnsafeScopeMatchesAnsible|TestImplicitVarNamesAreNeverUndefinedInAnsible)$$' ./internal/inventory/
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_IdentitySecretDriftProbe' ./internal/accessgrants/
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 8m -run '^TestIdentitySecretDriftCommands' ./cmd/pilot/cmd/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 8m -run '^(TestIdentitySecretDriftCommands|TestPrecheckRosterReferencesFactsMatchAnsible|TestRosterReferencesHonorUnsafeAboveTheValue)' ./cmd/pilot/cmd/
 	python3 -I playbooks/check/files/test_identity_object_observer.py
 
 # ROOT_TESTS are the internal/inventory tests that call requireRoot: what a

@@ -1930,6 +1930,13 @@ func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runne
 	if err != nil {
 		return DeploymentExecutionResult{}, err
 	}
+	// Equally before the plan, the dependency chain, any preview and any ssh: a
+	// roster password that refers to a variable nothing defines fails apply
+	// inside a no_log task, whose fatal result is censored, so mid-run (issue #165).
+	err = precheckRosterReferences(ctx, out, catalog, components, inv, limit, extraVars, vault)
+	if err != nil {
+		return DeploymentExecutionResult{}, err
+	}
 	// A normal deploy used to prompt once for each same-host dependency and
 	// again for the requested component.  Besides being noisy, that split
 	// transaction lets an automation run consume its confirmations while
@@ -4292,6 +4299,11 @@ func executeCatalogBatch(ctx context.Context, runner *ansible.Runner, out io.Wri
 	// whose lock the inventory cannot give is refused before the operator is
 	// shown a plan to authorize (see checkIdentityLockTarget).
 	err := precheckIdentityBatch(ctx, requests)
+	if err != nil {
+		return err
+	}
+	// The same for a roster reference nothing defines (precheckRosterReferences).
+	err = precheckRosterReferencesBatch(ctx, out, requests)
 	if err != nil {
 		return err
 	}
