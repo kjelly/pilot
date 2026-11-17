@@ -5,7 +5,7 @@
 Accept:
 - Absolute Issue URL, e.g. `https://github.com/OWNER/REPO/issues/123`.
 - `OWNER/REPO#123` or `#123` in an unambiguous Git repository.
-- Exactly one Issue per invocation. For multiple/all targets, ask which one to handle; never queue or fan out. Read the checkout contract, `.agents/skills/_shared/single-item-checkout.md` (repo-root path), before analysis.
+- Exactly one Issue per invocation. For multiple/all targets, ask which one to handle; never queue or fan out. Read the checkout contract, `.agents/skills/_shared/single-item-checkout.md` (repo-root path), before analysis. The one exception is [umbrella mode](#umbrella-mode): a planner umbrella and its open sub-issues are one item.
 
 Missing Issue IDs are not permission to process every open Issue.
 
@@ -45,6 +45,20 @@ The same path closes a related Issue after the PR that referenced it with `Refs 
 ## Related Issues (stage 0)
 
 Open Issues with the same invariant as the selected Issue are found during the [similar-defect scan](similar-defect-scan.md) and handled by its section 5: they join the fix only as `Refs #M` (never a closing keyword), nobody comments on or closes them before the merge, and after the merge each one gets its own `issue-to-pr` invocation that takes the existing-PR disposition above. This invocation still handles exactly one Issue; stage 0 takes no claim on related Issues, so re-check their open PRs and claims right before PR creation.
+
+## Umbrella mode
+
+An umbrella is an Issue that `issue-batch-planner` filed with `file_umbrella.py` for a batch the user approved. Its body has exactly one line `issue-batch-planner batch: <12 hex>` and one line `issue-batch-planner issues: <n> <n> ...`, and its GitHub sub-issues are those members. When the user names the umbrella U or one of its sub-issues, U with its open sub-issues is the one work item of this invocation: one branch, one claim, one PR, which closes each sub-issue it fixes with its own `Fixes`. An ordinary GitHub parent, a parent or sub-issue in another repository, and more than four open sub-issues are never umbrella mode. The exception is part of the checkout contract (`.agents/skills/_shared/single-item-checkout.md`) and adds no other Issue.
+
+1. **Resolve** right after reading the Issue: `python3 "$SNAP/.agents/skills/issue-to-pr/scripts/umbrella.py" resolve --repo OWNER/REPO --issue N` (read-only). `mode: single` leaves the rest of this skill unchanged. `mode: umbrella` makes U the work item; `redirected: true` means the user named a sub-issue, so tell them. Exit 2 means stop and report the reason: most often U's linking stopped part-way (its sub-issues are not its member line; finish it with `file_umbrella.py` until exit 0) or someone changed its sub-issues by hand.
+2. **Claim and branch**: `claim.py acquire --issue U --member C` (repeat `--member` for every open sub-issue) on the branch `issue/<U>-<c1>-<c2>-<slug>`, so the member numbers stay in the branch name after the claim expires. One claim file covers the group, a conflict on any number writes nothing, and `renew`/`release` take U.
+3. **Analysis**: SA triages the claims and acceptance criteria of every open sub-issue separately, with a regression that tells that sub-issue apart from the others. One similar-defect scan covers the umbrella, and the sites the sub-issues report are in scope. A sub-issue that is `INVALID`, `NEEDS_DECISION`, or that this PR cannot fix becomes `partial`: Root replies on that sub-issue per [Issue claims](issue-claims.md) and records the reply in its own `disputed_issue_claims`. The other sub-issues are fixed as usual; one stuck sub-issue does not hold up the PR.
+4. **Coder and Reviewer**: each `fixes` sub-issue needs at least one distinguishing regression; a single shared test is not enough. The Reviewer gives a verdict per sub-issue (`reviewer_confirmed`) and checks the umbrella's own resolution (next point).
+5. **Evidence**: `issue` is U and `umbrella` records each open sub-issue ([evidence contract](evidence-contract.md)). U's `issue_resolution` is `fixes` exactly when every sub-issue is `fixes`, otherwise `partial`; U's own `disputed_issue_claims` stays empty. The gate fails closed on this field.
+6. **PR body**: `Fixes #c` for each `fixes` sub-issue and `Refs #c` for each `partial` one, one keyword per number (a keyword in front of two numbers closes only the first, so the check fails); `Fixes #U` when U is `fixes`, otherwise `Refs #U`. `create_pr.py` and `mark_ready.py` check each of them.
+7. **After the merge**, GitHub closes the Issues behind `Fixes`. A `partial` sub-issue and a `partial` U stay open with the reply that says what is left; this PR closes nothing else.
+
+Related open Issues that are already sub-issues of the same umbrella are handled here, not through stage 0; stage 0 still applies to related Issues outside it.
 
 ## Dependency decisions
 

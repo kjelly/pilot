@@ -57,6 +57,9 @@ class FakeGitHub:
         self.lose_create_response = False  # the Issue is created, but create_issue.py reports exit 2
         self.search_lag = False            # the search index has not caught up: every search returns []
         self.stored_body = None            # how GitHub stores a body (None: as given)
+        self.body_edit_result = None       # what `gh issue edit --body-file` reports (None: success)
+        self.drop_body_edits = False       # `gh issue edit --body-file` changes nothing
+        self.on_body_edit = None           # a side effect of the body edit on the fake (n -> None)
 
     @property
     def writes(self):
@@ -89,6 +92,14 @@ class FakeGitHub:
             return R(0, json.dumps(hits), "")
         if sub == ["pr", "list"]:
             return R(0, json.dumps([{"number": n} for n in sorted(self.open_prs)]), "")
+        if sub == ["issue", "edit"] and argv[6] == "--body-file":
+            n = int(argv[3])
+            if not self.drop_body_edits:
+                body = Path(argv[7]).read_text()
+                self.issues[n]["body"] = self.stored_body(body) if self.stored_body else body
+                if self.on_body_edit:
+                    self.on_body_edit(n)
+            return self.body_edit_result or R(0, f"https://github.com/{REPO}/issues/{n}\n", "")
         if sub == ["issue", "edit"]:
             umbrella, child = int(argv[3]), int(argv[7])
             if child in self.fail_edit_on:
@@ -118,7 +129,9 @@ def as_subprocess(gh, *, times_out=lambda argv: False):
     return run
 
 
-class FileUmbrellaTest(unittest.TestCase):
+class UmbrellaHarness(unittest.TestCase):
+    """The fake GitHub, a report and the CLI; no tests of its own, so subclasses do not repeat them."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -153,6 +166,9 @@ class FileUmbrellaTest(unittest.TestCase):
             argv.append("--execute")
             if approval is not False:
                 argv += ["--approval-sha256", approval or self.approval(labels, batch)]
+        return self._main(argv, runner, subprocess_run)
+
+    def _main(self, argv, runner=None, subprocess_run=None):
         out = io.StringIO()
         seam = patch.object(fu.subprocess, "run", side_effect=subprocess_run) if subprocess_run else \
             patch.object(fu, "run_command", side_effect=runner or self.gh)
@@ -166,6 +182,8 @@ class FileUmbrellaTest(unittest.TestCase):
     def state_json(self):
         return json.loads((self.state / f"{BATCH}.json").read_text())
 
+
+class FileUmbrellaTest(UmbrellaHarness):
     def test_captured_view_shapes_parse(self):
         for name, sample in SAMPLES.items():
             with self.subTest(sample=name), \
@@ -197,7 +215,7 @@ class FileUmbrellaTest(unittest.TestCase):
         self.assertEqual([], self.gh.writes)
         body = Path(out["body_file"]).read_text()
         self.assertIn(fu.marker(BATCH), body.splitlines())
-        self.assertIn("run it on the primary Issue #11", body)
+        self.assertIn("Suggested first Issue to analyse: #11.", body)
         self.assertEqual(self.approval(), out["approval_sha256"])
         self.assertFalse((self.state / f"{BATCH}.json").exists(), "a dry run records no state")
 
@@ -518,6 +536,200 @@ class FileUmbrellaTest(unittest.TestCase):
                 self.assertEqual([900, 900, 900], [gh.issues[n]["parent"]["number"] for n in (11, 12, 13)])
 
 
+OLD_BODY = f"Old umbrella body: do not run issue-to-pr on this Issue.\n\n{fu.marker(BATCH)}\n"
+
+
+class UpdateBodyTest(UmbrellaHarness):
+    """--update-body (F19-F25): replace an existing umbrella's body, approved against the body it replaces."""
+
+    def setUp(self):
+        super().setUp()
+        self.gh.issues[800] = issue_view(800, body=OLD_BODY, subs=(11, 12, 13), labels=("bug", "P1"))
+        for n in (11, 12, 13):
+            self.gh.issues[n]["parent"] = node(800)
+
+    def new_body(self):
+        report, b = fu.load_batch(self.dir / "report.json", BATCH)
+        return fu.build_body(report, b)
+
+    def update_approval(self, current=OLD_BODY, umbrella=800):
+        return fu.update_approval_sha256(REPO, BATCH, umbrella, fu.sha256_text(current), self.new_body())
+
+    def run_update(self, *, execute=True, approval=None, labels=(), runner=None, subprocess_run=None):
+        """approval: None = the value for the old body (what the user approved), False = leave it out."""
+        argv = ["--repo", REPO, "--report", str(self.dir / "report.json"), "--batch", BATCH,
+                "--state-dir", str(self.state), "--update-body"] + [x for label in labels for x in ("--label", label)]
+        if execute:
+            argv.append("--execute")
+            if approval is not False:
+                argv += ["--approval-sha256", approval or self.update_approval()]
+        return self._main(argv, runner, subprocess_run)
+
+    def body_edits(self):
+        return [c for c in self.gh.calls if c[1:3] == ["issue", "edit"] and c[6] == "--body-file"]
+
+    def test_v14_the_new_body_describes_umbrella_mode(self):
+        body = self.new_body()
+        self.assertNotIn("Do not run `issue-to-pr`", body)
+        self.assertIn("Run `issue-to-pr` on this Issue or on any of its sub-issues", body)
+        self.assertIn("`Fixes #<sub-issue>`", body)
+        self.assertIn("`Refs`", body)
+        lines = body.splitlines()
+        self.assertEqual([fu.members_line([11, 12, 13]), fu.marker(BATCH)], lines[-2:])
+        self.assertEqual("issue-batch-planner issues: 11 12 13", fu.members_line([13, 11, 12]))
+        self.assertEqual(1, lines.count(fu.marker(BATCH)))
+        self.assertIsNone(fu.MENTION_RE.search(body))
+
+    def test_v14_issue_to_pr_reads_the_members_back(self):
+        """The body this script writes is the one issue-to-pr's umbrella.py parses: same batch, same members."""
+        import importlib.util
+        path = Path(fu.__file__).resolve().parents[2] / "issue-to-pr" / "scripts" / "umbrella.py"
+        spec = importlib.util.spec_from_file_location("issue_to_pr_umbrella", path)
+        umbrella = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(umbrella)
+        view = issue_view(800, body=self.new_body(), subs=(11, 12, 13))
+        got = umbrella.parse_umbrella(REPO, view)
+        self.assertEqual((BATCH, [11, 12, 13], []), (got["batch_id"], got["sub_issues"], got["closed_sub_issues"]))
+        self.assertTrue(umbrella.BATCH_LINE.fullmatch(fu.marker(BATCH)))
+        self.assertTrue(umbrella.MEMBERS_LINE.fullmatch(fu.members_line([11, 12, 13])))
+
+    def test_f19_dry_run_shows_the_change_and_writes_nothing(self):
+        code, out = self.run_update(execute=False)
+        self.assertEqual(0, code, out)
+        self.assertEqual(("DRY_RUN", "update-body", 800), (out["status"], out["mode"], out["umbrella"]))
+        self.assertEqual([], self.gh.writes)
+        self.assertEqual(self.new_body(), Path(out["body_file"]).read_text())
+        self.assertEqual(OLD_BODY, Path(out["current_body_file"]).read_text())
+        diff = Path(out["diff_file"]).read_text()
+        self.assertIn("-Old umbrella body", diff)
+        self.assertIn("+" + fu.members_line([11, 12, 13]), diff)
+        self.assertEqual(fu.sha256_text(OLD_BODY), out["current_body_sha256"])
+        self.assertEqual(self.update_approval(), out["approval_sha256"])
+        self.assertNotEqual(self.approval(), out["approval_sha256"], "a creation's approval differs")
+        self.gh.issues[800]["body"] = self.new_body()
+        code, out = self.run_update(execute=False)
+        self.assertEqual((0, "UP_TO_DATE"), (code, out["status"]))
+        self.assertEqual([], self.gh.writes)
+
+    def test_f20_nothing_to_update_or_a_label_is_refused(self):
+        code, out = self.run_update(labels=("bug",))
+        self.assertEqual(2, code)
+        self.assertIn("leave --label out", out["error"])
+        self.assertEqual([], self.gh.calls)
+        self.gh = FakeGitHub()  # no umbrella carries the marker
+        for execute in (False, True):
+            with self.subTest(execute=execute):
+                code, out = self.run_update(execute=execute, approval="0" * 64)
+                self.assertEqual(2, code, out)
+                self.assertIn("no umbrella body to update", out["error"])
+                self.assertEqual([], self.gh.writes)
+        self.state.mkdir(exist_ok=True)
+        (self.state / f"{BATCH}.json").write_text(json.dumps(
+            {"batch_id": BATCH, "pending_creation": {"started_at": "2026-11-17T00:00:00Z", "approval_sha256": "a" * 64}}))
+        code, out = self.run_update(approval="0" * 64)
+        self.assertEqual(3, code, out)
+        self.assertIn("did not report its result", out["error"])
+        self.assertEqual([], self.gh.writes)
+
+    def test_f21_a_stale_or_foreign_approval_is_refused(self):
+        code, dry = self.run_update(execute=False)
+        self.assertEqual(0, code, dry)
+        cases = (("no approval", False, None),
+                 ("a creation's approval", self.approval(), None),
+                 ("another umbrella's approval", self.update_approval(umbrella=801), None),
+                 ("edited after the approval", dry["approval_sha256"], OLD_BODY.replace("Old", "Edited")))
+        for name, approval, edited in cases:
+            with self.subTest(name):
+                if edited:
+                    self.gh.issues[800]["body"] = edited
+                code, out = self.run_update(approval=approval)
+                self.assertEqual(2, code, out)
+                self.assertIn("--approval-sha256" if approval is False else "approval_sha256 differs", out["error"])
+                self.assertEqual([], self.body_edits())
+        self.assertEqual(OLD_BODY.replace("Old", "Edited"), self.gh.issues[800]["body"], "nobody's edit is overwritten")
+
+    def test_f22_update_publishes_exactly_the_shown_body(self):
+        code, dry = self.run_update(execute=False)
+        self.assertEqual(0, code, dry)
+        code, out = self.run_update(approval=dry["approval_sha256"])
+        self.assertEqual(0, code, out)
+        self.assertEqual(("UPDATED", 800), (out["status"], out["umbrella"]))
+        self.assertEqual(1, len(self.body_edits()))
+        self.assertEqual(self.gh.calls.count(self.body_edits()[0]), 1)
+        self.assertEqual(Path(dry["body_file"]).read_text(), self.gh.issues[800]["body"])
+        self.assertEqual([], self.creates())
+        self.assertEqual([], [c for c in self.gh.calls if c[1:3] == ["issue", "edit"] and c[6] == "--add-sub-issue"])
+        self.assertEqual({"bug", "P1"}, {x["name"] for x in self.gh.issues[800]["labels"]})
+        self.assertEqual(3, self.gh.issues[800]["subIssues"]["totalCount"])
+
+    def test_f23_errors_after_the_edit_started_are_partial(self):
+        is_body_edit = lambda argv: argv[1:3] == ["issue", "edit"] and argv[6] == "--body-file"  # noqa: E731
+
+        def drop_sub(n):
+            self.gh.issues[n]["subIssues"] = {"nodes": [node(11)], "totalCount": 1}
+
+        def relabel(n):
+            self.gh.issues[n]["labels"] = issue_view(n, labels=("bug",))["labels"]
+
+        cases = (
+            ("edit fails", dict(body_edit_result=planner.Result(1, "", "HTTP 502")), None, "update", "may or may not"),
+            ("edit times out", {}, is_body_edit, "update", "did not finish"),
+            ("body stored differently", dict(stored_body=lambda b: b.rstrip("\n")), None, "read-back",
+             "not the approved body"),
+            ("sub-issues changed", dict(on_body_edit=drop_sub), None, "read-back", "sub-issues changed"),
+            ("labels changed", dict(on_body_edit=relabel), None, "read-back", "labels changed"),
+        )
+        for name, fake, times_out, phase, needle in cases:
+            with self.subTest(name):
+                self.setUp()
+                for key, value in fake.items():
+                    setattr(self.gh, key, value)
+                kwargs = dict(subprocess_run=as_subprocess(self.gh, times_out=times_out)) if times_out else {}
+                code, out = self.run_update(**kwargs)
+                self.assertEqual(3, code, out)
+                self.assertEqual((phase, 800), (out["phase"], out["umbrella"]))
+                self.assertIn(needle, out["error"])
+        for name, response in (("read-back fails", planner.Result(1, "", "HTTP 502")),
+                               ("read-back is not JSON", planner.Result(0, "<html>", "")),
+                               ("read-back has another shape", planner.Result(0, json.dumps({"number": 800}), ""))):
+            with self.subTest(name):
+                self.setUp()
+                gh = self.gh
+
+                def runner(argv, **kwargs):
+                    if argv[1:4] == ["issue", "view", "800"] and self.body_edits():
+                        return response
+                    return gh(argv, **kwargs)
+
+                code, out = self.run_update(runner=runner)
+                self.assertEqual(3, code, out)
+                self.assertEqual(("read-back", 800), (out["phase"], out["umbrella"]))
+
+    def test_f24_a_lost_response_is_safe_to_rerun(self):
+        is_body_edit = lambda argv: argv[1:3] == ["issue", "edit"] and argv[6] == "--body-file"  # noqa: E731
+        approval = self.update_approval()
+        with self.subTest("the edit landed"):
+            code, out = self.run_update(approval=approval,
+                                        subprocess_run=as_subprocess(self.gh, times_out=is_body_edit))
+            self.assertEqual(3, code, out)
+            self.assertEqual(self.new_body(), self.gh.issues[800]["body"])
+            code, out = self.run_update(approval=approval)
+            self.assertEqual((0, "ALREADY_UPDATED"), (code, out["status"]), out)
+            self.assertEqual(1, len(self.body_edits()), "nothing written again")
+        with self.subTest("the edit did not land"):
+            self.setUp()
+            self.gh.drop_body_edits = True
+            code, out = self.run_update(approval=approval,
+                                        subprocess_run=as_subprocess(self.gh, times_out=is_body_edit))
+            self.assertEqual(3, code, out)
+            self.assertEqual(OLD_BODY, self.gh.issues[800]["body"])
+            self.gh.drop_body_edits = False
+            code, out = self.run_update(approval=approval)
+            self.assertEqual((0, "UPDATED"), (code, out["status"]), out)
+            self.assertEqual(2, len(self.body_edits()))
+            self.assertEqual(self.new_body(), self.gh.issues[800]["body"])
+
+
 class AllowlistTest(unittest.TestCase):
     ALLOWED = [
         [sys.executable, str(fu.CREATE_ISSUE), "--repo", REPO, "--title", "umbrella(x): y", "--body-file", "/s/b.md",
@@ -527,8 +739,18 @@ class AllowlistTest(unittest.TestCase):
          "--json", "number,url,body"],
         ["gh", "pr", "list", "-R", REPO, "--state", "open", "--limit", "1000", "--json", "number"],
         ["gh", "issue", "edit", "900", "-R", REPO, "--add-sub-issue", "12"],
+        ["gh", "issue", "edit", "900", "-R", REPO, "--body-file", f"/s/{BATCH}.body.md"],
     ]
     REFUSED = [
+        # F25: --body-file only names this script's own absolute <batch>.body.md, for exactly one Issue.
+        ["gh", "issue", "edit", "900", "-R", REPO, "--body-file", f"s/{BATCH}.body.md"],
+        ["gh", "issue", "edit", "900", "-R", REPO, "--body-file", "/s/notes.md"],
+        ["gh", "issue", "edit", "900", "-R", REPO, "--body-file", f"/s/{BATCH}.current.md"],
+        ["gh", "issue", "edit", "900", "901", "-R", REPO, "--body-file", f"/s/{BATCH}.body.md"],
+        ["gh", "issue", "edit", "900", "-R", REPO, "--body-file", f"/s/{BATCH}.body.md", "--attach", "/s/x.png"],
+        ["gh", "issue", "edit", "900", "-R", REPO, "--title", "x"],
+        ["gh", "issue", "edit", "900", "-R", REPO, "--body", "x"],
+        ["gh", "issue", "edit", "900", "-R", REPO, "-F", f"/s/{BATCH}.body.md"],
         ["gh", "issue", "close", "12", "-R", REPO],
         ["gh", "issue", "comment", "12", "-R", REPO, "--body", "x"],
         ["gh", "issue", "edit", "900", "-R", REPO, "--add-label", "bug"],

@@ -13,6 +13,12 @@ forever.
     claim.py release --repo O/R --pr 148 --token T       # on READY, BLOCKED or any final report
     claim.py check   --repo O/R --issue 157              # read-only
     claim.py list [--repo O/R]
+    claim.py acquire --repo O/R --issue 354 --member 142 --member 216 --skill issue-to-pr ...  # umbrella
+
+Umbrella mode (issue-to-pr's references/workflow.md): one claim covers the umbrella Issue and its
+sub-issues. It is one file, `issue-<umbrella>.json` with `members`, written by one os.replace, so a failed
+write never leaves part of a group claimed. A member has no file of its own: `acquire` and `check` of any
+number also look for a live group claim that lists it. `renew` and `release` take the umbrella's number.
 
 Exit codes: 0 ok, 3 conflict / not owner / claim lost (stop and re-evaluate), 2 usage or error.
 Stdout is always one JSON object. The token printed by `acquire` is the only proof of ownership:
@@ -88,11 +94,31 @@ def read_claim(path: Path) -> dict[str, Any] | None:
 
 
 def write_claim(path: Path, claim: dict[str, Any]) -> None:
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".claim-", suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(claim, fh, indent=2)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    """One os.replace: the claim is written whole or not at all. A failure is a ClaimError (exit 2)."""
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".claim-", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(claim, fh, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError as exc:
+        if tmp is not None:
+            Path(tmp).unlink(missing_ok=True)
+        raise ClaimError(f"Cannot write claim file {path} ({exc}); nothing was claimed") from exc
+
+
+def group_claims(directory: Path, number: int, now: float, *, exclude: Path | None = None) -> list[dict[str, Any]]:
+    """Live umbrella claims (other than `exclude`) whose `members` list Issue `number`."""
+    found = []
+    for f in sorted(directory.glob("issue-*.json")) if directory.is_dir() else []:
+        if exclude is not None and f == exclude:
+            continue
+        claim = read_claim(f)
+        members = claim.get("members") if claim else None
+        if claim and claim["expires_at"] > now and isinstance(members, list) and number in members:
+            found.append(claim)
+    return found
 
 
 def public(claim: dict[str, Any], now: float) -> dict[str, Any]:
@@ -180,13 +206,28 @@ def emit(status: str, code: int, **extra: Any) -> int:
     return code
 
 
+def members_of(args: argparse.Namespace, kind: str, number: int) -> list[int]:
+    members = list(getattr(args, "member", None) or [])
+    if members and kind != "issue":
+        raise ClaimError("--member only goes with --issue (an umbrella Issue and its sub-issues)")
+    if any(m < 1 for m in members) or len(set(members)) != len(members) or number in members:
+        raise ClaimError("--member must name distinct positive sub-issue numbers other than --issue")
+    return sorted(members)
+
+
 def cmd_acquire(args: argparse.Namespace) -> int:
     kind, number = key(args)
+    members = members_of(args, kind, number)
     directory = repo_dir(args.repo)
     path = directory / f"{kind}-{number}.json"
     now = time.time()
     conflicts, warnings = scan_branches(kind, number, Path(args.git_dir), args.remote, args.branch,
                                         args.worktree, set(args.allow_branch or []))
+    for member in members:
+        found, notes = scan_branches(kind, member, Path(args.git_dir), args.remote, args.branch,
+                                     args.worktree, set(args.allow_branch or []))
+        conflicts += [{**c, "number": member} for c in found]
+        warnings += notes
     if args.no_remote_scan:
         conflicts, warnings = [], ["Branch scan disabled by --no-remote-scan"]
     if kind == "pr" and not args.no_gh:
@@ -214,6 +255,20 @@ def cmd_acquire(args: argparse.Namespace) -> int:
             return emit("CONFLICT", 3, conflicts=conflicts, warnings=warnings,
                         hint="Work for this target already exists elsewhere. Report it and stop; if it is your own "
                              "earlier branch, re-run with --branch NAME (or --allow-branch NAME) to resume it.")
+        if kind == "issue":
+            # A sub-issue has no file of its own: the umbrella's claim lists it. Check every number of this
+            # claim against the other live claims before writing anything; --takeover never covers them.
+            own = digest(args.token) if args.token else None
+            for n in [number, *members]:
+                held = [c for c in group_claims(directory, n, now, exclude=path) if c.get("token_sha256") != own]
+                single = read_claim(directory / f"issue-{n}.json") if n != number else None
+                if single and single["expires_at"] > now and single.get("token_sha256") != own:
+                    held.append(single)
+                if held:
+                    return emit("CONFLICT", 3, number=n, claim=public(held[0], now), conflicts=conflicts,
+                                warnings=warnings,
+                                hint=f"#{n} is already claimed by another session (alone or as part of umbrella "
+                                     f"#{held[0]['number']}); nothing was written. Stop and tell the user.")
         if not (status == "RENEWED" and token):
             token = secrets.token_hex(16)
         claim = {"schema_version": 1, "repo": args.repo, "kind": kind, "number": number, "skill": args.skill,
@@ -222,6 +277,8 @@ def cmd_acquire(args: argparse.Namespace) -> int:
                            "label": args.label},
                  "claimed_at": existing["claimed_at"] if status == "RENEWED" and existing else now,
                  "renewed_at": now, "expires_at": now + args.ttl_minutes * 60, "token_sha256": digest(token)}
+        if members:
+            claim["members"] = members
         write_claim(path, claim)
         return emit(status, 0, token=token, claim=public(claim, now), previous=previous,
                     conflicts=[], warnings=warnings)
@@ -264,6 +321,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     path = repo_dir(args.repo) / f"{kind}-{number}.json"
     now = time.time()
     claim = read_claim(path)
+    if kind == "issue" and (claim is None or claim["expires_at"] <= now):
+        # A sub-issue is claimed through its umbrella's claim.
+        claim = next(iter(group_claims(path.parent, number, now, exclude=path)), claim)
     conflicts, warnings = scan_branches(kind, number, Path(args.git_dir), args.remote, args.branch,
                                         args.worktree, set(args.allow_branch or []))
     if claim is None:
@@ -312,6 +372,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--skill", required=True, choices=SKILLS)
     a.add_argument("--label", help="Free-text name of this session, e.g. 'session-b'")
     a.add_argument("--ttl-minutes", type=int, default=240)
+    a.add_argument("--member", action="append", type=int,
+                   help="Umbrella mode: a sub-issue covered by this --issue claim (repeatable)")
     a.add_argument("--token", help="Token from an earlier acquire, to resume your own claim")
     a.add_argument("--takeover", action="store_true", help="Replace an active claim (only on explicit user instruction)")
     a.add_argument("--no-remote-scan", action="store_true")
@@ -350,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return args.fn(args)
-    except ClaimError as exc:
+    except (ClaimError, OSError) as exc:  # an unusable claim directory is an error, never a traceback
         return emit("ERROR", 2, error=str(exc))
 
 

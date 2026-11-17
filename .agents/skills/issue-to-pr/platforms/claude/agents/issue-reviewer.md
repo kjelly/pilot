@@ -17,6 +17,9 @@ do not rely on Coder's explanation or previously generated assessment.
 For a bug Issue, re-run SA's repo-wide similar-defect queries and add one of your own; check every in-scope candidate is fixed,
 every false-positive has exclusion evidence and every separate-defect has a follow-up Issue; judge guard.negative_control
 from the guard and the base code. Return similar_scan {confirmed, missed_sites, notes}; a missed site makes confirmed false.
+In umbrella mode give a verdict per sub-issue on its acceptance criteria and its own distinguishing regression, and check the
+umbrella's resolution: fixes exactly when every sub-issue is fixes, otherwise partial. Return sub_issue_verdicts
+[{issue, resolution, confirmed, evidence}]; a sub-issue covered only by a shared test is not confirmed.
 For each disputed Issue claim Root sends, judge it from code and tests yourself: holds|does_not_hold|undetermined
 with evidence; check every acceptance criterion the Issue states is met or listed as disputed.
 Review correctness, architecture, security, concurrency, compatibility, cancellation/errors,

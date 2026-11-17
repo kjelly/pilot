@@ -21,7 +21,7 @@ from typing import Sequence
 # counts any added file and would STOP every later step. Set before the first sibling import.
 sys.dont_write_bytecode = True
 from issue_gate import (ISSUE_RESOLUTIONS, GateError, closes_issue, command, evaluate, references_issue,
-                        resolution_problem)
+                        resolution_problem, sub_issue_resolutions)
 
 
 def execute(args: list[str], cwd: Path) -> str:
@@ -51,8 +51,18 @@ def issue_reference_problem(body: str, repo: str, issue: int, resolution: str) -
     return None
 
 
+def reference_problems(body: str, repo: str, issue: int, resolution: str,
+                       sub_issues: dict[int, str] | None = None) -> list[str]:
+    """issue_reference_problem for the Issue and, in umbrella mode, for every sub-issue with its own
+    resolution: a `fixes` sub-issue needs its own closing keyword (`Fixes #1, #2` closes only #1), a
+    `partial` one only `Refs #c`. U itself follows the evidence's top-level resolution (decision 8)."""
+    checks = [(issue, resolution)] + sorted((sub_issues or {}).items())
+    problems = [(n, issue_reference_problem(body, repo, n, r)) for n, r in checks]
+    return [p if n == issue else f"sub-issue #{n}: {p}" for n, p in problems if p]
+
+
 def check_pr(repo: str, branch: str, base: str, sha: str, *, draft: bool, issue: int,
-             resolution: str = "fixes") -> dict:
+             resolution: str = "fixes", sub_issues: dict[int, str] | None = None) -> dict:
     p = command(["gh", "pr", "view", branch, "-R", repo,
                  "--json", "number,url,state,isDraft,headRefName,headRefOid,baseRefName,body"])
     if not isinstance(p, dict):
@@ -63,9 +73,9 @@ def check_pr(repo: str, branch: str, base: str, sha: str, *, draft: bool, issue:
         raise GateError("New PR base/Draft-state mismatch")
     if not isinstance(p.get("number"), int) or not p.get("url"):
         raise GateError("Cannot identify created PR")
-    problem = issue_reference_problem(p.get("body") or "", repo, issue, resolution)
-    if problem:
-        raise GateError(f"New PR body: {problem}")
+    problems = reference_problems(p.get("body") or "", repo, issue, resolution, sub_issues)
+    if problems:
+        raise GateError(f"New PR body: {'; '.join(problems)}")
     return p
 
 
@@ -79,9 +89,10 @@ def create(*, repo: str, issue: int, worktree: Path, evidence: Path,
     body = body_file.read_text(encoding="utf-8")
     evidence_data = json.loads(evidence.expanduser().resolve(strict=True).read_text(encoding="utf-8"))
     resolution = evidence_data.get("issue_resolution", "fixes") if isinstance(evidence_data, dict) else "fixes"
-    problem = issue_reference_problem(body, repo, issue, resolution)
-    if problem:
-        raise GateError(problem)
+    subs = sub_issue_resolutions(evidence_data) if isinstance(evidence_data, dict) else {}
+    problems = reference_problems(body, repo, issue, resolution, subs)
+    if problems:
+        raise GateError("; ".join(problems))
     if len(title.strip()) < 8 or not title.strip():
         raise GateError("Provide a meaningful PR title")
     if not ("tests" in body.lower() or "測試" in body):
@@ -113,7 +124,7 @@ def create(*, repo: str, issue: int, worktree: Path, evidence: Path,
         return {"status": "CREATE_UNCERTAIN", "issue": issue, "head_sha": sha,
                 "blockers": [str(exc), "Check gh pr view <branch> before attempting to retry"], **scan}
     try:
-        pr = check_pr(repo, branch, base_name, sha, draft=draft, issue=issue, resolution=resolution)
+        pr = check_pr(repo, branch, base_name, sha, draft=draft, issue=issue, resolution=resolution, sub_issues=subs)
     except GateError as exc:
         return {"status": "CREATED_UNVERIFIED", "issue": issue, "head_sha": sha,
                 "blockers": [str(exc), "Do not retry creation; inspect the created PR"], **scan}

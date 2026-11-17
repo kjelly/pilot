@@ -29,7 +29,7 @@ sys.dont_write_bytecode = True
 import pr_ci
 from issue_gate import GateError, command, evaluate
 
-from create_pr import execute, issue_reference_problem
+from create_pr import execute, reference_problems
 
 # Every review thread of the PR, 100 per page; the first comment's URL names the thread.
 THREADS_QUERY = """query($owner:String!,$repo:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$repo){\
@@ -95,9 +95,10 @@ def mark_ready(*, repo: str, issue: int, pr: int, worktree: Path, evidence: Path
     if view.get("isDraft") is not True:
         return {"status": "ALREADY_READY", "issue": issue, "pr": pr, "url": view.get("url"), "head_sha": sha, **scan}
     # create_pr.py checked the body at creation; the evidence's resolution or the body can change after.
-    problem = issue_reference_problem(view.get("body") or "", repo, issue, info["issue_resolution"])
-    if problem:
-        return {"status": "BLOCKED", "issue": issue, "pr": pr, "blockers": [f"PR body: {problem}"], **scan}
+    subs = {s["issue"]: s["issue_resolution"] for s in (info.get("umbrella") or {}).get("sub_issues", [])}
+    problems = reference_problems(view.get("body") or "", repo, issue, info["issue_resolution"], subs)
+    if problems:
+        return {"status": "BLOCKED", "issue": issue, "pr": pr, "blockers": [f"PR body: {p}" for p in problems], **scan}
     if view.get("reviewDecision") == "CHANGES_REQUESTED":
         return {"status": "BLOCKED", "issue": issue, "pr": pr,
                 "blockers": ["A review requests changes (reviewDecision CHANGES_REQUESTED). mark_ready does not "

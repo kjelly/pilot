@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # counts any added file and would STOP every later step. Set before the first sibling import.
 sys.dont_write_bytecode = True
 import repo_evidence  # noqa: E402
+import umbrella as umbrella_mode  # noqa: E402
 
 SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
@@ -170,12 +171,7 @@ def check_evidence(evidence: dict[str, Any], *, repo: str, issue: int, sha: str,
     if not isinstance(deps, dict) or deps.get("status") != "resolved" or not nontrivial(deps.get("evidence"), 15):
         errors.append("Issue dependencies have not been positively assessed/resolved")
     criteria = evidence.get("acceptance_criteria")
-    if not isinstance(criteria, list) or not criteria:
-        errors.append("Acceptance criteria absent")
-    else:
-        for i, item in enumerate(criteria):
-            if not isinstance(item, dict) or item.get("met") is not True or not nontrivial(item.get("criterion"), 8) or not nontrivial(item.get("evidence"), 10):
-                errors.append(f"acceptance_criteria[{i}] lacks PASS and concrete evidence")
+    errors.extend(criteria_problems(criteria, "acceptance_criteria"))
     checks = evidence.get("checks")
     categories: set[str] = set()
     if not isinstance(checks, list) or not checks:
@@ -251,23 +247,159 @@ def check_evidence(evidence: dict[str, Any], *, repo: str, issue: int, sha: str,
                     errors.append(f"Unresolved blocking review finding: {f.get('description', f['severity'])}")
     if ctx is not None:
         errors.extend(ctx.check_required(evidence.get("repo_required_evidence")))
-    # `fixes` is the default when the key is absent: the PR body then closes the Issue.
-    resolution = evidence.get("issue_resolution", "fixes")
+    if "umbrella" in evidence:
+        # Umbrella mode: the resolution rules apply to each sub-issue; U's own resolution follows them.
+        errors.extend(umbrella_structure_problems(evidence, issue=issue))
+    else:
+        errors.extend(resolution_problems(evidence, "evidence"))
+    return errors
+
+
+def criteria_problems(criteria: Any, label: str, *, allow_empty: bool = False) -> list[str]:
+    """Each acceptance criterion is met, with a concrete criterion and evidence."""
+    if not isinstance(criteria, list) or (not criteria and not allow_empty):
+        return [f"{label}: acceptance criteria absent" if label != "acceptance_criteria" else "Acceptance criteria absent"]
+    return [f"{label}[{i}] lacks PASS and concrete evidence" for i, item in enumerate(criteria)
+            if not isinstance(item, dict) or item.get("met") is not True or not nontrivial(item.get("criterion"), 8)
+            or not nontrivial(item.get("evidence"), 10)]
+
+
+def resolution_problems(item: dict[str, Any], label: str) -> list[str]:
+    """`issue_resolution` of an Issue (the evidence itself, or one umbrella sub-issue) against its
+    `disputed_issue_claims`. `fixes` is the default when the key is absent: the PR body then closes it."""
+    resolution = item.get("issue_resolution", "fixes")
     if resolution not in ISSUE_RESOLUTIONS:
-        errors.append(resolution_problem(resolution))
-    elif resolution == "partial" and not evidence.get("disputed_issue_claims"):
-        errors.append("issue_resolution 'partial' needs the disputed_issue_claims that stay open")
-    elif resolution == "fixes":
+        return [resolution_problem(resolution) if label == "evidence" else f"{label}: {resolution_problem(resolution)}"]
+    where = "" if label == "evidence" else f"{label}: "
+    if resolution == "partial" and not item.get("disputed_issue_claims"):
+        return [f"{where}issue_resolution 'partial' needs the disputed_issue_claims that stay open"]
+    if resolution == "fixes":
         # The converse (references/issue-claims.md "Whole-Issue outcomes"): a claim that stays open
         # after merge must not ride on a closing keyword. any(), not all(): one open claim is enough.
-        items = evidence.get("disputed_issue_claims")
-        still_open = [f"disputed_issue_claims[{i}] ({item['disposition']})"
-                      for i, item in enumerate(items if isinstance(items, list) else [])
-                      if isinstance(item, dict) and leaves_issue_open(item)]
+        items = item.get("disputed_issue_claims")
+        still_open = [f"disputed_issue_claims[{i}] ({c['disposition']})"
+                      for i, c in enumerate(items if isinstance(items, list) else [])
+                      if isinstance(c, dict) and leaves_issue_open(c)]
         if still_open:
-            errors.append("issue_resolution is 'fixes' (the default when absent), but " + ", ".join(still_open)
-                          + " stays open after merge: set issue_resolution 'partial' (Refs #N), or for an "
-                          "out_of_scope claim record the follow-up Issue in follow_up_issue_url")
+            return [f"{where}issue_resolution is 'fixes' (the default when absent), but " + ", ".join(still_open)
+                    + " stays open after merge: set issue_resolution 'partial' (Refs #N), or for an "
+                    "out_of_scope claim record the follow-up Issue in follow_up_issue_url"]
+    return []
+
+
+# ----------------------------------------------------------------------------- umbrella mode
+
+BATCH_ID = re.compile(r"[0-9a-f]{12}\Z")
+
+
+def umbrella_entries(evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    """The well-formed sub-issue entries (`issue` a positive int); malformed ones are reported by
+    umbrella_structure_problems and ignored everywhere else."""
+    u = evidence.get("umbrella")
+    subs = u.get("sub_issues") if isinstance(u, dict) else None
+    return [s for s in subs if isinstance(s, dict) and type(s.get("issue")) is int and s["issue"] > 0] \
+        if isinstance(subs, list) else []
+
+
+def sub_issue_resolutions(evidence: dict[str, Any]) -> dict[int, str]:
+    """{sub-issue: issue_resolution} of the well-formed entries (`fixes` when absent)."""
+    return {s["issue"]: s.get("issue_resolution", "fixes") for s in umbrella_entries(evidence)}
+
+
+def umbrella_structure_problems(evidence: dict[str, Any], *, issue: int) -> list[str]:
+    """Structure of `umbrella` (references/evidence-contract.md): per-sub-issue acceptance, resolution and
+    reviewer verdict, and decision 8: U is `fixes` exactly when every sub-issue is. No GitHub reads."""
+    u = evidence["umbrella"]
+    if not isinstance(u, dict):
+        return ["umbrella must be an object"]
+    errors: list[str] = []
+    if not isinstance(u.get("batch_id"), str) or not BATCH_ID.fullmatch(u["batch_id"]):
+        errors.append("umbrella.batch_id must be the 12-hex batch id of the umbrella's marker line")
+    subs = u.get("sub_issues")
+    if not isinstance(subs, list) or not subs:
+        errors.append("umbrella.sub_issues must list every open sub-issue")
+        subs = []
+    seen: set[int] = set()
+    for i, s in enumerate(subs):
+        label = f"umbrella.sub_issues[{i}]"
+        if not isinstance(s, dict) or type(s.get("issue")) is not int or s["issue"] < 1:
+            errors.append(f"{label} must be an object with a positive integer issue")
+            continue
+        label = f"umbrella sub-issue #{s['issue']}"
+        if s["issue"] in seen or s["issue"] == issue:
+            errors.append(f"{label} is listed twice or is the umbrella itself")
+        seen.add(s["issue"])
+        partial = s.get("issue_resolution", "fixes") == "partial"
+        # A partial sub-issue lists only what this PR delivers for it; the rest is its disputed claims.
+        errors.extend(criteria_problems(s.get("acceptance_criteria"), f"{label}.acceptance_criteria",
+                                        allow_empty=partial))
+        if not isinstance(s.get("disputed_issue_claims", []), list):
+            errors.append(f"{label}.disputed_issue_claims malformed")
+        else:
+            errors.extend(resolution_problems(s, label))
+        if s.get("reviewer_confirmed") is not True:
+            errors.append(f"{label} not confirmed by the independent reviewer (reviewer_confirmed)")
+    if evidence.get("disputed_issue_claims"):
+        errors.append("umbrella mode: disputed claims belong to the sub-issue they are about "
+                      "(umbrella.sub_issues[].disputed_issue_claims); the umbrella's own list must be empty")
+    resolution = evidence.get("issue_resolution", "fixes")
+    entries = umbrella_entries(evidence)
+    expected = "fixes" if entries and all(s.get("issue_resolution", "fixes") == "fixes" for s in entries) else "partial"
+    if resolution not in ISSUE_RESOLUTIONS:
+        errors.append(resolution_problem(resolution))
+    elif resolution != expected:
+        errors.append(f"umbrella #{issue}: issue_resolution must be '{expected}' (it is 'fixes' exactly when every "
+                      f"sub-issue is 'fixes'), not '{resolution}'")
+    return errors
+
+
+def gh_umbrella_view(repo: str, number: int) -> Any:
+    return command(["gh", "issue", "view", str(number), "-R", repo, "--json", umbrella_mode.VIEW_FIELDS])
+
+
+def resolve_umbrella(repo: str, issue: int) -> dict[str, Any]:
+    """umbrella.py's resolution of `issue`, reading GitHub through command(). Any refusal is a GateError."""
+    try:
+        return umbrella_mode.resolve(repo, issue, lambda n: gh_umbrella_view(repo, n))
+    except umbrella_mode.UmbrellaRefused as exc:
+        raise GateError(f"umbrella: {exc}") from exc
+
+
+def check_umbrella_github(evidence: dict[str, Any], *, repo: str, issue: int, branch: str, sha: str,
+                          own_pr: int | None, ctx: "repo_evidence.Context | None") -> list[str]:
+    """GitHub side of umbrella mode, fail closed: U resolves to itself with the same batch, the evidence
+    covers exactly U's open sub-issues, each sub-issue is open with no other closing PR, and each one's
+    disputed claims were answered on that sub-issue's own thread."""
+    errors: list[str] = []
+    try:
+        resolved = resolve_umbrella(repo, issue)
+    except GateError as exc:
+        return [str(exc)]
+    if resolved["mode"] != "umbrella" or resolved["umbrella"] != issue:
+        return [f"evidence has `umbrella`, but #{issue} is not a planner umbrella (umbrella.py resolves it to "
+                f"{resolved.get('umbrella', 'single mode')}); run the gate with the umbrella's number"]
+    u = evidence["umbrella"]
+    if isinstance(u, dict) and u.get("batch_id") != resolved["batch_id"]:
+        errors.append(f"umbrella.batch_id is not #{issue}'s batch {resolved['batch_id']}")
+    listed = {s["issue"] for s in umbrella_entries(evidence)}
+    if listed != set(resolved["sub_issues"]):
+        errors.append(f"umbrella.sub_issues {sorted(listed)} are not #{issue}'s open sub-issues "
+                      f"{resolved['sub_issues']} on GitHub")
+    for s in umbrella_entries(evidence):
+        c = s["issue"]
+        try:
+            errors.extend(f"sub-issue #{c}: {e}" for e in gh_issue_and_duplicates(repo, c, branch, own_pr))
+        except GateError as exc:
+            errors.append(f"sub-issue #{c}: GitHub duplicate/issue validation unavailable: {exc}")
+        if isinstance(s.get("disputed_issue_claims"), list) and s["disputed_issue_claims"]:
+            thread = None
+            try:
+                thread = gh_issue_thread(repo, c)
+            except GateError as exc:
+                errors.append(f"sub-issue #{c}: GitHub Issue comments unavailable: {exc}")
+            errors.extend(f"sub-issue #{c}: {e}" for e in
+                          check_disputed_claims(s, thread, repo=repo, issue=c, sha=sha, ctx=ctx))
+            errors.extend(f"sub-issue #{c}: {e}" for e in check_follow_ups(s, repo=repo, issue=c))
     return errors
 
 
@@ -724,6 +856,9 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
             errors.append(f"GitHub Issue comments unavailable: {exc}")
         errors.extend(check_disputed_claims(evidence, thread, repo=repo, issue=issue, sha=sha, ctx=ctx))
         errors.extend(check_follow_ups(evidence, repo=repo, issue=issue))
+    if "umbrella" in evidence:
+        errors.extend(check_umbrella_github(evidence, repo=repo, issue=issue, branch=branch, sha=sha,
+                                            own_pr=own_pr, ctx=ctx))
     try:
         if not remote_identity(worktree, remote, repo):
             errors.append(f"Git remote '{remote}' does not identify {repo} (forks require manual handling)")
@@ -740,10 +875,15 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
         errors.extend(gh_issue_and_duplicates(repo, issue, branch, own_pr))
     except GateError as exc:
         errors.append(f"GitHub duplicate/issue validation unavailable: {exc}")
-    return errors, {"repo": repo, "issue": issue, "head_sha": sha, "branch": branch, "stage": stage,
-                    "issue_resolution": evidence.get("issue_resolution", "fixes"),
-                    "repo_evidence": ctx.report(), "secret_scan": secret_summary,
-                    "similar_defect_scan": scan_report}
+    info = {"repo": repo, "issue": issue, "head_sha": sha, "branch": branch, "stage": stage,
+            "issue_resolution": evidence.get("issue_resolution", "fixes"),
+            "repo_evidence": ctx.report(), "secret_scan": secret_summary,
+            "similar_defect_scan": scan_report}
+    if "umbrella" in evidence:
+        # Each sub-issue's resolution decides its own `Fixes #c` / `Refs #c` (create_pr.py, mark_ready.py).
+        info["umbrella"] = {"umbrella": issue, "sub_issues": [
+            {"issue": c, "issue_resolution": r} for c, r in sorted(sub_issue_resolutions(evidence).items())]}
+    return errors, info
 
 
 def main(argv: list[str] | None = None) -> int:
