@@ -129,30 +129,48 @@ func TestRosterLintWithoutVarsFileIsUnchanged(t *testing.T) {
 	}
 }
 
-// What cannot be judged is never reported: filters, operators, !unsafe,
-// inline !vault, blocks, literals and the names Ansible supplies.
+// What cannot be judged is never reported as missing: filters, operators,
+// !unsafe, inline !vault, blocks, literals and the names Ansible supplies. A
+// field with a part lint could not read (a filter, a call, a block) is said
+// to be skipped, with its label and nothing of its value; one that is simply
+// not a reference is silent.
 func TestRosterLintVarsFile_DoesNotReportWhatItCannotJudge(t *testing.T) {
 	dir := t.TempDir()
 	adminLit := `"` + lintRunSentinel(t) + `"`
 	vars := writeLintFile(t, dir, "main.yaml", "other: 1\n")
-	for name, initial := range map[string]string{
-		"default filter":                         `"{{ nope | default('') }}"`,
-		"unsafe":                                 `!unsafe "{{ nope }}"`,
-		"raw block":                              `"{% raw %}{{ nope }}{% endraw %}"`,
-		"magic variable":                         `"{{ inventory_hostname }}"`,
-		"jinja literal":                          `"{{ none }}"`,
-		"a literal":                              `"` + lintRunSentinel(t) + `"`,
-		"empty":                                  `""`,
-		"inline !vault":                          "!vault |\n          $ANSIBLE_VAULT;1.1;AES256\n          6162636465",
-		"a call":                                 `"{{ lookup('env', 'NOPE') }}"`,
-		"a name the playbooks define themselves": `"{{ stage }}-{{ ipa_realm }}-{{ nfs_pseudo_root }}"`,
-		"another scalar":                         `12345678`,
+	const skipped = "ℹ️  roster 變數引用檢查已略過：users[alice].password.initial 有無法判斷的部分"
+	for name, tc := range map[string]struct {
+		initial string
+		noted   bool
+	}{
+		"default filter":                         {`"{{ nope | default('') }}"`, true},
+		"unsafe":                                 {`!unsafe "{{ nope }}"`, false},
+		"raw block":                              {`"{% raw %}{{ nope }}{% endraw %}"`, true},
+		"magic variable":                         {`"{{ inventory_hostname }}"`, false},
+		"jinja literal":                          {`"{{ none }}"`, false},
+		"a literal":                              {`"` + lintRunSentinel(t) + `"`, false},
+		"empty":                                  {`""`, false},
+		"inline !vault":                          {"!vault |\n          $ANSIBLE_VAULT;1.1;AES256\n          6162636465", false},
+		"a call":                                 {`"{{ lookup('env', 'NOPE') }}"`, true},
+		"a name the playbooks define themselves": {`"{{ stage }}-{{ ipa_realm }}-{{ nfs_pseudo_root }}"`, false},
+		"another scalar":                         {`12345678`, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			roster := writeLintFile(t, dir, "r.yaml", lintRefRoster(adminLit, initial))
+			roster := writeLintFile(t, dir, "r.yaml", lintRefRoster(adminLit, tc.initial))
 			out, err := execRosterLint(t, "--vars-file", vars, roster)
-			if out != lintOK || err != nil {
+			if err != nil {
 				t.Fatalf("stdout = %q, error = %v, want a clean lint", out, err)
+			}
+			want := lintOK
+			if tc.noted {
+				// One line naming the field, after the verdict; the value is not in it.
+				if !strings.HasPrefix(out, lintOK+skipped) || strings.Count(out, "\n") != 2 || strings.Contains(out, "nope") || strings.Contains(out, "NOPE") {
+					t.Fatalf("stdout = %q, want %q then one skipped line for the field", out, lintOK)
+				}
+				return
+			}
+			if out != want {
+				t.Fatalf("stdout = %q, want a clean lint with no note", out)
 			}
 		})
 	}
@@ -350,6 +368,13 @@ func TestRosterLintHelpDescribesTheCheckHonestly(t *testing.T) {
 		"its fatal result is censored", "after the dependency chain",
 		"reports every admin and every user reference", "a finding deploy would not refuse",
 		"the names the freeipa-identity and freeipa-nfs-server playbooks define for themselves",
+		// !unsafe on an enclosing mapping or the whole document, and what an alias
+		// or merge key shares between !unsafe and normal YAML.
+		"or on any mapping or list that encloses it", "--- !unsafe",
+		"shares between an !unsafe part and a normal part is not judged",
+		"gets one line after the verdict",
+		// A bare {{ name }} server or ipa_admin_password is resolved; anything else is not.
+		"resolve it from the run's effective variables", "cannot be resolved",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("the help does not say %q", want)

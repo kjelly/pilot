@@ -215,8 +215,8 @@ func TestAnsibleTagsMatchTheClassifier(t *testing.T) {
 		if err := yaml.Unmarshal([]byte("x: "+form.scalar+"\n"), &doc); err != nil {
 			t.Fatal(err)
 		}
-		if value := doc.Content[0].Content[1]; ansibleScalarKind(value) != scalarLiteral || value.Value != form.text {
-			t.Errorf("%s: classifier says %v %q, want literal %q", form.scalar, ansibleScalarKind(value), value.Value, form.text)
+		if value := doc.Content[0].Content[1]; ansibleScalarKind(value, nil) != scalarLiteral || value.Value != form.text {
+			t.Errorf("%s: classifier says %v %q, want literal %q", form.scalar, ansibleScalarKind(value, nil), value.Value, form.text)
 		}
 		fmt.Fprintf(&vals, "  v%03d: %s\n", i, form.scalar)
 		// The expected text, spelled so no "{{" appears in the template.
@@ -230,6 +230,10 @@ func TestAnsibleTagsMatchTheClassifier(t *testing.T) {
 		}
 		t.Skipf("ansible-playbook not installed; checked the classifier only: %v", err)
 	}
+	// !unsafe above the value, aliases and merge keys (issue 165). First, and
+	// on the default output: it does not depend on the json stdout callback
+	// the check below uses, which not every ansible-core 2.19.x ships.
+	t.Run("unsafe scope", unsafeScopeAgainstLoader)
 	dir := t.TempDir()
 	play := "- hosts: localhost\n  connection: local\n  gather_facts: false\n  vars_files: [vals.yml]\n  tasks:\n" +
 		"    - debug:\n        msg: \"{{ [" + strings.Join(checks, ", ") + "] }}\"\n"

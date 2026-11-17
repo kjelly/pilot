@@ -240,6 +240,7 @@ func TestPrecheckRosterReferencesVerdicts(t *testing.T) {
 		noVault   bool
 		nfs1Vars  string   // inventory variables of nfs-1
 		wantNames []string // "field references name" parts of the refusal; none: not refused
+		wantNote  string   // a run that goes on and says what it did not judge: a part of the one line on out
 	}{
 		// ---- freeipa-identity: users' initial passwords ----
 		{name: "identity: a user's password refers to a variable the vars file lacks", component: idc, roster: rosterRefRoster(true, adminLit, `"{{ ipa_default_initial_password }}"`), vars: vars,
@@ -250,7 +251,8 @@ func TestPrecheckRosterReferencesVerdicts(t *testing.T) {
 		{name: "identity: no vault vars file is not judged", component: idc, roster: rosterRefRoster(true, adminLit, `"{{ ipa_default_initial_password }}"`), vars: vars, noVault: true},
 		{name: "identity: a mixed literal and reference", component: idc, roster: rosterRefRoster(true, adminLit, `"prefix-{{ lacking }}"`), vars: vars,
 			wantNames: []string{"users[alice].password.initial references lacking"}},
-		{name: "identity: a default filter is not judged", component: idc, roster: rosterRefRoster(true, adminLit, `"{{ lacking | default('') }}"`), vars: vars},
+		{name: "identity: a default filter is not judged, and says so", component: idc, roster: rosterRefRoster(true, adminLit, `"{{ lacking | default('') }}"`), vars: vars,
+			wantNote: "的 users[alice].password.initial 有無法判斷的部分"},
 		{name: "identity: !unsafe is not judged", component: idc, roster: rosterRefRoster(true, adminLit, `!unsafe "{{ lacking }}"`), vars: vars},
 		{name: "identity: a literal", component: idc, roster: rosterRefRoster(true, adminLit, initialLit), vars: vars},
 		// ---- freeipa-identity: the admin password ----
@@ -296,8 +298,14 @@ func TestPrecheckRosterReferencesVerdicts(t *testing.T) {
 			}
 			out, err := env.call(t, tc.component, tc.extra, vault)
 			if len(tc.wantNames) == 0 {
-				if err != nil || out != "" {
+				if err != nil {
 					t.Fatalf("a run that works: err = %v, output = %q", err, out)
+				}
+				if tc.wantNote == "" && out != "" {
+					t.Fatalf("a run that works and has nothing to skip printed %q", out)
+				}
+				if tc.wantNote != "" && (!strings.Contains(out, tc.wantNote) || strings.Count(out, "\n") != 1 || !strings.HasPrefix(out, "ℹ️  "+skippedMarker)) {
+					t.Fatalf("output = %q, want one skipped line holding %q", out, tc.wantNote)
 				}
 				return
 			}
@@ -440,30 +448,6 @@ func TestPrecheckRosterReferencesThroughCobra(t *testing.T) {
 	})
 }
 
-func TestJinjaTruthy(t *testing.T) {
-	for name, tc := range map[string]struct {
-		v    any
-		want bool
-	}{
-		"missing":           {nil, false},
-		"empty string":      {"", false},
-		"a string":          {"x", true},
-		"a template string": {"{{ vault_admin }}", true},
-		"false":             {false, false},
-		"true":              {true, true},
-		"zero":              {float64(0), false},
-		"a number":          {float64(7), true},
-		"an empty list":     {[]any{}, false},
-		"a list":            {[]any{"a"}, true},
-		"an empty mapping":  {map[string]any{}, false},
-		"a mapping":         {map[string]any{"a": 1}, true},
-	} {
-		if got := jinjaTruthy(tc.v); got != tc.want {
-			t.Errorf("%s: jinjaTruthy(%v) = %v, want %v", name, tc.v, got, tc.want)
-		}
-	}
-}
-
 // The components the precheck judges are the ones whose playbooks the oracle
 // test (internal/inventory TestRosterRenderedFieldsMatchAnsible) runs: a
 // renamed playbook or a changed consumer fails here instead of silently
@@ -504,5 +488,36 @@ func TestRosterLintReportsWhatDeployWouldNotRefuse(t *testing.T) {
 	want := "[roster-reference] freeipa.admin.password references lacking_admin, which " + env.vars + " does not define\n"
 	if lintOut != want || lintErr == nil || lintErr.Error() != "1 issue(s) found" {
 		t.Fatalf("lint: stdout = %q, error = %v, want the admin finding", lintOut, lintErr)
+	}
+}
+
+// A freeipa_roster_file that is not a string (a number or a mapping, say) names
+// no roster the precheck can read: the host is skipped, and the run says so
+// instead of silently checking nothing.
+func TestPrecheckRosterReferencesNotesANonStringRosterFile(t *testing.T) {
+	admin := lintRunSentinel(t)
+	env := newRosterRefEnv(t, rosterRefRoster(true, `"{{ lacking_admin }}"`, `"`+admin+`"`), "ipa_admin_password: "+admin+"\n")
+	body := rosterRefInventory(env.roster, "", false)
+	at := strings.LastIndex(body, "freeipa_roster_file: "+env.roster)
+	if at < 0 {
+		t.Fatal("the inventory has no freeipa_roster_file for nfs-1")
+	}
+	body = body[:at] + "freeipa_roster_file: 5" + body[at+len("freeipa_roster_file: "+env.roster):]
+	if err := os.WriteFile(env.inv, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := env.call(t, "freeipa-nfs-server", nil, env.vault())
+	if err != nil {
+		t.Fatalf("err = %v, want the host skipped, not refused", err)
+	}
+	if want := "ℹ️  roster 變數引用檢查已略過：nfs-1 的 freeipa_roster_file 不是字串，沒有檢查它的 roster\n"; out != want {
+		t.Fatalf("output = %q, want %q", out, want)
+	}
+	// The twin: the same roster, named by a string, is read and refused.
+	if err := os.WriteFile(env.inv, []byte(rosterRefInventory(env.roster, "", false)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.call(t, "freeipa-nfs-server", nil, env.vault()); err == nil || !strings.Contains(err.Error(), "freeipa.admin.password references lacking_admin") {
+		t.Fatalf("err = %v, want the admin reference refused once the roster is named by a string", err)
 	}
 }

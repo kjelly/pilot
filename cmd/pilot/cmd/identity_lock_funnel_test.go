@@ -92,6 +92,8 @@ var identityLockReferences = []lockReference{
 		Reason: "Activate and Deactivate hand the default playbook to applyPlan, the funnel"},
 	{File: "cmd/pilot/cmd/reconcile_golang_apply.go", Token: "ref:identitylock.AuthCachePlaybook", Count: 1, Role: "funnel",
 		Reason: "runGoAuthCacheEntry runs the entry playbook on the host whose /etc/ipa lock the run holds, under a context bound to that lock; it takes the *identitylock.Held (entryProblems), and its callers, runGolangApplyUnderLock (reached only from golangApply after the lock) and runMixedGoPhase (reached only from PrepareApply, which the apply step of the deploy transaction calls after the lock), hold it"},
+	{File: "internal/rosteroracletest/rosteroracletest.go", Token: "lit:freeipa-identity-apply.yml", Count: 1, Role: "data",
+		Reason: "test support: the harness of the roster reference oracle runs the playbook's pre_tasks, up to its admin credential gate and before any task that changes a host, under ansible-playbook on localhost. Nothing in the pilot binary imports the package (TestNothingInTheBinaryImportsTheOracle), so no run of it can reach FreeIPA"},
 	{File: "internal/identitylock/identitylock.go", Token: "lit:playbooks/apply/freeipa-identity-apply.yml", Count: 1, Role: "data",
 		Reason: "the definition of the name the funnels and this lint are keyed on"},
 	{File: "internal/identitylock/identitylock.go", Token: "lit:playbooks/apply/freeipa-identity-auth-cache.yml", Count: 1, Role: "data",

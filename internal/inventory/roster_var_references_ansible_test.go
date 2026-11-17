@@ -2,18 +2,16 @@ package inventory
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
 
-	"go.yaml.in/yaml/v3"
+	"github.com/kjelly/pilot/internal/rosteroracletest"
 )
 
 // The oracle for the roster reference check: real ansible-playbook, running the
@@ -28,204 +26,31 @@ import (
 // Skipped without ansible-playbook, as the other real-Ansible tests are; with
 // PILOT_REQUIRE_CONTAINER_TESTS=1 (CI) its absence is a failure.
 
-func requireAnsiblePlaybook(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("ansible-playbook"); err != nil {
-		if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
-			t.Fatalf("required ansible-playbook not installed: %v", err)
-		}
-		t.Skipf("ansible-playbook not installed: %v", err)
-	}
-}
-
-var ansibleUndefinedName = regexp.MustCompile(`'([A-Za-z_][A-Za-z0-9_]*)' is undefined`)
-
-// oraclePlay is one real apply playbook's pre_tasks as a play that runs on
-// localhost: what stays of the playbook is only what the roster reaches before
-// the first mutation.
-type oraclePlay struct {
-	file        string // playbooks/apply/<file>
-	lastPreTask string // the last pre_task kept
-	extraVars   []string
-	// adminGate: the playbook has a gate that renders the admin password with
-	// `is defined` first, so an undefined reference in it fails the gate
-	// ("Missing ipa_admin_password and canonical roster fallback") and does not
-	// name the variable. The oracle reports it as adminGateMarker.
-	adminGate string
-}
-
-// adminGateMarker stands for "an admin password reference is undefined" where
-// Ansible does not name the variable.
-const adminGateMarker = "<admin password>"
+// The harness itself (the real pre_tasks under ansible-playbook) lives in
+// rosteroracletest, which cmd/pilot/cmd's tests use too.
+type oraclePlay = rosteroracletest.Play
 
 var (
-	identityOraclePlay = oraclePlay{
-		file:        "freeipa-identity-apply.yml",
-		lastPreTask: "Gate: admin credential present (fail early, before any mutation)",
-		adminGate:   "Missing ipa_admin_password and canonical roster fallback",
-	}
-	nfsOraclePlay = oraclePlay{
-		file:        "freeipa-nfs-server-apply.yml",
-		lastPreTask: "Gate: roster admin password matches the vault's ipa_admin_password",
-		// The play gathers facts; the localhost harness does not.
-		extraVars: []string{"ansible_os_family=Debian"},
-	}
+	identityOraclePlay = rosteroracletest.Identity
+	nfsOraclePlay      = rosteroracletest.NFS
+	yamlKey            = rosteroracletest.YAMLKey
 )
 
-// stripNoLog removes every no_log from node, in place.
-func stripNoLog(node *yaml.Node) {
-	if node.Kind == yaml.MappingNode {
-		kept := node.Content[:0]
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			if node.Content[i].Value == "no_log" {
-				continue
-			}
-			kept = append(kept, node.Content[i], node.Content[i+1])
-		}
-		node.Content = kept
-	}
-	for _, child := range node.Content {
-		stripNoLog(child)
-	}
+const adminGateMarker = rosteroracletest.AdminGateMarker
+
+func requireAnsiblePlaybook(t *testing.T) {
+	t.Helper()
+	rosteroracletest.RequireAnsiblePlaybook(t)
 }
 
-func yamlKey(mapping *yaml.Node, key string) *yaml.Node {
-	for i := 0; i+1 < len(mapping.Content); i += 2 {
-		if mapping.Content[i].Value == key {
-			return mapping.Content[i+1]
-		}
-	}
-	return nil
-}
-
-func scalarNode(value string) *yaml.Node {
-	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
-}
-
-// writeOracleHarness writes the harness for play into dir: harness.yml, the
-// include_tasks files its pre_tasks use (no_log removed) and the files/ dir
-// the play's vars read. It fails the test when the playbook no longer has the
-// task the harness stops after, so a rename cannot make the oracle vacuous.
 func writeOracleHarness(t *testing.T, dir string, play oraclePlay) {
 	t.Helper()
-	applyDir := filepath.Join("..", "..", "playbooks", "apply")
-	data, err := os.ReadFile(filepath.Join(applyDir, play.file))
-	if err != nil {
-		t.Fatalf("the oracle needs the real playbook: %v", err)
-	}
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		t.Fatal(err)
-	}
-	real := doc.Content[0].Content[0] // the first play
-	preTasks := yamlKey(real, "pre_tasks")
-	cut := -1
-	for i, task := range preTasks.Content {
-		if name := yamlKey(task, "name"); name != nil && name.Value == play.lastPreTask {
-			cut = i
-			break
-		}
-	}
-	if cut < 0 {
-		t.Fatalf("%s has no pre_task %q: update the oracle with the playbook", play.file, play.lastPreTask)
-	}
-	kept := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: preTasks.Content[:cut+1]}
-
-	harness := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-	add := func(key string, value *yaml.Node) {
-		harness.Content = append(harness.Content, scalarNode(key), value)
-	}
-	add("name", scalarNode("roster reference oracle for "+play.file))
-	add("hosts", scalarNode("localhost"))
-	add("connection", scalarNode("local"))
-	add("gather_facts", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "false"})
-	if vars := yamlKey(real, "vars"); vars != nil {
-		add("vars", vars)
-	}
-	add("pre_tasks", kept)
-	stripNoLog(harness)
-	out, err := yaml.Marshal(&yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.SequenceNode, Tag: "!!seq", Content: []*yaml.Node{harness}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "harness.yml"), out, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// The include_tasks files of the kept pre_tasks, with no_log removed.
-	var includes []string
-	var collect func(*yaml.Node)
-	collect = func(n *yaml.Node) {
-		if n.Kind == yaml.MappingNode {
-			for i := 0; i+1 < len(n.Content); i += 2 {
-				if n.Content[i].Value == "ansible.builtin.include_tasks" {
-					if file := yamlKey(n.Content[i+1], "file"); file != nil {
-						includes = append(includes, file.Value)
-					} else if n.Content[i+1].Kind == yaml.ScalarNode {
-						includes = append(includes, n.Content[i+1].Value)
-					}
-				}
-			}
-		}
-		for _, c := range n.Content {
-			collect(c)
-		}
-	}
-	collect(kept)
-	for _, file := range includes {
-		raw, err := os.ReadFile(filepath.Join(applyDir, file))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var inc yaml.Node
-		if err := yaml.Unmarshal(raw, &inc); err != nil {
-			t.Fatal(err)
-		}
-		stripNoLog(&inc)
-		body, err := yaml.Marshal(&inc)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, file)), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, file), body, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	files, err := filepath.Abs(filepath.Join(applyDir, "files"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(files, filepath.Join(dir, "files")); err != nil {
-		t.Fatal(err)
-	}
+	rosteroracletest.WriteHarness(t, dir, play)
 }
 
-// oracleEnv isolates ansible-playbook from the machine's configuration and
-// gives the play's `hostname -f` an answer wherever the tests run.
 func oracleEnv(t *testing.T, dir string) []string {
 	t.Helper()
-	bin := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(bin, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bin, "hostname"), []byte("#!/bin/sh\necho ipa.oracle.test\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cfg := filepath.Join(dir, "ansible.cfg")
-	if err := os.WriteFile(cfg, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return append(os.Environ(),
-		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"ANSIBLE_CONFIG="+cfg,
-		"ANSIBLE_HOME="+filepath.Join(dir, "home"),
-		"ANSIBLE_LOCAL_TEMP="+filepath.Join(dir, "tmp"),
-		"ANSIBLE_NOCOLOR=1",
-		"ANSIBLE_LOCALHOST_WARNING=False",
-		"ANSIBLE_INVENTORY_UNPARSED_WARNING=False",
-	)
+	return rosteroracletest.Env(t, dir)
 }
 
 // oracleFixture is a roster and the variables of one run.
@@ -282,6 +107,17 @@ func (f oracleFixture) varsNames() map[string]bool {
 	return names
 }
 
+// oracleFacts are the render facts of fixture f for roster: the roster's own,
+// and ipa_admin_password as the fixture's vars file defines it.
+func oracleFacts(f oracleFixture, roster string) RosterRenderFacts {
+	server, _ := RosterFreeIPAServerDeclared([]byte(roster))
+	facts := RosterRenderFacts{SchemaVersionDefined: RosterSchemaVersionDefined([]byte(roster)), ServerDeclared: server, AdminPasswordProvided: RosterFactNo}
+	if f.ipaAdmin == "set" {
+		facts.AdminPasswordProvided = RosterFactYes
+	}
+	return facts
+}
+
 // goVerdict is the names pilot would report as missing for consumer.
 func goVerdict(t *testing.T, consumer RosterVarConsumer, f oracleFixture, roster string) []string {
 	t.Helper()
@@ -289,7 +125,7 @@ func goVerdict(t *testing.T, consumer RosterVarConsumer, f oracleFixture, roster
 	if err != nil {
 		t.Fatal(err)
 	}
-	facts := RosterRenderFacts{AdminPasswordProvided: f.ipaAdmin == "set", ServerDeclared: RosterFreeIPAServerDeclared([]byte(roster))}
+	facts := oracleFacts(f, roster)
 	set := map[string]bool{}
 	for _, ref := range MissingRosterVarReferencesFor(consumer, refs, facts, f.varsNames()) {
 		if ref.Admin && consumer == RosterConsumerFreeIPAIdentity {
@@ -347,7 +183,6 @@ func ansibleVerdict(t *testing.T, play oraclePlay, f oracleFixture, roster, valu
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	writeOracleHarness(t, dir, play)
-	env := oracleEnv(t, dir)
 	rosterPath := filepath.Join(dir, "roster.yaml")
 	if err := os.WriteFile(rosterPath, []byte(roster), 0o600); err != nil {
 		t.Fatal(err)
@@ -378,40 +213,26 @@ func ansibleVerdict(t *testing.T, play oraclePlay, f oracleFixture, roster, valu
 		if err := os.WriteFile(varsPath, []byte(vars.String()), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		args := []string{"-i", "localhost,", filepath.Join(dir, "harness.yml"), "-e", "@" + varsPath, "-e", "freeipa_roster_file=" + rosterPath}
-		for _, extra := range play.extraVars {
-			args = append(args, "-e", extra)
-		}
-		cmd := exec.Command("ansible-playbook", args...)
-		cmd.Dir = dir
-		cmd.Env = env
-		var out bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &out, &out
-		err := cmd.Run()
-		if err == nil {
+		res := rosteroracletest.Run(t, dir, play, rosterPath, varsPath)
+		if res.OK {
 			return sortedNameSet(found)
 		}
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) {
-			t.Fatal(err)
-		}
-		if play.adminGate != "" && strings.Contains(out.String(), play.adminGate) {
+		if res.AdminGate {
 			// The admin gate named nothing: note it and define what the roster's
 			// admin password refers to, so the run can go on.
 			found[adminGateMarker] = true
 			defined = append(defined, f.adminRefs...)
 			continue
 		}
-		m := ansibleUndefinedName.FindStringSubmatch(out.String())
-		if m == nil {
-			t.Fatalf("the harness failed for a reason other than an undefined variable (%v):\n%s", err, out.String())
+		if res.Undefined == "" {
+			t.Fatalf("the harness failed for a reason other than an undefined variable (task %q):\n%s", res.Task, res.Output)
 		}
-		if play.adminGate != "" && slicesContains(f.adminRefs, m[1]) {
+		if play.AdminGate != "" && slicesContains(f.adminRefs, res.Undefined) {
 			found[adminGateMarker] = true
 		} else {
-			found[m[1]] = true
+			found[res.Undefined] = true
 		}
-		defined = append(defined, m[1])
+		defined = append(defined, res.Undefined)
 	}
 	t.Fatalf("still failing after 12 rounds, found %v", sortedNameSet(found))
 	return nil

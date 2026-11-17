@@ -55,6 +55,17 @@ var rosterReferenceConsumers = map[string]inventory.RosterVarConsumer{
 // render are not judged (inventory.RosterVarReferencesRenderedBy): refusing a
 // run for them would refuse one that works.
 //
+// Whether the identity playbook renders the roster's admin password depends on
+// two facts of the run, ipa_admin_password (its `default(x, true)` fallback)
+// and whether freeipa.server is declared. Each is decided from the host's raw
+// variables only where it is a literal or a chain of bare {{ name }}
+// references that ends in one or in an undefined name
+// (inventory.RosterRunVars); anything else is unknown, never refused, and
+// named in one line (a reference that would be missing, but only if the unknown
+// fact turns out one way). The same one-line note covers a roster field the
+// check cannot read at all (a filter, a call, a block, a value shared between
+// !unsafe and normal YAML).
+//
 // What it cannot read is not a failure: this is a precheck and the playbook
 // has its own gates. --ask-vault-pass (a prompt of its own is not made here),
 // an inventory ansible-inventory cannot list with the run's arguments (a vault
@@ -112,7 +123,12 @@ func precheckRosterReferences(ctx context.Context, out io.Writer, catalog contra
 		sort.Strings(hosts)
 		for _, host := range hosts {
 			hostVars := snapshot.HostVars[host]
-			rosterRef, _ := hostVars["freeipa_roster_file"].(string)
+			rosterVar, present := hostVars["freeipa_roster_file"]
+			rosterRef, isString := rosterVar.(string)
+			if present && rosterVar != nil && !isString {
+				notes.add(fmt.Sprintf("%s 的 freeipa_roster_file 不是字串，沒有檢查它的 roster", host))
+				continue
+			}
 			rosterRef = strings.TrimSpace(rosterRef)
 			if rosterRef == "" {
 				continue // nothing to read here; the contract's own preflight says so
@@ -133,11 +149,9 @@ func precheckRosterReferences(ctx context.Context, out io.Writer, catalog contra
 			for name := range extraNames {
 				defined[name] = true
 			}
-			facts := inventory.RosterRenderFacts{
-				AdminPasswordProvided: jinjaTruthy(hostVars["ipa_admin_password"]),
-				ServerDeclared:        roster.serverDeclared,
-			}
-			for _, ref := range inventory.MissingRosterVarReferencesFor(rosterReferenceConsumers[id], roster.refs, facts, defined) {
+			consumer := rosterReferenceConsumers[id]
+			facts := roster.renderFacts(inventory.RosterRunVars{HostVars: hostVars, ExtraNames: extraNames, Consumer: consumer})
+			for _, ref := range inventory.MissingRosterVarReferencesFor(consumer, roster.refs, facts, defined) {
 				key := rosterPath + "\x00" + ref.Field + "\x00" + ref.Name
 				if seen[key] {
 					continue
@@ -145,6 +159,9 @@ func precheckRosterReferences(ctx context.Context, out io.Writer, catalog contra
 				seen[key] = true
 				where := fmt.Sprintf("%s (or the inventory, for %s)", vault.ExtraVarsFile, host)
 				findings = append(findings, finding{roster: rosterPath, host: host, text: ref.Violation(where).String()})
+			}
+			for _, ref := range inventory.UnjudgedRosterVarReferencesFor(consumer, roster.refs, facts, defined) {
+				notes.add(fmt.Sprintf("roster %s 的 %s 引用 %s，但這次是否會展開它取決於 %s，無法判斷，所以沒有檢查", rosterPath, ref.Field, ref.Name, roster.unknownFacts(facts)))
 			}
 		}
 	}
@@ -199,10 +216,48 @@ func precheckRosterReferencesBatch(ctx context.Context, out io.Writer, requests 
 	return nil
 }
 
-// rosterReferenceRoster is one roster's references, read once per run.
+// rosterReferenceRoster is one roster's references and the facts about it
+// that do not depend on the run, read once per run.
 type rosterReferenceRoster struct {
-	refs           []inventory.RosterVarRef
-	serverDeclared bool
+	refs      []inventory.RosterVarRef
+	schema    inventory.RosterFact
+	server    inventory.RosterFact
+	serverVar string // the variable freeipa.server is exactly, when it is a bare {{ name }}
+}
+
+// renderFacts are the facts of a run of the identity playbook for this
+// roster: the roster's own, and the two that depend on the run's variables
+// (inventory.RosterRunVars), each unknown unless a literal or a chain of bare
+// references decides it.
+func (r *rosterReferenceRoster) renderFacts(run inventory.RosterRunVars) inventory.RosterRenderFacts {
+	facts := inventory.RosterRenderFacts{SchemaVersionDefined: r.schema, ServerDeclared: r.server}
+	if run.Consumer != inventory.RosterConsumerFreeIPAIdentity {
+		return facts
+	}
+	if facts.ServerDeclared == inventory.RosterFactUnknown && r.serverVar != "" {
+		facts.ServerDeclared = run.ServerDeclared(r.serverVar)
+	}
+	facts.AdminPasswordProvided = run.AdminPasswordProvided()
+	return facts
+}
+
+// unknownFacts names, for a note, what a run's facts leave undecided.
+func (r *rosterReferenceRoster) unknownFacts(facts inventory.RosterRenderFacts) string {
+	var names []string
+	if facts.AdminPasswordProvided == inventory.RosterFactUnknown {
+		names = append(names, "ipa_admin_password")
+	}
+	if facts.ServerDeclared == inventory.RosterFactUnknown {
+		if r.serverVar != "" {
+			names = append(names, "freeipa.server(="+r.serverVar+")")
+		} else {
+			names = append(names, "freeipa.server")
+		}
+	}
+	if facts.SchemaVersionDefined == inventory.RosterFactUnknown {
+		names = append(names, "schema_version")
+	}
+	return strings.Join(names, "、")
 }
 
 // readRosterReferences reads the roster at path (decrypting an encrypted one in
@@ -222,12 +277,24 @@ func readRosterReferences(path string, vault vaultInput, notes *rosterReferenceN
 		notes.add(fmt.Sprintf("讀不出 roster %s(結構檢查與 playbook 會回報原因)", path))
 		return nil
 	}
-	refs, _, err := inventory.RosterSecretVarReferences(plaintext)
+	refs, unchecked, err := inventory.RosterSecretVarReferences(plaintext)
 	if err != nil {
 		notes.add(fmt.Sprintf("roster %s 不是可解析的 YAML(結構檢查會回報)", path))
 		return nil
 	}
-	return &rosterReferenceRoster{refs: refs, serverDeclared: inventory.RosterFreeIPAServerDeclared(plaintext)}
+	for _, field := range unchecked {
+		notes.add(uncheckedFieldNote(path, field))
+	}
+	server, serverVar := inventory.RosterFreeIPAServerDeclared(plaintext)
+	return &rosterReferenceRoster{refs: refs, schema: inventory.RosterSchemaVersionDefined(plaintext), server: server, serverVar: serverVar}
+}
+
+// uncheckedFieldNote is the line for a roster field the check cannot judge:
+// its value has a filter, operator, call or {% %} block, or is shared by an
+// alias or merge key between !unsafe and normal YAML. It names the roster and
+// the field only.
+func uncheckedFieldNote(roster, field string) string {
+	return fmt.Sprintf("roster %s 的 %s %s", roster, field, uncheckedFieldReason)
 }
 
 // rosterReferenceNotes writes each reason the check was skipped once.
@@ -242,25 +309,4 @@ func (n *rosterReferenceNotes) add(reason string) {
 	}
 	n.seen[reason] = true
 	fmt.Fprintf(n.out, "ℹ️  roster 變數引用檢查已略過：%s\n", reason)
-}
-
-// jinjaTruthy is whether Jinja takes v, a value of an ansible-inventory JSON
-// document, as true: the test of `default(x, true)`, which replaces a variable
-// that is defined and empty as it replaces one that is not defined.
-func jinjaTruthy(v any) bool {
-	switch x := v.(type) {
-	case nil:
-		return false
-	case string:
-		return x != ""
-	case bool:
-		return x
-	case float64:
-		return x != 0
-	case []any:
-		return len(x) > 0
-	case map[string]any:
-		return len(x) > 0
-	}
-	return true
 }

@@ -100,3 +100,13 @@ func MissingRosterVarReferencesFor(consumer RosterVarConsumer, refs []RosterVarR
 	sets := append(append([]map[string]bool{}, defined...), playbookDefinedNames(consumer))
 	return MissingRosterVarReferences(RosterVarReferencesRenderedBy(consumer, refs, facts), sets...)
 }
+
+// UnjudgedRosterVarReferencesFor is what a deploy or reconcile run of consumer
+// does not refuse but could be failing on: the references that nothing
+// defines (as MissingRosterVarReferencesFor) and that the playbook renders
+// only if a fact of the run that the check cannot decide
+// (RosterFactUnknown) turns out one way. A precheck says it did not judge them.
+func UnjudgedRosterVarReferencesFor(consumer RosterVarConsumer, refs []RosterVarRef, facts RosterRenderFacts, defined ...map[string]bool) []RosterVarRef {
+	sets := append(append([]map[string]bool{}, defined...), playbookDefinedNames(consumer))
+	return MissingRosterVarReferences(RosterVarReferencesMaybeRenderedBy(consumer, refs, facts), sets...)
+}

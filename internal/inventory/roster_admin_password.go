@@ -54,7 +54,7 @@ const (
 // date, or none.
 func VaultAdminPassword(data []byte) string {
 	value := vaultAdminValue(data)
-	if ansibleScalarKind(value) != scalarLiteral {
+	if ansibleScalarKind(value, nil) != scalarLiteral {
 		return ""
 	}
 	return value.Value
@@ -76,7 +76,7 @@ func VaultAdminPasswordReusable(data []byte) string {
 // something other than a string (scalarNotString): pilot can then neither
 // compare it with a roster nor carry it into one, and says to quote it.
 func VaultAdminPasswordNotString(data []byte) bool {
-	return ansibleScalarKind(vaultAdminValue(data)) == scalarNotString
+	return ansibleScalarKind(vaultAdminValue(data), nil) == scalarNotString
 }
 
 // VaultAdminPasswordEncrypted reports whether a plaintext vault vars
@@ -84,7 +84,7 @@ func VaultAdminPasswordNotString(data []byte) bool {
 // pilot cannot read it, so it can neither tell which rosters held it nor
 // compare one with it.
 func VaultAdminPasswordEncrypted(data []byte) bool {
-	return ansibleScalarKind(vaultAdminValue(data)) == scalarEncrypted
+	return ansibleScalarKind(vaultAdminValue(data), nil) == scalarEncrypted
 }
 
 // VaultAdminPasswordText is a plaintext vault vars file's
@@ -127,7 +127,7 @@ func vaultAdminValue(data []byte) *yaml.Node {
 // The value may be a password: callers compare it and never show it.
 func VaultAdminPasswordTemplate(data []byte) string {
 	value := vaultAdminValue(data)
-	if ansibleScalarKind(value) != scalarTemplate {
+	if ansibleScalarKind(value, nil) != scalarTemplate {
 		return ""
 	}
 	return value.Value
@@ -156,7 +156,7 @@ func CompareRosterAdminPassword(path, vaultPassword string) (RosterAdminSync, er
 		return 0, err
 	}
 	_, value, _ := rosterAdminPassword(doc)
-	switch ansibleScalarKind(value) {
+	switch ansibleScalarKind(value, nil) {
 	case scalarNotString:
 		return RosterAdminNotString, nil
 	case scalarLiteral:
@@ -304,7 +304,7 @@ func decideRosterAdminSync(path, oldPassword, newPassword string) (result Roster
 		return 0, nil, nil, err
 	}
 	mapping, value, direct := rosterAdminPassword(doc)
-	kind := ansibleScalarKind(value)
+	kind := ansibleScalarKind(value, nil)
 	if kind == scalarEncrypted {
 		return 0, nil, data, fmt.Errorf("roster %s: freeipa.admin.password is an inline !vault value: %w", path, ErrRosterEncrypted)
 	}
@@ -461,6 +461,12 @@ const (
 	scalarNotString
 	// scalarEncrypted: an inline !vault value.
 	scalarEncrypted
+	// scalarAmbiguous: a string holding a Jinja delimiter that is shared, by
+	// an alias or a merge key, between a part of the document that is !unsafe
+	// and a part that is not. Ansible templates it or not depending on which
+	// part its loader built first, so the text cannot say (yamlTrust). Only
+	// ansibleScalarKind given a trust map returns it.
+	scalarAmbiguous
 )
 
 // ansibleScalarKind classifies a password value the one way every vault-
@@ -469,7 +475,16 @@ const (
 // disagree on unquoted scalars such as 012345678, 1e10, 190:20:30 and yes,
 // so an unquoted value either may read as a non-string is
 // scalarNotString: quoting it settles both.
-func ansibleScalarKind(value *yaml.Node) scalarKind {
+//
+// trust, when not nil, is the document's trust map (newYAMLTrust): !unsafe
+// marks the whole value it tags, so a template-looking string below an !unsafe
+// mapping, list or document is a literal, and one that an alias or merge key
+// shares between an !unsafe part and a normal one is scalarAmbiguous. nil
+// judges the scalar by its own tag only, as every caller that predates the map
+// does; the reference check is the one caller that must not judge what the
+// text cannot tell, so it passes the map and treats scalarAmbiguous as "not
+// judged".
+func ansibleScalarKind(value *yaml.Node, trust *yamlTrust) scalarKind {
 	if value == nil {
 		return scalarAbsent
 	}
@@ -494,6 +509,12 @@ func ansibleScalarKind(value *yaml.Node) scalarKind {
 	case !quoted && value.Style&yaml.TaggedStyle == 0 && yaml11NonString.MatchString(value.Value):
 		return scalarNotString
 	case jinjaDelimited(value.Value):
+		switch literal, ambiguous := trust.classify(value); {
+		case literal:
+			return scalarLiteral
+		case ambiguous:
+			return scalarAmbiguous
+		}
 		return scalarTemplate
 	}
 	return scalarLiteral
@@ -641,7 +662,7 @@ func ResolveIPAAdminPassword(vaultData, rosterData []byte) (string, error) {
 // literalAdminPassword is value as Ansible uses it when that is a literal
 // string, "" when there is none.
 func literalAdminPassword(what string, value *yaml.Node) (string, error) {
-	switch ansibleScalarKind(value) {
+	switch ansibleScalarKind(value, nil) {
 	case scalarAbsent:
 		return "", nil
 	case scalarLiteral:

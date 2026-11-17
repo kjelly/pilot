@@ -182,7 +182,57 @@ func TestRosterSecretVarReferencesUnchecked(t *testing.T) {
 	}
 }
 
-// The consumer decides which of the references it renders.
+// !unsafe above the value makes it a literal; what an alias or merge key
+// shares between !unsafe and normal YAML is not judged and listed as unchecked.
+// The plain forms must still be reported (both directions, AGENTS.md section
+// 5.12); TestRosterUnsafeScopeMatchesAnsible pins each verdict to Ansible.
+func TestRosterSecretVarReferencesUnsafeScope(t *testing.T) {
+	user := func(name, password string) string {
+		return "  - name: " + name + "\n    password: " + password + "\n"
+	}
+	head := "schema_version: 3\nfreeipa:\n  server: ipa.example.test\n  admin:\n    principal: admin\n    password: \"" + sentinelSecret(t) + "\"\nusers:\n"
+	const ref = `{initial: "{{ m }}"}`
+	const alice, bob = "users[alice].password.initial", "users[bob].password.initial"
+	for _, tc := range []struct {
+		name          string
+		roster        string
+		wantRefs      []string // "<field> <name>"
+		wantUnchecked []string
+	}{
+		{"plain", head + user("alice", ref), []string{alice + " m"}, nil},
+		{"a plain sibling of an !unsafe one", head + user("alice", ref) + user("bob", `{initial: !unsafe "{{ m }}"}`), []string{alice + " m"}, nil},
+		{"users: !unsafe", strings.Replace(head, "users:", "users: !unsafe", 1) + user("alice", ref), nil, nil},
+		{"password: !unsafe", head + user("alice", "!unsafe "+ref), nil, nil},
+		{"the document is !unsafe", "--- !unsafe\n" + head + user("alice", ref), nil, nil},
+		{"freeipa: !unsafe", "schema_version: 3\nfreeipa: !unsafe\n  admin: {password: \"{{ a }}\"}\n", nil, nil},
+		{"an alias to an !unsafe mapping", head + user("alice", "&p !unsafe "+ref) + user("bob", "*p"), nil, nil},
+		{"a merge from an !unsafe mapping is ambiguous", head + user("alice", "&p !unsafe "+ref) + user("bob", "{<<: *p}"), nil, []string{alice, bob}},
+		{"an !unsafe mapping merging a plain one is ambiguous", head + user("alice", "&p "+ref) + user("bob", "!unsafe {<<: *p}"), nil, []string{alice, bob}},
+		{"an ambiguous value is not read, whatever it holds", head + user("alice", `{initial: &p "{{ m | default('') }}"}`) + user("bob", "!unsafe {initial: *p}"), nil, []string{alice, bob}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			refs, unchecked, err := RosterSecretVarReferences([]byte(tc.roster))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, r := range refs {
+				got = append(got, r.Field+" "+r.Name)
+			}
+			if !reflect.DeepEqual(got, tc.wantRefs) {
+				t.Errorf("refs = %q, want %q", got, tc.wantRefs)
+			}
+			if !reflect.DeepEqual(unchecked, tc.wantUnchecked) {
+				t.Errorf("unchecked = %q, want %q", unchecked, tc.wantUnchecked)
+			}
+		})
+	}
+}
+
+// The consumer decides which of the references it renders, and a reference whose
+// rendering depends on a fact the check cannot decide is neither rendered nor
+// refused (it is "maybe": the precheck says it did not judge it). Both
+// directions, for every combination of the three-state facts.
 func TestRosterVarReferencesRenderedBy(t *testing.T) {
 	refs, _, err := RosterSecretVarReferences([]byte(refRoster(`"{{ a }}"`, `"{{ u }}"`)))
 	if err != nil {
@@ -196,54 +246,115 @@ func TestRosterVarReferencesRenderedBy(t *testing.T) {
 		return out
 	}
 	admin, user := "freeipa.admin.password", "users[user0].password.initial"
+	const unk, no, yes = RosterFactUnknown, RosterFactNo, RosterFactYes
+	facts := func(schema, provided, server RosterFact) RosterRenderFacts {
+		return RosterRenderFacts{SchemaVersionDefined: schema, AdminPasswordProvided: provided, ServerDeclared: server}
+	}
 	for _, tc := range []struct {
 		name     string
 		consumer RosterVarConsumer
 		facts    RosterRenderFacts
-		want     []string
+		want     []string // certainly rendered
+		maybe    []string // rendered depending on an unknown fact
 	}{
-		{"identity with no ipa_admin_password and no server renders both", RosterConsumerFreeIPAIdentity, RosterRenderFacts{}, []string{admin, user}},
-		{"identity with no ipa_admin_password renders both", RosterConsumerFreeIPAIdentity, RosterRenderFacts{ServerDeclared: true}, []string{admin, user}},
-		{"identity with ipa_admin_password but no server renders both (the server fill-in combine)", RosterConsumerFreeIPAIdentity, RosterRenderFacts{AdminPasswordProvided: true}, []string{admin, user}},
-		{"identity with ipa_admin_password and a server renders the users only", RosterConsumerFreeIPAIdentity, RosterRenderFacts{AdminPasswordProvided: true, ServerDeclared: true}, []string{user}},
-		{"nfs-server renders the admin password only", RosterConsumerFreeIPANFSServer, RosterRenderFacts{}, []string{admin}},
-		{"nfs-server renders it whatever the facts", RosterConsumerFreeIPANFSServer, RosterRenderFacts{AdminPasswordProvided: true, ServerDeclared: true}, []string{admin}},
-		{"an unknown consumer renders nothing", 0, RosterRenderFacts{}, nil},
+		{"identity with no ipa_admin_password and no server renders both", RosterConsumerFreeIPAIdentity, facts(yes, no, no), []string{admin, user}, nil},
+		{"identity with no ipa_admin_password renders both", RosterConsumerFreeIPAIdentity, facts(yes, no, yes), []string{admin, user}, nil},
+		{"identity with ipa_admin_password but no server renders both (the server fill-in combine)", RosterConsumerFreeIPAIdentity, facts(yes, yes, no), []string{admin, user}, nil},
+		{"identity with ipa_admin_password and a server renders the users only", RosterConsumerFreeIPAIdentity, facts(yes, yes, yes), []string{user}, nil},
+		{"an unknown server with ipa_admin_password: the admin password is maybe", RosterConsumerFreeIPAIdentity, facts(yes, yes, unk), []string{user}, []string{admin}},
+		{"an unknown ipa_admin_password with a server: the admin password is maybe", RosterConsumerFreeIPAIdentity, facts(yes, unk, yes), []string{user}, []string{admin}},
+		{"both unknown: maybe", RosterConsumerFreeIPAIdentity, facts(yes, unk, unk), []string{user}, []string{admin}},
+		{"no ipa_admin_password settles it whatever the server", RosterConsumerFreeIPAIdentity, facts(yes, no, unk), []string{admin, user}, nil},
+		{"no server settles it whatever ipa_admin_password", RosterConsumerFreeIPAIdentity, facts(yes, unk, no), []string{admin, user}, nil},
+		{"a roster without schema_version is ignored by the identity playbook", RosterConsumerFreeIPAIdentity, facts(no, no, no), nil, nil},
+		{"an unknown schema_version makes everything maybe", RosterConsumerFreeIPAIdentity, facts(unk, no, no), nil, []string{admin, user}},
+		{"the zero facts judge nothing", RosterConsumerFreeIPAIdentity, RosterRenderFacts{}, nil, []string{admin, user}},
+		{"nfs-server renders the admin password only", RosterConsumerFreeIPANFSServer, RosterRenderFacts{}, []string{admin}, nil},
+		{"nfs-server renders it whatever the facts", RosterConsumerFreeIPANFSServer, facts(yes, yes, yes), []string{admin}, nil},
+		{"an unknown consumer renders nothing", 0, RosterRenderFacts{}, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := field(RosterVarReferencesRenderedBy(tc.consumer, refs, tc.facts)); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("rendered = %q, want %q", got, tc.want)
 			}
+			if got := field(RosterVarReferencesMaybeRenderedBy(tc.consumer, refs, tc.facts)); !reflect.DeepEqual(got, tc.maybe) {
+				t.Fatalf("maybe rendered = %q, want %q", got, tc.maybe)
+			}
 		})
 	}
 }
 
+// freeipa.server decides whether the identity playbook's server fill-in renders
+// the admin password. A literal is judged (Python's strip decides what is
+// blank); a template is Unknown, with its variable's name when it is exactly
+// one bare {{ name }}; certainly-!unsafe text is a literal; and what !unsafe
+// and normal YAML share is Unknown. Each row twins the Ansible verdict pinned in
+// TestRosterRenderedFieldsMatchAnsible and the end-to-end oracle of cmd.
 func TestRosterFreeIPAServerDeclared(t *testing.T) {
+	const unk, no, yes = RosterFactUnknown, RosterFactNo, RosterFactYes
 	for _, tc := range []struct {
-		name   string
-		roster string
-		want   bool
+		name    string
+		roster  string
+		want    RosterFact
+		wantVar string
 	}{
-		{"a name", "freeipa: {server: ipa.example.test}\n", true},
-		{"a quoted name", "freeipa:\n  server: \"ipa.example.test\"\n", true},
-		{"a template is declared", "freeipa: {server: \"{{ ipa_server_fqdn }}\"}\n", true},
-		{"missing", "freeipa: {admin: {principal: admin}}\n", false},
-		{"no freeipa mapping", "schema_version: 3\n", false},
-		{"null counts as declared (None | string is the text None)", "freeipa: {server: null}\n", true},
-		{"a bare key is a null", "freeipa:\n  server:\n  admin: {principal: admin}\n", true},
-		{"a tilde is a null", "freeipa: {server: ~}\n", true},
-		{"a number is declared", "freeipa: {server: 12}\n", true},
-		{"a list is declared", "freeipa: {server: [a]}\n", true},
-		{"empty", "freeipa: {server: \"\"}\n", false},
-		{"blank", "freeipa: {server: \"  \"}\n", false},
-		{"through a merge key", "base: &b {server: ipa.example.test}\nfreeipa:\n  <<: *b\n", true},
-		{"not YAML", "freeipa: [1\n", false},
+		{"a name", "freeipa: {server: ipa.example.test}\n", yes, ""},
+		{"a quoted name", "freeipa:\n  server: \"ipa.example.test\"\n", yes, ""},
+		{"missing", "freeipa: {admin: {principal: admin}}\n", no, ""},
+		{"no freeipa mapping", "schema_version: 3\n", no, ""},
+		{"null counts as declared (None | string is the text None)", "freeipa: {server: null}\n", yes, ""},
+		{"a bare key is a null", "freeipa:\n  server:\n  admin: {principal: admin}\n", yes, ""},
+		{"a tilde is a null", "freeipa: {server: ~}\n", yes, ""},
+		{"a number is declared", "freeipa: {server: 12}\n", yes, ""},
+		{"a list is declared", "freeipa: {server: [a]}\n", yes, ""},
+		{"an empty list is declared (its string is [])", "freeipa: {server: []}\n", yes, ""},
+		{"empty", "freeipa: {server: \"\"}\n", no, ""},
+		{"blank", "freeipa: {server: \"  \"}\n", no, ""},
+		{"blank with a tab and a newline", "freeipa: {server: \" \\t\\n \"}\n", no, ""},
+		{"blank with the ASCII separator Python strips", "freeipa: {server: \"\\x1c\\x1f\"}\n", no, ""},
+		{"a no-break space is blank to Python too", "freeipa: {server: \"\\u00a0\"}\n", no, ""},
+		{"a zero-width space is not blank", "freeipa: {server: \"\\u200b\"}\n", yes, ""},
+		{"through a merge key", "base: &b {server: ipa.example.test}\nfreeipa:\n  <<: *b\n", yes, ""},
+		{"not YAML", "freeipa: [1\n", unk, ""},
+		// Templates: Ansible renders the value before it counts its length.
+		{"a bare reference", "freeipa: {server: \"{{ ipa_server_fqdn }}\"}\n", unk, "ipa_server_fqdn"},
+		{"a bare reference with whitespace control", "freeipa: {server: \"{{- srv -}}\"}\n", unk, "srv"},
+		{"a bare reference with an attribute is not followed", "freeipa: {server: \"{{ a.b }}\"}\n", unk, ""},
+		{"a reference with text around it is not followed", "freeipa: {server: \"x{{ srv }}\"}\n", unk, ""},
+		{"a reference with a filter is not followed", "freeipa: {server: \"{{ srv | default('', true) }}\"}\n", unk, ""},
+		{"two references are not followed", "freeipa: {server: \"{{ a }}{{ b }}\"}\n", unk, ""},
+		{"a Jinja word is not a variable", "freeipa: {server: \"{{ not }}\"}\n", unk, ""},
+		{"inline !vault", "freeipa: {server: !vault \"$ANSIBLE_VAULT;1.1;AES256\\n6162\"}\n", unk, ""},
+		// !unsafe: the text is never templated, so it is judged as written.
+		{"!unsafe template text is a literal name", "freeipa: {server: !unsafe \"{{ srv }}\"}\n", yes, ""},
+		{"!unsafe empty is not declared", "freeipa: {server: !unsafe \"\"}\n", no, ""},
+		{"below an !unsafe freeipa mapping", "freeipa: !unsafe {server: \"{{ srv }}\"}\n", yes, ""},
+		{"below an !unsafe document", "--- !unsafe\nfreeipa: {server: \"{{ srv }}\"}\n", yes, ""},
+		{"shared between !unsafe and normal YAML", "a: &s !unsafe {server: \"{{ srv }}\"}\nfreeipa: {<<: *s}\n", unk, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := RosterFreeIPAServerDeclared([]byte(tc.roster)); got != tc.want {
-				t.Fatalf("declared = %v, want %v", got, tc.want)
+			got, name := RosterFreeIPAServerDeclared([]byte(tc.roster))
+			if got != tc.want || name != tc.wantVar {
+				t.Fatalf("declared = %v (var %q), want %v (var %q)", got, name, tc.want, tc.wantVar)
 			}
 		})
+	}
+}
+
+func TestRosterSchemaVersionDefined(t *testing.T) {
+	for _, tc := range []struct {
+		roster string
+		want   RosterFact
+	}{
+		{"schema_version: 3\n", RosterFactYes},
+		{"schema_version:\n", RosterFactYes},
+		{"base: &b {schema_version: 3}\n<<: *b\n", RosterFactYes},
+		{"freeipa: {}\n", RosterFactNo},
+		{"not: [yaml\n", RosterFactUnknown},
+	} {
+		if got := RosterSchemaVersionDefined([]byte(tc.roster)); got != tc.want {
+			t.Errorf("%q: %v, want %v", tc.roster, got, tc.want)
+		}
 	}
 }
 
@@ -497,7 +608,8 @@ func TestMissingRosterVarReferencesForKnowsThePlaybooksOwnNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	facts := RosterRenderFacts{}
+	// The render facts that make the identity playbook render everything.
+	facts := RosterRenderFacts{SchemaVersionDefined: RosterFactYes, AdminPasswordProvided: RosterFactNo, ServerDeclared: RosterFactNo}
 	names := func(missing []RosterVarRef) []string {
 		var out []string
 		for _, ref := range missing {

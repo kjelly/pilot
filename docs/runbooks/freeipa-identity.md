@@ -150,14 +150,34 @@ task 的 `fatal:` 結果行被 no_log 遮蔽，所以失敗發生在執行到一
   展開的欄位：`freeipa-identity` 一律展開每位使用者（含 `state: absent`）的
   `password.initial`；`freeipa.admin.password` 只在 `ipa_admin_password` 沒定義或是空的、或名冊沒有
   宣告 `freeipa.server`（playbook 會替它補值，補值時連 admin 密碼一起展開）時才展開——空字串
-  或只有空白不算宣告，`null` 算（Ansible 的條件是 `server | default('') | string | trim | length == 0`，
-  `None | string` 是文字 `None`）；`freeipa-nfs-server` 只展開 `freeipa.admin.password`。沒有 vault 變數檔、`--ask-vault-pass`、`ansible-inventory` 讀不出
-  變數、名冊加密又沒給 `--vault-password-file`、名冊讀不出來時，檢查會跳過並印一行
-  `roster 變數引用檢查已略過：<原因>`，不算失敗。
+  或只有空白（Python `str.strip` 算的空白）不算宣告，`null` 算（Ansible 的條件是
+  `server | default('') | string | trim | length == 0`，`None | string` 是文字 `None`）；沒有
+  `schema_version` 的名冊 identity playbook 整份忽略（每個展開名冊字串的 task 都有
+  `freeipa_roster.schema_version is defined` 條件），什麼都不展開；`freeipa-nfs-server` 只展開
+  `freeipa.admin.password`。沒有 vault 變數檔、`--ask-vault-pass`、`ansible-inventory` 讀不出
+  變數、名冊加密又沒給 `--vault-password-file`、名冊讀不出來、`freeipa_roster_file` 不是字串時，
+  檢查會跳過並印一行 `roster 變數引用檢查已略過：<原因>`，不算失敗。
+- 判斷優先順序是「寧可不判斷，也不拒絕一個能跑的 run」：拒絕的集合必須是 Ansible 會因 undefined
+  失敗的集合的子集。`freeipa.server` 或 `ipa_admin_password` 如果剛好是單獨一個 `{{ name }}`
+  （含 `{{- name -}}`，沒有屬性、filter 或前後文字），就用這次執行實際生效的變數（
+  `ansible-inventory --list` 的原始值）解開：連續的 `{{ name }}` 最多追 8 層，結尾是字面值（空字串
+  或空白 → 沒宣告／沒提供；`null`、數字、布林、list、mapping → 照 Ansible 的字串化與真值規則）、
+  `!unsafe` 值（照字面）或沒有人定義的名稱（`default('')` 讓它變空）。結尾是別的東西——filter、
+  前後有文字、行內 `!vault`、playbook 自己定義的名稱（`stage`…）、魔術變數、只用 `-e` 傳入而看不到值、
+  循環、超過 8 層——這個 fact 就是「無法判斷」：依賴它的 admin 密碼引用不拒絕，只印一行
+  `roster 變數引用檢查已略過：roster … 的 freeipa.admin.password 引用 <name>，但這次是否會展開它取決於 …`
+  （只有欄位與變數名稱）。
 
 只檢查單純的 `{{ name }}`（含 `{{- name -}}`、`{{ name.attr }}`，混在字面字串裡也算）。帶 filter
-（例如 `| default('')`）、運算子、函式呼叫、`{% %}` 區塊的值，或 `!unsafe`、行內 `!vault` 值，
-都不判斷也不報；Jinja／Ansible 自己提供的名稱（`inventory_hostname`、`ansible_*`、`true`、`none`…）
+（例如 `| default('')`）、運算子、函式呼叫、`{% %}` 區塊的值，或行內 `!vault` 值，
+都不判斷也不報，而且每個這樣的欄位會印一行 `roster 變數引用檢查已略過：…`（lint 在判定之後印，
+deploy／reconcile 在顯示計畫之前印），只有名冊路徑與欄位標籤，沒有值。`!unsafe` 標在值本身、
+或標在任何包住它的 mapping／list 上（`users:`、某位使用者、`password:`、`freeipa:`、`admin:`，
+連整份名冊 `--- !unsafe` 都算），那個值就是字面文字，不是引用。同一個值如果經 alias 或 merge key
+（`<<: *x`）同時被 `!unsafe` 的部分與一般部分共用，Ansible 展不展開取決於載入器建構文件的順序
+（錨點建在較深處、merge 在較淺處時會展開；反過來不會，對 ansible-core 2.19.2 與 2.19.15 實測，
+`TestAnsibleTagsMatchTheClassifier` 的 unsafe scope 子測試鎖住這兩個方向都存在），文字無法決定，
+所以這種值不判斷，也印一行略過。Jinja／Ansible 自己提供的名稱（`inventory_hostname`、`ansible_*`、`true`、`none`…）
 不算缺。兩支 playbook 自己在展開名冊字串之前就定義好的名稱也不算缺（`stage`、`confirm_staging`、
 `ipa_domain`、`ipa_realm`…，即 play 的 `vars:` 與前幾個 pre_task 的 `freeipa_roster` 等；lint
 把兩支 playbook 的聯集都當成已定義，deploy／reconcile 只算該元件自己那支）。名冊字串看不到
@@ -1325,3 +1345,4 @@ refresh`，或以 `PARTIAL` 失敗，重跑相同的 apply（或 `--tags client-
 | 2026-10-28 | v1.5 | 新增 §4.5 更換 FreeIPA admin 密碼（issue #146）：`pilot edit` 改 `.vault/main.yaml` 的 `ipa_admin_password` 時同步名冊、哪些名冊不會同步（含沒加引號、YAML 可能讀成數字／日期／布林值的密碼，打不開的 lock 檔）、名冊與 vault 不一致時只能手動修改名冊（再存一次不會補同步）、舊版 root 留下的 lock 檔如何處理、要跟著改的名冊被鎖住或不能寫時整次存檔拒絕、自動化遇到寫不進的名冊時該步失敗（MCP apply 會 rollback，`--actions` 停在那一步、保留之前的步驟，plan 失敗）、plan／MCP apply 只在真的要改 `.vault/` 以外的名冊時失敗、apply rollback 保留被其他操作改過的名冊、名冊的寫入方式；review 後修正：同一個名冊的多個 hard link 名稱共用 inode 鎖與同一個 journal 身分、plan 的暫存複本保留 `.vault/` 別名結構、rollback 以 apply 前的狀態與寫入紀錄判斷哪些檔案是名冊（一般 vault 檔一律還原）、rollback 期間保留對名冊的登記直到還原結束；暫存目錄以持有的 flock 判斷建立者是否還在（不以 pid）；`RemoveRosterFile` 的呼叫端要先停掉 journal（candidate `3b4bdb1`、`22cad092` 與 `09119dd` 都曾對兩台全新 VM 實跑，見 §4.5 末段；rollback 的還原路徑、plan 的探測、MCP plan/apply 與暫存目錄清掃沒有實機觸發） | pilot |
 | 2026-10-31 | v1.6 | §3 名冊範例與說明改為 schema v3（`schema_version: 3`、`grants: []`，netgroups 註明 v2 起支援），新增第 5 步 `pilot roster lint --vault-password-file`（加密名冊在記憶體內解密），附本機實跑輸出；§4.1 編輯後先跑該步；§0.5 補上範例名冊與該步的事實。未重跑目標主機：v2 → v3 只改版本號並加空的 `grants: []`，與 `EnsureRosterCurrent` 載入時套用的升級相同，apply playbook 對 v2/v3 的差別只在允許的頂層 key | pilot |
 | 2026-11-16 | v1.7 | §3 新增「名冊裡的 `{{ 變數 }}` 引用」（issue #165）：`pilot roster lint --vars-file` 與 `pilot deploy`／`pilot reconcile` 對 `freeipa-identity`、`freeipa-nfs-server` 的前置檢查，名冊密碼欄位引用的變數沒有任何地方定義就在計畫、預覽與連線之前拒絕（只列名稱，不印值）。apply 對這類引用是在 no_log task 失敗、`fatal:` 結果行被遮蔽，所以是執行到一半、前面的相依元件已套用完才失敗；這個檢查把失敗移到任何東西執行之前。判斷只看 playbook 真的會展開的欄位（`freeipa.server: null` 算已宣告、空字串不算）、兩支 playbook 自己定義的名稱（`stage`、`ipa_realm`…）算已定義，lint 對每個 admin／user 引用都報、deploy／reconcile 只判斷這次會展開的欄位；以上都對 ansible-core 2.19.2 實跑 oracle 驗證，附本機實跑輸出。沒有對 vm-target 重跑 apply：檢查不改變 playbook 的行為 | pilot |
+| 2026-11-17 | v1.8 | §3「名冊裡的 `{{ 變數 }}` 引用」修正 PR #341 review 的兩個 P2（原則：寧可不判斷，也不拒絕一個能跑的 run）。(1) `!unsafe` 標在包住值的任何 mapping／list 上（`users:`、使用者、`password:`、`freeipa:`、`admin:`、整份名冊 `--- !unsafe`）時值是字面文字，原本只看值自己的 tag，會誤擋；經 alias 或 merge key 被 `!unsafe` 與一般部分共用的值，Ansible 展不展開取決於載入器建構文件的順序（對 2.19.2 與 2.19.15 實測兩個方向都存在），改為「不判斷」並印一行略過（`internal/inventory/roster_yaml_trust.go` 的信任圖，每份文件算一次、線性時間；單純沿查找路徑往下傳 `!unsafe` 不夠，`TestRosterUnsafeScopeMatchesAnsible` 有分開兩種作法的列）。(2) identity 是否展開 admin 密碼取決於兩個 fact，現在是三態（是／否／無法判斷）：`freeipa.server` 是單獨的 `{{ name }}` 時，與 `ipa_admin_password`（`default(x, true)` 的真值規則）一樣，用這次執行實際生效的變數（`ansible-inventory --list` 的原始值）解開，連續 `{{ name }}` 最多 8 層，結尾是字面值、`!unsafe` 值或沒人定義的名稱；其他（filter、前後有文字、行內 `!vault`、playbook 自己定義的名稱、只用 `-e` 傳入、循環）是「無法判斷」，不拒絕，印一行 `roster 變數引用檢查已略過：…` 只列欄位與變數名稱。原本把任何樣板都當成「已宣告」、把原始值的樣板字串當成「有提供」，會漏掉 `{{ srv }}` 展開成空字串、`ipa_admin_password: '{{ empty }}'` 這類 apply 會失敗的 run；blank 改用 Python `str.strip` 的空白定義。同一批也處理：沒有 `schema_version` 的名冊 identity playbook 整份忽略（oracle 實測 PASS，原本誤擋使用者密碼引用）、無法判斷的欄位（filter、區塊、被共用的值）與 `freeipa_roster_file` 不是字串現在都印略過行（原本靜默）。oracle 對 ansible-core 2.19.2 與 2.19.15 實跑：inventory 套件的 `TestRosterUnsafeScopeMatchesAnsible`（鑑別性列：certain 列與 Ansible 完全一致，ambiguous 列只可能是 Ansible 失敗集合的子集）、`TestAnsibleTagsMatchTheClassifier` 的 unsafe scope 子測試（用載入器本身驗證分類，並證明兩種結果都存在）、cmd 的 `TestPrecheckRosterReferencesFactsMatchAnsible`（真的 `ansible-inventory` 加 `precheckRosterReferences`，對同一組檔案跑真的 playbook pre_tasks；共用 harness 抽到 `internal/rosteroracletest`）；這三個都進了 `make identity-secret-test`。未動 playbook、contract、spec；沒有對 vm-target 重跑 apply（檢查不改變 playbook 的行為）；其他只看葉節點的呼叫端（名冊 admin 密碼的比對、同步、使用者初始密碼檢查等八處）維持原行為 | pilot |

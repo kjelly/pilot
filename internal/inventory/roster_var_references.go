@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -64,11 +65,16 @@ func (r RosterVarRef) Violation(definedIn string) RosterViolation {
 //
 // Only a value Ansible templates is a candidate (ansibleScalarKind says
 // scalarTemplate): a literal, an !unsafe or inline !vault value, an empty or
-// non-string one has no reference. Each {{ ... }} of a string is read on its
-// own, and only a bare variable (x or x.y, whitespace control - allowed) is
-// a reference: anything with a filter, a test, an operator, a call or a
-// subscript cannot be judged without evaluating it. A string with {% or {# is
-// not read at all. Every field with such a part is listed in unchecked.
+// non-string one has no reference. !unsafe on any mapping, list or document
+// that encloses the value makes it a literal; a value that an alias or merge
+// key shares between an !unsafe part and a normal one is ambiguous (Ansible
+// templates it or not depending on its loader's build order, see yamlTrust) and
+// is not judged. Each {{ ... }} of a string is read on its own, and only a
+// bare variable (x or x.y, whitespace control - allowed) is a reference:
+// anything with a filter, a test, an operator, a call or a subscript cannot be
+// judged without evaluating it. A string with {% or {# is not read at all.
+// Every field with such a part, and every ambiguous one, is listed in
+// unchecked.
 //
 // The error never holds roster content: ErrRosterEncrypted for an encrypted
 // document, a YAML error as its line numbers only.
@@ -80,8 +86,14 @@ func RosterSecretVarReferences(plaintext []byte) (refs []RosterVarRef, unchecked
 	if err != nil {
 		return nil, nil, withheldYAMLError("the roster", err)
 	}
+	trust := newYAMLTrust(doc)
 	add := func(field string, admin bool, value *yaml.Node) {
-		if ansibleScalarKind(value) != scalarTemplate {
+		switch ansibleScalarKind(value, trust) {
+		case scalarAmbiguous:
+			unchecked = append(unchecked, field)
+			return
+		case scalarTemplate:
+		default:
 			return
 		}
 		roots, complete := templateVarRoots(value.Value)
@@ -263,33 +275,130 @@ const (
 	RosterConsumerFreeIPANFSServer
 )
 
+// RosterFact is a fact of one run that may be unknowable from where pilot
+// stands. The zero value is RosterFactUnknown, so a fact nobody filled in never
+// triggers a refusal: the check judges a reference only when every fact that
+// decides whether the playbook renders it is known (never refuse a run that
+// would work; a run it cannot judge is left to the playbook's own gates).
+type RosterFact int
+
+const (
+	// RosterFactUnknown: it depends on something the check cannot evaluate (a
+	// template with a filter, an inline !vault value, a name the playbook
+	// itself defines, a scalar shared between !unsafe and normal YAML).
+	RosterFactUnknown RosterFact = iota
+	// RosterFactNo: known not to hold.
+	RosterFactNo
+	// RosterFactYes: known to hold.
+	RosterFactYes
+)
+
 // RosterRenderFacts are the facts of one run that decide which roster fields
 // the freeipa-identity playbook renders.
 type RosterRenderFacts struct {
+	// SchemaVersionDefined: the roster has a schema_version. The identity
+	// playbook ignores a roster without one: every task that renders a roster
+	// string is conditioned on `freeipa_roster.schema_version is defined`.
+	SchemaVersionDefined RosterFact
 	// AdminPasswordProvided: the run has an ipa_admin_password that is defined
-	// and non-empty, so the playbook takes the admin password from it.
-	AdminPasswordProvided bool
+	// and truthy (`default(x, true)`), so the playbook takes the admin password
+	// from it.
+	AdminPasswordProvided RosterFact
 	// ServerDeclared: the roster's freeipa.server counts as declared
 	// (RosterFreeIPAServerDeclared).
-	ServerDeclared bool
+	ServerDeclared RosterFact
 }
 
 // RosterVarReferencesRenderedBy keeps the references the playbook of consumer
-// renders: the fields it never renders cannot fail it, however undefined they
-// are, and refusing a deployment for one would refuse a run that works.
+// certainly renders: the fields it never renders cannot fail it, however
+// undefined they are, and refusing a deployment for one would refuse a run
+// that works. A reference whose rendering depends on a fact that is unknown is
+// not in the result (RosterVarReferencesMaybeRenderedBy lists it).
 // TestRosterRenderedFieldsMatchAnsible pins both playbooks' behaviour against
 // ansible-core, running the playbooks' own pre_tasks.
 func RosterVarReferencesRenderedBy(consumer RosterVarConsumer, refs []RosterVarRef, facts RosterRenderFacts) []RosterVarRef {
 	var out []RosterVarRef
 	for _, ref := range refs {
-		switch {
-		case consumer == RosterConsumerFreeIPAIdentity && !ref.Admin,
-			consumer == RosterConsumerFreeIPAIdentity && ref.Admin && (!facts.AdminPasswordProvided || !facts.ServerDeclared),
-			consumer == RosterConsumerFreeIPANFSServer && ref.Admin:
+		if rendersAs(consumer, ref, facts) == RosterFactYes {
 			out = append(out, ref)
 		}
 	}
 	return out
+}
+
+// RosterVarReferencesMaybeRenderedBy keeps the references the playbook might
+// render, depending on a fact that is unknown: the ones a precheck must not
+// refuse and says it did not judge.
+func RosterVarReferencesMaybeRenderedBy(consumer RosterVarConsumer, refs []RosterVarRef, facts RosterRenderFacts) []RosterVarRef {
+	var out []RosterVarRef
+	for _, ref := range refs {
+		if rendersAs(consumer, ref, facts) == RosterFactUnknown {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+// rendersAs is whether the playbook of consumer renders ref in a run with
+// facts: Yes, No, or Unknown when a fact it depends on is.
+func rendersAs(consumer RosterVarConsumer, ref RosterVarRef, facts RosterRenderFacts) RosterFact {
+	switch consumer {
+	case RosterConsumerFreeIPANFSServer:
+		if ref.Admin {
+			return RosterFactYes
+		}
+		return RosterFactNo
+	case RosterConsumerFreeIPAIdentity:
+		if facts.SchemaVersionDefined == RosterFactNo {
+			return RosterFactNo
+		}
+		var rendered RosterFact
+		if !ref.Admin {
+			// Every user's password.initial, absent users included.
+			rendered = RosterFactYes
+		} else {
+			// The admin password is the fallback of ipa_admin_password
+			// (`default(x, true)`), and the server fill-in's combine renders
+			// the whole freeipa mapping when freeipa.server is not declared.
+			switch {
+			case facts.AdminPasswordProvided == RosterFactNo || facts.ServerDeclared == RosterFactNo:
+				rendered = RosterFactYes
+			case facts.AdminPasswordProvided == RosterFactYes && facts.ServerDeclared == RosterFactYes:
+				rendered = RosterFactNo
+			default:
+				rendered = RosterFactUnknown
+			}
+		}
+		if rendered == RosterFactYes && facts.SchemaVersionDefined == RosterFactUnknown {
+			return RosterFactUnknown
+		}
+		return rendered
+	}
+	return RosterFactNo
+}
+
+// RosterSchemaVersionDefined reports whether the decrypted roster defines
+// schema_version (a null value is defined, as it is for
+// `freeipa_roster.schema_version is defined`). A document that does not parse
+// is unknown.
+func RosterSchemaVersionDefined(plaintext []byte) RosterFact {
+	doc, err := parseYAMLDocument(plaintext)
+	if err != nil {
+		return RosterFactUnknown
+	}
+	if value, _ := mappingValue(documentRoot(doc), "schema_version"); value == nil {
+		return RosterFactNo
+	}
+	return RosterFactYes
+}
+
+// pyStrip is Python's str.strip() with no argument — what Jinja's trim does:
+// it removes unicode.IsSpace characters and also the four ASCII separators
+// \x1c-\x1f that Python counts as whitespace and Go does not.
+func pyStrip(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
+	})
 }
 
 // RosterFreeIPAServerDeclared reports whether the decrypted roster's
@@ -297,27 +406,65 @@ func RosterVarReferencesRenderedBy(consumer RosterVarConsumer, refs []RosterVarR
 // FreeIPA server FQDN when roster omits freeipa.server" and "Fill canonical
 // roster freeipa.server" pre_tasks, whose condition takes the server, applies
 // default with an empty-string argument, string and trim, and asks for a length
-// of 0. That default replaces only a value that is not defined, so: a missing key
-// (or a missing freeipa mapping) is not declared; an empty or blank string
-// is not declared; a null is declared, because None | string is the text None; any
-// other scalar, list or mapping is declared. A document that does not parse
-// declares nothing.
-func RosterFreeIPAServerDeclared(plaintext []byte) bool {
+// of 0. That default replaces only a value that is not defined, so:
+//
+//   - No: a missing key (or a missing freeipa mapping), and an empty or blank
+//     string (Python's str.strip decides what is blank);
+//   - Yes: a null (None | string is the text None), a non-blank literal, any
+//     other scalar, a list or a mapping;
+//   - the literal rules apply to a value that is certainly !unsafe (tagged, or
+//     below an !unsafe mapping or document): its text is never templated;
+//   - Unknown: a template, which Ansible renders before it counts the length,
+//     and a value shared between !unsafe and normal YAML (yamlTrust). When the
+//     whole value is exactly one bare {{ name }} (whitespace control allowed,
+//     no attribute, filter or text around it) varName is that variable, so a
+//     caller that knows the run's variables can decide it (RosterRunVars).
+//
+// A document that does not parse is Unknown.
+func RosterFreeIPAServerDeclared(plaintext []byte) (fact RosterFact, varName string) {
 	doc, err := parseYAMLDocument(plaintext)
 	if err != nil {
-		return false
+		return RosterFactUnknown, ""
 	}
 	freeipa, _ := mappingValue(documentRoot(doc), "freeipa")
 	server, _ := mappingValue(freeipa, "server")
-	switch {
-	case server == nil:
-		return false
-	case server.Kind == yaml.ScalarNode && server.ShortTag() == "!!null":
-		return true
-	case server.Kind == yaml.ScalarNode:
-		return strings.TrimSpace(server.Value) != ""
+	if server == nil {
+		return RosterFactNo, ""
 	}
-	return true
+	if server.Kind != yaml.ScalarNode {
+		return RosterFactYes, ""
+	}
+	if server.ShortTag() == "!!null" {
+		return RosterFactYes, ""
+	}
+	switch ansibleScalarKind(server, newYAMLTrust(doc)) {
+	case scalarAbsent:
+		return RosterFactNo, "" // an empty string
+	case scalarLiteral:
+		if pyStrip(server.Value) == "" {
+			return RosterFactNo, ""
+		}
+		return RosterFactYes, ""
+	case scalarNotString:
+		return RosterFactYes, ""
+	case scalarTemplate:
+		return RosterFactUnknown, bareTemplateName(server.Value)
+	}
+	return RosterFactUnknown, "" // inline !vault, shared between !unsafe and normal YAML
+}
+
+// bareVarTag is a string that is exactly one {{ name }} and nothing else.
+var bareVarTag = regexp.MustCompile(`^\{\{-?[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*-?\}\}$`)
+
+// bareTemplateName is the variable of s when s is exactly one bare
+// {{ name }} — Ansible then renders it to the variable's own value — and ""
+// otherwise (text around it, an attribute, a filter, anything else).
+func bareTemplateName(s string) string {
+	m := bareVarTag.FindStringSubmatch(s)
+	if m == nil || jinjaWords[m[1]] {
+		return ""
+	}
+	return m[1]
 }
 
 // VarsFileNames returns the top-level variable names the plaintext vars file
