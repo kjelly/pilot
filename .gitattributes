@@ -1,0 +1,5 @@
+# Real tool captures that internal/spec tests feed to fake programs. kadmin.local
+# ends its password prompts with a trailing space; the captures keep those bytes,
+# so git's whitespace check must not flag them.
+internal/spec/testdata/kadmin-cpw/** -whitespace
+internal/spec/testdata/ldapmodify-ldapi/** -whitespace

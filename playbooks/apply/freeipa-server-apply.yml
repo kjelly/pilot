@@ -863,6 +863,8 @@
         - name: "FreeIPA — 389-ds audit log: check whether the audit file already has entries"
           ansible.builtin.stat:
             path: "/var/log/dirsrv/{{ ipa_ds_instance }}/audit"
+            # Only the size matters, and the audit file can be 100 MB.
+            get_checksum: false
           register: ipa_ds_audit_before
 
         - name: "FreeIPA — 389-ds audit log: write dummy description to trigger audit log (spec C16)"
@@ -904,6 +906,7 @@
         - name: "FreeIPA — 389-ds audit log: read the audit file size"
           ansible.builtin.stat:
             path: "/var/log/dirsrv/{{ ipa_ds_instance }}/audit"
+            get_checksum: false
           register: ipa_ds_audit_file
 
         - name: "Gate: the 389-ds audit file is non-empty (spec C16)"
@@ -919,9 +922,11 @@
               {{ 'missing' if not ipa_ds_audit_file.stat.exists else 'empty' }}
               after {{ ipa_ds_audit_wait.elapsed | default('?') }} s
               ({{ ipa_ds_audit_wait.msg | default('') }}), although audit
-              logging is on and a directory write was made. Check that the
-              dummy write above succeeded (run it by hand with the Directory
-              Manager password) and that dirsrv can write the file.
+              logging is on and a directory write was made. Check that
+              dirsrv can write the file. To repeat the dummy write by hand,
+              run it as root over ldapi with SASL EXTERNAL (ldapmodify -Q -Y
+              EXTERNAL -H ldapi://%2Frun%2F{{ ipa_ds_instance }}.socket); no
+              Directory Manager password is needed.
 
   handlers:
     - name: "Validate httpd configuration after FreeIPA WSGI timeout change"

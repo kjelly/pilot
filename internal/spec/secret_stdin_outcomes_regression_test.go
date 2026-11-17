@@ -74,13 +74,13 @@ func TestRegression_KadminCpwOutcomesAreJudgedFromItsOutput(t *testing.T) {
 			vars:  map[string]any{"audit_demo_user": "audituser"},
 		},
 		{
-			file: "playbooks/test/fixtures/freeipa-hostauthz-demo.yml", user: "hz_web", secretVar: "hz_web_password",
+			file: "playbooks/test/fixtures/freeipa-hostauthz-demo.yml", user: "hz_web", secretVar: "hz_web_pass",
 			probe: "Fixtures — does hz_web already have the declared password?",
 			cpw:   "Fixtures — set stable password for hz_web via kadmin.local",
 			gate:  "Gate: kadmin.local changed the password of hz_web",
 		},
 		{
-			file: "playbooks/test/fixtures/freeipa-hostauthz-demo.yml", user: "hz_db", secretVar: "hz_db_password",
+			file: "playbooks/test/fixtures/freeipa-hostauthz-demo.yml", user: "hz_db", secretVar: "hz_db_pass",
 			probe: "Fixtures — does hz_db already have the declared password?",
 			cpw:   "Fixtures — set stable password for hz_db via kadmin.local",
 			gate:  "Gate: kadmin.local changed the password of hz_db",
@@ -284,6 +284,63 @@ func TestRegression_AuditLogDummyWriteNeedsNoPassword(t *testing.T) {
 	}
 }
 
+// TestRegression_AuditFileStatsSkipTheChecksum: both stats of the audit file
+// read only its size, and the file can be 100 MB, so neither may checksum it
+// (ansible.builtin.stat does by default).
+func TestRegression_AuditFileStatsSkipTheChecksum(t *testing.T) {
+	doc := loadYAML(t, filepath.Join("..", "..", "playbooks", "apply", "freeipa-server-apply.yml"))
+	for _, name := range []string{
+		"FreeIPA — 389-ds audit log: check whether the audit file already has entries",
+		"FreeIPA — 389-ds audit log: read the audit file size",
+	} {
+		args, _ := findNamedTask(t, doc, name)["ansible.builtin.stat"].(map[string]any)
+		if args == nil || args["get_checksum"] != false {
+			t.Errorf("%s: stat args = %v, want get_checksum: false", name, args)
+		}
+	}
+}
+
+// TestRegression_HostauthzDemoPasswordDefaultsResolveOnce: the two lab users'
+// declared passwords are resolved once, as play vars (like audit_demo_user_pass
+// in freeipa-audit-demo.yml), and every task reads those. The play vars keep the
+// old behaviour: the lab default, or hz_*_password when given.
+func TestRegression_HostauthzDemoPasswordDefaultsResolveOnce(t *testing.T) {
+	requireAnsiblePlaybook(t)
+	const file = "../../playbooks/test/fixtures/freeipa-hostauthz-demo.yml"
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, literal := range []string{"TestWebPass123", "TestDbPass123"} {
+		if n := strings.Count(string(raw), literal); n != 1 {
+			t.Errorf("%s appears %d times in %s, want once (the play var default)", literal, n, file)
+		}
+	}
+	plays, _ := loadYAML(t, file).([]any)
+	if len(plays) != 1 {
+		t.Fatalf("want one play, got %d", len(plays))
+	}
+	vars, _ := plays[0].(map[string]any)["vars"].(map[string]any)
+	for _, tc := range []struct {
+		name    string
+		extra   map[string]any
+		web, db string
+	}{
+		{name: "lab defaults", web: "TestWebPass123", db: "TestDbPass123"},
+		{name: "overrides win", extra: map[string]any{"hz_web_password": "Web-override-9", "hz_db_password": "Db-override-9"}, web: "Web-override-9", db: "Db-override-9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			check := func(name, want string) map[string]any {
+				return map[string]any{"name": name, "ansible.builtin.assert": map[string]any{"that": []any{fmt.Sprintf("%s == %q", name, want)}}}
+			}
+			res := runGatewayTasks(t, t.TempDir(), []any{check("hz_web_pass", tc.web), check("hz_db_pass", tc.db)}, vars, tc.extra)
+			if res.rc != 0 {
+				t.Fatalf("rc=%d failures=%v\n%s", res.rc, res.failures, res.raw)
+			}
+		})
+	}
+}
+
 // TestRegression_AuditLogDummyWriteFailsLoudly runs the real stat and write
 // tasks with real ansible-playbook and a fake ldapmodify. It requires the
 // guard (an empty or missing audit file writes once, a non-empty one does not),
@@ -345,7 +402,12 @@ func TestRegression_AuditLogDummyWriteFailsLoudly(t *testing.T) {
 			for k, v := range stat {
 				statCopy[k] = v
 			}
-			statCopy["ansible.builtin.stat"] = map[string]any{"path": auditFile}
+			statArgs := map[string]any{}
+			for k, v := range stat["ansible.builtin.stat"].(map[string]any) {
+				statArgs[k] = v
+			}
+			statArgs["path"] = auditFile
+			statCopy["ansible.builtin.stat"] = statArgs
 			writeCopy := map[string]any{}
 			for k, v := range write {
 				if k != "tags" {

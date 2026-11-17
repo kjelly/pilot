@@ -38,6 +38,10 @@
     ipa_realm: "{{ ipa_domain | upper }}"
     webhost_fqdn: freeipa-client.ipa.pilot.internal
     dbhost_fqdn: freeipa-client-2.ipa.pilot.internal
+    # The lab users' declared passwords, resolved once (same shape as
+    # audit_demo_user_pass in freeipa-audit-demo.yml); every use reads these.
+    hz_web_pass: "{{ hz_web_password | default('TestWebPass123') }}"
+    hz_db_pass: "{{ hz_db_password | default('TestDbPass123') }}"
 
   pre_tasks:
     - name: "Gate: admin credential present"
@@ -163,7 +167,7 @@
           become: true
           ansible.builtin.command:
             argv: [kinit, -c, "MEMORY:pilot-hz_web-pwcheck", "hz_web@{{ ipa_realm }}"]
-            stdin: "{{ hz_web_password | default('TestWebPass123') }}"
+            stdin: "{{ hz_web_pass }}"
           register: hz_web_pwcheck
           changed_when: false
           failed_when: false
@@ -174,7 +178,7 @@
           become: true
           ansible.builtin.command:
             argv: [kadmin.local, -q, "cpw hz_web"]
-            stdin: "{{ hz_web_password | default('TestWebPass123') }}\n{{ hz_web_password | default('TestWebPass123') }}"
+            stdin: "{{ hz_web_pass }}\n{{ hz_web_pass }}"
           register: hz_web_cpw
           changed_when: "' changed.' in hz_web_cpw.stdout"
           failed_when: false
@@ -205,7 +209,7 @@
           become: true
           ansible.builtin.command:
             argv: [kinit, -c, "MEMORY:pilot-hz_db-pwcheck", "hz_db@{{ ipa_realm }}"]
-            stdin: "{{ hz_db_password | default('TestDbPass123') }}"
+            stdin: "{{ hz_db_pass }}"
           register: hz_db_pwcheck
           changed_when: false
           failed_when: false
@@ -216,7 +220,7 @@
           become: true
           ansible.builtin.command:
             argv: [kadmin.local, -q, "cpw hz_db"]
-            stdin: "{{ hz_db_password | default('TestDbPass123') }}\n{{ hz_db_password | default('TestDbPass123') }}"
+            stdin: "{{ hz_db_pass }}\n{{ hz_db_pass }}"
           register: hz_db_cpw
           changed_when: "' changed.' in hz_db_cpw.stdout"
           failed_when: false

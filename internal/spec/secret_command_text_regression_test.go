@@ -37,7 +37,8 @@ import (
 // The only argv exemption is the FreeIPA installers (ipa-server-install,
 // ipa-replica-install, ipa-client-install): they take the admin password only
 // as an option, and moving them to stdin is tracked separately (their argv
-// still goes through expand_argument_vars).
+// still goes through expand_argument_vars). The argv program check reads only
+// the first element of a Jinja-list argv.
 //
 // TestRegression_FreeIPAKinitTasksPassPasswordUnchanged is the runtime
 // counterpart: it finds every task that passes a secret on stdin and runs it
@@ -71,8 +72,9 @@ var (
 	secretIdentRe = regexp.MustCompile(`(?i)password|passwd|secret|(^|_)pass($|_)|(^|_)pwd($|_)|token|api_?key|(^|_)psk($|_)|passphrase|credential|(^|_)(private|signing|master)_key($|_)|(^|_)otp($|_)`)
 	// Names of files that hold a secret are not the secret.
 	secretPathIdentRe = regexp.MustCompile(`(?i)_(file|path|dir)$`)
-	// installerProgramRe is the one program whose argv may carry a secret.
-	installerProgramRe = regexp.MustCompile(`^ipa-[a-z]+-install$`)
+	// installerProgramRe is the programs whose argv may carry a secret: the
+	// three FreeIPA installers AGENTS.md 4.5 item 15 names.
+	installerProgramRe = regexp.MustCompile(`^ipa-(server|replica|client)-install$`)
 )
 
 // secretModules are the modules whose arguments become a command line:
@@ -432,6 +434,9 @@ func TestSecretCommandTextScanClassifiesSites(t *testing.T) {
 		cmd("installer name only later", map[string]any{"argv": []any{"kinit", "ipa-server-install", "{{ ipa_admin_password }}"}}),
 		cmd("installer jinja later", map[string]any{"argv": "{{ ['kinit', 'ipa-client-install', ipa_admin_password] }}"}),
 		cmd("installer stdin", map[string]any{"argv": []any{"ipa-client-install", "-U"}, "stdin": "{{ ipa_enroll_password }}"}),
+		// Only the three named installers are exempt.
+		cmd("other installer", map[string]any{"argv": []any{"ipa-ca-install", "-p", "{{ ipa_dm_password }}"}}),
+		cmd("other installer jinja", map[string]any{"argv": "{{ ['ipa-dns-install', '-a', ipa_admin_password] }}"}),
 
 		// stdin must be no_log.
 		cmd("stdin with no_log", map[string]any{"argv": []any{"kinit", "admin"}, "stdin": "{{ ipa_admin_password }}"}),
@@ -504,6 +509,8 @@ func TestSecretCommandTextScanClassifiesSites(t *testing.T) {
 			"f.yml::argv through two vars":     "1 [webhook_secret]",
 			"f.yml::installer name only later": "1 [ipa_admin_password]",
 			"f.yml::installer jinja later":     "1 [ipa_admin_password]",
+			"f.yml::other installer":           "1 [ipa_dm_password]",
+			"f.yml::other installer jinja":     "1 [ipa_admin_password]",
 		}},
 		{"stdin", sc.stdin, map[string]string{
 			"f.yml::argv option":        "1 [ipa_admin_password]",
@@ -546,7 +553,7 @@ func TestSecretCommandTextScanClassifiesSites(t *testing.T) {
 	if len(textProblems) != 2 || !strings.Contains(textProblems[0], `"f.yml::shell printf" counts 2 tasks, 1 remain`) || !strings.Contains(textProblems[1], "f.yml::copied: 2 tasks") {
 		t.Errorf("text problems = %q", textProblems)
 	}
-	if len(argvProblems) != 7 || len(stdinProblems) != 2 {
+	if len(argvProblems) != 9 || len(stdinProblems) != 2 {
 		t.Errorf("argv problems = %q, stdin problems = %q", argvProblems, stdinProblems)
 	}
 }
@@ -666,10 +673,10 @@ var stdinCases = map[string]stdinCase{
 	"playbooks/test/fixtures/freeipa-audit-demo.yml::Fixtures — kinit admin":                                                                       kinitCase("ipa_admin_password", "admin@"+stdinRealm),
 	"playbooks/test/fixtures/freeipa-audit-demo.yml::Fixtures — does {{ audit_demo_user }} already have the declared password?":                    kinitCase("audit_demo_user_pass", "-c", "MEMORY:pilot-audit-demo-pwcheck", "audituser@"+stdinRealm),
 	"playbooks/test/fixtures/freeipa-audit-demo.yml::Fixtures — set stable password for {{ audit_demo_user }} via kadmin.local (no forced change)": kadminCase("audit_demo_user_pass", "audituser"),
-	"playbooks/test/fixtures/freeipa-hostauthz-demo.yml::Fixtures — does hz_web already have the declared password?":                               kinitCase("hz_web_password", "-c", "MEMORY:pilot-hz_web-pwcheck", "hz_web@"+stdinRealm),
-	"playbooks/test/fixtures/freeipa-hostauthz-demo.yml::Fixtures — set stable password for hz_web via kadmin.local":                               kadminCase("hz_web_password", "hz_web"),
-	"playbooks/test/fixtures/freeipa-hostauthz-demo.yml::Fixtures — does hz_db already have the declared password?":                                kinitCase("hz_db_password", "-c", "MEMORY:pilot-hz_db-pwcheck", "hz_db@"+stdinRealm),
-	"playbooks/test/fixtures/freeipa-hostauthz-demo.yml::Fixtures — set stable password for hz_db via kadmin.local":                                kadminCase("hz_db_password", "hz_db"),
+	"playbooks/test/fixtures/freeipa-hostauthz-demo.yml::Fixtures — does hz_web already have the declared password?":                               kinitCase("hz_web_pass", "-c", "MEMORY:pilot-hz_web-pwcheck", "hz_web@"+stdinRealm),
+	"playbooks/test/fixtures/freeipa-hostauthz-demo.yml::Fixtures — set stable password for hz_web via kadmin.local":                               kadminCase("hz_web_pass", "hz_web"),
+	"playbooks/test/fixtures/freeipa-hostauthz-demo.yml::Fixtures — does hz_db already have the declared password?":                                kinitCase("hz_db_pass", "-c", "MEMORY:pilot-hz_db-pwcheck", "hz_db@"+stdinRealm),
+	"playbooks/test/fixtures/freeipa-hostauthz-demo.yml::Fixtures — set stable password for hz_db via kadmin.local":                                kadminCase("hz_db_pass", "hz_db"),
 	"playbooks/test/fixtures/freeipa-audit-sim.yml::Sim — kinit as {{ audit_demo_user }} (Kerberos TGT)":                                           kinitCase("audit_demo_user_pass", "-r", "7d", "audituser"),
 	"playbooks/test/fixtures/freeipa-client-fixtures.yml::Fixtures — kinit admin (ticket for the ipa CLI below)":                                   kinitCase("ipa_admin_password", "admin@"+stdinRealm),
 	"playbooks/test/fixtures/freeipa-client-pwexpiry-canary.yml::Canary password — kinit admin":                                                    kinitCase("ipa_admin_password", "admin@"+stdinRealm),
