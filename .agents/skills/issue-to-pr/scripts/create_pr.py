@@ -88,8 +88,10 @@ def create(*, repo: str, issue: int, worktree: Path, evidence: Path,
         raise GateError("PR body must summarize validation/test evidence")
     errors, info = evaluate(repo=repo, issue=issue, worktree=worktree, evidence_path=evidence,
                             stage="local", remote=remote, secret_files=secret_files)
+    # The advisory similar-defect report (issue_gate.SIMILAR_SCAN_ENFORCED) rides along on every result.
+    scan = {"similar_defect_scan": info["similar_defect_scan"]} if "similar_defect_scan" in info else {}
     if errors:
-        return {"status": "BLOCKED", "issue": issue, "blockers": errors}
+        return {"status": "BLOCKED", "issue": issue, "blockers": errors, **scan}
     branch, sha = info["branch"], info["head_sha"]
     # Base comes from the validated evidence, not the mutable main checkout.
     base_name = evidence_data["base_branch"]
@@ -98,7 +100,7 @@ def create(*, repo: str, issue: int, worktree: Path, evidence: Path,
     errors, _ = evaluate(repo=repo, issue=issue, worktree=worktree, evidence_path=evidence,
                          stage="pushed", remote=remote, secret_files=secret_files)
     if errors:
-        return {"status": "BLOCKED_AFTER_PUSH", "issue": issue, "head_sha": sha, "blockers": errors}
+        return {"status": "BLOCKED_AFTER_PUSH", "issue": issue, "head_sha": sha, "blockers": errors, **scan}
     cmd = ["gh", "pr", "create", "-R", repo, "--base", base_name, "--head", branch,
            "--title", title, "--body-file", str(body_file)]
     if draft:
@@ -109,16 +111,16 @@ def create(*, repo: str, issue: int, worktree: Path, evidence: Path,
         # A timeout/network error may occur AFTER GitHub creates the PR.
         # Do not retry creation blindly. Caller should inspect `gh pr view` first.
         return {"status": "CREATE_UNCERTAIN", "issue": issue, "head_sha": sha,
-                "blockers": [str(exc), "Check gh pr view <branch> before attempting to retry"]}
+                "blockers": [str(exc), "Check gh pr view <branch> before attempting to retry"], **scan}
     try:
         pr = check_pr(repo, branch, base_name, sha, draft=draft, issue=issue, resolution=resolution)
     except GateError as exc:
         return {"status": "CREATED_UNVERIFIED", "issue": issue, "head_sha": sha,
-                "blockers": [str(exc), "Do not retry creation; inspect the created PR"]}
+                "blockers": [str(exc), "Do not retry creation; inspect the created PR"], **scan}
     return {"status": "DRAFT_PR_CREATED" if draft else "READY_PR_CREATED",
             "issue": issue, "pr": pr["number"], "url": pr["url"],
             "branch": branch, "head_sha": sha, "draft": draft,
-            "ci_status": "NOT_YET_VERIFIED"}
+            "ci_status": "NOT_YET_VERIFIED", **scan}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -108,6 +108,15 @@ func checkCIImageNeeds(ciYAML string) string {
 	if unknown != "" {
 		return unknown
 	}
+	const fullGuard = "needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'"
+	if nw.Jobs[image].If != fullGuard {
+		return "image must run only after successful full validation"
+	}
+	conditional := map[string]bool{
+		"test": true, "go-test-results": true, "playbook-lint": true,
+		"playbook-integration": true, "root-tests": true, "thanos-retention": true,
+		"lint": true, "pilot-mcp-cross": true, "mcp-remote": true,
+	}
 
 	var names []string
 	for name := range nw.Jobs {
@@ -122,7 +131,9 @@ func checkCIImageNeeds(ciYAML string) string {
 		switch {
 		case !imageDeps[name]:
 			return fmt.Sprintf("%s does not (transitively) need %s", image, name)
-		case job.If != "" && ((name != "test" && name != "playbook-integration") || job.If != "needs.changes.outputs.evidence_only != 'true'" || !slices.Contains(ciNeedsList(job.Needs), "changes")):
+		case conditional[name] && job.If != fullGuard:
+			return fmt.Sprintf("validation job %s has if: %q, want the full validation guard", name, job.If)
+		case job.If != "" && (!conditional[name] || !slices.Contains(ciNeedsList(job.Needs), "changes")):
 			return fmt.Sprintf("validation job %s has if: %q; when it is skipped, the jobs that need it are skipped too, and when it is not run a failure does not stop %s", name, job.If, image)
 		case job.ContinueOnError != nil && fmt.Sprint(job.ContinueOnError) != "false":
 			return fmt.Sprintf("validation job %s has continue-on-error: %v, so %s runs when it fails", name, job.ContinueOnError, image)
@@ -151,22 +162,22 @@ func TestCIImageNeedsCheckCatchesDrift(t *testing.T) {
 		}
 		return strings.Replace(ci, old, new, 1)
 	}
-	const imageNeeds = "    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]\n"
+	const imageNeeds = "    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote, skills]\n"
 	cases := []struct{ name, ci, want string }{
 		{"current", ci, ""},
-		{"transitive path through another job", strings.Replace(edit(imageNeeds, "    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, thanos-retention, lint, pilot-mcp-cross, mcp-remote]\n"), "  lint:\n", "  lint:\n    needs: root-tests\n", 1), ""},
-		{"image needs one job as a string", strings.Replace(edit(imageNeeds, "    needs: lint\n"), "  lint:\n", "  lint:\n    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, pilot-mcp-cross, mcp-remote]\n", 1), ""},
+		{"transitive path through another job", strings.Replace(edit(imageNeeds, "    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, thanos-retention, lint, pilot-mcp-cross, mcp-remote, skills]\n"), "  lint:\n    needs: changes\n", "  lint:\n    needs: [changes, root-tests]\n", 1), ""},
+		{"image needs one job as a string", strings.Replace(edit(imageNeeds, "    needs: lint\n"), "  lint:\n    needs: changes\n", "  lint:\n    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, pilot-mcp-cross, mcp-remote, skills]\n", 1), ""},
 		{"promote lists image", edit("    needs: image\n", "    needs: [image]\n"), ""},
 		// The state of main after PR #148 added root-tests.
 		{"root-tests missing", edit(imageNeeds, "    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, thanos-retention, lint, pilot-mcp-cross, mcp-remote]\n"), "image does not (transitively) need root-tests"},
-		{"test direct edge omitted but result gate still waits", edit(imageNeeds, "    needs: [changes, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]\n"), ""},
+		{"test direct edge omitted but result gate still waits", edit(imageNeeds, "    needs: [changes, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote, skills]\n"), ""},
 		{"result gate missing", edit(imageNeeds, "    needs: [changes, test, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]\n"), "image does not (transitively) need go-test-results"},
 		{"integration missing", edit(imageNeeds, "    needs: [changes, test, go-test-results, playbook-lint, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]\n"), "image does not (transitively) need playbook-integration"},
 		{"a new job omitted", ci + "\n  docs:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo docs\n", "image does not (transitively) need docs"},
 		{"a new job after image is not a dependency", ci + "\n  notify:\n    needs: promote\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo notify\n", ""},
 		{"promote does not need image", edit("    needs: image\n", "    needs: test\n"), "want exactly 1"},
 		{"unknown needs name", edit(imageNeeds, "    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote, roots-tests]\n"), `unknown job "roots-tests"`},
-		{"validation job with if", strings.Replace(ci, "  root-tests:\n", "  root-tests:\n    if: github.event_name == 'push'\n", 1), "validation job root-tests has if:"},
+		{"validation job with if", strings.Replace(ci, "  root-tests:\n    needs: changes\n    if: needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'\n", "  root-tests:\n    needs: changes\n    if: github.event_name == 'push'\n", 1), "validation job root-tests has if:"},
 		{"validation job continue-on-error", strings.Replace(ci, "  root-tests:\n", "  root-tests:\n    continue-on-error: true\n", 1), "validation job root-tests has continue-on-error"},
 		{"continue-on-error false", strings.Replace(ci, "  root-tests:\n", "  root-tests:\n    continue-on-error: false\n", 1), ""},
 	}

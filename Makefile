@@ -137,7 +137,8 @@ test-callback: ## Run Python callback unit tests
 	cd ansible_callback && python3 -m unittest test_pilot_diagnose.py test_pilot_result.py -v
 
 .PHONY: ci-workflow-test
-ci-workflow-test: ## Verify candidate CI reuse against real Git histories and API controls
+ci-workflow-test: ## Verify CI impact selection, candidate reuse and shard evidence controls
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_impact.py'
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_validation_reuse.py'
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_go_test_shards.py'
 
@@ -151,6 +152,10 @@ skill-test:    ## Run the unit tests of every project-local agent skill (.agents
 	  printf '── %s\n' "$$skill"; \
 	  (cd "$$skill" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py') || exit 1; \
 	done
+
+.PHONY: skill-repo-lint
+skill-repo-lint: ## Run the repo-wide Go lints that read .agents/.claude (the skills/docs CI profiles skip the Go shards; CI runs this)
+	go test -count=1 -timeout 5m ./internal/spec -run '^(TestRegression_SSHControlPathTemplatesAreBounded|TestRegression_NoArchivedYAMLImport)$$'
 
 test-prereq: ## Check go / docker / ansible availability
 	@command -v go >/dev/null              && echo "go OK"              || (echo "go MISSING"; exit 1)
@@ -196,9 +201,9 @@ identity-ssh-cache-live-test: ## Require an external private fixture config for 
 
 identity-secret-test: ## Require real Ansible for password transport, failure, cleanup and rerun regressions (issue 118).
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^(TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText|FreeIPANFSServerAdminPasswordDriftGate|FreeIPANFSServerAdminPasswordGateIsVisible)|TestIdentityDriftSharedNormalizationInAnsible)$$' ./internal/spec/
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^(TestYAML11NonStringMatchesAnsible|TestAnsibleTagsMatchTheClassifier)$$' ./internal/inventory/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^(TestYAML11NonStringMatchesAnsible|TestAnsibleTagsMatchTheClassifier|TestRosterRenderedFieldsMatchAnsible|TestRosterUnsafeScopeMatchesAnsible|TestImplicitVarNamesAreNeverUndefinedInAnsible)$$' ./internal/inventory/
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_IdentitySecretDriftProbe' ./internal/accessgrants/
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 8m -run '^TestIdentitySecretDriftCommands' ./cmd/pilot/cmd/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 8m -run '^(TestIdentitySecretDriftCommands|TestPrecheckRosterReferencesFactsMatchAnsible|TestRosterReferencesHonorUnsafeAboveTheValue)' ./cmd/pilot/cmd/
 	python3 -I playbooks/check/files/test_identity_object_observer.py
 
 # ROOT_TESTS are the internal/inventory tests that call requireRoot: what a

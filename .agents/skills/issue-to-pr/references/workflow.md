@@ -40,6 +40,12 @@ Handle the selected Issue only; do not create a duplicate PR or a new branch mer
 
 This is an `EXISTING_PR` terminal path before implementation; it does not authorize creating a PR without the quality gate or treating a partial fix as complete.
 
+The same path closes a related Issue after the PR that referenced it with `Refs #M` has merged (stage 0 below).
+
+## Related Issues (stage 0)
+
+Open Issues with the same invariant as the selected Issue are found during the [similar-defect scan](similar-defect-scan.md) and handled by its section 5: they join the fix only as `Refs #M` (never a closing keyword), nobody comments on or closes them before the merge, and after the merge each one gets its own `issue-to-pr` invocation that takes the existing-PR disposition above. This invocation still handles exactly one Issue; stage 0 takes no claim on related Issues, so re-check their open PRs and claims right before PR creation.
+
 ## Dependency decisions
 
 - Use explicit `blocked by`, acceptance dependencies, related PR branches, and actual source prerequisites; mentions alone do not imply a hard dependency.

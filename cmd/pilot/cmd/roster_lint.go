@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 
@@ -20,6 +21,7 @@ var rosterCmd = &cobra.Command{
 var (
 	rosterLintUpgrade           bool
 	rosterLintVaultPasswordFile string
+	rosterLintVarsFile          string
 )
 
 var rosterLintCmd = &cobra.Command{
@@ -41,6 +43,51 @@ decrypts it in memory with ` + "`ansible-vault view`" + ` (the same decryption
 ` + "`pilot roster migrate`" + ` uses), writes no plaintext file, and prints
 the same report it prints for the plaintext roster. The flag is not read
 for a plaintext roster.
+
+A roster string can refer to a variable — password.initial:
+'{{ ipa_default_initial_password }}' — that apply resolves from the vars file
+` + "(`-e @.vault/main.yaml`)" + `; when the vars file lacks it, apply fails inside a
+no_log task (its fatal result is censored), so mid-run, after the dependency
+chain (freeipa-server, say) has been applied. With --vars-file lint reads the
+vars file's top-level variable names (never its values) and reports every
+freeipa.admin.password and users[].password.initial reference that file does
+not define, as "[roster-reference] <field> references <name>, which <file>
+does not define", with the other violations. Only a bare {{ name }} (or
+{{ name.attr }}) is checked: a value with a filter such as default(''), an
+operator, a call or a {% %} block cannot be judged without evaluating it and
+is never reported, nor are inline !vault values, Jinja's and
+Ansible's own names (inventory_hostname, ansible_*, ...) and the names the
+freeipa-identity and freeipa-nfs-server playbooks define for themselves (stage,
+ipa_domain, ipa_realm, ...). !unsafe on the value or on any mapping or list
+that encloses it (the whole document included: --- !unsafe) makes the value a
+literal, never a reference. A value that an alias or a merge key (<<: *x)
+shares between an !unsafe part and a normal part is not judged either, because
+Ansible templates it or not depending on the order its loader builds the
+document in. Every field that has a part lint could not judge, in either way,
+gets one line after the verdict, "roster 變數引用檢查已略過：<field> ...", with
+the field's label and nothing of its value. The names the inventory itself defines
+(group_vars, host_vars) are not known to lint: for a variable only the
+inventory defines, ` + "`pilot deploy`" + ` and ` + "`pilot reconcile`" + ` make the same check with
+them taken into account. Lint also does not know which playbook will apply the
+roster, so it reports every admin and every user reference; deploy and
+reconcile judge only the fields the playbook renders for that run (the admin
+password only when ipa_admin_password is not set or is empty, or the roster
+declares no freeipa.server — an empty string is not a declaration, null is —
+for freeipa-identity, which ignores a roster that has no schema_version; no user
+password for freeipa-nfs-server), so a lint finding for a field a run does not
+render is a finding deploy would not refuse. When freeipa.server or
+ipa_admin_password is exactly a bare {{ name }}, deploy and reconcile resolve it
+from the run's effective variables (a chain of bare references ends in a literal
+or an undefined name); anything else — a filter, text around the reference, an
+inline !vault value, a name the playbook defines itself — cannot be resolved,
+so the admin password reference is not judged and a "roster 變數引用檢查已略過"
+line says so.
+
+--vars-file is never found on its own: without it lint reads and prints exactly
+what it always did. A missing, unreadable or non-YAML vars file, or an
+encrypted one without --vault-password-file, is an error. An encrypted vars file is decrypted in
+memory with the same --vault-password-file as the roster, so both must be
+encrypted with one vault password.
 
 A structurally valid roster below the current schema version passes with a
 notice pointing at ` + "`pilot roster migrate`" + `; pass --upgrade to have
@@ -75,10 +122,27 @@ even though lint still exits 0.`,
 		}
 
 		violations := inventory.ValidateRoster(root)
+		// What the reference check did not judge, one line each (names and
+		// field labels only); printed after the verdict, like warnings.
+		var skipped []string
+		if rosterLintVarsFile != "" {
+			references, notes, err := rosterLintReferenceViolations(path, plaintext, rosterLintVarsFile, rosterLintVaultPasswordFile)
+			if err != nil {
+				return err
+			}
+			violations = append(violations, references...)
+			skipped = notes
+		}
+		printSkipped := func() {
+			for _, note := range skipped {
+				fmt.Fprintf(cmd.OutOrStdout(), "ℹ️  roster 變數引用檢查已略過：%s\n", note)
+			}
+		}
 		if len(violations) > 0 {
 			for _, v := range violations {
 				fmt.Fprintln(cmd.OutOrStdout(), v.String())
 			}
+			printSkipped()
 			return fmt.Errorf("%d issue(s) found", len(violations))
 		}
 
@@ -94,6 +158,7 @@ even though lint still exits 0.`,
 			for _, w := range warnings {
 				fmt.Fprintf(cmd.OutOrStdout(), "warning: %s\n", w.Detail)
 			}
+			printSkipped()
 		}
 
 		// No structural violations: report which schema version passed
@@ -134,6 +199,54 @@ even though lint still exits 0.`,
 	},
 }
 
+// rosterLintReferenceViolations is the findings of lint's --vars-file: every
+// secret reference of the roster that the vars file does not define, and the
+// notes of what it did not judge (a field with a filter, an operator or a
+// block, or a value shared between !unsafe and normal YAML: the field's label
+// only). The vars file is read the strict way an explicit --vars-file always
+// is (resolveDriftVarsFile: it must exist, not be a directory, be readable,
+// and, when encrypted, come with --vault-password-file). Neither the findings,
+// the notes nor the errors hold a value of the roster or the vars file:
+// names, field labels and line numbers only (inventory.VarsFileNames).
+func rosterLintReferenceViolations(rosterPath string, rosterPlaintext []byte, varsFile, vaultPasswordFile string) ([]inventory.RosterViolation, []string, error) {
+	abs, err := resolveDriftVarsFile(io.Discard, "", varsFile, vaultPasswordFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	names, err := inventory.ReadVarsFileNames(abs, vaultPasswordFile)
+	if err != nil {
+		if errors.Is(err, inventory.ErrVarsFileEncrypted) {
+			return nil, nil, fmt.Errorf("--vars-file %s is ansible-vault encrypted; rerun with --vault-password-file <path>", varsFile)
+		}
+		return nil, nil, fmt.Errorf("--vars-file %s: %w", varsFile, err)
+	}
+	refs, unchecked, err := inventory.RosterSecretVarReferences(rosterPlaintext)
+	if err != nil {
+		return nil, nil, fmt.Errorf("check the references in roster %s: %w", rosterPath, err)
+	}
+	var out []inventory.RosterViolation
+	// The playbooks' own names (stage, ipa_realm, ...) are known to both consumers'
+	// runs; lint does not know the consumer, so it takes them all as defined.
+	for _, ref := range inventory.MissingRosterVarReferences(refs, names, inventory.RosterPlaybookKnownNames()) {
+		out = append(out, ref.Violation(varsFile))
+	}
+	var notes []string
+	for _, field := range unchecked {
+		notes = append(notes, uncheckedFieldNoteLint(field))
+	}
+	return out, notes, nil
+}
+
+// uncheckedFieldNoteLint is uncheckedFieldNote without the roster (lint has
+// one roster).
+func uncheckedFieldNoteLint(field string) string {
+	return fmt.Sprintf("%s %s", field, uncheckedFieldReason)
+}
+
+// uncheckedFieldReason is why a field is not checked, said once for lint and
+// the deploy precheck.
+const uncheckedFieldReason = "有無法判斷的部分(filter、運算子、{% %} 區塊，或被 !unsafe 與一般 YAML 共用的值)，沒有檢查"
+
 // yamlErrorLine matches the "line N" positions in a yaml.v3 error.
 var yamlErrorLine = regexp.MustCompile(`line \d+`)
 
@@ -154,7 +267,8 @@ func rosterLintParseError(path string, encrypted bool, err error) error {
 
 func init() {
 	rosterLintCmd.Flags().BoolVar(&rosterLintUpgrade, "upgrade", false, "if the roster isn't the current schema version, upgrade it via the same engine as `pilot roster migrate` before reporting")
-	rosterLintCmd.Flags().StringVar(&rosterLintVaultPasswordFile, "vault-password-file", "", "ansible-vault password file, for an encrypted roster (decrypted in memory; no plaintext file is written)")
+	rosterLintCmd.Flags().StringVar(&rosterLintVaultPasswordFile, "vault-password-file", "", "ansible-vault password file, for an encrypted roster and for an encrypted --vars-file, which then share one vault password (decrypted in memory; no plaintext file is written)")
+	rosterLintCmd.Flags().StringVar(&rosterLintVarsFile, "vars-file", "", "ansible vars file (e.g. .vault/main.yaml, plain or ansible-vault encrypted) the roster's {{ name }} password references must be defined in; reports the missing names, never values (never searched for: without this flag lint does not check references)")
 	rosterCmd.AddCommand(rosterLintCmd)
 	rootCmd.AddCommand(rosterCmd)
 }

@@ -1,0 +1,264 @@
+{
+  "child_after_execute": {
+    "body": "Captured body replaced.",
+    "closedByPullRequestsReferences": [],
+    "labels": [
+      {
+        "color": "d73a4a",
+        "description": "Something isn't working",
+        "id": "LA_SANITIZED_0",
+        "name": "bug"
+      },
+      {
+        "color": "b60205",
+        "description": "\u5f71\u97ff\u771f\u5be6\u4f48\u7f72(prod/staging \u5931\u6557\u3001\u932f\u8aa4\u6210\u529f\u3001\u79d8\u5bc6\u5916\u6d29)",
+        "id": "LA_SANITIZED_1",
+        "name": "P1"
+      },
+      {
+        "color": "5319e7",
+        "description": "\u5143\u4ef6\u7bc4\u570d:freeipa",
+        "id": "LA_SANITIZED_2",
+        "name": "area:freeipa"
+      },
+      {
+        "color": "B60205",
+        "description": "\u79d8\u5bc6\u5916\u6d29\u3001\u6b0a\u9650\u3001\u63d0\u6b0a\u8def\u5f91\u3001\u5bc6\u78bc\u8655\u7406",
+        "id": "LA_SANITIZED_3",
+        "name": "security"
+      }
+    ],
+    "number": 142,
+    "parent": {
+      "id": "I_SANITIZED_P",
+      "number": 354,
+      "state": "OPEN",
+      "title": "Captured parent",
+      "url": "https://github.com/OWNER/REPO/issues/354"
+    },
+    "state": "OPEN",
+    "subIssues": {
+      "nodes": [],
+      "totalCount": 0
+    },
+    "url": "https://github.com/OWNER/REPO/issues/142"
+  },
+  "closed_by_pr": {
+    "body": "Captured body replaced.",
+    "closedByPullRequestsReferences": [
+      {
+        "id": "PR_SANITIZED_0",
+        "number": 353,
+        "repository": {
+          "id": "R_SANITIZED",
+          "name": "pilot",
+          "owner": {
+            "id": "U_SANITIZED",
+            "login": "kjelly"
+          }
+        },
+        "url": "https://github.com/kjelly/pilot/pull/353"
+      }
+    ],
+    "labels": [
+      {
+        "color": "d73a4a",
+        "description": "Something isn't working",
+        "id": "LA_SANITIZED_0",
+        "name": "bug"
+      },
+      {
+        "color": "fbca04",
+        "description": "\u908a\u89d2\u6848\u4f8b\u3001\u6e2c\u8a66/CI \u7f3a\u53e3\u3001\u5c0f\u5e45\u6539\u5584",
+        "id": "LA_SANITIZED_1",
+        "name": "P3"
+      },
+      {
+        "color": "0e8a16",
+        "description": "\u5143\u4ef6\u7bc4\u570d:siem-logging",
+        "id": "LA_SANITIZED_2",
+        "name": "area:siem-logging"
+      },
+      {
+        "color": "FBCA04",
+        "description": "\u539f\u56e0\u5c1a\u672a\u67e5\u660e",
+        "id": "LA_SANITIZED_3",
+        "name": "needs-investigation"
+      }
+    ],
+    "number": 330,
+    "parent": null,
+    "state": "OPEN",
+    "subIssues": {
+      "nodes": [],
+      "totalCount": 0
+    },
+    "url": "https://github.com/OWNER/REPO/issues/330"
+  },
+  "plain": {
+    "body": "Captured body replaced.",
+    "closedByPullRequestsReferences": [],
+    "labels": [
+      {
+        "color": "d73a4a",
+        "description": "Something isn't working",
+        "id": "LA_SANITIZED_0",
+        "name": "bug"
+      },
+      {
+        "color": "b60205",
+        "description": "\u5f71\u97ff\u771f\u5be6\u4f48\u7f72(prod/staging \u5931\u6557\u3001\u932f\u8aa4\u6210\u529f\u3001\u79d8\u5bc6\u5916\u6d29)",
+        "id": "LA_SANITIZED_1",
+        "name": "P1"
+      },
+      {
+        "color": "5319e7",
+        "description": "\u5143\u4ef6\u7bc4\u570d:freeipa",
+        "id": "LA_SANITIZED_2",
+        "name": "area:freeipa"
+      },
+      {
+        "color": "B60205",
+        "description": "\u79d8\u5bc6\u5916\u6d29\u3001\u6b0a\u9650\u3001\u63d0\u6b0a\u8def\u5f91\u3001\u5bc6\u78bc\u8655\u7406",
+        "id": "LA_SANITIZED_3",
+        "name": "security"
+      }
+    ],
+    "number": 142,
+    "parent": null,
+    "state": "OPEN",
+    "subIssues": {
+      "nodes": [],
+      "totalCount": 0
+    },
+    "url": "https://github.com/OWNER/REPO/issues/142"
+  },
+  "umbrella_after_execute": {
+    "body": "Captured body replaced.",
+    "closedByPullRequestsReferences": [],
+    "labels": [
+      {
+        "color": "d73a4a",
+        "description": "Something isn't working",
+        "id": "LA_SANITIZED_0",
+        "name": "bug"
+      },
+      {
+        "color": "b60205",
+        "description": "\u5f71\u97ff\u771f\u5be6\u4f48\u7f72(prod/staging \u5931\u6557\u3001\u932f\u8aa4\u6210\u529f\u3001\u79d8\u5bc6\u5916\u6d29)",
+        "id": "LA_SANITIZED_1",
+        "name": "P1"
+      },
+      {
+        "color": "5319e7",
+        "description": "\u5143\u4ef6\u7bc4\u570d:freeipa",
+        "id": "LA_SANITIZED_2",
+        "name": "area:freeipa"
+      },
+      {
+        "color": "B60205",
+        "description": "\u79d8\u5bc6\u5916\u6d29\u3001\u6b0a\u9650\u3001\u63d0\u6b0a\u8def\u5f91\u3001\u5bc6\u78bc\u8655\u7406",
+        "id": "LA_SANITIZED_3",
+        "name": "security"
+      }
+    ],
+    "number": 354,
+    "parent": null,
+    "state": "OPEN",
+    "subIssues": {
+      "nodes": [
+        {
+          "id": "I_SANITIZED_S0",
+          "number": 142,
+          "state": "OPEN",
+          "title": "Captured sub-issue",
+          "url": "https://github.com/OWNER/REPO/issues/142"
+        },
+        {
+          "id": "I_SANITIZED_S1",
+          "number": 216,
+          "state": "OPEN",
+          "title": "Captured sub-issue",
+          "url": "https://github.com/OWNER/REPO/issues/216"
+        }
+      ],
+      "totalCount": 2
+    },
+    "url": "https://github.com/OWNER/REPO/issues/354"
+  },
+  "with_parent_and_sub_issues": {
+    "body": "Captured body replaced.",
+    "closedByPullRequestsReferences": [],
+    "labels": [
+      {
+        "color": "0dd8ac",
+        "description": "a request to improve CLI",
+        "id": "LA_SANITIZED_0",
+        "name": "enhancement"
+      },
+      {
+        "color": "430568",
+        "description": "relating to the gh issue command",
+        "id": "LA_SANITIZED_1",
+        "name": "gh-issue"
+      }
+    ],
+    "number": 14529,
+    "parent": {
+      "id": "I_SANITIZED_P",
+      "number": 14563,
+      "state": "CLOSED",
+      "title": "Captured parent",
+      "url": "https://github.com/cli/cli/issues/14563"
+    },
+    "state": "CLOSED",
+    "subIssues": {
+      "nodes": [
+        {
+          "id": "I_SANITIZED_S0",
+          "number": 14523,
+          "state": "CLOSED",
+          "title": "Captured sub-issue",
+          "url": "https://github.com/cli/cli/issues/14523"
+        },
+        {
+          "id": "I_SANITIZED_S1",
+          "number": 14524,
+          "state": "CLOSED",
+          "title": "Captured sub-issue",
+          "url": "https://github.com/cli/cli/issues/14524"
+        },
+        {
+          "id": "I_SANITIZED_S2",
+          "number": 14525,
+          "state": "CLOSED",
+          "title": "Captured sub-issue",
+          "url": "https://github.com/cli/cli/issues/14525"
+        },
+        {
+          "id": "I_SANITIZED_S3",
+          "number": 14526,
+          "state": "CLOSED",
+          "title": "Captured sub-issue",
+          "url": "https://github.com/cli/cli/issues/14526"
+        },
+        {
+          "id": "I_SANITIZED_S4",
+          "number": 14527,
+          "state": "CLOSED",
+          "title": "Captured sub-issue",
+          "url": "https://github.com/cli/cli/issues/14527"
+        },
+        {
+          "id": "I_SANITIZED_S5",
+          "number": 14528,
+          "state": "CLOSED",
+          "title": "Captured sub-issue",
+          "url": "https://github.com/cli/cli/issues/14528"
+        }
+      ],
+      "totalCount": 6
+    },
+    "url": "https://github.com/OWNER/REPO/issues/14529"
+  }
+}

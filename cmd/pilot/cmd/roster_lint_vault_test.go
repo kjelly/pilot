@@ -31,8 +31,16 @@ users:
 // runs against a lint without --vault-password-file).
 func execRosterLint(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	stdout, _, err := execRosterLintStreams(t, args...)
+	return stdout, err
+}
+
+// execRosterLintStreams is execRosterLint that also returns what the command
+// wrote to stderr (cobra prints the returned error there).
+func execRosterLintStreams(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
 	reset := func() {
-		for _, name := range []string{"upgrade", "vault-password-file"} {
+		for _, name := range []string{"upgrade", "vault-password-file", "vars-file"} {
 			if f := rosterLintCmd.Flags().Lookup(name); f != nil {
 				_ = f.Value.Set(f.DefValue)
 				f.Changed = false
@@ -44,12 +52,12 @@ func execRosterLint(t *testing.T, args ...string) (string, error) {
 	}
 	reset()
 	t.Cleanup(reset)
-	var stdout, stderr bytes.Buffer
+	var outBuf, errBuf bytes.Buffer
 	rootCmd.SetArgs(append([]string{"roster", "lint"}, args...))
-	rootCmd.SetOut(&stdout)
-	rootCmd.SetErr(&stderr)
-	err := rootCmd.Execute()
-	return stdout.String(), err
+	rootCmd.SetOut(&outBuf)
+	rootCmd.SetErr(&errBuf)
+	err = rootCmd.Execute()
+	return outBuf.String(), errBuf.String(), err
 }
 
 // isolateRosterLintTempDirs points every temp directory lint or

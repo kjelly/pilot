@@ -104,6 +104,18 @@ def git(worktree: Path, *args: str) -> str:
     return p.stdout.strip()
 
 
+def git_answer(worktree: Path, *args: str) -> bool:
+    """A git yes/no command (`merge-base --is-ancestor`): exit 0 is True, exit 1 is False. Any other
+    exit is an error, never read as "no" (`git()` cannot tell the two apart)."""
+    try:
+        p = subprocess.run(["git", "-C", str(worktree), *args], capture_output=True, text=True)
+    except OSError as exc:
+        raise GateError(f"Cannot execute git: {exc}") from exc
+    if p.returncode in (0, 1):
+        return p.returncode == 0
+    raise GateError(f"git {args[:2]}: {p.stderr.strip()[:500]}")
+
+
 def check_git(worktree: Path) -> tuple[str, str, list[str]]:
     try:
         if not worktree.is_dir():
@@ -259,6 +271,163 @@ def check_evidence(evidence: dict[str, Any], *, repo: str, issue: int, sha: str,
     return errors
 
 
+# The similar-defect scan (references/similar-defect-scan.md) is checked in advisory mode: its problems
+# are reported under info["similar_defect_scan"] and never block. Making them blockers is a deliberate,
+# separate change of this constant, decided by the repository's owner, not part of an Issue fix.
+SIMILAR_SCAN_ENFORCED = False
+SCAN_CLASS = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+SCAN_CLASSIFICATIONS = ("same-invariant-in-scope", "shared-choke-point", "false-positive",
+                        "separate-defect", "dependent-or-overlapping", "unconfirmed")
+SCAN_MUST_RESOLVE = ("same-invariant-in-scope", "shared-choke-point")
+
+
+def _scan_int(value: Any, minimum: int) -> bool:
+    return type(value) is int and value >= minimum
+
+
+def _scan_problems(scan: Any, *, repo: str, issue: int, worktree: Path, sha: str,
+                   merge_base: str | None, ctx: "repo_evidence.Context | None") -> list[str]:
+    """Structural and provenance problems of `similar_defect_scan`; empty means none were found.
+    It cannot judge whether the search was sufficient or the fix correct."""
+    label = "similar_defect_scan"
+    if not isinstance(scan, dict):
+        return [f"{label} must be an object"]
+    problems: list[str] = []
+    status, kind = scan.get("status"), scan.get("issue_kind")
+    if status not in ("complete", "not-applicable"):
+        problems.append(f"{label}.status must be complete or not-applicable")
+    if kind not in ("bug", "non-bug"):
+        problems.append(f"{label}.issue_kind must be bug or non-bug")
+    reviewer = scan.get("reviewer")
+    if not isinstance(reviewer, dict) or reviewer.get("confirmed") is not True:
+        problems.append(f"{label}.reviewer.confirmed must be true (the independent Reviewer's verdict)")
+    elif not covers_head(ctx, reviewer.get("head_sha"), sha, f"{label}.reviewer"):
+        problems.append(f"{label}.reviewer.head_sha is for another HEAD")
+    if status == "not-applicable":
+        if kind == "bug":
+            problems.append(f"{label}: a bug Issue cannot be not-applicable; run the scan")
+        if not nontrivial(scan.get("reason"), 25):
+            problems.append(f"{label}: not-applicable needs a specific reason")
+        return problems
+    if not isinstance(scan.get("class"), str) or not SCAN_CLASS.fullmatch(scan["class"]):
+        problems.append(f"{label}.class must be a short kebab-case label")
+    if not nontrivial(scan.get("invariant")):
+        problems.append(f"{label}.invariant lacks a concrete statement")
+    base_sha = scan.get("base_sha")
+    if not isinstance(base_sha, str) or not SHA.fullmatch(base_sha):
+        problems.append(f"{label}.base_sha must be a full 40-hex SHA")
+    elif not git_answer(worktree, "merge-base", "--is-ancestor", base_sha, sha):
+        problems.append(f"{label}.base_sha {base_sha} is not an ancestor of HEAD")
+    queries = scan.get("queries")
+    hits: dict[str, int] = {}
+    if not isinstance(queries, list) or not queries:
+        problems.append(f"{label}.queries must list the searches")
+        queries = []
+    for i, q in enumerate(queries):
+        where = f"{label}.queries[{i}]"
+        if not isinstance(q, dict) or not isinstance(q.get("id"), str) or not q["id"].strip():
+            problems.append(f"{where}: needs an id")
+            continue
+        if q["id"] in hits:
+            problems.append(f"{where}: duplicate id {q['id']!r}")
+            continue
+        if q.get("kind") not in ("git-grep", "family"):
+            problems.append(f"{where}: kind must be git-grep or family")
+        if not isinstance(q.get("scope"), str) or not q["scope"].strip():
+            problems.append(f"{where}: scope missing")
+        if not nontrivial(q.get("pattern" if q.get("kind") == "git-grep" else "description"), 3):
+            problems.append(f"{where}: a git-grep query needs its pattern, a family query its description")
+        if not _scan_int(q.get("hits"), 0):
+            problems.append(f"{where}: hits must be a non-negative integer")
+        hits[q["id"]] = q.get("hits") if _scan_int(q.get("hits"), 0) else 0
+    if not any(isinstance(q, dict) and q.get("kind") == "git-grep" and q.get("scope") == "repo" for q in queries):
+        problems.append(f"{label}: needs a repository-wide git-grep query (scope: repo)")
+    if not any(isinstance(q, dict) and q.get("kind") == "family" for q in queries):
+        problems.append(f"{label}: needs an execution-family query (kind: family)")
+    candidates = scan.get("candidates")
+    if not isinstance(candidates, list):
+        problems.append(f"{label}.candidates must be a list")
+        candidates = []
+    accounted = dict.fromkeys(hits, 0)
+    for i, c in enumerate(candidates):
+        where = f"{label}.candidates[{i}]"
+        if not isinstance(c, dict):
+            problems.append(f"{where}: must be an object")
+            continue
+        if not isinstance(c.get("location"), str) or not c["location"].strip():
+            problems.append(f"{where}: location missing")
+        ids = c.get("query_ids")
+        # isinstance first: the file is agent-written JSON, and `x in hits` raises on a list or object.
+        named = [x for x in ids if isinstance(x, str) and x in hits] if isinstance(ids, list) else []
+        if not isinstance(ids, list) or not ids or len(named) != len(ids):
+            problems.append(f"{where}: query_ids must be a non-empty list of listed query ids (strings)")
+        if not _scan_int(c.get("hits"), 1):
+            problems.append(f"{where}: hits must be a positive integer")
+        else:
+            for x in set(named):
+                accounted[x] += c["hits"]
+        cls = c.get("classification")
+        if cls not in SCAN_CLASSIFICATIONS:
+            problems.append(f"{where}: unknown classification {cls!r}")
+        elif cls == "unconfirmed":
+            problems.append(f"{where}: unconfirmed candidate; investigate it before the scan is complete")
+        elif cls in SCAN_MUST_RESOLVE and c.get("resolved") is not True:
+            problems.append(f"{where}: {cls} must be fixed in this change (resolved: true)")
+        elif cls == "separate-defect" and c.get("follow_up_issue_url") is None:
+            problems.append(f"{where}: separate-defect needs follow_up_issue_url")
+        for field in ("follow_up_issue_url", "related_issue_url"):
+            _, problem = follow_up_number(c, repo, issue, field)
+            if problem:
+                problems.append(f"{where}: {problem}")
+        if not nontrivial(c.get("evidence"), 10):
+            problems.append(f"{where}: evidence missing")
+    for qid, total in hits.items():
+        if accounted[qid] != total:
+            problems.append(f"{label}: query {qid!r} has {total} hits but its candidates account for "
+                            f"{accounted[qid]}; classify every hit")
+    risk = scan.get("recurrence_risk")
+    if risk not in ("yes", "no"):
+        problems.append(f"{label}.recurrence_risk must be yes or no")
+    elif risk == "yes":
+        guard = scan.get("guard")
+        path = guard.get("path") if isinstance(guard, dict) else None
+        if not isinstance(guard, dict) or guard.get("status") not in ("added", "existing"):
+            problems.append(f"{label}.guard.status must be added or existing when recurrence_risk is yes")
+        elif not isinstance(path, str) or not path.strip() or path.startswith("/") or ".." in path.split("/"):
+            problems.append(f"{label}.guard.path must be a repository-relative path")
+        else:
+            listed = git(worktree, "ls-tree", sha, "--", path)
+            if not listed or listed.split(None, 3)[1:2] != ["blob"] or listed.split("\t", 1)[-1] != path:
+                problems.append(f"{label}.guard.path {path} is not a file at HEAD")
+            elif guard["status"] == "added":
+                if merge_base is None:
+                    problems.append(f"{label}.guard: cannot tell whether {path} changed (no merge-base)")
+                elif path not in git(worktree, "diff", "--name-only", "-z", merge_base, sha).split("\0"):
+                    problems.append(f"{label}.guard.path {path} is 'added' but unchanged on this branch")
+        if isinstance(guard, dict) and not nontrivial(guard.get("negative_control"), 20):
+            problems.append(f"{label}.guard.negative_control must say why the guard fails on base")
+    return problems
+
+
+def similar_scan_report(evidence: dict[str, Any], *, repo: str, issue: int, worktree: Path, sha: str,
+                        merge_base: str | None, ctx: "repo_evidence.Context | None") -> dict[str, Any]:
+    """`{"enforced", "status": pass|warn|missing, "problems"}` for references/similar-defect-scan.md.
+    A git failure is a problem, never a silent pass. So is any other exception: in advisory mode the
+    field must never stop the gate, and enforced, the problem blocks like every other one. The shape
+    checks in _scan_problems come first; tests require that no case of their type matrix lands here."""
+    if "similar_defect_scan" not in evidence:
+        problems = ["similar_defect_scan is absent (references/similar-defect-scan.md)"]
+        return {"enforced": SIMILAR_SCAN_ENFORCED, "status": "missing", "problems": problems}
+    try:
+        problems = _scan_problems(evidence["similar_defect_scan"], repo=repo, issue=issue, worktree=worktree,
+                                  sha=sha, merge_base=merge_base, ctx=ctx)
+    except GateError as exc:
+        problems = [f"similar_defect_scan could not be checked: {exc}"]
+    except Exception as exc:  # noqa: BLE001 -- reported as a problem, never a pass
+        problems = [f"similar_defect_scan could not be checked (internal error {type(exc).__name__}: {exc})"]
+    return {"enforced": SIMILAR_SCAN_ENFORCED, "status": "warn" if problems else "pass", "problems": problems}
+
+
 ISSUE_RESOLUTIONS = ("fixes", "partial")
 DISPUTE_DISPOSITIONS = ("invalid", "needs_evidence", "out_of_scope")
 
@@ -276,22 +445,23 @@ def leaves_issue_open(item: dict[str, Any]) -> bool:
     return item.get("disposition") == "out_of_scope" and item.get("follow_up_issue_url") is None
 
 
-def follow_up_number(item: dict[str, Any], repo: str, issue: int) -> tuple[int | None, str | None]:
-    """The follow-up Issue number named by `follow_up_issue_url`, or an error message.
+def follow_up_number(item: dict[str, Any], repo: str, issue: int,
+                     field: str = "follow_up_issue_url") -> tuple[int | None, str | None]:
+    """The Issue number named by `item[field]` (default `follow_up_issue_url`), or an error message.
 
     Only `https://github.com/<this repo>/issues/<M>` (repo compared case-insensitively) with M
     different from this Issue is accepted; (None, None) when the field is absent.
     """
-    url = item.get("follow_up_issue_url")
+    url = item.get(field)
     if url is None:
         return None, None
     # At most 10 digits (GitHub numbers are 32-bit), so int() never sees an oversized literal.
     found = re.fullmatch(re.escape(f"https://github.com/{repo}/issues/") + r"([1-9][0-9]{0,9})",
                          url, re.IGNORECASE) if isinstance(url, str) else None
     if found is None:
-        return None, f"follow_up_issue_url must be https://github.com/{repo}/issues/<number>"
+        return None, f"{field} must be https://github.com/{repo}/issues/<number>"
     if int(found.group(1)) == issue:
-        return None, f"follow_up_issue_url must be a different Issue than #{issue}"
+        return None, f"{field} must be a different Issue than #{issue}"
     return int(found.group(1)), None
 
 
@@ -523,13 +693,16 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
     if not branch or branch == base or branch in ("main", "master"):
         errors.append("Issue must use a dedicated non-base branch")
     secret_summary: dict[str, Any] = {"status": "NOT_RUN", "reason": "no valid base branch"}
+    merge_base: str | None = None
     if base:
         try:
             common = git(worktree, "merge-base", f"refs/remotes/{remote}/{base}", "HEAD")
             if not SHA.fullmatch(common):
                 errors.append("Cannot establish commit ancestry against remote base")
-            elif git(worktree, "rev-list", "--count", f"{common}..HEAD") == "0":
-                errors.append("No Issue-specific commits relative to base")
+            else:
+                merge_base = common
+                if git(worktree, "rev-list", "--count", f"{common}..HEAD") == "0":
+                    errors.append("No Issue-specific commits relative to base")
         except GateError as exc:
             errors.append(str(exc))
         # Every commit of the branch, right where its base is established: a value that a later commit
@@ -539,6 +712,10 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
     ctx = repo_evidence.Context.load(worktree, sha, f"refs/remotes/{remote}/{base}" if base else None)
     errors.extend(check_evidence(evidence, repo=repo, issue=issue, sha=sha,
                                  branch=branch, base=base, evidence_dir=evidence_path.parent, ctx=ctx))
+    scan_report = similar_scan_report(evidence, repo=repo, issue=issue, worktree=worktree, sha=sha,
+                                      merge_base=merge_base, ctx=ctx)
+    if SIMILAR_SCAN_ENFORCED:
+        errors.extend(scan_report["problems"])
     if evidence.get("disputed_issue_claims"):
         thread = None
         try:
@@ -565,7 +742,8 @@ def evaluate(*, repo: str, issue: int, worktree: Path, evidence_path: Path,
         errors.append(f"GitHub duplicate/issue validation unavailable: {exc}")
     return errors, {"repo": repo, "issue": issue, "head_sha": sha, "branch": branch, "stage": stage,
                     "issue_resolution": evidence.get("issue_resolution", "fixes"),
-                    "repo_evidence": ctx.report(), "secret_scan": secret_summary}
+                    "repo_evidence": ctx.report(), "secret_scan": secret_summary,
+                    "similar_defect_scan": scan_report}
 
 
 def main(argv: list[str] | None = None) -> int:
