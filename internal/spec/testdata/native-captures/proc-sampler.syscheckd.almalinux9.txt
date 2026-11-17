@@ -1,0 +1,26 @@
+# AlmaLinux 9.8 VM, kernel 5.14.0-687.5.3.el9_8.x86_64, systemd 252 (252-67.el9_8.4.alma.1), Wazuh 4.14.1.
+# Read-only in-guest sampler during a natural fresh apply of the pilot candidate cbf23c42 (Issue #330), with the
+# agent's real enrolment and Wazuh's own `restart.sh agent reload`.
+# Sampler output (not raw /proc files): comm, exe (readlink), cgroup and stat field 22 (starttime, clock ticks since
+# boot) read from /proc/<pid>/ the first time the process was seen; `[n]` is uptime in seconds at that moment and
+# `uptime_now` is the uptime in seconds at the moment the process was first seen. cmdline was not captured for it.
+== syscheckd:28363 first seen [353.75] uptime_now=353.75
+comm=wazuh-syscheckd
+exe=/var/ossec/bin/wazuh-syscheckd
+cgroup=0::/system.slice/wazuh-agent.service
+starttime=35367
+== syscheckd:29702 first seen [362.89] uptime_now=362.89
+comm=wazuh-syscheckd
+exe=/var/ossec/bin/wazuh-syscheckd
+cgroup=0::/system.slice/wazuh-agent.service
+starttime=36280
+== syscheckd:30920 first seen [370.30] uptime_now=370.30
+comm=wazuh-syscheckd
+exe=/var/ossec/bin/wazuh-syscheckd
+cgroup=0::/system.slice/wazuh-agent.service
+starttime=37026
+== syscheckd:32442 first seen [381.88] uptime_now=381.88
+comm=wazuh-syscheckd
+exe=/var/ossec/bin/wazuh-syscheckd
+cgroup=0::/system.slice/wazuh-agent.service
+starttime=38186
