@@ -10,6 +10,7 @@ package rosteroracletest
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kjelly/pilot/internal/ansible"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -236,6 +238,9 @@ func Env(t *testing.T, dir string) []string {
 		"ANSIBLE_NOCOLOR=1",
 		"ANSIBLE_LOCALHOST_WARNING=False",
 		"ANSIBLE_INVENTORY_UNPARSED_WARNING=False",
+		// The output has no_log removed and can quote roster values: it must
+		// never reach a real controller log, whatever the machine configures.
+		"ANSIBLE_LOG_PATH=",
 	)
 }
 
@@ -271,7 +276,14 @@ func Run(t *testing.T, dir string, play Play, rosterPath, varsPath string) Outco
 	cmd.Env = Env(t, dir)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	err := cmd.Run()
+	// Every Ansible command runs while its log is held (TestAnsibleCommandsHoldTheLog);
+	// Env sets an empty ANSIBLE_LOG_PATH, so there is no log, and the hold is a no-op.
+	release, err := ansible.HoldCommandLog(context.Background(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cmd.Run()
+	release()
 	res := Outcome{Output: out.String()}
 	if err == nil {
 		res.OK = true

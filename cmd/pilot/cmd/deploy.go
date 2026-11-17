@@ -1932,7 +1932,7 @@ func executeRecordedDeploymentWithAuthorizationResult(ctx context.Context, runne
 	}
 	// Equally before the plan, the dependency chain, any preview and any ssh: a
 	// roster password that refers to a variable nothing defines fails apply
-	// inside a no_log task that hides which one (issue #165).
+	// inside a no_log task, whose fatal result is censored, so mid-run (issue #165).
 	err = precheckRosterReferences(ctx, out, catalog, components, inv, limit, extraVars, vault)
 	if err != nil {
 		return DeploymentExecutionResult{}, err
