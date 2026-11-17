@@ -31,14 +31,13 @@ import (
 // ansible.builtin.command defaults expand_argument_vars to true, so `$HOME`
 // (any `$name`) in an argv element is expanded before exec (`$(...)` is not
 // run; ansible-core 2.19.2), and any local user can read the element in
-// /proc/<pid>/cmdline. This lint
-// therefore flags a secret in the command text of a shell, command, raw,
-// expect or script task and in the argv of a command task, and requires
-// no_log: true on every task that passes a secret on stdin. The only argv
-// exemption is the FreeIPA installers (ipa-server-install, ipa-replica-install,
-// ipa-client-install): they take the admin password only as an option, and
-// moving them to stdin is tracked separately (their argv still goes through
-// expand_argument_vars).
+// /proc/<pid>/cmdline. This lint therefore flags a secret in the command text
+// of a shell, command, raw, expect or script task and in the argv of a command
+// task, and requires no_log: true on every task that passes a secret on stdin.
+// The only argv exemption is the FreeIPA installers (ipa-server-install,
+// ipa-replica-install, ipa-client-install): they take the admin password only
+// as an option, and moving them to stdin is tracked separately (their argv
+// still goes through expand_argument_vars).
 //
 // TestRegression_FreeIPAKinitTasksPassPasswordUnchanged is the runtime
 // counterpart: it finds every task that passes a secret on stdin and runs it
@@ -54,9 +53,8 @@ import (
 // secretCommandTextAllowlist counts, per "<path>::<task name>", the tasks
 // that put a secret into command text and are still to be migrated. Only the
 // three htpasswd tasks are left; they are batch 3 of issue #118. The lint
-// fails when a key has more
-// tasks than its count (a copied task with the same name is a new site) and
-// when it has fewer, so the list only shrinks.
+// fails when a key has more tasks than its count (a copied task with the same
+// name is a new site) and when it has fewer, so the list only shrinks.
 var secretCommandTextAllowlist = map[string]int{
 	"playbooks/apply/dcgm-exporter-apply.yml::Step 6: Generate bcrypt hash for basic auth (spec C9; only when the credential changed)":        1,
 	"playbooks/apply/host-monitoring-apply.yml::Step 8: Generate bcrypt hash for basic auth (spec C10; only when the credential changed)":     1,
@@ -66,10 +64,10 @@ var secretCommandTextAllowlist = map[string]int{
 var (
 	jinjaExprRe  = regexp.MustCompile(`(?s)\{\{(.*?)\}\}`)
 	identifierRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
-	// secretIdentRe names the variables that hold a secret. The last three
+	// secretIdentRe names the variables that hold a secret. The last four
 	// groups were added with the argv rule: passphrases, credentials, key
-	// material and one-time passwords (the tree has no variable of those
-	// names today, so they only catch new ones).
+	// material and one-time passwords (no command text, argv or stdin on the
+	// tree reads one today, so they only catch new ones).
 	secretIdentRe = regexp.MustCompile(`(?i)password|passwd|secret|(^|_)pass($|_)|(^|_)pwd($|_)|token|api_?key|(^|_)psk($|_)|passphrase|credential|(^|_)(private|signing|master)_key($|_)|(^|_)otp($|_)`)
 	// Names of files that hold a secret are not the secret.
 	secretPathIdentRe = regexp.MustCompile(`(?i)_(file|path|dir)$`)
