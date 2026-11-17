@@ -1,6 +1,6 @@
 # Runbook — log-server
 
-對齊 [verification spec v2.0](../verification/log-server.md) 與
+對齊 [verification spec v2.1](../verification/log-server.md) 與
 [apply playbook](../../playbooks/apply/log-server-apply.yml)。
 
 ## 0. 目標與範圍
@@ -44,6 +44,14 @@ RELP 使用獨立埠，預設 20514；須提供 CA、server cert/key 與允許�
 `siem_receiver_tcp_port` 必須是十進位 1–65535；非預設埠的 SELinux type 不可屬於其他服務。
 先前建立的 port label 不會自動刪除。
 
+logrotate 策略（`/etc/logrotate.d/siem-incoming`）以 `su <siem_log_owner> <siem_log_owner>` 輪替：
+Ubuntu 是 `syslog`，EL 是 `root`（等於不切換），與上面建立落地根目錄的擁有者相同。
+logrotate 以 root 展開 `siem_log_root/*/*.log` 後依完整路徑 rename、compress、刪除，
+卻不擋路徑中間的 symlink 目錄；各來源目錄由 rsyslog 帳號建立，若輪替仍以 root 進行，
+該帳號把某個來源目錄換成 symlink，就能讓 root 的每日輪替在別處動手。
+改用落地根目錄擁有者的身分輪替後，這個影響範圍只剩 rsyslog 帳號本來就能寫的目錄。
+postrotate 腳本仍以 root 執行，`systemctl kill -s HUP rsyslog.service` 不受影響。
+
 ## 2. 部署與驗收流程
 
 先讀實際 inventory，確認接收端與同機 forwarding 的角色都存在，再部署 receiver、sender。
@@ -52,10 +60,12 @@ RELP 使用獨立埠，預設 20514；須提供 CA、server cert/key 與允許�
 check mode → apply → verify → 第二次 apply。上游套件前置只限測試 VM，
 正式主機由部署方先提供具有必要能力的套件與 PKI。
 
-spec 共 C1–C11。C4 檢查實際載入的 transport、有效材料、daemon listener 與 TCP loopback 限制。
+spec 共 C1–C12。C4 檢查實際載入的 transport、有效材料、daemon listener 與 TCP loopback 限制。
 C7/C8 每次注入新的 local6/authpriv nonce，等待它寫入目前設定的根目錄，不能用舊 selftest PASS。
 它們是同機 selftest；跨主機訊息與故障補送的證明由
 [audit forwarding 流程](./audit-log-forwarding.md) 提供。
+C12 對 logrotate 策略跑 `logrotate -d`，確認它列出的 euid/egid 切換是落地根目錄擁有者的身分
+（根目錄屬於 root 時直接通過）；這一行要有至少一個落地檔才會出現。
 
 ## 3. 自我轉送與來源身分
 
