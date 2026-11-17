@@ -197,13 +197,13 @@ def main():
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
             with open(summary, "a") as out:
-                out.write(f"CI validation: {'reuse full run ' + str(run['id']) if run else 'full run required'}\n")
+                out.write(f"CI validation reuse: {'reuse full run ' + str(run['id']) if run else 'no reusable full run; use the selected CI profile'}\n")
     except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile,
             subprocess.SubprocessError) as exc:
         if args.record:
             print(f"cannot record validation: {type(exc).__name__}", file=sys.stderr)
             return 1
-        print(f"Full validation required: {type(exc).__name__}", file=sys.stderr)
+        print(f"Full validation reuse unavailable: {type(exc).__name__}", file=sys.stderr)
         print("evidence_only=false\nreused_run_id=")
     return 0
 

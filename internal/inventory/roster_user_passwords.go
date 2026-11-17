@@ -127,7 +127,7 @@ func RosterUserPasswords(data []byte) (map[string]RosterUserPassword, error) {
 			out[name] = RosterUserPassword{Form: PasswordNotString}
 			continue
 		}
-		kind := ansibleScalarKind(initial)
+		kind := ansibleScalarKind(initial, nil)
 		res := RosterUserPassword{Form: passwordFormOf(kind)}
 		if res.Form == PasswordLiteral {
 			res.Value = initial.Value

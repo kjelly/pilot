@@ -169,8 +169,13 @@ fixture 的前三步（docker、manager、agent）只能跑一次：一旦有主
 8. **失敗訊息看不到原因。** ansible 的失敗摘要只有 `non-zero return code`，真正的 typed 拒絕原因在 helper 的 stdout 裡；
    現在 CLI 會從失敗輸出撈出來印成「原因：…」（`internal/hotfix.Refusals`，用真實擷取當 fixture）。
 9. **EL 的 who-data 步驟有既有的重啟 race（不是這個變更造成，但會影響「hotfix 之後重裝」）。** Wazuh 自己的 `restart.sh`
-   （註冊後重啟 agent）可能和 pilot 的 `systemctl restart wazuh-agent` 重疊，留下一個在 audit endpoint 出現**之前**就啟動的
-   `wazuh-syscheckd`（journal：`remains running after unit stopped`、`already running`），於是
-   `native Wazuh audit stream or watches did not appear after restarting the agent`，約 60 秒後 apply 失敗。
-   在 pilot 自己的一般 `wazuh-fim-apply.yml`（還沒有 hotfix 參與）也發生過一次，同一台主機重跑即通過。若 hotfix 之後的重裝在 EL
-   卡在這一步，**直接重跑 `pilot deploy` 即可**；它需要另外追根本原因，不是在 hotfix 裡加 workaround。
+   （註冊後收到第一份 shared config 時重啟 agent）可能和 pilot 的 `systemctl restart wazuh-agent` 重疊，留下一個在 audit
+   endpoint 出現**之前**就啟動的 `wazuh-syscheckd`（journal：`remains running after unit stopped`、`already running`），
+   於是舊版 coordinator 以 `native Wazuh audit stream or watches did not appear after restarting the agent` 在約 60 秒後讓
+   apply 失敗。在 pilot 自己的一般 `wazuh-fim-apply.yml`（還沒有 hotfix 參與）也發生過一次，同一台主機重跑即通過。
+   根因由 Issue #330 處理，修在 coordinator 的 `agent-whodata-ensure`（不是 hotfix 的 workaround）：重啟前等 agent 服務沒有進行中的
+   reload/restart（有上限，逾時則不重啟）；之後若 agent 只有一個 syscheckd、而且是在 endpoint 之後啟動的（例如 Wazuh 自己的
+   reload 啟動的），不重啟也不殺它，給它時限就緒，時限內沒就緒才（再確認一次 settle 後）重啟一次；其餘情形直接重啟一次，並把
+   失敗拆成各自固定訊息（`docs/verification/wazuh-fim.md` §2 Step 11a）。實跑的觀察與其限制（機制未證明的相關性）見
+   `docs/runbooks/wazuh-fim.md` §5.2 與 [LATEST.md](../evidence/wazuh-fim/LATEST.md) 列出此變更時所指的 sanitized record。若
+   hotfix 之後的重裝在 EL 卡在這一步，**直接重跑 `pilot deploy` 仍是恢復方式**。

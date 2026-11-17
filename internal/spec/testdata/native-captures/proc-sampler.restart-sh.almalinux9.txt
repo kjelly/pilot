@@ -1,0 +1,14 @@
+# AlmaLinux 9.8 VM, kernel 5.14.0-687.5.3.el9_8.x86_64, systemd 252 (252-67.el9_8.4.alma.1), Wazuh 4.14.1.
+# Read-only in-guest sampler during a natural fresh apply of the pilot candidate cbf23c42 (Issue #330), with the
+# agent's real enrolment and Wazuh's own `restart.sh agent reload`.
+# Sampler output (not raw /proc files): comm, cmdline, exe (readlink), cgroup and stat field 22 (starttime, clock
+# ticks since boot) read from /proc/<pid>/ the first time the process was seen; `[n]` is uptime in seconds at that
+# moment. The sampler rendered the NULs of cmdline as spaces and left a trailing space, removed here (whitespace
+# only); ppid_cmd is the parent's cmdline rendered the same way.
+== restart:29611 first seen [361.99]
+comm=restart.sh
+cmdline=/bin/sh active-response/bin/restart.sh agent reload
+exe=/usr/bin/bash
+cgroup=0::/system.slice/wazuh-agent.service
+starttime=36197
+ppid_cmd=/var/ossec/bin/wazuh-execd
