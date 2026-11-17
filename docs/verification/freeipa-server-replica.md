@@ -44,6 +44,13 @@
    在 `playbooks/apply/freeipa-client-apply.yml` 順手修掉(拿掉 `services=`
    裡的 `sudo`,交給 socket activation)。
 
+**2026-11-17 起（issue #362）這支 playbook 由 `playbooks/site.yml` 依主機角色套用**：inventory 把
+`freeipa-server-replica` 指定給某台主機，全站 `pilot deploy` 就會把它升級成 replica（排在
+`freeipa-server` 之後、`dns` 與 `freeipa-client` 之前）；`site.yml` 不再把它靜默略過。因此以下三件事
+在任何變更之前就檢查並明確失敗：`ipa_server_ip` 缺少時（改由 `freeipa-server` 主機的 `ansible_host`
+推導）、多台 replica 沒有各自設定 `freeipa_replica_fqdn` 或 FQDN 重複／等於 primary 的、以及 primary
+沒有原生 DNS 卻解析不到這台的 FQDN（下一段的手動前置步驟）。Checklist 沒有變。
+
 另外實跑也發現一個**只做手動修補、沒有寫進任何 playbook 的必要步驟**：套用
 `freeipa-server-replica-apply.yml` 前,**primary 必須先手動把新 replica 的
 FQDN/IP pin 進自己的 `/etc/hosts`**（本 playbook 只會 pin 自己端）,否則
@@ -218,7 +225,7 @@ pass=15 fail=0 skip=0**(2026-07-09T09:41Z)。
 
 | ID | 例外內容 | 適用環境 | 期限 |
 |----|---------|---------|------|
-| — | **套用前必須手動把這台的 FQDN/IP pin 進 primary（以及其它既有節點）的 `/etc/hosts`**：`ipa-replica-install` 在 promotion 模式下會叫 primary 反過來對這台做一次 remote conncheck（primary 主動連回這台的 389/636/88/464/80/443），沒有內建 DNS 時 primary 端解析不到新節點的 FQDN 就會整個 install 失敗，錯誤訊息是 `ERROR: Port check failed! Unable to resolve host name 'ipa2.ipa.pilot.internal'`（實跑踩過，見 §0 的真實 log）。本 playbook 只會 pin 自己端（新 replica）的 `/etc/hosts`，**不會**（也做不到——vm-target 的 ansible inventory 一次只認得一台機器）幫你去改 primary 的 `/etc/hosts`。套用前先手動在 primary（以及任何已存在的其它 replica）上加一行 `<這台的 IP> <這台的 FQDN> <短名>`，或者從一開始就在整個 realm 啟用真正的 DNS（`ipa_setup_dns=true`，且所有節點一致，見下一條例外） | 全部 | 永久 |
+| — | **套用前必須手動把這台的 FQDN/IP pin 進 primary（以及其它既有節點）的 `/etc/hosts`**：`ipa-replica-install` 在 promotion 模式下會叫 primary 反過來對這台做一次 remote conncheck（primary 主動連回這台的 389/636/88/464/80/443），沒有內建 DNS 時 primary 端解析不到新節點的 FQDN 就會整個 install 失敗，錯誤訊息是 `ERROR: Port check failed! Unable to resolve host name 'ipa2.ipa.pilot.internal'`（實跑踩過，見 §0 的真實 log）。本 playbook 只會 pin 自己端（新 replica）的 `/etc/hosts`，**不會**（也做不到——vm-target 的 ansible inventory 一次只認得一台機器）幫你去改 primary 的 `/etc/hosts`。套用前先手動在 primary（以及任何已存在的其它 replica）上加一行 `<這台的 IP> <這台的 FQDN> <短名>`，或者從一開始就在整個 realm 啟用真正的 DNS（`ipa_setup_dns=true`，且所有節點一致，見下一條例外）。2026-11-17 起（issue #362）primary 沒有原生 DNS（`freeipa_setup_dns: false`）時，playbook 在 pre_tasks、任何變更之前，用 delegate 到 primary 的唯讀 `getent ahostsv4 <這台的 FQDN>` 檢查這一步：解析不到、或解析到的位址不是這台的 IP，就在 hostname、套件、`ipa-client-install` 都還沒動之前失敗，訊息指名這個手動步驟；primary 有原生 DNS 時不跑這道 gate（改由 self-register 登記 A record）；inventory 沒有 `freeipa-server` 主機可問時（單機 `-e target_group=all` 測試）也略過，手動步驟仍然需要 | 全部 | 永久 |
 | — | **CA renewal master 不會自動轉移**：`ipa_replica_setup_ca=true` 只讓這台成為 CA **replica**（能簽憑證),CA **renewal**(定期更新 CA 憑證本身)的角色仍留在原本那台,直到有人手動 `ipa config-mod --ca-renewal-master-server=<fqdn>` 轉移。原本那台(通常是 primary)下線前忘記轉移,會導致全網 CA 憑證到期後無人續期。本 playbook 刻意不自動做這件事——這是需要人判斷「該轉去哪台」的操作,不該被套用腳本悄悄做掉 | 全部 | 永久 |
 | — | **DNS/NTP 選項不會跨節點同步**：`ipa_setup_dns`/`ipa_setup_ntp` 只控制「這台自己」,不會去讀 primary 或其它既有 replica 目前的設定。若站台混用(某些節點開 DNS、某些沒開),靠 DNS SRV record 做 client failover 的機制會不完整。操作者要自己保證同一個 realm 裡所有節點的這兩個開關一致 | 全部 | 永久 |
 | — | **既有 client 的 failover 不會自動補上**:加入這台 replica 後,舊有的 `freeipa-client-apply.yml` 已 enroll 過的主機,`/etc/sssd/sssd.conf` 的 `ipa_server`/DNS 設定不會自動改成看得到新節點。要讓既有 client 真正 failover 到新節點,需要另外重跑 client 端設定(補 `ipa_server` 多值清單,或啟用 DNS SRV)——這在 client 端 spec(`freeipa-client.md`)的範圍,不在本檔 | 全部 | 永久 |
@@ -381,3 +388,4 @@ Online status: Offline
 | 2026-07-09 | v1.0 | **已實跑**:三台 vm-target(primary/replica/client)跑完整鏈路,`pilot vm-target verify` 15/15 PASS(§3)。修正 apply playbook 兩個實跑撞出的 bug——(1) `ipa-replica-install` promotion 模式不接受 NTP 旗標,(2) `freeipa-client-apply.yml` 的 `services=` 塞 `sudo` 跟 SSSD socket-activated sudo responder 衝突(既有 bug,順手修掉)。C14/C15 的查詢方式改為 root+ldapi(`-Y EXTERNAL`),因為 `cn=masters,cn=ipa,cn=etc` 匿名讀不到(實跑才發現)。新增 §9 完整記錄 client 端 HA failover 實測(kinit 作為「兩台都掛 = 無法登入」的權威證明,並誠實記錄 SSSD offline cache 的補充說明);§5 新增「primary 需手動 pin 新 replica /etc/hosts」的例外 | pilot |
 | 2026-10-12 | v1.1 | Checklist 不變。step 1 的 `ipa-client-install` 會 restart sshd，`dnf install` FreeIPA 套件本身也會讓 sshd 被 restart（2026-10-12 在全新 AlmaLinux 9 主機實測：systemd「Queuing reload/restart jobs for marked units」）：pre_tasks 在任何變更與套件安裝之前先跑 `sshd -t`（沿用 step 1 的 `creates:`），失敗就拒絕、什麼都不改。step 2 的 `ipa-replica-install`（promote 已 enroll 的 client）實測不會 restart sshd（MainPID 不變），不另加檢查；`internal/spec/sshd_config_write_regression_test.go::TestRegression_IpaInstallersRunAfterAnSshdCheck`（allowlist 清空）與 `sshd_config_write_behavior_test.go::TestRegression_IpaInstallersCheckSshdFirst` 鎖住；實跑（含對照組）見 [`docs/evidence/sshd-config-writes/2026-10-12-2fe32c6.md`](../evidence/sshd-config-writes/2026-10-12-2fe32c6.md) | pilot |
 | 2026-10-15 | v1.2 | Checklist 不變。DNS 裝好之後，每次 apply 都用 `ipa dnsserver-mod <ipa_replica_fqdn> --forwarder=…` 讓這台 server 自己的 forwarders 等於 `ipa_dns_forwarders`／`freeipa_dns_forwarders`（兩者都沒設時清掉，沿用全域 forwarders）。之前只有安裝時的 `--forwarder` 會設，之後改設定不會生效。`<位址> port <N>` 寫法在這次 run 會呼叫 `ipa-replica-install`／`ipa-dns-install` 時，於 pre_tasks、任何變更之前擋下（PR #73 follow-up 第二輪） | pilot |
+| 2026-11-17 | v1.3 | Checklist 不變（issue #362）。`playbooks/site.yml` 依主機角色套用這支 playbook（`freeipa-server` 之後、`dns` 與 `freeipa-client` 之前）。pre_tasks 在任何變更之前新增三道 fail-closed 檢查：`ipa_server_ip` 改成與 `freeipa-client-apply.yml` 相同的推導（`freeipa_server_ip`，否則 `freeipa-server` 主機的 `ansible_host`，仍為空就失敗；原本預設成這台自己的位址，訊息誤導）；多台 replica 必須各自設定 `freeipa_replica_fqdn`、FQDN 不得重複或等於 primary（`tasks/freeipa-server-pool.yml` 的同一組規則，原本要等到排在它之後的 `dns`／`freeipa-client` 才會擋，replica 早已升級）；primary 沒有原生 DNS 時，primary 必須解析得到這台的 FQDN（§5 第一條）。「primary 是否有原生 DNS」的兩個 fact 從 tasks 移到 pre_tasks（`always`）。已排在 `freeipa-server` 之後的既有 inventory 在下一次全站部署時就會被升級成 replica | pilot |

@@ -116,8 +116,14 @@ server/replica（`ipa-server-install`/`ipa-replica-install --setup-dns`），
   `internal-endpoint-apply.yml` 的 C9 baseline 用同一支共用檔，`--tags C9` 也會跑這兩步。驗收用 spec 的 C8。
 - 本檔不建立/管理 FreeIPA server 本身，也不管理 DNS zone/record 資料
   （那是 `freeipa-dns-apply.yml` 的職責）。
-- 套用範圍：任意主機，包含 FreeIPA server/replica 自己。day-2/opt-in，
-  **不在 `site.yml`**（比照 `freeipa-dns`/`freeipa-server-replica`）。
+- 套用範圍：任意主機，包含 FreeIPA server/replica 自己。opt-in、依主機角色套用：
+  inventory 把 `freeipa-dns-client` 指定給某台主機，才會改寫那台的 resolver。
+- **行為變更（2026-11-17，issue #362）**：`playbooks/site.yml` 現在會執行這支 playbook，
+  緊接在 `freeipa-client` 之後、所有跨角色使用者之前（排在 `freeipa-server-replica` 與 `dns` 之後）。
+  **已經把 `freeipa-dns-client` 指定給某些主機的既有 inventory，下一次全站 `pilot deploy`
+  就會改寫那些主機的 resolver**；以前全站部署會靜默略過這個角色，要另外單獨跑。沒有主機被指定時，
+  行為跟以前一樣。部分 `--limit` 的全站部署只會在被限定的主機上套用它，並依 `--limit` 的依賴展開
+  帶進 FreeIPA server。不想讓某台主機被改寫，先把它從 `freeipa-dns-client` group 移除。
 - 兩種 OS 路徑：
   - Debian/Ubuntu：`systemd-resolved.conf.d` drop-in（nss-resolve/`resolvectl`
     路徑）+ 直寫 `/etc/resolv.conf`（`dig`/傳統 glibc resolver 路徑，繞過

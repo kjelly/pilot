@@ -462,21 +462,42 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 `os-patch-sla`(用 `patch_stage`)、`host-monitoring`、`dcgm-exporter`、`prometheus`、`thanos-query`、
 `detection-engine`、`alertmanager`、`snmp-exporter`、`dashboard`、`log-shipping`、`reverse-proxy`、`internal-endpoint`、
 `agent-controller`、`gateway-scope`、`pilot-access-gateway`、`pilot-access-directory`、`pilot-session-store`、`pilot-access-target-policy`、`login-probe`)。
-`freeipa-server-replica`、
-`freeipa-realm-replacement`、
-`freeipa-dns`、`freeipa-dns-client`、`freeipa-ca-trust`、`internal-endpoint`、`agent-controller` 與後五支可觀測性堆疊一樣是**還沒接進
-`site.yml`**(前三者是刻意的:day-2、opt-in 操作,不是每個部署都要的穩態
-角色,比照 `freeipa-identity` 的待遇;`agent-controller` 是 experimental
-Phase 1(見 `docs/architecture/agent-monitoring.md`);後五支則是一開始清點時漏掉,
-2026-07-09 一併補齊;`snmp-exporter` 也是 opt-in、`site.include: false`——
-同 `prometheus`/`alertmanager`/`thanos-query`/`detection-engine`/`dashboard`,
-且 Phase 0 階段連 task 都還沒有,見
-`docs/superpowers/specs/2026-09-01-snmp-monitoring-integration-spec.md`;`pilot-access-target-policy`
-同樣是 day-2/opt-in、`site.include: false`——收緊 transport target 的 sshd 設定是刻意的操作,
-不是每次全站部署都該發生的事,見
-`docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md` §13)——
-**不要因為一支 playbook「還沒接進 site.yml」或
-「角色感覺不重要」就假設它可以不用 gate**,新增任何 apply playbook 一律要帶。
+**哪些元件放進 `playbooks/site.yml`(issue #362)**:不是所有 apply playbook 都該放進
+`site.yml`。一個元件要**同時符合下面四點**,才 import 進去,並由
+inventory 的主機角色決定要不要執行(`site.include: false`、`optIn: true` 的元件由既有的 opt-in
+篩選依主機角色納入,沒有主機被指定時行為不變):
+
+1. **由主機角色表達**:inventory 把角色指定給主機,代表「這台主機應該長這樣」。
+2. **可以重複執行**:第二次 apply 是 `changed=0`,每次部署都跑也安全。
+3. **第一次套用可以自動進行**:角色一被指定就該直接執行;前置條件不滿足時要明確失敗並說明原因,
+   不能卡住,也不能回報成功。
+4. **不需要額外的單次授權**:例如 `-e wazuh_upgrade=true`,或需要人確認某個不可逆的步驟。
+
+符合的放進 `site.yml`:inventory 是唯一的期望狀態來源,主機重建後一次全站部署就能全部補回來,
+冪等性檢查和 staging 驗證也都涵蓋得到。不符合的維持單獨執行(reconcile、hotfix、decommission、CLI),
+避免每次例行部署都可能觸發不可逆或影響全組織的變更。
+
+目前的歸類:`freeipa-server-replica` 與 `freeipa-dns-client` 符合,2026-11-17 起已 import 進
+`site.yml`(replica 在 `freeipa-server` 之後、`dns` 與 `freeipa-client` 之前;`freeipa-dns-client` 在
+`freeipa-client` 之後、所有跨角色使用者之前;順序的理由寫在 `site.yml` 的註解)。已經把這兩個角色指定給主機的
+既有 inventory,下一次全站部署就會把那些主機升級成 replica、改寫 resolver;以前全站部署會靜默略過它們,
+而且 run 仍回報成功。`agent-controller` 等 kjelly/pilot#195(它的 `always` 備份步驟每次執行都回報
+changed,不符合第 2 點),修好之後再放。其餘刻意單獨執行:`freeipa-identity`(名冊驅動,不是主機角色,
+影響所有使用者)、`freeipa-dns`、`internal-endpoint`(manifest 驅動的 reconciler,角色與 `freeipa-server`
+共用)、`freeipa-realm-replacement`(一次性、不可逆)、`pilot-gateway-scope`(`pilot gateway-scope` CLI 的後端)、
+`pilot-access-target-policy`(刻意收緊 transport target 的 sshd,要由人主動觸發,見
+`docs/superpowers/specs/2026-09-23-pilot-access-gateway-captive-ssh-transport-spec.md` §13)、
+`freeipa-ca-trust`(role 是 `all`,沒有可指定的主機)。
+
+`cmd/pilot/cmd/site_yml_consistency_test.go::TestSiteYMLHostRolesAreImportedOrStandalone` 把這份歸類鎖住:
+role 不是 `all` 的 contract,apply playbook 要嘛在 `site.yml`,要嘛列在 `siteYMLStandaloneComponents` 並寫明
+違反第幾點;過時的項目(已經 import、已移除)會讓測試失敗;每個 import 的 tags 要帶元件 ID(`--limit`
+的依賴展開會把 ID 當 `--tags` 交給 ansible);replica 與 dns-client 的順序也鎖住。**新增元件的 PR 必須
+依這四點說明它為什麼放進或不放進 `site.yml`**,並同步更新這個測試。「主機有被指定某個角色、全站部署卻
+不會執行它」的結果仍然不會列出主機和角色,另案追蹤。
+
+**不要因為一支 playbook 單獨執行、或「角色感覺不重要」就假設它可以不用 gate**,新增任何 apply
+playbook 一律要帶。
 
 寫或改任何一支 apply playbook,`pre_tasks` 除了既有的「staging/prod 需要
 confirm 旗標」assert,**必須**同時帶這一道 cross-check(新增同類 playbook 照抄,
@@ -1123,7 +1144,7 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 
 | 配對 | 測試 |
 |---|---|
-| contract `site.include`/`site.tags` ↔ `playbooks/site.yml` 的 `import_playbook` | `cmd/pilot/cmd/site_yml_consistency_test.go::TestSiteYMLImportsEveryReachableComponent` |
+| contract `site.include`/`site.tags` ↔ `playbooks/site.yml` 的 `import_playbook`(host role 要 import 或附理由單獨執行、import tags 帶元件 ID、replica 與 dns-client 的順序,見 §4.3) | `cmd/pilot/cmd/site_yml_consistency_test.go::TestSiteYMLImportsEveryReachableComponent`、`::TestSiteYMLHostRolesAreImportedOrStandalone` |
 | `group_vars/*.example.yml` 期待的 `dist/` artifact ↔ `images/Dockerfile.pilot-cli` | `cmd/pilot/cmd/dockerfile_artifact_consistency_test.go::TestDockerfileBakesEveryDistArtifactGroupVarsExpects` |
 | Go 常數 `pilotSSHConfig` ↔ `pilot-access-gateway-apply.yml` Step 12 的 ssh_config | `cmd/pilot/cmd/portal_ssh_config_sync_test.go::TestPilotSSHConfigMatchesApplyPlaybook` |
 | `docs/verification/*.md` 的 row ↔ apply playbook 的 tag | `cmd/pilot/cmd/tag_coverage_test.go::TestSpecPlaybookTagAlignment`(見 §4.0) |
@@ -1681,6 +1702,7 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 - ❌ 不要因為 Codex/Claude 是主要 authoring 介面，就把 LLM provider / prompt orchestration / agent loop 重新加回 pilot runtime
 - ❌ 新增或移除會產生資料/設定檔的軟體角色時，不要漏改 `group_vars/restic-backup.example.yml` 的對應備份範例（見 §4.2）
 - ❌ 新增/改 stage gate 時，不要只做「confirm 旗標」檢查而漏掉「host 的環境 group 是否與 stage 一致」的 cross-check（見 §4.3）——否則機器已歸類進 `staging`/`prod`，但指令忘了帶 `-e stage=`，會靜默用 `sandbox` 門檻套用
+- ❌ 新增 apply playbook 時，不要沒有依 §4.3 的四點說明它為什麼放進或不放進 `playbooks/site.yml`——放不進去的元件被指定給主機時，全站部署會靜默略過它且 run 仍回報成功（issue #362）
 - ❌ 不要移除或繞過 `playbooks/site.yml` 開頭的 `target_group` 安全閥（見 §4.3）——它擋的是「全站入口誤帶 `-e target_group=` 同時覆寫全部子 playbook 目標」的事故
 - ❌ 新增/改 `playbooks/apply/*.yml` 的 task 標 `tags: [always]` 時，不要漏查它依賴的前置 fact/探測 task 是否也標了 `always`（見 §4.4）——`pre_tasks:` 跟 `tasks:` 都要檢查
 - ❌ 改動 `deploy.go` 的 `--limit`/依賴展開/tags 篩選邏輯時，不要只憑既有 mock 測試綠燈就合併；至少要有一個跨兩跳依賴的 regression test + 一次真實 topology 部署證據（見 §5.5）
@@ -1885,3 +1907,4 @@ git status --short
 | 2026-11-09 | v1.65 | §5.9 第 5 點:更正 v1.61 對 `TestRegression_SSSDCacheClearsOnlyInVettedHelpers` 的描述並補強 lint。v1.61 寫「allowlist 項目不再清快取時要求移除」,但 allowlist 三個檔案中的兩個(`freeipa-sssd-sudo-refresh.py`、`tasks/freeipa-client-server-failover.yml`)的 docstring 或 task `name:` 仍提到 `sss_cache`,真正的呼叫拿掉後 stale 檢查不會觸發(獨立 review 對暫存複本實測)。現在 Python docstring 與 YAML `name:` 不算命中,並新增 `TestSSSDStaleEntryFiresWhenTheRealCallIsRemoved`(對三個真實檔案各拿掉真正的呼叫,要求掃描結果為空)與 `TestSSSDAllowlistProblemsFireBothWays`(未列入與 stale 兩個分支);另擋 `sssctl cache-expire/cache-remove`,單行 argv list(`[sssctl, cache-expire]`、`["sssctl", "cache-expire"]`)也算。偵測不到的寫法(`find -delete`、`mv`、Python 刪除 API、拆成多行或多個 list 項目的 argv、變數組路徑)寫進 §5.9 與測試註解。第一版判斷 docstring 的方式(只看每一行的行首)本身就是 regression:賦值字串(`X = '''…'''`)結尾的 `'''` 被當成 docstring 開頭,之後的程式碼整段不再被掃描(`playbooks/apply/files/wazuh-transaction.py` 約 700 行,對它附加一個真的 `subprocess.run(["sss_cache","-E"])` 仍然通過,獨立 review 實測),base 反而每個非註解行都掃。同 class 的修法不再補字串特例:`pythonProseLines` 以字串狀態掃描整份檔案(單行字串與跳脫、三引號字串、`#` 註解、括號深度、反斜線續行),只在開頭引號決定是不是說明文字(是該邏輯行的第一個 token、結尾引號後只剩空白或註解、不是 f-string);賦值、當參數、接 `.format()`、放在括號裡的三引號字串,連同它結尾那一行,照樣掃描。新增 `TestSSSDPythonProseLines`(精確的行號)、偵測案例的反例(賦值字串、`""", shell=True)`、獨立成行的引數、反斜線續行後的真呼叫)與 `TestSSSDPythonProseLinesMatchPythonAST`(對全部 `playbooks/**/*.py` 以 Python 自己的 `ast` 交叉檢查:被跳過的行必須落在 docstring 內、三引號 docstring 的每一行都必須被跳過、語料必須有非 docstring 的多行字串;沒有 python3 時 skip)。負向證明(暫存的 `git archive` 複本):把兩個跳過函式(HEAD 的 `skipPythonDocstringLine`/`isYAMLNameLine`,現在的 `pythonProseLines`/`isYAMLNameLine`)改成永遠不跳過,`TestSSSDStaleEntryFiresWhenTheRealCallIsRemoved` 與 docstring/`name:` 偵測案例(HEAD 版五個)失敗;關掉 `sssdAllowlistProblems` 任一個分支,`TestSSSDAllowlistProblemsFireBothWays` 失敗;換回舊的行首判斷,新增的反例與 `ast` 交叉檢查在 `wazuh-transaction.py` 失敗,對它附加真呼叫則 `TestRegression_SSSDCacheClearsOnlyInVettedHelpers` 指名該檔案失敗 | pilot |
 | 2026-11-06 | v1.66 | §4.0 資料夾表新增一列：`playbooks/apply/<component>-<purpose>.yml`（檔名不是 `-apply.yml`）是只由 pilot 的 Go 程式碼呼叫的內部入口，沒有 contract，仍適用 `playbooks/apply/*.yml` 的全 repo lint 與完整的 §4.3 gate。第一個是 `freeipa-identity-auth-cache.yml`（FreeIPA Go reconcile Phase 2 P2-3：入口 `prepare`／`probe` 兩個模式，把授權快取義務寫進或唯讀探測 FreeIPA 主機的 journal，結果寫成 controller 端的 JSON 結果檔；helper 新增唯讀動作 `auth_inspect`；identity playbook 為 ack task 加 `register` 並在 block 結尾加 `always` 的觀察 task，只在被給了 `pilot_identity_auth_cache_output` 時寫檔）；規格 §5，實跑紀錄 `docs/evidence/freeipa-go-reconcile/pr-284.md` | pilot |
 | 2026-11-13 | v1.67 | 新增 `pilot hotfix <子指令>`（容器指令，每個「修正已知環境問題」的情境一個子指令，旗標與 `pilot deploy` 同語意並重用它的 inventory／stage／limit 實作）與第一個子指令 `wazuh-agent-skew`：移除版本比 Wazuh manager 新的 agent，讓之後的 `pilot deploy` 能重裝正確版本（`wazuh-fim-apply.yml` 對 V > M 一律拒絕、沒有降級路徑；既有 `wazuh-agent-decommission.yml` 只刪 `client.keys`、保留套件與 hold，所以救不了）。內部入口 playbook `playbooks/apply/wazuh-fim-agent-skew-hotfix.yml`（§4.0；完整 §4.3 gate，另對被 deregister 的 manager 做環境 group cross-check）、helper `playbooks/apply/files/wazuh-agent-hotfix.py`（版本比較**只在這裡做一次**，Go 只讀 playbook 的 marker；不修改 `wazuh-transaction.py`，重複的常數由 `TestWazuhAgentHotfixConstantsMatchTheTransactionCoordinator` 鎖）、`internal/hotfix`、spec `docs/verification/wazuh-fim-agent-skew-hotfix.md`。設計決定由使用者確認：完整移除（停服務、解 hold、卸載、刪 `client.keys`、manager 取消登記）、以 agent 主機實際安裝版本為準、任何無法判定即整次 fail closed（read-only play `any_errors_fatal` 先判定全部主機，之後才逐台 `serial: 1` 變更；所有不需要先變更才能判斷的拒絕——stage／confirm／環境 group／prod attestation、確認過的主機清單、manager 登記表與 `client.keys` 的比對、做不完的 skewed 主機〔EL 沒有 auditd legacy restart action、`ss` 不能用〕——都在這個唯讀 play，因為 `serial: 1` 的 play 對第二台主機的 gate 會在第一台已被卸載之後才跑；移除順序是解除 policy → 移除 `client.keys` → 卸載 → 清 audit plugin，卸載最後，所以卸載之前的中斷會讓套件仍在、重跑選得到，卸載之後唯一可能殘留的 audit plugin 以 `residue` 狀態〔沒有套件且 plugin 孤立〕被重跑選到；卸載本身被殺掉與 controller 被殺後殘留的 writer marker 不在這個保證內，見 runbook）。順帶發現的 matcher 陷阱：`sh -c '<缺少的 binary> … && echo 0 \|\| echo 1'` 在 `pilot verify --local` 下，shell 自己印的 `not found` 併在 `echo` 前面，讓輸出不是單獨整數，`rc-from-stdout` 抽不出來而退回程序 rc=0，**缺 binary 也 PASS**；inventory 路徑（`ansible --one-line`，ansible-core 2.20.1 的 `(stdout) 1 (stderr) …` 格式）實測不受影響（#332 追蹤，`wazuh-manager.md` C11/C12、`wazuh-fim.md` C10、`wazuh-alert-delivery.md` C1 是同形寫法，未在本變更修）；本 spec 的 C6 加 `test -x` 與 `2>&1`，並由 `TestWazuhAgentHotfixSpecRowsPrintALoneIntegerEvenWhenToolsAreMissing` 對每個 row 鎖「輸出只有單獨的 0 或 1」 | pilot |
+| 2026-11-17 | v1.68 | `playbooks/site.yml` 依主機角色 import `freeipa-server-replica`(`freeipa-server` 之後、`dns` 與 `freeipa-client` 之前)與 `freeipa-dns-client`(`freeipa-client` 之後、所有跨角色使用者之前),部分解決 issue #362(`Refs`;`agent-controller` 等 #195)。§4.3 取代原本「不是每個部署都要的穩態角色」的理由(同時也過時:那段把已 import 的可觀測性元件說成還沒接進 `site.yml`),改寫成四點標準(由主機角色表達、可重複執行 `changed=0`、第一次套用可自動進行且前置條件不滿足時明確失敗、不需要額外的單次授權)與目前的歸類,新增元件的 PR 要依這四點說明放進或不放進。起因:`optInRolesAssignedInScope` 對 `site.yml` 沒有 import 的 opt-in 元件靜默略過(9550b38a 正確地不把它記成已部署),某個 staging 環境重建 replica 主機後,全站 Deploy 回報成功(`failed=0`、第二次 `changed=0`)但那台主機沒有 FreeIPA。真正的原因是缺 import,不是 9550b38a 的篩選。因為這個 playbook 現在是例行執行,`freeipa-server-replica-apply.yml` 在任何變更之前新增三道 fail-closed 檢查:`ipa_server_ip` 與 `freeipa-client-apply.yml` 相同的推導(原本預設成這台自己的位址)、多台 replica 要各自設 `freeipa_replica_fqdn` 且不重複(`tasks/freeipa-server-pool.yml` 的同一組規則,原本排在它之後才擋)、primary 沒有原生 DNS 時 primary 要解析得到這台的 FQDN(原本是檔頭的手動前置步驟,沒做會在 `ipa-replica-install` 才失敗且原因被 `no_log` 藏起來);兩個 contract 的 `site.tags` 補成與 import 相同,讓 `--tags freeipa` 會記錄與驗證它們。新增全 repo 守衛 `TestSiteYMLHostRolesAreImportedOrStandalone`(`cmd/pilot/cmd/site_yml_consistency_test.go`)與 `site_yml_day2_roles_test.go`(真實 contracts 與真實 `site.yml` 的選擇、部分 `--limit`,以及用真實 `ansible-playbook --list-tasks` 確認 tags 選得到 tasks)。行為變更:已把這兩個角色指定給主機的既有 inventory,下一次全站部署就會升級 replica、改寫 resolver | pilot |

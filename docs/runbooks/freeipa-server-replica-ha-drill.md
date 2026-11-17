@@ -29,6 +29,17 @@
 > 本檔每一步都已在真實 vm-target sandbox（`ipa-primary`/`ipa-replica`
 > AlmaLinux 9、`ipa-ha-client` Ubuntu 24.04）實跑過，全程只用
 > `go run ./cmd/pilot vm-target` 系列指令。
+>
+> **行為變更（2026-11-17，issue #362）**：`playbooks/site.yml` 現在會執行
+> `freeipa-server-replica-apply.yml`（排在 `freeipa-server-apply.yml` 之後、`dns` 與
+> `freeipa-client` 之前）。**已經把 `freeipa-server-replica` 指定給某些主機的既有 inventory，
+> 下一次全站 `pilot deploy` 就會把那些主機升級成 replica**（約 8–12 分鐘，依序在 primary 之後）；
+> 以前全站部署會靜默略過、要另外單獨跑這支 playbook，所以重建過的 replica 主機只會看到
+> 「全站部署成功」卻沒有 FreeIPA。沒有主機被指定時，行為跟以前一樣。三道檢查在任何變更之前明確失敗：
+> 缺 `ipa_server_ip`（改由 `freeipa-server` 主機的 `ansible_host` 推導）、多台 replica 沒有各自的
+> `freeipa_replica_fqdn` 或 FQDN 重複／等於 primary 的、以及 primary 沒有原生 DNS 卻解析不到
+> replica 的 FQDN（`docs/verification/freeipa-server-replica.md` §5 的手動前置步驟）。
+> 對同一個 primary 一次升級多台 replica 的併發限制見該檔 §5。
 
 ---
 

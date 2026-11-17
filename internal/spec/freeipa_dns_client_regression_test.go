@@ -142,8 +142,11 @@ type freeipaDNSClientGroupVar struct {
 }
 
 // TestRegression_FreeipaDNSClientContract locks the contract-shape
-// requirements the spec/design depends on: day-2/opt-in (site.include:
-// false), a required providerEndpoint dependency on freeipa-server, an
+// requirements the spec/design depends on: an opt-in role applied by host
+// assignment (site.include: false, optIn: true; playbooks/site.yml imports
+// the playbook since issue #362, see cmd/pilot/cmd's
+// TestSiteYMLHostRolesAreImportedOrStandalone), a required providerEndpoint
+// dependency on freeipa-server, an
 // optional planOnly dependency on freeipa-server-replica (the fallback
 // nameserver), hostCardinality: one-or-more (unlike freeipa-dns.md's
 // exactly-one — this component runs on ANY number of target hosts, not just
@@ -168,7 +171,7 @@ func TestRegression_FreeipaDNSClientContract(t *testing.T) {
 		t.Errorf("hostCardinality = %q, want one-or-more", c.HostCardinality)
 	}
 	if c.Site.Include || !c.Site.OptIn {
-		t.Errorf("site = {include:%v optIn:%v}, want {include:false optIn:true} (day-2/opt-in, matches freeipa-dns/freeipa-server-replica)", c.Site.Include, c.Site.OptIn)
+		t.Errorf("site = {include:%v optIn:%v}, want {include:false optIn:true} (opt-in, selected by host assignment; matches freeipa-server-replica)", c.Site.Include, c.Site.OptIn)
 	}
 	if c.Playbooks["apply"] != "playbooks/apply/freeipa-dns-client-apply.yml" {
 		t.Errorf("playbooks.apply = %q, want playbooks/apply/freeipa-dns-client-apply.yml", c.Playbooks["apply"])

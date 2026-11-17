@@ -86,7 +86,7 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "freeipa-dns-client", Label: "把機器的 DNS resolver 指向 FreeIPA DNS(server/replica)",
 		Playbook: "playbooks/apply/freeipa-dns-client-apply.yml", DefaultGroup: "freeipa-dns-client", StageVar: "stage",
-		Note:      "day-2/opt-in 角色(不在 site.yml);與 freeipa-client(AAA 納管)互不相依,不需先做身分 enrollment。自動從 inventory 偵測 freeipa-server/freeipa-server-replica 裡沒把 freeipa_setup_dns 設成 false 的主機(FreeIPA 的 NS 紀錄還沒列出、未設 freeipa_setup_dns 的 replica 會被略過並警告),寫入前逐一確認每個 nameserver 都會回答;也可套用到 FreeIPA server/replica 自己身上(自動優先指向自己)。支援 Debian/Ubuntu(systemd-resolved)與 EL(NetworkManager)。",
+		Note:      "依主機角色套用的 opt-in 角色(2026-11-17 起在 site.yml,inventory 指定給某台主機,全站部署就會改寫它的 resolver);與 freeipa-client(AAA 納管)互不相依,不需先做身分 enrollment。自動從 inventory 偵測 freeipa-server/freeipa-server-replica 裡沒把 freeipa_setup_dns 設成 false 的主機(FreeIPA 的 NS 紀錄還沒列出、未設 freeipa_setup_dns 的 replica 會被略過並警告),寫入前逐一確認每個 nameserver 都會回答;也可套用到 FreeIPA server/replica 自己身上(自動優先指向自己)。支援 Debian/Ubuntu(systemd-resolved)與 EL(NetworkManager)。",
 		Reconcile: true,
 	},
 	{
@@ -109,7 +109,7 @@ var deployCatalog = []deployPlaybook{
 	{
 		Key: "freeipa-server-replica", Label: "第二台 FreeIPA server(multi-master HA replica)",
 		Playbook: "playbooks/apply/freeipa-server-replica-apply.yml", DefaultGroup: "freeipa-server-replica", StageVar: "stage",
-		Note:      "day-2/opt-in 角色(不在 site.yml);已於三台 vm-target 全鏈路實跑過,見 docs/verification/freeipa-server-replica.md §0/§5。",
+		Note:      "依主機角色套用的 opt-in 角色(2026-11-17 起在 site.yml,inventory 指定給某台主機,全站部署就會把它升級成 replica);primary 沒有原生 DNS 時,先做 playbook 檔頭的 MANUAL PRE-STEP,沒做會在任何變更前明確失敗。已於三台 vm-target 全鏈路實跑過,見 docs/verification/freeipa-server-replica.md §0/§5。",
 		VaultHint: "既有 realm 的管理員密碼(ipa_admin_password)",
 		Reconcile: true,
 	},
