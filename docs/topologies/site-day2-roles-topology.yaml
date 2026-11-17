@@ -1,0 +1,66 @@
+# Declarative three-node topology for issue #362: playbooks/site.yml runs the
+# host-assigned roles freeipa-server-replica and freeipa-dns-client on fresh
+# nodes, in site.yml's own order (primary, then replica, then the client and
+# its resolver), instead of silently skipping them.
+#
+#   i362-ipa1  FreeIPA primary (native DNS, the default)
+#   i362-ipa2  freeipa-server-replica: promoted by the site-wide run. There is
+#              no `wire:` on purpose: the primary has native DNS, so the replica
+#              registers its own A record there (the playbook's self-register
+#              step) instead of an /etc/hosts pin on the primary.
+#   i362-c1    Ubuntu client in freeipa-client, host-monitoring and
+#              freeipa-dns-client (the host the resolver baseline is applied to)
+#
+# Intended command (fresh nodes: L3 check-mode, apply, verify, second apply with
+# changed=0; the vault supplies ipa_admin_password):
+#
+#   pilot vm-target topology test --topology docs/topologies/site-day2-roles-topology.yaml \
+#       --ephemeral --playbook playbooks/site.yml \
+#       --verify docs/verification/freeipa-server.md=freeipa-server \
+#       --verify docs/verification/freeipa-server-replica.md=freeipa-server-replica \
+#       --verify docs/verification/freeipa-client.md=freeipa-client \
+#       --verify docs/verification/freeipa-dns-client.md=freeipa-dns-client \
+#       -- -e @~/.vault/<secrets>.yaml
+#
+# The node names carry the issue number so they cannot collide with another
+# disposable topology on the same host. No `services: local`: the host cache
+# stack is not required for this run.
+services: none
+nodes:
+  - name: i362-ipa1
+    base_image: almalinux-9
+    # The guest sees about 95% of this, and pilot deploy needs 4096 MiB for
+    # freeipa-server and freeipa-server-replica
+    # (cmd/pilot/cmd/topology_resources_test.go).
+    memory: 4608
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-server
+
+  - name: i362-ipa2
+    base_image: almalinux-9
+    memory: 4608
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-server-replica
+
+  - name: i362-c1
+    base_image: ubuntu-24.04
+    memory: 2048
+    vcpus: 2
+    disk: 15
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups:
+      - freeipa-client
+      - freeipa-dns-client
+      - host-monitoring

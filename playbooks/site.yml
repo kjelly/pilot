@@ -27,7 +27,8 @@
 #     的 target_group 安全閥)永遠不受這個過濾影響。
 #
 #  ── 相依順序 ────────────────────────────────────────────────────────────
-#     核心服務(ntp)→ FreeIPA server → dns 快取層 → FreeIPA client → NFS server → NFS client
+#     核心服務(ntp)→ FreeIPA server → FreeIPA replica → dns 快取層 → FreeIPA client
+#                         → freeipa-dns-client → NFS server → NFS client
 #                         → Keycloak DB → Keycloak → PAM-OIDC
 #                         → log-server → audit-log-forwarding
 #                         → wazuh-manager → wazuh-fim
@@ -35,6 +36,12 @@
 #                         → alertmanager → prometheus → thanos-query → dashboard
 #                         → log-shipping (log-server/Wazuh logs → Loki)
 #                         → OS 補丁
+#
+#  注意:哪些元件放進 site.yml,依 AGENTS.md §4.3 的四點標準判斷(由主機角色
+#  表達、可重複執行 changed=0、第一次套用可自動進行且前置條件不滿足時明確失敗、
+#  不需要額外的單次授權);freeipa-server-replica 與 freeipa-dns-client 符合,
+#  2026-11-17 起(issue #362)在下方依主機角色套用——inventory 把這兩個角色指定給
+#  某台主機,全站部署就會安裝/改寫它,不再靜默略過。agent-controller 等待 #195。
 #
 #  注意:FreeIPA 使用者/權限(freeipa-identity-apply.yml)是「資料驅動的 day-2
 #  維運」,需要 vault roster,刻意不放進 site.yml。單獨執行,見 DELIVERY.md。
@@ -127,12 +134,30 @@
 # ── 2. 身份 / AAA(FreeIPA)server → enrolled clients → NFS roles ───────
 - import_playbook: apply/freeipa-server-apply.yml
   tags: [freeipa, freeipa-server]
+# freeipa-server-replica(issue #362;符合 AGENTS.md §4.3 四點:主機角色、
+# 第二次 apply changed=0、角色一被指定就安裝而前置條件不符時 fail closed、不需要
+# 額外的單次授權)。排在 freeipa-server 之後(primary 要先存在),而且一定要在
+# dns 與 freeipa-client 之前:dns-apply.yml 與 tasks/freeipa-dns-providers-live.yml
+# 會問 FreeIPA 哪些 replica 已經提供 DNS——replica 還沒升級時第一輪把它排除、第二輪
+# 才加進來,第二次 apply 就不是 changed=0;dns-apply 的 G5 gate 對設了
+# freeipa_setup_dns: true 但尚未升級的 replica 也會直接失敗。
+- import_playbook: apply/freeipa-server-replica-apply.yml
+  tags: [freeipa, freeipa-server-replica]
 # dns 快取層(docs/verification/dns.md):內部網域自動導向 FreeIPA,它的
 # FreeIPA authority gate(§5 G5)需要 FreeIPA DNS 已經在服務。
 - import_playbook: apply/dns-apply.yml
   tags: [infra, dns]
 - import_playbook: apply/freeipa-client-apply.yml
   tags: [freeipa, freeipa-client]
+# freeipa-dns-client(issue #362;同樣符合 AGENTS.md §4.3 四點):把被指定的主機
+# 本身的 OS resolver 指向 FreeIPA DNS。緊接在 freeipa-client 之後、所有跨角色使用者
+# 之前:deploy.go 的 fqdnForGroupHost 對整個 consumer group 都已經是
+# freeipa-dns-client 的主機,會把跨角色目標(log-server、wazuh-manager、
+# seaweedfs-s3…)換成 FreeIPA FQDN,後面的 pilot-session-store、NFS 與其他元件
+# 第一輪就要解析得到那些名稱。排在 dns 與 freeipa-client 之後:它會先問每個要
+# 寫進 resolver 的 nameserver 是否回答,dns 快取層與 FreeIPA 都要已經在服務。
+- import_playbook: apply/freeipa-dns-client-apply.yml
+  tags: [freeipa, freeipa-dns-client]
 # docs/tmp/now/spec.md §35: pilot-session-store 依賴 freeipa-client
 # (sameHosts，跟 Gateway/Directory 各自獨立、不是同一批主機)。2026-09-23 起
 # 排在 pilot-access-gateway 之前(per-host recording spec §0.2/§27.1a)：
