@@ -113,9 +113,9 @@ An additive field; `schema_version` stays 1. Example:
 Rules:
 
 - A candidate may stand for several hits in one file (`location` is a path, `hits` the count) and may
-  belong to several queries (`query_ids`). **Each query's `hits` equals the sum of `hits` of the
-  candidates that list it**, so a hit nobody classified cannot pass. Narrow a query that returns too
-  many hits instead of listing them blindly.
+  belong to several queries (`query_ids`, a non-empty list of the queries' `id` strings). **Each
+  query's `hits` equals the sum of `hits` of the candidates that list it**, so a hit nobody classified
+  cannot pass. Narrow a query that returns too many hits instead of listing them blindly.
 - `kind` is `git-grep` or `family`; at least one `git-grep` query has `scope: "repo"`, and at least one
   query is `family`.
 - `classification` is one of section 2; `same-invariant-in-scope` and `shared-choke-point` need

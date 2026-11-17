@@ -910,7 +910,7 @@ class SecretScanGateTests(LocalGitFixture):
 
 
 class SimilarDefectScanTests(unittest.TestCase):
-    """references/similar-defect-scan.md, checked in advisory mode (U1-U14 of the plan). Every case that
+    """references/similar-defect-scan.md, checked in advisory mode (U1-U17 of the plan). Every case that
     must be reported has a passing counterpart, and each is run advisory and enforced. It borrows
     LocalGitFixture's repository instead of inheriting it, so that class's tests do not run twice."""
 
@@ -1067,6 +1067,87 @@ class SimilarDefectScanTests(unittest.TestCase):
 
     def test_class_label_format(self):
         self.assertReported(lambda s: s.update({"class": "Error Swallowed"}), "kebab-case")
+
+    QUERY_IDS = "query_ids must be a non-empty list of listed query ids"
+
+    def test_u16_query_ids_are_checked_before_any_lookup(self):
+        """PR #355 review of 49f91124: `x in hits` on an object or list element raised TypeError, so the
+        advisory field made issue_gate exit 1 with a traceback."""
+        for bad in ([{"id": "q1"}], [["q1"]], [1], [None], [True], [1.5], ["q9"], [], "q1", {"id": "q1"}, None):
+            with self.subTest(query_ids=bad):
+                self.assertReported(lambda s: s["candidates"][0].update(query_ids=bad), self.QUERY_IDS)
+        # Mixed elements: the valid id still accounts for its hits, the object accounts for nothing.
+        _, rep = self.report(self.mutated(lambda s: s["candidates"][1].update(query_ids=["q1", {"id": "q2"}])))
+        self.assertIn(f"similar_defect_scan.candidates[1]: {self.QUERY_IDS} (strings)", rep["problems"])
+        self.assertIn("similar_defect_scan: query 'q2' has 1 hits but its candidates account for 0; "
+                      "classify every hit", rep["problems"])
+        self.assertEqual(2, len(rep["problems"]), rep["problems"])
+
+    def test_u16_main_reports_a_nested_query_id_instead_of_crashing(self):
+        self.evidence["similar_defect_scan"] = self.mutated(
+            lambda s: s["candidates"][0].update(query_ids=[{"id": "q1"}]))
+        self.save()
+        for enforced, code, status in ((False, 0, "GATE-PASS"), (True, 2, "BLOCKED")):
+            out = io.StringIO()
+            with self.subTest(enforced=enforced), patch.object(issue_gate, "SIMILAR_SCAN_ENFORCED", enforced), \
+                    patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), \
+                    contextlib.redirect_stdout(out):
+                rc = issue_gate.main(["--repo", "OWNER/REPO", "--issue", "123", "--worktree", str(self.worktree),
+                                      "--evidence", str(self.path)])
+                value = json.loads(out.getvalue())
+                self.assertEqual((code, status), (rc, value["status"]))
+                self.assertEqual("warn", value["similar_defect_scan"]["status"])
+                problem = f"similar_defect_scan.candidates[0]: {self.QUERY_IDS} (strings)"
+                self.assertIn(problem, value["similar_defect_scan"]["problems"])
+                self.assertEqual(value["similar_defect_scan"]["problems"] if enforced else [], value["blockers"])
+
+    WRONG_TYPES = ({}, {"id": "q1"}, [], [{}], [["q1"]], 0, -1, 2.5, True, None, "x")
+
+    def test_u17_no_field_of_the_wrong_type_reaches_the_catch_all(self):
+        """Every field and list element of a complete scan, and of the not-applicable form, replaced by
+        each JSON type in turn: the shape checks report or accept it. None of them may fall through to
+        similar_scan_report's catch-all, which exists for cases no test thought of."""
+        ctx = issue_gate.repo_evidence.Context.load(self.worktree, self.sha, "refs/remotes/origin/main")
+        not_applicable = {"status": "not-applicable", "issue_kind": "non-bug",
+                          "reason": "Documentation-only wording change with no code path",
+                          "reviewer": {"confirmed": True, "head_sha": self.sha}}
+
+        def paths(value, prefix=()):
+            yield prefix
+            items = value.items() if isinstance(value, dict) else enumerate(value) if isinstance(value, list) else ()
+            for key, sub in items:
+                yield from paths(sub, prefix + (key,))
+
+        cases = 0
+        for valid in (self.scan, not_applicable):
+            for path in paths(valid):
+                for wrong in self.WRONG_TYPES:
+                    scan = json.loads(json.dumps(valid))
+                    if path:
+                        parent = scan
+                        for key in path[:-1]:
+                            parent = parent[key]
+                        parent[path[-1]] = json.loads(json.dumps(wrong))
+                    else:
+                        scan = json.loads(json.dumps(wrong))
+                    rep = issue_gate.similar_scan_report(
+                        {"similar_defect_scan": scan}, repo="OWNER/REPO", issue=123, worktree=self.worktree,
+                        sha=self.sha, merge_base=self.base, ctx=ctx)
+                    cases += 1
+                    self.assertIn(rep["status"], ("pass", "warn"), (path, wrong))
+                    self.assertEqual([], [p for p in rep["problems"] if "internal error" in p], (path, wrong))
+        self.assertGreater(cases, 400)
+
+    def test_u17_an_unexpected_exception_is_a_problem_not_a_crash(self):
+        with patch.object(issue_gate, "_scan_problems", side_effect=TypeError("unhashable type: 'dict'")):
+            errors, rep = self.report(self.scan)
+            self.assertEqual([], errors)
+            self.assertEqual("warn", rep["status"])
+            problem = "similar_defect_scan could not be checked (internal error TypeError: unhashable type: 'dict')"
+            self.assertEqual([problem], rep["problems"])
+            errors, _ = self.report(self.scan, enforced=True)
+            self.assertIn(problem, errors)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -498,6 +498,10 @@ W2 與 W3 可平行。W7 另開分支與 PR。
 | U13 | git 指令失敗（例如 `base_sha` 指向不存在的 commit） | 問題字串，`evaluate()` 不崩潰 |
 | U14 | 預設值 | `SIMILAR_SCAN_ENFORCED is False`；既有 `test_gate_pass` 等測試在缺欄位時仍通過 |
 | U15 | `create_pr.create()`、`mark_ready` 的結果 | 帶有 `similar_defect_scan` |
+| U16 | `query_ids` 的元素是物件、陣列、數字、`null`、未列出的 id，或整個欄位不是非空陣列；以及合法與不合法混在一起 | 問題，不崩潰；混合時合法的 id 照常計入命中數。經 `main()`：advisory 是 exit 0、`GATE-PASS` 加 `warn`，enforced 是 exit 2、`BLOCKED` 並列出問題 |
+| U17 | 完整區塊與 `not-applicable` 區塊的每個欄位與陣列元素，逐一換成每一種 JSON 型別 | 都由形狀檢查回報或接受，沒有一個落到 `similar_scan_report` 的兜底；兜底本身把非預期的例外轉成問題（enforced 時是 blocker），不會讓 gate 崩潰 |
+
+U16、U17 是 PR #355 第二次自動審查（`49f91124`）後補上的：`x in hits` 對物件或陣列元素丟出 `TypeError`，advisory 欄位反而讓 `issue_gate` 以 traceback 結束。檢查一律先確認型別再做 dict／set 運算；同類寫法另掃過 `issue-batch-planner` 的 `validate`（proposals 先經宣告式 `shape_errors` 驗證，型別錯誤在任何雜湊運算之前就回報），沒有同樣的問題。
 
 **驗收**：上列測試與 `make skill-test` 全部通過；`git diff --check` 無輸出。
 

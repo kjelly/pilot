@@ -357,13 +357,14 @@ def _scan_problems(scan: Any, *, repo: str, issue: int, worktree: Path, sha: str
         if not isinstance(c.get("location"), str) or not c["location"].strip():
             problems.append(f"{where}: location missing")
         ids = c.get("query_ids")
-        if not isinstance(ids, list) or not ids or any(x not in hits for x in ids):
-            problems.append(f"{where}: query_ids must name listed queries")
-            ids = [x for x in ids if x in hits] if isinstance(ids, list) else []
+        # isinstance first: the file is agent-written JSON, and `x in hits` raises on a list or object.
+        named = [x for x in ids if isinstance(x, str) and x in hits] if isinstance(ids, list) else []
+        if not isinstance(ids, list) or not ids or len(named) != len(ids):
+            problems.append(f"{where}: query_ids must be a non-empty list of listed query ids (strings)")
         if not _scan_int(c.get("hits"), 1):
             problems.append(f"{where}: hits must be a positive integer")
         else:
-            for x in set(ids):
+            for x in set(named):
                 accounted[x] += c["hits"]
         cls = c.get("classification")
         if cls not in SCAN_CLASSIFICATIONS:
@@ -411,7 +412,9 @@ def _scan_problems(scan: Any, *, repo: str, issue: int, worktree: Path, sha: str
 def similar_scan_report(evidence: dict[str, Any], *, repo: str, issue: int, worktree: Path, sha: str,
                         merge_base: str | None, ctx: "repo_evidence.Context | None") -> dict[str, Any]:
     """`{"enforced", "status": pass|warn|missing, "problems"}` for references/similar-defect-scan.md.
-    A git failure is a problem, never a silent pass."""
+    A git failure is a problem, never a silent pass. So is any other exception: in advisory mode the
+    field must never stop the gate, and enforced, the problem blocks like every other one. The shape
+    checks in _scan_problems come first; tests require that no case of their type matrix lands here."""
     if "similar_defect_scan" not in evidence:
         problems = ["similar_defect_scan is absent (references/similar-defect-scan.md)"]
         return {"enforced": SIMILAR_SCAN_ENFORCED, "status": "missing", "problems": problems}
@@ -420,6 +423,8 @@ def similar_scan_report(evidence: dict[str, Any], *, repo: str, issue: int, work
                                   sha=sha, merge_base=merge_base, ctx=ctx)
     except GateError as exc:
         problems = [f"similar_defect_scan could not be checked: {exc}"]
+    except Exception as exc:  # noqa: BLE001 -- reported as a problem, never a pass
+        problems = [f"similar_defect_scan could not be checked (internal error {type(exc).__name__}: {exc})"]
     return {"enforced": SIMILAR_SCAN_ENFORCED, "status": "warn" if problems else "pass", "problems": problems}
 
 
