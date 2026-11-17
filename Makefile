@@ -224,7 +224,7 @@ freeipa-server-pool-test: ## Include tasks/freeipa-server-pool.yml twice on one 
 
 .PHONY: freeipa-server-pool-test
 
-site-day2-roles-test: ## Run the real freeipa-server-replica pre_tasks (R1-R3 gates, issue 362) and ask real ansible-playbook which tasks the site.yml tags of the two imported day-2 roles select, with mandatory real Ansible.
+site-day2-roles-test: ## Run the real freeipa-server-replica pre_tasks (G-ip, G-pool and G-resolve gates and its serial: 1, issue 362) and ask real ansible-playbook which tasks the site.yml tags of the two imported day-2 roles select, with mandatory real Ansible.
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_SiteDay2Roles' ./internal/spec/
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestSiteYMLDay2RolesTagsSelectTheirTasksInAnsible$$' ./cmd/pilot/cmd/
 

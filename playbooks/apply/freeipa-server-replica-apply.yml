@@ -46,6 +46,12 @@
 # not run when the primary has native DNS (the self-registration below
 # handles that case) or when the inventory has no freeipa-server host to ask.
 #
+# ONE REPLICA AT A TIME: the play has `serial: 1`, so playbooks/site.yml (and a
+# run against several freeipa-server-replica hosts) promotes replicas
+# sequentially, as docs/verification/freeipa-server-replica.md section 5
+# requires. A failed or unreachable replica stops the play and, from site.yml,
+# every later play (see the comment on `serial:` below). Refs issue #110.
+#
 # NOT in scope of this playbook (see docs/verification/freeipa-server-replica.md
 # §5 for the full list — read it before treating a replica as "done"):
 #   * CA renewal-master handoff — a replica with --setup-ca becomes a CA
@@ -105,6 +111,34 @@
   hosts: "{{ target_group | default('freeipa-server-replica') }}"
   become: true
   gather_facts: true
+  # One replica at a time (issue #362, review F1; refs #110). playbooks/site.yml
+  # runs this play, and ansible.cfg's forks=20 would otherwise promote every
+  # freeipa-server-replica host at once against the same primary.
+  # docs/verification/freeipa-server-replica.md section 5 ("permanent"): do not
+  # run several ipa-replica-install against one primary in parallel, a known
+  # race when 389-ds replication segments are created; and open issue #110
+  # shows the delegated `ipa dnsrecord-add` self-register below failing when two
+  # replicas run together. With serial: 1 the second replica starts only after
+  # the first one's whole batch (enroll, promote, verify) is done.
+  #
+  # What serial: 1 means for a failure (ansible-core 2.19.2,
+  # executor/playbook_executor.py: `len(batch) == failed_hosts_count` sets
+  # break_play, and `if break_play: break` leaves the loop over ALL plays of the
+  # playbook file, imported ones included): a batch is one host, so ANY replica
+  # that fails or is unreachable stops this play (the later replicas never
+  # start) and every later play of site.yml does not run, and ansible-playbook
+  # exits 2. That is fail closed: no later replica, dns, client or NFS play runs
+  # on top of a half-built replica tier. Replicas that were already promoted
+  # stay promoted (nothing rolls them back); re-run after fixing the host.
+  # Without serial, only the failed host would drop out and the other replicas
+  # and the later plays would carry on.
+  #
+  # The pre_tasks gates split by what they read: the pool gates (G-pool) read
+  # the whole freeipa-server-replica group, so they fail on the first host's
+  # batch before any replica changes; G-ip, G-resolve, EL9, sshd -t and the
+  # stage gates are per host and run when THAT host's batch starts, so a
+  # later replica can still fail them after an earlier one was promoted.
+  serial: 1
   vars:
     stage: sandbox
     confirm_staging: false
@@ -123,7 +157,7 @@
     # replica's own) address, so an inventory without freeipa_server_ip --
     # valid for freeipa-server and freeipa-client, which derive it -- failed
     # "must not be the primary itself" with a misleading message on a raw
-    # `ansible-playbook site.yml` (issue #362 R1).
+    # `ansible-playbook site.yml` (issue #362, gate G-ip).
     ipa_server_inventory_ip: >-
       {{ (hostvars[groups['freeipa-server'][0]].ansible_host | default('', true))
          if (groups['freeipa-server'] | default([]) | length > 0)
@@ -271,7 +305,7 @@
         ipa_enroll_principal: "{{ ipa_enroll_principal | default('admin') }}"
       tags: [always]
 
-    # ── The server pool, checked BEFORE this play changes anything ─────────
+    # ── G-pool: the server pool, checked BEFORE this play changes anything ──
     # The pool gates in tasks/freeipa-server-pool.yml (more than one replica
     # needs an explicit freeipa_replica_fqdn each; no duplicate FQDN across
     # the pool, primary included) only run from dns-apply.yml and
@@ -279,11 +313,15 @@
     # and the clients see the promoted replica). Left to them, two replica
     # hosts without their own freeipa_replica_fqdn would both default to
     # ipa2.<domain>, both run `ipa-client-install --force-join` under that
-    # name, and only then trip the shared gate (issue #362 R2). The shared
-    # task is not included here: it asserts exactly one freeipa-server host,
-    # which a single-host `-e target_group=all` run (this playbook's own
-    # vm-target convention) does not have, and it sets pool facts this play
-    # has no use for. Same inputs and the same rules, evaluated up front.
+    # name, and only then trip the shared gate (issue #362, gate G-pool).
+    # The shared task is not included here: it asserts exactly one
+    # freeipa-server host, which a single-host `-e target_group=all` run (this
+    # playbook's own vm-target convention) does not have, and it sets pool
+    # facts this play has no use for. Same inputs and the same rules,
+    # evaluated up front. These gates read the whole freeipa-server-replica
+    # group (hostvars of every member), not this host alone, so under
+    # `serial: 1` they fail on the FIRST host's batch, before any replica has
+    # changed anything.
     - name: "FreeIPA replica pool — each replica host's effective FQDN and the hosts that leave it unset"
       ansible.builtin.set_fact:
         freeipa_replica_pool_fqdns: >-
@@ -323,16 +361,34 @@
           Nothing was changed.
       tags: [always]
 
-    # ── The primary must be able to find this replica by name ──────────────
+    # ── G-resolve: the primary must be able to find this replica by name ───
     # ipa-replica-install makes the PRIMARY connect back to this host by FQDN
     # (its conncheck). With native DNS on the primary this play registers the
     # A record itself (the self-register block under tasks:). Without it the
     # operator has to do the MANUAL PRE-STEP in the header, and before this
     # gate the play changed the hostname, installed packages and enrolled the
     # host first, then failed inside ipa-replica-install with the reason
-    # hidden by no_log (issue #362 R3). Read-only: it never writes anywhere.
-    # Both facts are also what the self-register block delegates with, so
-    # they are computed once here, for every tag.
+    # hidden by no_log (issue #362, gate G-resolve). Read-only: it never
+    # writes anywhere.
+    #
+    # Per host, not per group: the question is about THIS replica's FQDN and
+    # address, so under `serial: 1` it is asked when this host's batch starts.
+    # A later replica can fail it after an earlier one was already promoted
+    # (that earlier replica stays promoted; see the note on serial above).
+    #
+    # Exact semantics: `getent ahostsv4 <ipa_replica_fqdn>` run on the primary
+    # (IPv4 only) must exit 0 and its address list must CONTAIN ipa_replica_ip,
+    # which defaults to this host's ansible_host; set freeipa_replica_ip when
+    # the replica is known by another address (multi-homed, or ansible_host is
+    # a hostname). An answer without that address fails the gate even when the
+    # name resolves. It runs on EVERY apply, so it also guards an
+    # already-promoted replica: with no native DNS on the primary, a primary
+    # that no longer resolves the replica's name is a real inconsistency for a
+    # promoted replica too, and the gate is kept unconditional so a rerun
+    # proves it on the target.
+    #
+    # Both facts below are also what the self-register block delegates with,
+    # so they are computed once here, for every tag.
     - name: "FreeIPA replica — resolve whether the primary provides native DNS + who to delegate DNS registration to"
       ansible.builtin.set_fact:
         freeipa_replica_primary_native_dns: >-
@@ -373,9 +429,13 @@
           ipa-replica-install makes the primary connect back to this host by that name. From the
           primary, `getent ahostsv4 {{ ipa_replica_fqdn }}` returned rc={{ freeipa_replica_primary_resolve.rc }}
           {{ freeipa_replica_primary_resolve.stdout_lines | default([]) }}, not {{ ipa_replica_ip }}.
+          The gate needs rc=0 and an IPv4 address list that CONTAINS ipa_replica_ip
+          ({{ ipa_replica_ip }}; default: this host's ansible_host; set freeipa_replica_ip when the
+          replica is known by another address, e.g. multi-homed or ansible_host is a hostname). It
+          runs on every apply, also for an already-promoted replica.
           Do the MANUAL PRE-STEP first: register {{ ipa_replica_fqdn }} -> {{ ipa_replica_ip }} in your DNS, or
           pin it in /etc/hosts on the primary (and on every other existing replica); see the header of
-          this playbook and docs/verification/freeipa-server-replica.md section 0/5. Nothing was changed.
+          this playbook and docs/verification/freeipa-server-replica.md section 0/5. Nothing was changed on this host.
       when:
         - freeipa_replica_primary_inventory_host != inventory_hostname
         - not (freeipa_replica_primary_native_dns | bool)

@@ -141,6 +141,10 @@
 # 會問 FreeIPA 哪些 replica 已經提供 DNS——replica 還沒升級時第一輪把它排除、第二輪
 # 才加進來,第二次 apply 就不是 changed=0;dns-apply 的 G5 gate 對設了
 # freeipa_setup_dns: true 但尚未升級的 replica 也會直接失敗。
+# 這個 play 帶 `serial: 1`:多台 replica 一台一台升級(replica spec §5:同時對同一個
+# primary 跑 ipa-replica-install 有 389-ds 複寫競態;見 issue #110),任何一台失敗或連不上就
+# 停下這個 play,site.yml 後面的 play 也不會跑(ansible-playbook 結束碼 2,已升級的 replica
+# 不會被還原)。
 - import_playbook: apply/freeipa-server-replica-apply.yml
   tags: [freeipa, freeipa-server-replica]
 # dns 快取層(docs/verification/dns.md):內部網域自動導向 FreeIPA,它的
@@ -156,6 +160,11 @@
 # seaweedfs-s3…)換成 FreeIPA FQDN,後面的 pilot-session-store、NFS 與其他元件
 # 第一輪就要解析得到那些名稱。排在 dns 與 freeipa-client 之後:它會先問每個要
 # 寫進 resolver 的 nameserver 是否回答,dns 快取層與 FreeIPA 都要已經在服務。
+# 注意:這個 play 之後,同一台主機上後面的 play(apt 更新、get_url 下載、docker pull)解析
+# 外部名稱都經過 FreeIPA DNS(它的 forwarders;沒有 forwarders 時從 root 開始遞迴)。
+# 隔離網路或沒有對外 DNS 的 FreeIPA,指定 freeipa-dns-client 之前要先設
+# freeipa_dns_forwarders(或 -e/inventory 的 ipa_dns_forwarders),或先有 dns 快取層
+# (dns 角色,上游自己設定)。
 - import_playbook: apply/freeipa-dns-client-apply.yml
   tags: [freeipa, freeipa-dns-client]
 # docs/tmp/now/spec.md §35: pilot-session-store 依賴 freeipa-client
