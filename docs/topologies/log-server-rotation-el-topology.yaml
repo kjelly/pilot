@@ -1,0 +1,21 @@
+# Disposable single-node topology for the SIEM logrotate rotation identity
+# (kjelly/pilot#93; docs/verification/log-server.md C9-C12).
+#
+# log-server is exactly-one per contract, so Ubuntu and EL each get their own
+# topology (see log-server-rotation-ubuntu-topology.yaml). The node is also an
+# audit-log-forwarding client of itself: log-server C7/C8 inject locally and
+# need this host to forward to its own receiver, as in every supported
+# deployment, and C12 reads the per-host files C7/C8 leave behind.
+# On EL rsyslogd runs as root and the SIEM tree is root-owned: the policy
+# renders `su root root`, which C12 accepts without a privilege switch.
+services: none
+nodes:
+  - name: lrot-el
+    base_image: almalinux-9
+    memory: 2560
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [log-server, audit-log-forwarding]
