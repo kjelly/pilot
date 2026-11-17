@@ -8,6 +8,7 @@
 | Root cause | Explain violated invariant and demonstrate a fix of the real defect (not a test-only hack). |
 | Acceptance criteria | Each criterion marked met with distinct supporting evidence. Every criterion the Issue states is met or listed in `disputed_issue_claims` (reviewer-confirmed, answered on the Issue); none is dropped silently. See [Issue claims](issue-claims.md). |
 | Dependencies | Preconditions are resolved; no invalid stack or unhandled overlapping writes. |
+| Similar defects | Bug Issue: the [similar-defect scan](similar-defect-scan.md) accounts for every hit as a classified candidate, in-scope sites are fixed, `separate-defect` sites have follow-up Issues, related open Issues appear only as `Refs`, and the Reviewer confirmed it. Non-bug Issue: a specific, Reviewer-confirmed `not-applicable` reason. `issue_gate.py` checks the `similar_defect_scan` field in advisory mode: a `warn`/`missing` status is reported to the user, not ignored, but does not block. |
 | Tests | A targeted regression check exists and passes on committed HEAD. Additional relevant tests/integration pass. |
 | Static checks | Lint passes if applicable; static/security analysis passes if applicable or has justified N/A. |
 | Independent review | Fresh Reviewer, not the implementer; exactly matching HEAD; no unresolved P0/P1/P2 as defined in [severity.md](severity.md) (`pre-existing` findings cap at P3). |

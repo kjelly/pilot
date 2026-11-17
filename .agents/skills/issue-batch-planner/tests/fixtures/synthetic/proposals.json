@@ -1,0 +1,99 @@
+{
+  "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "batches": [
+    {
+      "acceptance_by_issue": [
+        {
+          "coverage": "fully_addressable",
+          "issue": 11,
+          "validation": "TestAThing with a failing query"
+        },
+        {
+          "coverage": "fully_addressable",
+          "issue": 12,
+          "validation": "TestAThing with a timeout"
+        },
+        {
+          "coverage": "partial_only",
+          "issue": 13,
+          "validation": "Only the rc half; docs part stays"
+        }
+      ],
+      "blockers": [],
+      "classification": "MERGE_CANDIDATE",
+      "evidence": [
+        {
+          "kind": "issue",
+          "path": null,
+          "ref_sha": null,
+          "summary": "Reports the swallowed rc in a.yml",
+          "url": "https://github.com/OWNER/REPO/issues/11"
+        },
+        {
+          "kind": "code",
+          "path": "playbooks/apply/a.yml",
+          "ref_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "summary": "The task reads rc != 0 as absent",
+          "url": null
+        }
+      ],
+      "existing_prs": [],
+      "human_approval_required": true,
+      "invariant": "A failed query must never read as absent",
+      "issue_numbers": [
+        11,
+        12,
+        13
+      ],
+      "pair_compatibility": [
+        {
+          "evidence": "Same task, same rc handling",
+          "issues": [
+            11,
+            12
+          ]
+        },
+        {
+          "evidence": "Same task; TestAThing covers both",
+          "issues": [
+            11,
+            13
+          ]
+        },
+        {
+          "evidence": "Same task, no conflicting acceptance",
+          "issues": [
+            12,
+            13
+          ]
+        }
+      ],
+      "primary_issue": 11,
+      "root_cause_class": "error-swallowed"
+    }
+  ],
+  "issue_statuses": [
+    {
+      "number": 14,
+      "reason": "open PR #90 closes it",
+      "status": "EXISTING_PR"
+    },
+    {
+      "number": 15,
+      "reason": "blocked by open #99",
+      "status": "BLOCKED_BY"
+    },
+    {
+      "number": 16,
+      "reason": "labelled needs-decision",
+      "status": "NEEDS_DECISION"
+    },
+    {
+      "number": 17,
+      "reason": "no related Issue found",
+      "status": "UNASSIGNED"
+    }
+  ],
+  "schema_version": 1,
+  "snapshot_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}

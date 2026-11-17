@@ -41,7 +41,7 @@ Run one fresh, full-diff review as the last gate before Ready/approval. It may u
 
 ## Class rule (stop point-fixing)
 
-If a finding has the same `class` as an earlier closed finding, or two findings in one round share a class, do not send the Coder another isolated point fix. Dispatch SA to assess all relevant sites in the affected execution family, including shared helpers, callers/includes and sibling backends; use a repository search to check the scope without expanding into an unrelated audit. Prefer a shared choke-point fix when architecture supports it; otherwise justify consistent multi-site fixes and a matrix covering the affected invariant. Then Coder implements that plan. This applies from the **second** occurrence of a class, not only after three failed rounds.
+If a finding has the same `class` as an earlier closed finding, or two findings in one round share a class, do not send the Coder another isolated point fix. Dispatch SA to assess all relevant sites in the affected execution family, including shared helpers, callers/includes and sibling backends; use a repository search to check the scope without expanding into an unrelated audit. Prefer a shared choke-point fix when architecture supports it; otherwise justify consistent multi-site fixes and a matrix covering the affected invariant. Then Coder implements that plan. This applies from the **second** occurrence of a class, not only after three failed rounds. Independently of review findings, SA already runs the [similar-defect scan](similar-defect-scan.md) for every valid bug Issue at the first occurrence of its root-cause class, before any code change.
 
 ## Scope
 

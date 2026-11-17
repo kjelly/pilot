@@ -80,44 +80,46 @@ def mark_ready(*, repo: str, issue: int, pr: int, worktree: Path, evidence: Path
     worktree = worktree.expanduser().resolve(strict=True)
     errors, info = evaluate(repo=repo, issue=issue, worktree=worktree, evidence_path=evidence,
                             stage="pushed", remote=remote, own_pr=pr, secret_files=secret_files)
+    # The advisory similar-defect report (issue_gate.SIMILAR_SCAN_ENFORCED) rides along on every result.
+    scan = {"similar_defect_scan": info["similar_defect_scan"]} if "similar_defect_scan" in info else {}
     if errors:
-        return {"status": "BLOCKED", "issue": issue, "pr": pr, "blockers": errors}
+        return {"status": "BLOCKED", "issue": issue, "pr": pr, "blockers": errors, **scan}
     branch, sha = info["branch"], info["head_sha"]
     view = command(["gh", "pr", "view", str(pr), "-R", repo,
                     "--json", "number,state,isDraft,headRefName,headRefOid,mergeable,url,body,reviewDecision"])
     if not isinstance(view, dict) or view.get("number") != pr or view.get("state") != "OPEN":
-        return {"status": "BLOCKED", "issue": issue, "pr": pr, "blockers": ["PR is not open"]}
+        return {"status": "BLOCKED", "issue": issue, "pr": pr, "blockers": ["PR is not open"], **scan}
     if view.get("headRefName") != branch or view.get("headRefOid") != sha:
         return {"status": "BLOCKED", "issue": issue, "pr": pr,
-                "blockers": [f"PR head {view.get('headRefName')}@{view.get('headRefOid')} is not the validated {branch}@{sha}"]}
+                "blockers": [f"PR head {view.get('headRefName')}@{view.get('headRefOid')} is not the validated {branch}@{sha}"], **scan}
     if view.get("isDraft") is not True:
-        return {"status": "ALREADY_READY", "issue": issue, "pr": pr, "url": view.get("url"), "head_sha": sha}
+        return {"status": "ALREADY_READY", "issue": issue, "pr": pr, "url": view.get("url"), "head_sha": sha, **scan}
     # create_pr.py checked the body at creation; the evidence's resolution or the body can change after.
     problem = issue_reference_problem(view.get("body") or "", repo, issue, info["issue_resolution"])
     if problem:
-        return {"status": "BLOCKED", "issue": issue, "pr": pr, "blockers": [f"PR body: {problem}"]}
+        return {"status": "BLOCKED", "issue": issue, "pr": pr, "blockers": [f"PR body: {problem}"], **scan}
     if view.get("reviewDecision") == "CHANGES_REQUESTED":
         return {"status": "BLOCKED", "issue": issue, "pr": pr,
                 "blockers": ["A review requests changes (reviewDecision CHANGES_REQUESTED). mark_ready does not "
-                             "triage reviews: handle the PR with pr-ready (fix, or dispute with evidence and a reply)"]}
+                             "triage reviews: handle the PR with pr-ready (fix, or dispute with evidence and a reply)"], **scan}
     threads = unresolved_threads(repo, pr)
     if threads:
         return {"status": "BLOCKED", "issue": issue, "pr": pr,
-                "blockers": [f"Unresolved review thread: {url} (fix or dispute it, then resolve it)" for url in threads]}
+                "blockers": [f"Unresolved review thread: {url} (fix or dispute it, then resolve it)" for url in threads], **scan}
     if view.get("mergeable") != "MERGEABLE":
         return {"status": "BLOCKED", "issue": issue, "pr": pr,
-                "blockers": [f"PR is not cleanly mergeable (mergeable={view.get('mergeable')}); resolve conflicts on the same branch first"]}
+                "blockers": [f"PR is not cleanly mergeable (mergeable={view.get('mergeable')}); resolve conflicts on the same branch first"], **scan}
     ci = pr_ci.inspect(repo, pr, sha)
     if ci.get("status") != "CI_PASSED":
         return {"status": "BLOCKED", "issue": issue, "pr": pr, "head_sha": sha,
-                "blockers": [f"CI is {ci.get('status')} on {sha}; Ready requires CI_PASSED"], "ci": ci}
+                "blockers": [f"CI is {ci.get('status')} on {sha}; Ready requires CI_PASSED"], "ci": ci, **scan}
     execute(["gh", "pr", "ready", str(pr), "-R", repo], cwd=worktree)
     after = command(["gh", "pr", "view", str(pr), "-R", repo, "--json", "isDraft,headRefOid,url"])
     if not isinstance(after, dict) or after.get("isDraft") is not False or after.get("headRefOid") != sha:
         return {"status": "READY_UNVERIFIED", "issue": issue, "pr": pr,
-                "blockers": ["PR is not a non-Draft PR at the validated HEAD after `gh pr ready`; inspect it"]}
+                "blockers": ["PR is not a non-Draft PR at the validated HEAD after `gh pr ready`; inspect it"], **scan}
     return {"status": "READY_FOR_REVIEW", "issue": issue, "pr": pr, "url": after.get("url"),
-            "head_sha": sha, "draft": False, "ci_status": "CI_PASSED"}
+            "head_sha": sha, "draft": False, "ci_status": "CI_PASSED", **scan}
 
 
 def main(argv: list[str] | None = None) -> int:
