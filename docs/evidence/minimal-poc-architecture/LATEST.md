@@ -4,7 +4,7 @@ The record of the latest verified run of `docs/runbooks/minimal-poc-architecture
 
 | Item | Value |
 |---|---|
-| Record | [round 34, five-node topology, final PR candidate](2026-11-16-round-34.md) |
-| Candidate | `e3285b5a7795357494c119fc6ef4f73322f0d790` (tree `ac5b50af8388b0f4736d101df9ca12fe521109b5`) |
+| Record | [round 35, five-node topology, merged PR candidate (public-mirror rpm content)](2026-11-17-round-35.md) |
+| Candidate | `47c71a21e8f59ef232541fba5879a873de681af3` (tree `cdfa7c79c7b7d96f3df088096c929f2b043cf3d0`) |
 
 A newer run replaces this file (an evidence-only change) with its own candidate, tree and record.
