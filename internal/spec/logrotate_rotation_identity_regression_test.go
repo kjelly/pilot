@@ -275,7 +275,7 @@ func logrotateSites(relPath, file string, doc any) []logrotateSite {
 			return &sites[len(sites)-1]
 		}
 
-		if !policyDest && !(unresolved && related) {
+		if !policyDest && (!unresolved || !related) {
 			// Not recognisably a logrotate policy by its dest: it must not be
 			// one by its content either.
 			if text, ok := logrotateWrittenText(file, module, args, vars); ok && logrotateStanzaShaped(text) {

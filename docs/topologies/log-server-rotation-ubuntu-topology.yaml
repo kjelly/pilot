@@ -5,7 +5,7 @@
 # topology (see log-server-rotation-el-topology.yaml). The node is also an
 # audit-log-forwarding client of itself: log-server C7/C8 inject locally and
 # need this host to forward to its own receiver, as in every supported
-# deployment, and C12 reads the per-host files C7/C8 leave behind.
+# deployment.
 # On Ubuntu rsyslogd runs as syslog, so the SIEM tree is syslog-owned and the
 # siem-incoming policy must rotate as syslog.
 services: none
