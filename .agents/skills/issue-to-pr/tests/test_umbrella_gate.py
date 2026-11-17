@@ -134,6 +134,53 @@ class UmbrellaGateTests(base.LocalGitFixture):
         self.dups[216] = ["GitHub issue not OPEN/identity mismatch"]
         self.blocked("sub-issue #216: GitHub issue not OPEN")
 
+    def test_v6_a_sub_issue_whose_validation_cannot_be_read_blocks(self):
+        """gh_issue_and_duplicates RAISING (not returning errors) for one sub-issue fails closed, naming it."""
+        def dup(repo, n, branch, own_pr=None):
+            if n == 216:
+                raise issue_gate.GateError("gh timed out")
+            return []
+
+        a, _, c = self.fakes()
+        with a, c, patch.object(issue_gate, "gh_issue_and_duplicates", side_effect=dup):
+            errors = issue_gate.evaluate(repo=REPO, issue=U, worktree=self.worktree, evidence_path=self.path)[0]
+        self.assertIn("sub-issue #216: GitHub duplicate/issue validation unavailable: gh timed out", errors)
+        self.assertFalse([e for e in errors if "#142" in e], errors)
+        self.assertEqual([], self.eval_local()[0], "the same evidence passes when the read works")
+
+    def test_v6_a_sub_issues_follow_up_issue_is_verified(self):
+        """An out_of_scope claim of a sub-issue may close it only with a follow-up Issue that exists
+        (single mode's check_follow_ups, run per sub-issue)."""
+        follow_up = "https://github.com/OWNER/REPO/issues/400"
+        self.thread["comments"][1]["body"] = f"Re {SUB_SOURCE}: a separate defect, tracked in {follow_up}."
+        self.sub(216)["disputed_issue_claims"] = [self.dispute_216(follow_up_issue_url=follow_up)]
+        self.save()
+        a, b, c = self.fakes()
+        with patch.object(issue_gate, "gh_follow_up_issue", side_effect=issue_gate.GateError("not found")) as gone:
+            with a, b, c:
+                errors = issue_gate.evaluate(repo=REPO, issue=U, worktree=self.worktree, evidence_path=self.path)[0]
+        gone.assert_called_once_with(REPO, 400)
+        self.assertIn("sub-issue #216: disputed_issue_claims[0].follow_up_issue_url cannot be verified: not found",
+                      errors)
+        a, b, c = self.fakes()
+        with patch.object(issue_gate, "gh_follow_up_issue", return_value=None) as found:
+            with a, b, c:
+                errors = issue_gate.evaluate(repo=REPO, issue=U, worktree=self.worktree, evidence_path=self.path)[0]
+        found.assert_called_once_with(REPO, 400)
+        self.assertEqual([], errors)
+
+    def test_v7_a_sub_issue_listed_twice_or_the_umbrella_itself_is_refused(self):
+        for name, subs in (("listed twice", [entry(142), entry(216), entry(216)]),
+                           ("the umbrella itself", [entry(142), entry(216), entry(U)])):
+            with self.subTest(name):
+                self.evidence["umbrella"]["sub_issues"] = subs
+                self.save()
+                errors = self.blocked("is listed twice or is the umbrella itself")
+                self.assertEqual(1, len([e for e in errors if "listed twice or is the umbrella itself" in e]), errors)
+        self.evidence["umbrella"]["sub_issues"] = [entry(142), entry(216)]
+        self.save()
+        self.assertEqual([], self.eval_local()[0])
+
     def test_v7_each_sub_issue_needs_acceptance_and_the_reviewer(self):
         for name, mutate, needle in (
                 ("no criteria", lambda s: s.pop("acceptance_criteria"), "#216.acceptance_criteria: acceptance criteria absent"),

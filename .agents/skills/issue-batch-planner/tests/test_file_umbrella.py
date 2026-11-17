@@ -631,6 +631,37 @@ class UpdateBodyTest(UmbrellaHarness):
         self.assertIn("did not report its result", out["error"])
         self.assertEqual([], self.gh.writes)
 
+    def test_f26_update_body_holds_the_batch_lock(self):
+        """--update-body takes the same per-batch lock as a creation (review R1 F1): a second run, dry or
+        approved, is refused before any GitHub call and writes no body, diff or state file."""
+        self.state.mkdir()
+        with open(self.state / f"{BATCH}.lock", "a+") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for execute in (False, True):
+                with self.subTest(execute=execute):
+                    code, out = self.run_update(execute=execute)
+                    self.assertEqual(2, code, out)
+                    self.assertIn("lock", out["error"])
+        self.assertEqual([], self.gh.calls)
+        self.assertEqual([f"{BATCH}.lock"], [p.name for p in self.state.iterdir()],
+                         "a run refused by the lock writes no body, diff or state file")
+        self.assertEqual(OLD_BODY, self.gh.issues[800]["body"])
+
+    def test_f27_an_umbrella_found_despite_a_pending_creation_is_recorded(self):
+        """The state file holds an unresolved creation attempt but the umbrella is visible (through its
+        sub-issues' parent): the approved update edits it and records its number, dropping pending_creation."""
+        self.state.mkdir()
+        state_file = self.state / f"{BATCH}.json"
+        state_file.write_text(json.dumps(
+            {"batch_id": BATCH, "pending_creation": {"started_at": "2026-11-17T00:00:00Z", "approval_sha256": "a" * 64}}))
+        code, out = self.run_update()
+        self.assertEqual((0, "UPDATED", 800), (code, out["status"], out["umbrella"]), out)
+        recorded = json.loads(state_file.read_text())
+        self.assertEqual(800, recorded["number"])
+        self.assertEqual(BATCH, recorded["batch_id"])
+        self.assertNotIn("pending_creation", recorded)
+        self.assertEqual(1, len(self.body_edits()))
+
     def test_f21_a_stale_or_foreign_approval_is_refused(self):
         code, dry = self.run_update(execute=False)
         self.assertEqual(0, code, dry)
