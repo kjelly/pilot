@@ -233,11 +233,22 @@ func TestTerminalSinkRegisterFailsOnWhatItShouldCatch(t *testing.T) {
 		})
 	}
 	t.Run("a call that moved: the entry is stale", func(t *testing.T) {
+		// The call is rewritten in place, so the anchor has to be in the source exactly once: a
+		// refactor of the call (the F7 retry wrapper moved it into a closure) that leaves the
+		// anchor behind would turn strings.Replace into a no-op and the control into a bare
+		// "problems = []" that says nothing about the register. Fail on the anchor instead.
+		const (
+			movedFile   = "internal/delivery/transaction.go"
+			movedAnchor = "t.Writer.AppendEvent(c, event)"
+		)
+		if n := strings.Count(real[movedFile], movedAnchor); n != 1 {
+			t.Fatalf("the anchor %q is in %s %d times, want exactly once: re-anchor this control on the current text of the Transaction.runStep AppendEvent call", movedAnchor, movedFile, n)
+		}
 		moved := lockSources{}
 		for k, v := range real {
 			moved[k] = v
 		}
-		moved["internal/delivery/transaction.go"] = strings.Replace(moved["internal/delivery/transaction.go"], "t.Writer.AppendEvent(actx,", "t.Writer.AppendEvidence2(actx,", 1)
+		moved[movedFile] = strings.Replace(moved[movedFile], movedAnchor, "t.Writer.AppendEvidence2(c, event)", 1)
 		p := terminalSinkProblems(scanTerminalSinks(t, moved), terminalSinks)
 		if len(p) == 0 || !strings.Contains(strings.Join(p, "\n"), "Transaction.runStep: the register lists a call of AppendEvent that is no longer there") {
 			t.Fatalf("problems = %v", p)

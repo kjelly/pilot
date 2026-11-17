@@ -1,6 +1,6 @@
 # Verification Spec — log-shipping (Promtail：log-server → dashboard Loki)
 
-> 版本：v1.5
+> 版本：v1.6
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `audit-log-forwarding.md`
 > 的「client 端疊一個轉送 agent、central 端固定變數」模式）
 > 維護者：sre
@@ -108,7 +108,7 @@
 | C6  | functional | 本機注入唯一測試訊息，透過 Promtail 轉送後，向中央 Loki 查詢確實查到    | 0 | sh -c 'n="PILOT-LOGSHIP-SELFTEST-$$-$(date +%s%N)"; logger -p local6.info "$n"; sleep 6; curl -fsS -G http://pilot-loki-backend:3100/loki/api/v1/query --data-urlencode "query={job=\"pilot-siem\"} |= \"$n\"" | grep -qF "$n" && echo 0 || echo 1' |
 | C7  | dir      | Promtail positions 檔目錄存在（記錄 tail 進度，重啟不重複轉送）          | present | test -d /var/lib/pilot/promtail |
 | C8  | config   | Promtail 設定檔含 `host` label 的 pipeline stage（從 `filename` 抽取來源主機名）| 0 | grep -qE 'source:\s*filename' /etc/pilot/promtail/promtail-config.yml; echo $? |
-| C9  | functional | 本機注入唯一測試訊息，向中央 Loki 用「本機 hostname」當 `host` label 篩選查詢確實查到——證明的不只是「資料有沒有進 Loki」（C6 已驗），而是「這筆資料能不能用 `host` label 篩出**這一台**」| 0 | sh -c 'n="PILOT-LOGSHIP-HOSTLABEL-$$-$(date +%s%N)"; logger -p local6.info "$n"; sleep 6; curl -fsS -G http://pilot-loki-backend:3100/loki/api/v1/query --data-urlencode "query={job=\"pilot-siem\", host=\"$(hostname)\"} |= \"$n\"" | grep -qF "$n" && echo 0 || echo 1' |
+| C9  | functional | 本機注入唯一測試訊息，向中央 Loki 用「本機 hostname」當 `host` label 篩選查詢確實查到——證明的不只是「資料有沒有進 Loki」（C6 已驗），而是「這筆資料能不能用 `host` label 篩出**這一台**」| 0 | sh -c 'n="PILOT-LOGSHIP-HOSTLABEL-$$-$(date +%s%N)"; logger -p local6.info "$n"; sleep 6; curl -fsS -G http://pilot-loki-backend:3100/loki/api/v1/query --data-urlencode "query={job=\"pilot-siem\", host=\"$(hostname -s)\"} |= \"$n\"" | grep -qF "$n" && echo 0 || echo 1' |
 
 > C3 從同機 log-server 的接收設定（`10-siem-receiver.conf` 的 `SiemAuditPath`）讀出實際生效的
 > `siem_log_root`，再比對 Promtail 的 `__path__`，所以非預設根目錄也驗得到。C4 的
@@ -122,10 +122,13 @@
 > 上一輪驗證留下的舊資料造成偽陽性；Command 欄位的文字固定，執行時才展開成這次的值，
 > 再用 `grep -qF "$n"` 比對這次送出的完整字串。LogQL 加上 `|= "$n"`，只取含這則訊息的行：
 > Loki instant query 預設最多回 100 行，日誌量大的 SIEM 上這則訊息可能不在最新的 100 行裡。
-> C9 的 `$(hostname)` 跟 C6/C9 的 `$$` 是同一種道理——這段 shell
+> C9 的 `$(hostname -s)` 跟 C6/C9 的 `$$` 是同一種道理——這段 shell
 > 語法本身是固定字串，只是**執行時**在不同主機/不同次會展開成不同值，不
 > 算違反「Command 欄位不能因每次執行而變」的規則（規則管的是欄位文字本
-> 身，不是它執行後的結果）。C9 特別選「用本機自己的 hostname 當 label
+> 身，不是它執行後的結果）。`pilot-siem` job 的 `host` label 是接收端 rsyslog 的 `%HOSTNAME%`，rsyslog
+> 預設（`PreserveFQDN off`）會去掉網域，所以 label 是短名稱（`nexus`、`ipa1`），不是加入 FreeIPA 後的 FQDN
+> （`nexus.ipa.pilot.internal`）；v1.5 以前的 C9 用 `$(hostname)`，在已 enroll 的主機上永遠查不到自己（實跑
+> 2026-11-13）。C9 特別選「用本機自己的 hostname 當 label
 > 篩選」而不是查全部再肉眼比對，是因為要證明的正是「這個 label 真的等於
 > 這台主機的名字」，不是「Loki 裡面有某個 host label 存在」。
 
@@ -167,3 +170,4 @@
 | 2026-08-07 | v1.3 | 修 v1.2 自己引入的 bug：wazuh-alerts job 的 `alerts/*.log` glob 只吃到 Wazuh 同時落地的純文字版告警檔，`json` pipeline stage 對純文字內容解析永遠失敗、`host` label 永遠不會被設定——而且不會報錯，看起來像「job 有資料，只是沒篩選能力」而非明顯故障。real incident：minimal-poc round 20 對一個全新 clean-room 拓樸做深入 Loki 查核時，`/loki/api/v1/series` 對這個 job 查出來只有 `filename`/`job` 兩個 label，完全沒有 `host`。修法：`__path__` 從 `alerts/*.log` 改成明確指定同目錄下 Wazuh 一律會寫的 `alerts/alerts.json`（不受 `<logall>`/`<logall_json>` 影響，那兩個設定管的是 archives 而非 alerts）。修前修後都在同一組 3 台主機（AlmaLinux 9 + 2×Ubuntu 24.04）實測確認：修前 host label 完全空白；修後 `{job="pilot-siem-wazuh-alerts"}` 每一筆都有正確的 `host` label | sre |
 | 2026-10-15 | v1.4 | C3 改成從 log-server 接收設定的 `SiemAuditPath` 讀出實際生效的 `siem_log_root`，再確認 Promtail 的 `__path__` 是 `<root>/**/*.log`，不再寫死 `/var/log/siem`（PR #79 讓 inventory 的 `siem_log_root` 生效，非預設根目錄不再是已知偏差）。C6/C9 改送這次唯一的 nonce 訊息並只認這則訊息（`grep -qF`，expected `0`）；v1.3 的 `grep -o "PILOT-LOGSHIP-SELFTEST-[0-9]*"` 會把先前留在 Loki 的舊訊息當成這次的結果（PR #79 review） | pilot |
 | 2026-10-15 | v1.5 | C6/C9 的 LogQL 加上 `\|= "$n"`，只取含這次 nonce 的行：Loki instant query 預設最多回 100 行，日誌量大時這則訊息可能不在其中而假 FAIL（PR #79 review）。§2 說明改成現在的 `grep -qF "$n"` 比對（拿掉舊的 `grep -o` 說法）；§4 補上 C3 fail 的成因（log-server 與 log-shipping 的 `siem_log_root` 不一致、這台沒有接收設定） | pilot |
+| 2026-11-13 | v1.6 | minimal-PoC 五節點實跑發現（F4）：C9 用 `$(hostname)`（加入 FreeIPA 後是 FQDN）查 `host` label，但 `pilot-siem` job 的 label 是 rsyslog `%HOSTNAME%`（預設去掉網域的短名稱），已 enroll 的主機永遠查不到自己。改用 `$(hostname -s)`。Expected 不變（仍要求用本機自己的名字篩出自己剛注入的訊息）；regression test 同步 | sre |
