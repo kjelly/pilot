@@ -1,0 +1,10 @@
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 38276
+;; flags: qr aa rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 1232
+; COOKIE: 000000000000000000000000000000000000000000000000 (good)
+;; ANSWER SECTION:
+ipa1.ipa.pilot.internal. 1200	IN	A	192.168.122.22
+

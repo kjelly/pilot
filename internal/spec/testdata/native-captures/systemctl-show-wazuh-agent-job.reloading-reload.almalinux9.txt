@@ -1,0 +1,10 @@
+# AlmaLinux 9.8 VM, kernel 5.14.0-687.5.3.el9_8.x86_64, systemd 252 (252-67.el9_8.4.alma.1), Wazuh 4.14.1.
+# Read-only in-guest sampler during a natural fresh apply of the pilot candidate cbf23c42 (Issue #330), with the
+# agent's real enrolment and Wazuh's own `restart.sh agent reload`.
+# `systemctl show wazuh-agent -p LoadState -p ActiveState -p SubState -p Job`; the return code was not recorded.
+# One sample of a sampler that logged the four properties on one line; they are split here at the spaces, one
+# property per line as systemctl prints them (no value contains a space). Sample taken at uptime 367.15 s.
+LoadState=loaded
+ActiveState=reloading
+SubState=reload
+Job=1496
