@@ -153,6 +153,10 @@ skill-test:    ## Run the unit tests of every project-local agent skill (.agents
 	  (cd "$$skill" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py') || exit 1; \
 	done
 
+.PHONY: skill-repo-lint
+skill-repo-lint: ## Run the repo-wide Go lints that read .agents/.claude (the skills/docs CI profiles skip the Go shards; CI runs this)
+	go test -count=1 -timeout 5m ./internal/spec -run '^(TestRegression_SSHControlPathTemplatesAreBounded|TestRegression_NoArchivedYAMLImport)$$'
+
 test-prereq: ## Check go / docker / ansible availability
 	@command -v go >/dev/null              && echo "go OK"              || (echo "go MISSING"; exit 1)
 	@command -v docker >/dev/null          && echo "docker OK"          || (echo "docker MISSING"; exit 1)

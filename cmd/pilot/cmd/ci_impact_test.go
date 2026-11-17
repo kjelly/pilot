@@ -61,7 +61,7 @@ func checkCIImpactWorkflow(body string) string {
 	if wf.Jobs["skills"].If != "" || !slices.Contains(ciNeedsList(wf.Jobs["skills"].Needs), "changes") {
 		return "skill contract job must run for every profile"
 	}
-	foundSkillTests, foundLayout := false, false
+	foundSkillTests, foundLayout, foundRepoLint := false, false, false
 	for _, step := range wf.Jobs["skills"].Steps {
 		if step.Run == "make skill-test" {
 			foundSkillTests = step.If == "needs.changes.outputs.profile != 'docs'"
@@ -69,9 +69,15 @@ func checkCIImpactWorkflow(body string) string {
 		if strings.Contains(step.Run, "-run '^TestAgentSkill'") {
 			foundLayout = step.If == ""
 		}
+		if step.Run == "make skill-repo-lint" {
+			foundRepoLint = step.If == ""
+		}
 	}
 	if !foundSkillTests || !foundLayout {
 		return "narrow validation lost skill tests or the unconditional layout contract"
+	}
+	if !foundRepoLint {
+		return "narrow validation lost the unconditional repo-wide lints that read .agents and .claude (make skill-repo-lint)"
 	}
 	const receiptGuard = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'"
 	if wf.Jobs["ci-receipt"].If != receiptGuard {
@@ -94,6 +100,8 @@ func TestCIImpactWorkflowContractCatchesDrift(t *testing.T) {
 		{"python3 scripts/ci-impact.py --check-results", "echo success", "execute the result checker"},
 		{"NEEDS_JSON: ${{ toJSON(needs) }}", "NEEDS_JSON: '{}'", "input drift"},
 		{"    if: needs.changes.outputs.profile != 'docs'", "    if: false", "lost skill tests"},
+		{"        run: make skill-repo-lint\n", "        if: needs.changes.outputs.profile == 'full'\n        run: make skill-repo-lint\n", "lost the unconditional repo-wide lints"},
+		{"      - name: Repo-wide lints that read .agents and .claude (make skill-repo-lint)\n        run: make skill-repo-lint\n", "", "lost the unconditional repo-wide lints"},
 		{"needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:", "needs.changes.outputs.evidence_only != 'true'\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:", "only full validation"},
 	} {
 		t.Run(tc.want, func(t *testing.T) {

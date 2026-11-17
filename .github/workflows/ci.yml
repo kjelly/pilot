@@ -365,6 +365,8 @@ jobs:
         run: make skill-test
       - name: Verify skill layout
         run: go test -count=1 -timeout 5m ./cmd/pilot/cmd -run '^TestAgentSkill'
+      - name: Repo-wide lints that read .agents and .claude (make skill-repo-lint)
+        run: make skill-repo-lint
       - name: Duplicate YAML key check (repo-wide)
         run: python3 scripts/check-yaml-duplicate-keys.py
 
