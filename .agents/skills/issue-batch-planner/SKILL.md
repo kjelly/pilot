@@ -61,15 +61,21 @@ Only after the user names a `MERGE_CANDIDATE` batch of a `REVIEWED` report and a
 2. Dry run (writes nothing to GitHub):
    `python3 .agents/skills/issue-batch-planner/scripts/file_umbrella.py --repo OWNER/REPO --report <dir>/report.json --batch <batch_id> --label <name> [--label ...] --state-dir <dir>/umbrella`
    It re-checks every Issue of the batch (still open, no open or unverifiable closing PR, no other
-   parent), finds an umbrella already filed for this batch, and writes the planned body to
-   `<state-dir>/<batch_id>.body.md`.
+   parent), finds an umbrella already filed for this batch, writes the planned body to
+   `<state-dir>/<batch_id>.body.md` and prints `approval_sha256`, which covers the repository, batch,
+   title, labels and body.
 3. Show the user the batch, the title, the labels and the body. **Stop here until the user explicitly
    approves this batch_id, these labels and this body.**
-4. Re-run the same command with `--execute`. Exit 0 means filed (or completed) and read back. Exit 3 means
-   partly done or uncertain: report the output as it is; re-running continues with the same umbrella
-   (found through a sub-issue's parent, the state file, or the marker line
-   `issue-batch-planner batch: <batch_id>`), and never retry after an uncertain creation before searching
-   for that marker.
+4. Re-run the same command with `--execute --approval-sha256 <approval_sha256 of that dry run>`. If the
+   report or the labels changed since, it refuses (exit 2): run the dry run again and ask again. Exit 0
+   means filed (or completed) and read back; a newly created umbrella's body must equal the approved body.
+   Exit 3 means partly done or uncertain, and every error after a GitHub write started is exit 3, never 2:
+   report the output as it is. Re-running continues with the same umbrella (found through a sub-issue's
+   parent, the state file, or the marker line `issue-batch-planner batch: <batch_id>`).
+   Before calling `create_issue.py`, the script records a pending creation in `<state-dir>/<batch_id>.json`.
+   While it is unresolved, no run creates another umbrella: a re-run adopts the umbrella once a sub-issue's
+   parent or the marker search shows it, and otherwise stops with exit 3. Delete that file only after
+   checking on GitHub that no Issue carries the marker line.
 
 The umbrella body tells readers not to run `issue-to-pr` on it: the fix starts from the primary Issue.
 Closing the umbrella after its sub-issues are closed is left to the user.

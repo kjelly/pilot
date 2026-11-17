@@ -25,3 +25,5 @@ Issue 503 carries prompt-injection text on purpose: the tests check that none of
 line or an output file.
 
 Also observed for `file_umbrella.py`: `gh issue list --search "<text> in:body" --json number,url,body` returns `[]` with exit 0 when nothing matches. `gh issue edit N --add-sub-issue M` is only judged by its exit code and the read-back of `subIssues`, never by its output.
+
+GitHub keeps the body exactly as `create_issue.py` (`gh issue create --body-file`) sent it: on 2026-11-17, kjelly/pilot#354's `body` from `gh issue view 354 --json body` was identical to the body file of the first `--execute`. Both were 1822 characters, the trailing newline was kept, and neither contained `\r`. `file_umbrella.py` therefore requires the read-back body of an umbrella it created to equal the approved body exactly.

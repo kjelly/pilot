@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """File one umbrella Issue for a user-approved MERGE_CANDIDATE batch of a REVIEWED planner report.
 
-Dry run unless --execute: the dry run checks every precondition and writes the planned body to
---state-dir, but creates, edits and links nothing. This is the planner skill's only writer; every
-external command goes through run_command(), which accepts only the forms in _command_problem().
-Exit 0: done (or a successful dry run). Exit 2: refused, nothing was written to GitHub. Exit 3: partly
+Dry run unless --execute: the dry run checks every precondition, writes the planned body to --state-dir
+and prints approval_sha256, but creates, edits and links nothing. --execute must name the approval_sha256
+of the dry run the user approved, so it publishes exactly the title, labels and body that were shown.
+This is the planner skill's only writer; every external command goes through run_command(), which
+accepts only the forms in _command_problem().
+Exit 0: done (or a successful dry run). Exit 2: refused, this run wrote nothing to GitHub. Exit 3: partly
 done or uncertain; the output says what is known, and a re-run continues without a second umbrella.
+Every error after a GitHub write has started is exit 3, never exit 2.
 """
 from __future__ import annotations
 
@@ -32,10 +35,18 @@ NUMBER_RE = re.compile(r"[1-9][0-9]{0,9}\Z")
 LABEL_RE = re.compile(r"[^\x00-\x1f]{1,50}\Z")
 MAX_BODY = 60000  # GitHub's limit is 65536 characters
 MENTION_RE = re.compile(r"(?<![\w`])@[A-Za-z0-9][A-Za-z0-9-]*")
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+# create_issue.py prints this, and exits 1, only when it stopped before `gh issue create`. Any other exit 1
+# (an uncaught exception, possibly after the Issue was created) is uncertain.
+BLOCKED_PREFIX = "BLOCKED before creation:"
 
 
 class Refused(RuntimeError):
-    """A precondition failed; nothing was written to GitHub."""
+    """A precondition failed before this run started any GitHub write; this run wrote nothing to GitHub."""
+
+
+class NotCreated(Refused):
+    """create_issue.py proved that it created nothing."""
 
 
 class Partial(RuntimeError):
@@ -89,8 +100,13 @@ def run_command(argv: list[str], *, timeout: int = 120) -> planner.Result:
         raise Refused(f"refused {argv[:3]!r}: {problem}")
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise Refused(f"{argv[0]} failed to run: {exc}") from exc
+    except OSError as exc:
+        raise Refused(f"{argv[0]} could not be started: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        message = f"{argv[0]} did not finish within {timeout}s"
+        if argv[0] == sys.executable or argv[1:3] == ["issue", "edit"]:  # a write: it may still have happened
+            raise Partial(f"{message}; the write it started may still have happened", {}) from exc
+        raise Refused(message) from exc  # a read; execute() still reports it as PARTIAL after a write
     return planner.Result(p.returncode, p.stdout, p.stderr)
 
 
@@ -190,6 +206,47 @@ def body_problems(title: str, body: str) -> list[str]:
     return problems
 
 
+def approval_sha256(repo: str, batch_id: str, title: str, labels: list[str], body: str) -> str:
+    """The value the user approves after the dry run: it covers everything --execute would publish."""
+    payload = planner.dumps({"repository": repo, "batch_id": batch_id, "title": title, "labels": sorted(labels),
+                             "body": body})
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------------------- state file
+
+def read_state(state_file: Path) -> dict[str, Any] | None:
+    """{"number": N, ...}: this directory filed umbrella #N. {"pending_creation": {...}}: a creation was
+    started and its result is not known, so no other creation may start until the umbrella is found."""
+    if not state_file.exists():
+        return None
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Refused(f"unreadable state file {state_file}: {exc}") from exc
+    if not isinstance(state, dict) or not (type(state.get("number")) is int
+                                           or isinstance(state.get("pending_creation"), dict)):
+        raise Refused(f"unreadable state file {state_file}: neither an umbrella number nor a pending creation")
+    return state
+
+
+def write_number(state_file: Path, repo: str, batch_id: str, number: int) -> None:
+    planner.write_atomic(state_file, planner.dumps({"number": number, "batch_id": batch_id,
+                                                    "url": f"https://github.com/{repo}/issues/{number}"}))
+
+
+def write_pending(state_file: Path, batch_id: str, approval: str) -> None:
+    planner.write_atomic(state_file, planner.dumps({"batch_id": batch_id, "pending_creation": {
+        "started_at": planner.now_iso(), "approval_sha256": approval}}))
+
+
+def pending_guidance(batch_id: str, state_file: Path) -> str:
+    return (f"an earlier creation attempt for this batch did not report its result, and no Issue carrying the "
+            f"line `{marker(batch_id)}` is visible yet (GitHub search can lag); re-run later and it is picked up. "
+            f"Only after checking on GitHub that no Issue carries that line, delete {state_file} to allow a new "
+            "creation")
+
+
 # --------------------------------------------------------------------------- plan and execute
 
 def open_pr_numbers(repo: str) -> set[int]:
@@ -199,18 +256,18 @@ def open_pr_numbers(repo: str) -> set[int]:
     return {p["number"] for p in data if isinstance(p, dict) and type(p.get("number")) is int}
 
 
-def find_existing(repo: str, batch_id: str, children: dict[int, dict[str, Any]], state_file: Path) -> int | None:
-    """The umbrella already filed for this batch, from (a) a child's parent, (b) the state file, (c) search."""
+def find_existing(repo: str, batch_id: str, children: dict[int, dict[str, Any]],
+                  state_file: Path) -> tuple[int | None, dict[str, Any] | None]:
+    """The umbrella already filed for this batch, from (a) a child's parent, (b) the state file, (c) search,
+    and the state file's unresolved creation attempt, if any."""
     found: set[int] = set()
     for child in children.values():
         parent = child["parent"]
         if parent and has_marker(view(repo, parent["number"])["body"], batch_id):
             found.add(parent["number"])
-    if not found and state_file.exists():
-        try:
-            recorded = json.loads(state_file.read_text(encoding="utf-8"))["number"]
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise Refused(f"unreadable state file {state_file}: {exc}") from exc
+    state = read_state(state_file)
+    if not found and state is not None and "number" in state:
+        recorded = state["number"]
         if not has_marker(view(repo, recorded)["body"], batch_id):
             raise Refused(f"state file names #{recorded}, whose body does not carry the batch marker")
         found.add(recorded)
@@ -222,7 +279,7 @@ def find_existing(repo: str, batch_id: str, children: dict[int, dict[str, Any]],
         found |= {h["number"] for h in hits if isinstance(h, dict) and has_marker(h.get("body"), batch_id)}
     if len(found) > 1:
         raise Refused(f"more than one umbrella carries the marker: {sorted(found)}; resolve by hand")
-    return next(iter(found), None)
+    return next(iter(found), None), (state or {}).get("pending_creation")
 
 
 def check_children(repo: str, batch: dict[str, Any], batch_id: str) -> dict[int, dict[str, Any]]:
@@ -247,7 +304,7 @@ def check_children(repo: str, batch: dict[str, Any], batch_id: str) -> dict[int,
     return children
 
 
-def create_umbrella(repo: str, title: str, body_file: Path, labels: list[str]) -> tuple[int | None, str]:
+def create_umbrella(repo: str, title: str, body_file: Path, labels: list[str]) -> tuple[int, str]:
     argv = [sys.executable, str(CREATE_ISSUE), "--repo", repo, "--title", title, "--body-file", str(body_file)]
     for label in labels:
         argv += ["--label", label]
@@ -255,17 +312,16 @@ def create_umbrella(repo: str, title: str, body_file: Path, labels: list[str]) -
     url_re = re.compile(r"https://github\.com/" + re.escape(repo) + r"/issues/([0-9]+)", re.IGNORECASE)
     if r.returncode == 0:
         m = url_re.fullmatch(r.stdout.strip())
-        if not m:
-            raise Partial("create_issue.py succeeded but printed no Issue URL; search for the marker before re-running", {})
-        return int(m.group(1)), "created"
-    if r.returncode == 1:
-        raise Refused(f"create_issue.py refused before creating anything: {r.stderr.strip()[:300]}")
-    if r.returncode == 3:
+        if m:
+            return int(m.group(1)), "created"
+    elif r.returncode == 1 and r.stderr.lstrip().startswith(BLOCKED_PREFIX):
+        raise NotCreated(f"create_issue.py refused before creating anything: {r.stderr.strip()[:300]}")
+    elif r.returncode == 3:
         m = url_re.search(r.stderr)
         if m:
             return int(m.group(1)), "created; label verification failed"
-    raise Partial("creation is uncertain (create_issue.py exit "
-                  f"{r.returncode}); do not retry before searching for the marker", {"stderr": r.stderr.strip()[:300]})
+    raise Partial(f"creation is uncertain (create_issue.py exit {r.returncode}, no Issue URL)",
+                  {"stderr": (r.stderr or r.stdout).strip()[:300]})
 
 
 def file_umbrella(args: argparse.Namespace) -> dict[str, Any]:
@@ -283,39 +339,71 @@ def file_umbrella(args: argparse.Namespace) -> dict[str, Any]:
     problems = body_problems(title, body)
     if problems:
         raise Refused("; ".join(problems))
+    approval = approval_sha256(args.repo, args.batch, title, labels, body)
+    approved = getattr(args, "approval_sha256", None)
+    if args.execute and approved is None:
+        raise Refused("--execute needs --approval-sha256: the approval_sha256 of the dry run the user approved")
+    if approved is not None and (not SHA256_RE.fullmatch(approved) or approved != approval):
+        raise Refused("the title, labels or body are not the ones the user approved (approval_sha256 differs); "
+                      "run the dry run again and get the user's approval for what it shows")
     state_dir = planner.prepare_out_dir(args.state_dir, refuse_existing=())
     body_file = state_dir / f"{args.batch}.body.md"
-    planner.write_atomic(body_file, body)
     state_file = state_dir / f"{args.batch}.json"
-    lock = open(state_dir / f"{args.batch}.lock", "a+")
-    try:
+    with open(state_dir / f"{args.batch}.lock", "a+") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise Refused("another run holds the lock for this batch") from exc
+            raise Refused("another run holds the lock for this batch; this run changed nothing") from exc
+        # Every file of the batch (body, state) is written only while holding the lock, so a run that is
+        # refused here cannot change what the run holding it publishes.
+        planner.write_atomic(body_file, body)
         children = check_children(args.repo, batch, args.batch)
-        umbrella = find_existing(args.repo, args.batch, children, state_file)
+        umbrella, pending = find_existing(args.repo, args.batch, children, state_file)
+        if umbrella is None and pending is not None:
+            raise Partial(pending_guidance(args.batch, state_file),
+                          {"umbrella": None, "pending_creation": pending, "state_file": str(state_file)})
         missing = [n for n in batch["issue_numbers"]
                    if not (children[n]["parent"] and children[n]["parent"]["number"] == umbrella)]
         plan = {"mode": "execute" if args.execute else "dry-run", "repository": args.repo, "batch_id": args.batch,
                 "umbrella": umbrella, "would_create": umbrella is None, "title": title, "labels": labels,
                 "body_file": str(body_file), "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                "approval_sha256": approval,
                 "sub_issues_to_add": missing if umbrella is not None else list(batch["issue_numbers"])}
+        if pending is not None:
+            plan["resolved_pending_creation"] = pending
         if not args.execute:
             return {"status": "DRY_RUN", **plan}
-        note = "existing"
+        return execute(args, batch, labels, title, body, body_file, state_file, umbrella, pending, missing, plan)
+
+
+def execute(args: argparse.Namespace, batch: dict[str, Any], labels: list[str], title: str, body: str,
+            body_file: Path, state_file: Path, umbrella: int | None, pending: dict[str, Any] | None,
+            missing: list[int], plan: dict[str, Any]) -> dict[str, Any]:
+    """The writes, under the caller's lock. Before the first GitHub write an error is a refusal; from the
+    first write on, every error is PARTIAL with what is known (a run that may have written never says it
+    wrote nothing)."""
+    if umbrella is not None and pending is not None:
+        write_number(state_file, args.repo, args.batch, umbrella)  # an earlier attempt's umbrella, now found
+    if umbrella is None:
+        if body_file.read_text(encoding="utf-8") != body:
+            raise Refused(f"{body_file} changed after this run wrote it; nothing was created")
+        write_pending(state_file, args.batch, plan["approval_sha256"])  # before the attempt, kept if uncertain
+    progress: dict[str, Any] = {"umbrella": umbrella, "phase": "create" if umbrella is None else "link"}
+    note = "existing"
+    try:
         if umbrella is None:
             umbrella, note = create_umbrella(args.repo, title, body_file, labels)
-            planner.write_atomic(state_file, planner.dumps({"number": umbrella, "batch_id": args.batch,
-                                                            "url": f"https://github.com/{args.repo}/issues/{umbrella}"}))
+            progress["umbrella"] = umbrella
+            write_number(state_file, args.repo, args.batch, umbrella)
             if note != "created":
-                raise Partial(f"#{umbrella} {note}; fix its labels, then re-run", {"umbrella": umbrella})
+                raise Partial(f"#{umbrella} {note}; fix its labels, then re-run", {})
             missing = list(batch["issue_numbers"])
+        progress["phase"] = "link"
         for n in missing:
             r = run_command(["gh", "issue", "edit", str(umbrella), "-R", args.repo, "--add-sub-issue", str(n)])
             if r.returncode != 0:
-                raise Partial(f"adding #{n} to #{umbrella} failed: {r.stderr.strip()[:200]}; re-run to continue",
-                              {"umbrella": umbrella})
+                raise Partial(f"adding #{n} to #{umbrella} failed: {r.stderr.strip()[:200]}; re-run to continue", {})
+        progress["phase"] = "read-back"
         after = view(args.repo, umbrella)
         subs = {node.get("number") for node in after["subIssues"]["nodes"] if isinstance(node, dict)}
         names = {x.get("name") for x in after["labels"] if isinstance(x, dict)}
@@ -324,14 +412,33 @@ def file_umbrella(args: argparse.Namespace) -> dict[str, Any]:
             gaps.append(f"sub-issues are {sorted(x for x in subs if x)}, expected {batch['issue_numbers']}")
         if not set(labels) <= names:
             gaps.append(f"labels {sorted(set(labels) - names)} are missing")
-        if not has_marker(after["body"], args.batch):
+        published_here = note == "created" or (
+            pending is not None and pending.get("approval_sha256") == plan["approval_sha256"])
+        if published_here and after["body"] != body:
+            gaps.append("the body is not the approved body")
+        elif not has_marker(after["body"], args.batch):
             gaps.append("the body lost the batch marker")
         if gaps:
-            raise Partial("read-back differs: " + "; ".join(gaps), {"umbrella": umbrella})
-        return {"status": "FILED" if note == "created" else "COMPLETED_EXISTING", **plan, "umbrella": umbrella,
-                "url": after["url"], "sub_issues": sorted(subs)}
-    finally:
-        lock.close()
+            raise Partial("read-back differs: " + "; ".join(gaps), {})
+    except NotCreated as exc:
+        try:
+            state_file.unlink(missing_ok=True)
+        except OSError as unlink_exc:
+            raise NotCreated(f"{exc}; also delete {state_file} by hand ({unlink_exc})") from exc
+        raise
+    except Partial as exc:
+        exc.state = {**progress, **exc.state}
+        if progress["phase"] == "create" and progress["umbrella"] is None:
+            exc.state.update(state_file=str(state_file), guidance=pending_guidance(args.batch, state_file))
+        raise
+    except Exception as exc:  # noqa: BLE001 - after a write started, no error may read as "nothing written"
+        state = dict(progress)
+        if progress["phase"] == "create" and progress["umbrella"] is None:
+            state.update(state_file=str(state_file), guidance=pending_guidance(args.batch, state_file))
+        raise Partial(f"{exc} (during {progress['phase']}, after a GitHub write may have happened); re-run to "
+                      "continue", state) from exc
+    return {"status": "FILED" if note == "created" else "COMPLETED_EXISTING", **plan, "umbrella": umbrella,
+            "url": after["url"], "sub_issues": sorted(subs)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -342,10 +449,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--label", action="append", default=[])
     ap.add_argument("--state-dir", required=True, type=Path)
     ap.add_argument("--execute", action="store_true", help="write to GitHub; without it, a dry run")
+    ap.add_argument("--approval-sha256", help="with --execute: the approval_sha256 of the dry run the user approved")
     args = ap.parse_args(argv)
     try:
         result, code = file_umbrella(args), EXIT_OK
-    except (Refused, planner.PlannerError) as exc:
+    except (Refused, planner.PlannerError, OSError) as exc:  # execute() turns every error after a write into Partial
         result, code = {"status": "REFUSED", "error": str(exc)}, EXIT_REFUSED
     except Partial as exc:
         result, code = {"status": "PARTIAL", "error": str(exc), **exc.state}, EXIT_PARTIAL

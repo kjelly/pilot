@@ -334,10 +334,10 @@ python3 "$P" diff      --previous <old>/report.json --current <dir>/report.json 
   ```bash
   python3 .agents/skills/issue-batch-planner/scripts/file_umbrella.py \
     --repo OWNER/REPO --report <dir>/report.json --batch <batch_id> \
-    --label <name> [--label <name> ...] --state-dir <dir> [--execute]
+    --label <name> [--label <name> ...] --state-dir <dir> [--execute --approval-sha256 <sha256>]
   ```
 
-  沒有 `--execute` 時只做 dry-run：檢查前置條件，輸出計畫（建立新的或沿用哪個母 Issue、標題、標籤、本文 SHA-256、要加入的 sub-issue），本文寫到 `--state-dir` 供檢視，不做任何寫入。
+  沒有 `--execute` 時只做 dry-run：檢查前置條件，輸出計畫（建立新的或沿用哪個母 Issue、標題、標籤、本文 SHA-256、要加入的 sub-issue），本文寫到 `--state-dir` 供檢視，不做任何寫入。計畫另含 `approval_sha256`：涵蓋 repository、batch、標題、標籤與本文。`--execute` 必須帶使用者核准的那次 dry-run 的 `approval_sha256`；報告或標籤在核准後改變就以結束碼 2 拒絕，所以只會發布使用者看過的內容。
 - 標籤由執行的 agent 依 `issue-filing` 流程選擇（列舉現有標籤、依類型選擇），以 `--label` 明確傳入。
 - **前置條件**（任何一項不成立就以結束碼 2 結束，不做任何寫入）：
   1. 報告狀態為 `REVIEWED`，重算的 `content_sha256` 與報告相符；
@@ -351,13 +351,13 @@ python3 "$P" diff      --previous <old>/report.json --current <dir>/report.json 
   - 報告的 base SHA 與 `content_sha256`；
   - 識別行：`issue-batch-planner batch: <batch_id>`。
 - **寫入順序**：
-  1. 取得 `--state-dir/<batch_id>.lock` 的 `flock`；被持有就以結束碼 2 結束；
-  2. 找既有的母 Issue，依序：(a) 任一子 Issue 的 `parent` 本文含相同識別行；(b) `--state-dir/<batch_id>.json` 記錄的 URL；(c) `gh issue list --state all --search "<batch_id> in:body"`，結果還要逐筆讀本文確認識別行完全相符。找到就沿用，不再建立；
-  3. 找不到才依路徑執行 `issue-filing` 的 `create_issue.py`，不另寫建立 Issue 的程式碼。依它的結束碼處理：`0` 取得 URL；`1`（什麼都沒建立）以結束碼 2 結束；`2`（不確定是否已建立）以結束碼 3 結束，提示先依步驟 2 查找再重跑，不自動重試；`3`（已建立、標籤驗證失敗）從 stderr 取得 URL、記錄後以結束碼 3 結束；
-  4. 取得 URL 後**立刻**寫入 `--state-dir/<batch_id>.json`；
+  1. 取得 `--state-dir/<batch_id>.lock` 的 `flock`；被持有就以結束碼 2 結束。本文檔與狀態檔都只在持有 lock 時寫入（dry-run 也一樣），被 lock 擋下的執行不會改到持有者要發布的本文（PR #355 審查 R1）；
+  2. 找既有的母 Issue，依序：(a) 任一子 Issue 的 `parent` 本文含相同識別行；(b) `--state-dir/<batch_id>.json` 記錄的 URL；(c) `gh issue list --state all --search "<batch_id> in:body"`，結果還要逐筆讀本文確認識別行完全相符。找到就沿用，不再建立。狀態檔若記錄著尚未確定結果的建立（見步驟 3）而三種方式都找不到，就以結束碼 3 結束、不建立：搜尋沒找到不能證明先前的建立沒有發生（搜尋索引有延遲）；
+  3. 找不到才依路徑執行 `issue-filing` 的 `create_issue.py`，不另寫建立 Issue 的程式碼。執行**前**先確認本文檔內容仍是核准的本文，並在狀態檔寫入 `pending_creation`（開始時間、`approval_sha256`；審查 R2）。依結束碼處理：`0` 且印出 URL 取得 URL；`1` 且 stderr 以 `BLOCKED before creation:` 開頭（它唯一證明什麼都沒建立的情況）刪除 `pending_creation`、以結束碼 2 結束；`3`（已建立、標籤驗證失敗）從 stderr 取得 URL、記錄後以結束碼 3 結束；其他情況（`2`、`0` 但沒有 URL、`1` 但沒有該前綴（例如未攔截的例外）、逾時、程序被中斷）都保留 `pending_creation`，以結束碼 3 結束，不自動重試。只有在 GitHub 上確認沒有任何 Issue 帶識別行後，使用者才可刪除狀態檔；
+  4. 取得 URL 後**立刻**寫入 `--state-dir/<batch_id>.json`（取代 `pending_creation`）；
   5. 對缺少的子 Issue 逐一執行 `gh issue edit <母> --add-sub-issue <n>`；
-  6. 讀回 `gh issue view <母> --json subIssues,labels,body`：sub-issue 集合等於分組、標籤包含指定的全部標籤、本文含識別行，才以結束碼 0 結束；否則以結束碼 3 結束並列出缺少的項目。重跑從步驟 2 接續，不會建立第二個母 Issue。
-- 結束碼：`0` 完成或 dry-run 成功；`2` 拒絕（沒有任何寫入）；`3` 部分完成或不確定（輸出已知狀態）。
+  6. 讀回 `gh issue view <母> --json subIssues,labels,body`：sub-issue 集合等於分組、標籤包含指定的全部標籤；本次（或同一核准的先前嘗試）建立的母 Issue，本文必須與核准的本文完全相同（GitHub 逐字保存本文，見 `tests/fixtures/captured/README.md`），沿用的既有母 Issue 則本文含識別行。全部成立才以結束碼 0 結束；否則以結束碼 3 結束並列出差異。重跑從步驟 2 接續，不會建立第二個母 Issue。
+- 結束碼：`0` 完成或 dry-run 成功；`2` 拒絕（本次執行沒有對 GitHub 寫入任何東西）；`3` 部分完成或不確定（輸出已知狀態：`phase`、母 Issue 編號、需要時的處理方式）。第一個 GitHub 寫入開始之後的任何錯誤（逾時、讀回失敗、JSON 或形狀不符）一律是 `3`，不會是 `2`（審查 R3）。
 - 指令白名單：`python3 <issue-filing>/scripts/create_issue.py`、`gh issue view`、`gh issue list`、`gh issue edit <n> --add-sub-issue <m>`。其他一律拒絕，並以 AST 檢查腳本中沒有白名單以外的 `subprocess` 用法。
 - `--state-dir` 的規則同 §5.9 的 `--out-dir`：位於 repo 內時必須被 gitignore。
 
@@ -594,11 +594,17 @@ W2 與 W3 可平行。W7 另開分支與 PR。
 | F5 | 狀態檔已記錄 URL、sub-issue 缺少 | 不建立，補上連結 |
 | F6 | 搜尋找到含相同識別行的 Issue；找到但識別行不完全相符 | 前者沿用；後者不沿用 |
 | F7 | 加入 sub-issue 途中失敗 | 結束碼 3，狀態檔有 URL；重跑補完，沒有第二次建立 |
-| F8 | `create_issue.py` 結束碼 1／2／3 | 分別為結束碼 2／3／3；2 時不自動重試；3 時記錄 URL |
+| F8 | `create_issue.py` 結束碼 1（有／沒有 `BLOCKED before creation:`）、2、0 但沒有 URL、3 | 分別為結束碼 2／3／3／3／3；只有 `BLOCKED` 不留狀態，3 記錄 URL，其餘保留 `pending_creation`；都不自動重試 |
 | F9 | 本文 secret scan 有發現 | 結束碼 2，沒有寫入 |
 | F10 | 讀回的 sub-issue 集合或標籤不符 | 結束碼 3，列出差異 |
-| F11 | lock 被持有 | 結束碼 2 |
+| F11 | lock 被持有（dry-run 與 `--execute`） | 結束碼 2，沒有任何 GitHub 呼叫，`--state-dir` 只有 lock 檔 |
 | F12 | 白名單 | 其他 `gh`／`git` 指令一律拒絕；AST 檢查沒有其他 `subprocess` 用法 |
+| F13 | 執行 A 持有 lock、正要建立；執行 B 用較新的合法報告與自己的核准值（含 dry-run） | B 被 lock 擋下、沒有寫任何檔案也沒有 GitHub 呼叫；A 發布的本文正是 A 核准的本文（審查 R1） |
+| F14 | 沒有 `--approval-sha256`；核准後標籤或報告改變 | 結束碼 2，沒有任何寫入，dry-run 的本文檔不變；用 dry-run 的值執行時，發布的本文等於 dry-run 顯示的本文 |
+| F15 | 讀回的本文與核准的本文不同 | 結束碼 3 |
+| F16 | 建立成功但回應遺失、搜尋索引落後 | 第一次結束碼 3 並留下 `pending_creation`；立即重跑（含 dry-run）結束碼 3、不再建立；索引趕上後沿用該母 Issue 並補完連結，全程只建立一次（審查 R2） |
+| F17 | 執行在 `create_issue.py` 期間被中斷 | 呼叫前狀態檔已有 `pending_creation`；重跑不建立 |
+| F18 | 建立或連結逾時（真實 `run_command`）；最後讀回失敗、不是 JSON、形狀不符 | 結束碼 3，輸出 `phase` 與母 Issue 編號；重跑補完、不建立第二個；`run_command` 中寫入指令逾時是 PARTIAL、讀取指令逾時是 REFUSED（審查 R3） |
 
 **實跑（第一次真實使用，需使用者核准）**：
 1. 使用 W5 實跑產生的 `REVIEWED` 報告；過期時依 W5 流程重跑一次。報告中沒有 `MERGE_CANDIDATE` 時無法驗證：W6 標示為未完成驗證並回報原因，不宣稱完成。
@@ -611,7 +617,7 @@ W2 與 W3 可平行。W7 另開分支與 PR。
 
 實跑中發現程式錯誤時，修正後只能對同一個母 Issue 重跑；要為重測建立新的母 Issue，必須再次取得使用者核准。
 
-**驗收**：F1–F12 與 `make skill-test` 通過；實跑第 4–6 步全部成立，或如實回報哪一步失敗。
+**驗收**：F1–F18 與 `make skill-test` 通過（F13–F18 是 PR #355 審查 R1–R3 後補上的）；實跑第 4–6 步全部成立，或如實回報哪一步失敗。
 
 ### W7：`issue-to-pr` 的母 Issue 模式
 
@@ -678,7 +684,7 @@ W6 的實跑會在 `kjelly/pilot`（public）建立真實的公開 Issue，只�
 5. **Planner 規則粗糙**：shortlist 只用來排序，報告永遠需要人工核准；不宣稱精確度。
 6. **GitHub 輸出格式變動**：fixture 來自真實擷取；遇到預期外的格式一律結束碼 2。
 7. **階段 0 不 claim 相似 Issue**：見 §4.6 的殘留風險。
-8. **重複建立母 Issue**：GitHub 搜尋索引有延遲，所以以子 Issue 的 `parent` 欄位與本機狀態檔為主要判斷，搜尋只是第三層。同一台機器的並行執行由 `flock` 擋下；不同機器在極短時間內對同一分組執行，仍可能重複建立。
+8. **重複建立母 Issue**：GitHub 搜尋索引有延遲，所以以子 Issue 的 `parent` 欄位與本機狀態檔為主要判斷，搜尋只是第三層。結果不確定的建立會在狀態檔留下 `pending_creation`，在找到母 Issue 或使用者確認後刪除之前不再建立。同一個 `--state-dir` 的並行執行由 `flock` 擋下；不同機器或不同 `--state-dir` 在極短時間內對同一分組執行，仍可能重複建立。
 9. **公開寫入**：母 Issue 的內容公開，只放驗證過的欄位，寫入前先做 secret scan。
 10. **母 Issue 模式改到共用契約與 fail-closed 的 gate**：錯了會影響每一次 `issue-to-pr`。以 V12（沒有 `umbrella` 欄位時行為完全不變）鎖住，並在 W7 的 PR 跑完整的 `make skill-test`。
 11. **整組 PR 變大**：子 Issue 上限 4 個、每個子 Issue 要有可區分的回歸測試；一個子 Issue 卡住時改為 `Refs`，不拖住其他子 Issue（決策 9）。
