@@ -220,6 +220,51 @@
     freeipa_dns_client_effective_resolver_options: >-
       {{ ['timeout:1', 'attempts:2'] if (freeipa_dns_client_effective_servers | length > 1) else [] }}
 
+# docs/verification/freeipa-dns-client.md §1.5 and C8 (issue #168): say what
+# the host asks today before this run changes it. Read-only, runs under
+# --check too, needs no dig, and is a report, not a gate: C3/C4/C6/C7 and the
+# check below only know the list this run writes or the first answer; a list
+# changed after pilot wrote it ("FreeIPA first, 1.1.1.1 after") was invisible.
+# It sits before the nameserver questions so that it is printed even when
+# those reject the list. tasks/freeipa-dns-client-effective-resolver.yml
+# explains what it reads. The gate that compares the state after the write is
+# in the block below.
+- name: "FreeIPA DNS client — effective resolver before this run: read"
+  ansible.builtin.include_tasks:
+    file: freeipa-dns-client-effective-resolver.yml
+    # Shared by two callers with different row tags (see the dig install
+    # above): `always` means "whenever this include runs".
+    apply:
+      tags: [always]
+  vars:
+    freeipa_dns_effective_allowed: "{{ freeipa_dns_client_effective_servers }}"
+
+- name: "FreeIPA DNS client — effective resolver before this run: report"
+  vars:
+    _eff: "{{ freeipa_dns_effective }}"
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: the resolver in effect before this run is
+      {{ (_eff.servers | join(', ')) if _eff.servers else 'empty' }}.
+      Read from {{ freeipa_dns_effective_source }}
+      {%- if _eff.beyond %}; glibc ignores line 4 onward: {{ _eff.beyond | join(', ') }}{% endif %}.
+      This run writes {{ freeipa_dns_client_effective_servers | join(', ') }}.
+      {%- if not _eff.managed %} pilot does not manage this host's resolver yet:
+      the run switches it from the list above to the list it writes.
+      {%- elif _eff.verdict == 'ok' %} pilot manages this host's resolver
+      ({{ _eff.managed_evidence }}) and every server in use is in the list this run writes.
+      {%- else %} DRIFT: pilot manages this host's resolver ({{ _eff.managed_evidence }}), but
+      {%- if _eff.stub %} resolv.conf points at the systemd-resolved stub {{ _eff.stub }}
+      {%- if _eff.foreign %} and the servers behind it that this run does not write are
+      {{ _eff.foreign | join(', ') }}
+      {%- endif %}
+      {%- elif _eff.foreign %} the servers in use that this run does not write are
+      {{ _eff.foreign | join(', ') }}
+      {%- else %} resolv.conf lists no nameserver
+      {%- endif %}. Either the resolver was changed after pilot wrote it, or the inventory no
+      longer lists a server; after the write this run checks that the host really uses its list.
+      {%- endif %}
+
 # Every nameserver this run writes is asked before anything is written,
 # for the FreeIPA server's FQDN (A and AAAA): a FreeIPA DNS server (this
 # host's own BIND at 127.0.0.1 included) authoritatively (+norec), a dns
@@ -570,6 +615,83 @@
         - freeipa_dns_client_nm_reapply is defined
         - freeipa_dns_client_nm_reapply.rc != 0
       changed_when: true
+
+    # ── effective-state gate (docs/verification/freeipa-dns-client.md §1.5, C8) ──
+    # What glibc will ask now must be a non-empty subset of what this run wrote
+    # (a subset, not equal: on a FreeIPA server the installer's zzz-ipa.conf
+    # global DNS leaves only 127.0.0.1 in resolv.conf, a subset of the
+    # self-first list) and must not be the systemd-resolved stub. Before this
+    # gate, a resolv.conf that NetworkManager did not regenerate (a hand edit
+    # while the profile still matched: changed=0 and the edit stayed,
+    # docs/evidence/freeipa-dns-client/2026-10-02-6224982.md) or one that a
+    # source pilot does not manage still overrides (NetworkManager global-dns,
+    # IPv6 DNS) went unnoticed until someone ran C8 by hand. On EL, a mismatch
+    # first asks NetworkManager to regenerate resolv.conf from the profile
+    # (nmcli general reload dns-rc, the 2026-10-02 evidence), then re-reads for
+    # at most 10 seconds because NetworkManager writes the file asynchronously.
+    # Debian wrote resolv.conf itself, so a mismatch there is not reloaded.
+    # A failure goes to the rescue below like any other failure of the block.
+    - name: "FreeIPA DNS client — effective resolver after the write: read"
+      ansible.builtin.include_tasks:
+        file: freeipa-dns-client-effective-resolver.yml
+        apply:
+          tags: [always]
+      vars:
+        freeipa_dns_effective_allowed: "{{ freeipa_dns_client_effective_servers }}"
+        # After a reapply NetworkManager may not have written the file yet:
+        # give it a few seconds before treating the state as a mismatch. A run
+        # that changed no profile waits for nothing.
+        freeipa_dns_effective_wait_seconds: >-
+          {{ 5 if ((freeipa_dns_client_nm_mod | default({})) is changed
+                   or (freeipa_dns_client_nm_reapply | default({})) is changed) else 0 }}
+      when: not ansible_check_mode
+
+    - name: "EL — regenerate /etc/resolv.conf from the connection profile (nmcli general reload dns-rc)"
+      ansible.builtin.command: nmcli general reload dns-rc
+      register: freeipa_dns_client_dns_rc_reload
+      failed_when: false
+      changed_when: freeipa_dns_client_dns_rc_reload.rc == 0
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'RedHat'
+        - freeipa_dns_effective.verdict != 'ok'
+
+    - name: "EL — effective resolver after the reload: read again (waits up to 10 seconds)"
+      ansible.builtin.include_tasks:
+        file: freeipa-dns-client-effective-resolver.yml
+        apply:
+          tags: [always]
+      vars:
+        freeipa_dns_effective_allowed: "{{ freeipa_dns_client_effective_servers }}"
+        freeipa_dns_effective_wait_seconds: 10
+      when:
+        - not ansible_check_mode
+        - ansible_os_family == 'RedHat'
+        - freeipa_dns_client_dns_rc_reload is not skipped
+
+    - name: "FreeIPA DNS client — Gate: the resolver glibc uses is the one this run wrote"
+      vars:
+        _eff: "{{ freeipa_dns_effective }}"
+        _reload: "{{ freeipa_dns_client_dns_rc_reload | default({}) }}"
+      ansible.builtin.assert:
+        that:
+          - _eff.verdict == 'ok'
+        fail_msg: >-
+          {{ inventory_hostname }}: after writing {{ freeipa_dns_client_effective_servers | join(', ') }}
+          the resolver glibc uses is {{ (_eff.servers | join(', ')) if _eff.servers else 'empty' }}.
+          Read from {{ freeipa_dns_effective_source }}.
+          {%- if _eff.stub %} resolv.conf points at the systemd-resolved stub {{ _eff.stub }}.
+          {%- elif not _eff.servers %} resolv.conf lists no nameserver.
+          {%- else %} Not in the list this run wrote: {{ _eff.foreign | join(', ') }}.
+          {%- endif %}
+          {%- if _reload is not skipped and _reload.rc is defined %} nmcli general reload dns-rc
+          {{ 'was run (rc=0)' if _reload.rc == 0 else 'failed (rc=' ~ _reload.rc ~ ')' }} and the file
+          still did not match after {{ _eff.waited }} seconds: something other than the connection
+          profile pilot manages decides what NetworkManager writes (for example a global-dns
+          setting under /etc/NetworkManager/conf.d, or DNS servers on another connection or
+          address family).
+          {%- endif %} The rescue that follows puts the resolver back and reports whether that worked.
+      when: not ansible_check_mode
 
     # ── functional proof (both OS) ──────────────────────────────────────
     - name: "FreeIPA DNS client — FreeIPA server FQDN actually resolves via DNS"

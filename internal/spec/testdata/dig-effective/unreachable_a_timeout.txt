@@ -1,0 +1,2 @@
+;; communications error to 192.0.2.1#53: timed out
+;; no servers could be reached
