@@ -143,8 +143,8 @@
 # freeipa_setup_dns: true 但尚未升級的 replica 也會直接失敗。
 # 這個 play 帶 `serial: 1`:多台 replica 一台一台升級(replica spec §5:同時對同一個
 # primary 跑 ipa-replica-install 有 389-ds 複寫競態;見 issue #110),任何一台失敗或連不上就
-# 停下這個 play,site.yml 後面的 play 也不會跑(ansible-playbook 結束碼 2,已升級的 replica
-# 不會被還原)。
+# 停下這個 play,site.yml 後面的 play 也不會跑(ansible-playbook 結束碼:失敗是 2,連不上是 4;
+# 已升級的 replica 不會被還原)。
 - import_playbook: apply/freeipa-server-replica-apply.yml
   tags: [freeipa, freeipa-server-replica]
 # dns 快取層(docs/verification/dns.md):內部網域自動導向 FreeIPA,它的

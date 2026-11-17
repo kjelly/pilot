@@ -48,7 +48,7 @@
 > 一台一台升級 replica，前一台做完才開始下一台（`docs/verification/freeipa-server-replica.md` §5：同時對同一個
 > primary 跑多個 `ipa-replica-install` 有 389-ds 複寫競態；另見 issue #110，兩台同時 self-register DNS 時
 > 偶發 `No valid Negotiate header`——序列化避開同時執行，但還沒有用兩台 replica 的 VM run 驗證，不宣稱已修）。
-> 任何一台失敗或連不上，後面的 replica 不會開始，`site.yml` 後面的 play 也不跑（ansible-playbook 結束碼 2），
+> 任何一台失敗或連不上，後面的 replica 不會開始，`site.yml` 後面的 play 也不跑（ansible-playbook 結束碼：失敗是 2，連不上是 4），
 > 已升級的 replica 不會被還原；修好那台主機後重跑。`G-pool` 讀整個 group，在第一台的批次就失敗，沒有任何 replica
 > 被改動；`G-ip`、`G-resolve` 與其餘 pre_tasks 逐台檢查，輪到那一台才跑。`serial: 1` 只管同一個
 > ansible-playbook process；自己同時開兩個 process 對同一個 primary 升級，仍受該檔 §5 的併發限制。

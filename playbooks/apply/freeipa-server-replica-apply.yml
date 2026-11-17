@@ -126,10 +126,13 @@
   # break_play, and `if break_play: break` leaves the loop over ALL plays of the
   # playbook file, imported ones included): a batch is one host, so ANY replica
   # that fails or is unreachable stops this play (the later replicas never
-  # start) and every later play of site.yml does not run, and ansible-playbook
-  # exits 2. That is fail closed: no later replica, dns, client or NFS play runs
-  # on top of a half-built replica tier. Replicas that were already promoted
-  # stay promoted (nothing rolls them back); re-run after fixing the host.
+  # start) and every later play of site.yml does not run. ansible-playbook
+  # exits 2 when the replica failed (ExitCode.HOST_FAILED) and 4 when it was
+  # unreachable (ExitCode.HOST_UNREACHABLE, TaskQueueManager.RUN_UNREACHABLE_HOSTS
+  # in ansible-core 2.19.2); the stop is the same for both. That is fail closed:
+  # no later replica, dns, client or NFS play runs on top of a half-built
+  # replica tier. Replicas that were already promoted stay promoted (nothing
+  # rolls them back); re-run after fixing the host.
   # Without serial, only the failed host would drop out and the other replicas
   # and the later plays would carry on.
   #

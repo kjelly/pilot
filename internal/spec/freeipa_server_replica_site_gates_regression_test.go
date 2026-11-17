@@ -573,7 +573,9 @@ type replicaSerialCase struct {
 // ansible-core 2.19.2 executor/playbook_executor.py: a serial batch in which
 // every host failed (or was unreachable) sets break_play, and break_play
 // leaves the loop over all plays of the playbook file, imported plays
-// included, so a one-host batch that fails ends the run with exit code 2.
+// included, so a one-host batch that fails ends the run with exit code 2
+// (HOST_FAILED); an unreachable host ends it the same way with exit code 4
+// (HOST_UNREACHABLE, TaskQueueManager.RUN_UNREACHABLE_HOSTS).
 func TestRegression_SiteDay2RolesReplicasPromoteOneAtATime(t *testing.T) {
 	requireAnsibleForReplicaGates(t)
 	double := getentDoubleDir(t)
