@@ -137,7 +137,8 @@ test-callback: ## Run Python callback unit tests
 	cd ansible_callback && python3 -m unittest test_pilot_diagnose.py test_pilot_result.py -v
 
 .PHONY: ci-workflow-test
-ci-workflow-test: ## Verify candidate CI reuse against real Git histories and API controls
+ci-workflow-test: ## Verify CI impact selection, candidate reuse and shard evidence controls
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_impact.py'
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_validation_reuse.py'
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_go_test_shards.py'
 

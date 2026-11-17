@@ -26,6 +26,7 @@ jobs:
       reused_run_id: ${{ steps.diff.outputs.reused_run_id }}
       go_test_matrix: ${{ steps.go_matrix.outputs.matrix }}
       go_test_max_parallel: ${{ steps.go_matrix.outputs.max_parallel }}
+      profile: ${{ steps.impact.outputs.profile }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,6 +34,9 @@ jobs:
           ref: ${{ github.sha }}
       - name: Verify candidate reuse controls
         run: make ci-workflow-test
+      - name: Select validation by changed inputs
+        id: impact
+        run: python3 scripts/ci-impact.py >> "$GITHUB_OUTPUT"
       - name: Generate Go test matrix
         id: go_matrix
         run: python3 scripts/ci-go-test-shards.py matrix --github-output >> "$GITHUB_OUTPUT"
@@ -45,7 +49,7 @@ jobs:
   test:
     name: Go test (${{ matrix.shard }})
     needs: changes
-    if: needs.changes.outputs.evidence_only != 'true'
+    if: needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(needs.changes.outputs.go_test_max_parallel) }}
@@ -142,14 +146,6 @@ jobs:
         working-directory: ansible_callback
         run: python3 -m unittest test_pilot_diagnose.py -v
 
-      # The issue-to-pr / pr-ready skills' gate scripts (claim, SHA-bound
-      # receipts, PR creation, Draft→Ready) ship their own unit tests; they
-      # run nowhere else (AGENTS.md §5.7: a test nobody runs is another list
-      # that drifts).
-      - name: Agent skill unit tests (make skill-test)
-        if: matrix.group == 'rest'
-        run: make skill-test
-
       - name: Duplicate YAML key check (repo-wide)
         if: matrix.group == 'rest'
         run: python3 scripts/check-yaml-duplicate-keys.py
@@ -161,6 +157,7 @@ jobs:
   go-test-results:
     name: Verify Go shard execution
     needs: [changes, test]
+    if: needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -192,6 +189,8 @@ jobs:
     # ansible-core + collections set Dockerfile.pilot-cli bakes into the
     # delivery image.
     name: Playbook lint
+    needs: changes
+    if: needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'
     runs-on: ubuntu-latest
     # Runtime suites run independently below; syntax/lint remains a quick job.
     timeout-minutes: 15
@@ -214,7 +213,7 @@ jobs:
   playbook-integration:
     name: Playbook integration (${{ matrix.target }})
     needs: changes
-    if: needs.changes.outputs.evidence_only != 'true'
+    if: needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -242,6 +241,8 @@ jobs:
         run: make "$TARGET"
 
   root-tests:
+    needs: changes
+    if: needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'
     # The roster ownership tests need root: pilot-cli runs pilot as root
     # under `docker run`, and only root can give a file to another user.
     # They skip as the runner user in the Go test job; `make root-test`
@@ -262,6 +263,8 @@ jobs:
         run: make root-test
 
   thanos-retention:
+    needs: changes
+    if: needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'
     # Runs the Thanos Compactor (the image version the playbooks deploy)
     # with thanos-query-apply.yml's retention defaults against synthetic
     # blocks: a short-lived site and the last blocks of a stopped or
@@ -277,6 +280,8 @@ jobs:
         run: make thanos-retention-test
 
   lint:
+    needs: changes
+    if: needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'
     name: golangci-lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -296,6 +301,8 @@ jobs:
           args: --timeout=5m
 
   pilot-mcp-cross:
+    needs: changes
+    if: needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'
     # pilot-mcp is the client users install on Linux or macOS laptops;
     # cmd/pilot itself does not build for darwin, so this keeps pilot-mcp
     # (internal/mcpclient, internal/mcpwire) free of Linux-only imports.
@@ -315,6 +322,8 @@ jobs:
         run: make pilot-mcp-cross
 
   mcp-remote:
+    needs: changes
+    if: needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'
     # pilot-mcp end to end against a real sshd; the deploy node's docker is
     # a stand-in that execs the real `pilot mcp remote`.
     name: pilot-mcp integration (sshd)
@@ -335,6 +344,30 @@ jobs:
       - name: make mcp-remote-test
         run: make mcp-remote-test
 
+  skills:
+    name: Skill and repository contracts
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install PyYAML
+        run: python3 -m pip install pyyaml
+      - name: Agent skill unit tests (make skill-test)
+        if: needs.changes.outputs.profile != 'docs'
+        run: make skill-test
+      - name: Verify skill layout
+        run: go test -count=1 -timeout 5m ./cmd/pilot/cmd -run '^TestAgentSkill'
+      - name: Duplicate YAML key check (repo-wide)
+        run: python3 scripts/check-yaml-duplicate-keys.py
+
   image:
     # Builds the delivery image (images/Dockerfile.pilot-cli, see DELIVERY.md)
     # once every other job here has passed (needs lists them all, root-tests
@@ -347,7 +380,8 @@ jobs:
     #   pull_request, or a fork -> build only, nothing is pushed
     # :latest is moved only by the promote job below.
     name: pilot-cli image
-    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote]
+    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote, skills]
+    if: needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'
     runs-on: ubuntu-latest
     # A cold-cache build took 3 min on 2026-10-27.
     timeout-minutes: 20
@@ -424,7 +458,7 @@ jobs:
   ci-receipt:
     name: Record full candidate validation
     needs: [changes, image]
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.changes.outputs.evidence_only != 'true'
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -442,6 +476,22 @@ jobs:
           path: ci-validation.json
           if-no-files-found: error
           retention-days: 7
+
+  ci-results:
+    name: CI required checks
+    if: always()
+    needs: [changes, test, go-test-results, playbook-lint, playbook-integration, root-tests, thanos-retention, lint, pilot-mcp-cross, mcp-remote, skills, image, ci-receipt]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check every planned validation result
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          CI_PROFILE: ${{ needs.changes.outputs.profile }}
+          EVIDENCE_ONLY: ${{ needs.changes.outputs.evidence_only }}
+          RECEIPT_REQUIRED: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        run: python3 scripts/ci-impact.py --check-results
 
   promote:
     # Points :latest at this run's image while its commit is still main's
