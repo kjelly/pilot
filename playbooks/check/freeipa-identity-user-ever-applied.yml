@@ -94,12 +94,9 @@
           tags: [always]
 
         - name: "Kinit admin for read-only identity probe"
-          ansible.builtin.shell:
-            cmd: |
-              set -o pipefail
-              printf %s "{{ identity_admin_password }}" |
-                kinit "{{ identity_admin_principal }}@{{ ipa_realm }}"
-            executable: /bin/bash
+          ansible.builtin.command:
+            argv: [kinit, "{{ identity_admin_principal }}@{{ ipa_realm }}"]
+            stdin: "{{ identity_admin_password }}"
           changed_when: false
           no_log: true
           run_once: true

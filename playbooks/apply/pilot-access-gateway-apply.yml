@@ -435,11 +435,9 @@
 
         # Step 3 groundwork: kinit once for every FreeIPA-mutating task below.
         - name: "Kinit admin (management-plane operations only — never shipped to this host)"
-          ansible.builtin.shell: |
-            set -euo pipefail
-            echo '{{ ipa_admin_password }}' | kinit admin
-          args:
-            executable: /bin/bash
+          ansible.builtin.command:
+            argv: [kinit, admin]
+            stdin: "{{ ipa_admin_password }}"
           changed_when: false
           no_log: true
           tags: [AG_enrollment, AG_keytab, AG_config, AG_service, AG12]

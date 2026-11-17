@@ -289,12 +289,14 @@
           check_mode: false
           tags: [always]
 
+        # argv + stdin: the password never passes through a shell, so `$`,
+        # backticks and quotes in it reach kinit unchanged (AGENTS.md §4.5 item 15).
         - name: "Kinit admin into the dedicated ccache"
-          ansible.builtin.shell:
-            cmd: |
-              set -o pipefail
-              printf %s "{{ ipa_admin_password }}" | KRB5CCNAME="{{ freeipa_dns_ccache_file.path }}" kinit admin@{{ ipa_realm }}
-            executable: /bin/bash
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ ipa_realm }}"]
+            stdin: "{{ ipa_admin_password }}"
+          environment:
+            KRB5CCNAME: "{{ freeipa_dns_ccache_file.path }}"
           changed_when: false
           no_log: true
           check_mode: false

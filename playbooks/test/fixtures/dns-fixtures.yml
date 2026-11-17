@@ -46,9 +46,9 @@
           tags: [always]
 
         - name: "Fixtures — kinit admin (ticket for the ipa CLI below)"
-          ansible.builtin.shell:
-            cmd: 'set -o pipefail; printf %s "{{ ipa_admin_password }}" | kinit admin@{{ dns_fixture_domain | upper }}'
-            executable: /bin/bash
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ dns_fixture_domain | upper }}"]
+            stdin: "{{ ipa_admin_password }}"
           changed_when: false
           no_log: true
           when: not ansible_check_mode

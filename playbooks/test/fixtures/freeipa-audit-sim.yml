@@ -69,11 +69,16 @@
         # ── Step 1: kinit as audituser ──────────────────────────────────────
         - name: "Sim — kinit as {{ audit_demo_user }} (Kerberos TGT)"
           become: true
-          ansible.builtin.shell:
-            cmd: |
-              echo "{{ audit_demo_user_pass }}" | kinit -r 7d {{ audit_demo_user }}
+          # argv + stdin: the password never passes through a shell. no_log
+          # hides the task's own result, so the next task's rc assert is the
+          # gate and its message (kinit's own output, no password) stays visible.
+          ansible.builtin.command:
+            argv: [kinit, -r, 7d, "{{ audit_demo_user }}"]
+            stdin: "{{ audit_demo_user_pass }}"
           register: kinit_result
           changed_when: false
+          failed_when: false
+          no_log: true
           tags: [sim]
 
         - name: "Sim — kinit result"
