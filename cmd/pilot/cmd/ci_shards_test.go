@@ -162,7 +162,7 @@ func TestCIGoShardsCoverAllPackagesExactlyOnce(t *testing.T) {
 	if len(counts) != 3 || counts["spec"] == 0 || counts["cmd"] == 0 || counts["rest"] != 1 {
 		t.Fatalf("matrix lost a required group: %v", counts)
 	}
-	if wf.Jobs["test"].If != "needs.changes.outputs.evidence_only != 'true'" {
+	if wf.Jobs["test"].If != "needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'" {
 		t.Fatal("Go suite skip must depend only on evidence diff")
 	}
 }
@@ -192,7 +192,7 @@ func TestCIIntegrationSuitesRemainParallelAndBlocking(t *testing.T) {
 	if !slices.Equal(integrationMatrix.Target, want) || job.Strategy.FailFast {
 		t.Fatal("each required runtime suite must run in its own non-fail-fast matrix job")
 	}
-	if job.If != "needs.changes.outputs.evidence_only != 'true'" || !slices.Contains(ciNeedsList(job.Needs), "changes") {
+	if job.If != "needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'" || !slices.Contains(ciNeedsList(job.Needs), "changes") {
 		t.Fatal("runtime reuse must depend on candidate validation")
 	}
 	mk, err := os.ReadFile(filepath.Join(repoRootForTest(t), "Makefile"))
@@ -268,8 +268,8 @@ func checkCIGoShardEvidence(ci string) error {
 		return fmt.Errorf("Go shard evidence contract: test=%v upload=%v runtime=%v", foundTest, foundUpload, foundRuntime)
 	}
 	gate := wf.Jobs["go-test-results"]
-	if gate.If != "" || !slices.Contains(ciNeedsList(gate.Needs), "test") || !slices.Contains(ciNeedsList(gate.Needs), "changes") {
-		return fmt.Errorf("result gate must depend unconditionally on the entire test matrix and changes")
+	if gate.If != "needs.changes.outputs.profile == 'full' && needs.changes.outputs.evidence_only != 'true'" || !slices.Contains(ciNeedsList(gate.Needs), "test") || !slices.Contains(ciNeedsList(gate.Needs), "changes") {
+		return fmt.Errorf("shard result gate must depend on the entire test matrix and changes for full validation")
 	}
 	verified, downloaded := false, false
 	for _, step := range gate.Steps {
