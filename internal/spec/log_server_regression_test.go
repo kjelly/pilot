@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -77,6 +78,30 @@ switching euid from 102 to 0 and egid from 102 to 0 (pid 3228)
 // logrotateSwitchTo is the first `switching` line of the capture above, used to
 // build variants of it (another uid, gid, or no line) by replacing that line.
 const logrotateSwitchTo = "switching euid from 0 to 102 and egid from 0 to 102 (pid 3228)\n"
+
+// logrotateCaptureFor rewrites a real `su syslog syslog` capture (uid 102, gid
+// 102) to the switch logrotate prints for uid:gid: the euid fields of both
+// switching lines carry uid, the egid fields carry gid, and nothing else in the
+// capture (pids, dates, sizes) changes. Both lines (the switch to the user and
+// the switch back to root) are in logrotateDebugUbuntuSu and
+// logrotateDebugUbuntuSuNoLogs exactly once, so each must be there exactly once
+// here: a capture that stops matching fails instead of silently feeding the
+// unchanged text, and a blanket replace of "102" (which would also rewrite the
+// gid) is not what this does.
+func logrotateCaptureFor(t *testing.T, capture, uid, gid string) string {
+	t.Helper()
+	const to = "switching euid from 0 to 102 and egid from 0 to 102 (pid "
+	const back = "switching euid from 102 to 0 and egid from 102 to 0 (pid "
+	for _, line := range []string{to, back} {
+		if n := strings.Count(capture, line); n != 1 {
+			t.Fatalf("capture holds %d x %q, want exactly 1:\n%s", n, line, capture)
+		}
+	}
+	return strings.NewReplacer(
+		to, "switching euid from 0 to "+uid+" and egid from 0 to "+gid+" (pid ",
+		back, "switching euid from "+uid+" to 0 and egid from "+gid+" to 0 (pid ",
+	).Replace(capture)
+}
 
 // logrotateDebugUbuntuBase is a second real capture from the same Ubuntu 24.04.4
 // VM (logrotate 3.21.0, rsyslog 8.2312.0): `LC_ALL=C logrotate -d
@@ -222,6 +247,11 @@ esac
 	}{
 		{name: "su in effect (real Ubuntu 24.04 / logrotate 3.21.0 output)", uid: uid, gid: gid, out: su, want: "0", logrotateRuns: true},
 		{name: "no landing files yet, logrotate 3.21 still reports the switch (real capture)", uid: uid, gid: gid, out: logrotateDebugUbuntuSuNoLogs, want: "0", logrotateRuns: true},
+		// uid != gid: a C12 that swaps the stat fields, or a capture rewrite that
+		// touches both ids alike, cannot pass these.
+		{name: "su in effect, landing owner uid and gid differ", uid: "1000", gid: "100", out: logrotateCaptureFor(t, su, "1000", "100"), want: "0", logrotateRuns: true},
+		{name: "no landing files yet, uid and gid differ", uid: "1000", gid: "100", out: logrotateCaptureFor(t, logrotateDebugUbuntuSuNoLogs, "1000", "100"), want: "0", logrotateRuns: true},
+		{name: "su switches to the landing ids with euid and egid swapped", uid: "100", gid: "1000", out: logrotateCaptureFor(t, su, "1000", "100"), want: "1", logrotateRuns: true},
 		{name: "su in effect, logrotate rc=1 for an unrelated diagnostic", uid: uid, gid: gid, out: su, rc: "1", want: "0", logrotateRuns: true},
 		{name: "policy without su (real output for the policy before v2.1)", uid: uid, gid: gid, out: logrotateDebugUbuntuBase, want: "1", logrotateRuns: true},
 		// The only switching line left is the switch back to root afterwards.
@@ -281,12 +311,22 @@ esac
 	}
 
 	// The real stat on the real landing directory, with no stat shim: the
-	// directory is owned by whoever runs the test, so the captured output is
-	// rewritten to that identity. (A root test process owns it as 0:0, which
-	// takes the root-owned short-circuit instead of this path.)
+	// captured output is rewritten to the uid:gid of the landing directory's
+	// inode, read with os.Stat (not the process ids: the inode's group is
+	// inherited from a setgid parent directory). Only a 0:0 inode takes C12's
+	// root-owned short-circuit instead of this path.
 	t.Run("real stat of the real landing directory", func(t *testing.T) {
-		if os.Getuid() == 0 || os.Getgid() == 0 {
-			t.Skip("running as root or with gid 0: the landing directory is root-owned, which C12 passes without logrotate")
+		info, err := os.Stat(landing)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Skip("no uid/gid on this platform's file info")
+		}
+		landingUID, landingGID := fmt.Sprint(owner.Uid), fmt.Sprint(owner.Gid)
+		if landingUID == "0" && landingGID == "0" {
+			t.Skip("the landing directory is root:root, which C12 passes without logrotate")
 		}
 		realShims := filepath.Join(dir, "bin-no-stat")
 		if err := os.MkdirAll(realShims, 0o755); err != nil {
@@ -300,8 +340,7 @@ esac
 			t.Fatal(err)
 		}
 		writeConf(landing)
-		me := strings.NewReplacer("102", fmt.Sprint(os.Getuid())).Replace(logrotateDebugUbuntuSu)
-		meGid := strings.NewReplacer("egid from 0 to 102", "egid from 0 to "+fmt.Sprint(os.Getgid())).Replace(me)
+		meGid := logrotateCaptureFor(t, logrotateDebugUbuntuSu, landingUID, landingGID)
 		for _, tc := range []struct{ name, out, want string }{
 			{"su in effect", meGid, "0"},
 			{"policy without su", logrotateDebugUbuntuBase, "1"},
