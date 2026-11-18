@@ -54,12 +54,7 @@ var hostileValues = []string{
 // the path of the rendered file. values[i] feeds resticEnvVars[i].
 func renderResticEnv(t *testing.T, dir string, values []string) string {
 	t.Helper()
-	task := findNamedTask(t, loadYAML(t, filepath.Join("..", "..", "playbooks", "apply", "restic-backup-apply.yml")), resticEnvTask)
-	if task["no_log"] != true {
-		t.Fatalf("%s must keep no_log: true", resticEnvTask)
-	}
-	envPath := filepath.Join(dir, "restic-env")
-	vars := map[string]any{"restic_env_path": envPath}
+	vars := map[string]any{}
 	for i, v := range resticEnvVars {
 		// !unsafe keeps a value from being templated; Ansible reads an empty
 		// !unsafe scalar as null, so "" is passed as a plain string.
@@ -73,6 +68,18 @@ func renderResticEnv(t *testing.T, dir string, values []string) string {
 		}
 		vars[v.input] = value
 	}
+	return renderResticEnvVars(t, dir, vars)
+}
+
+// renderResticEnvVars renders the real Step 4 with the given inputs.
+func renderResticEnvVars(t *testing.T, dir string, vars map[string]any) string {
+	t.Helper()
+	task := findNamedTask(t, loadYAML(t, filepath.Join("..", "..", "playbooks", "apply", "restic-backup-apply.yml")), resticEnvTask)
+	if task["no_log"] != true {
+		t.Fatalf("%s must keep no_log: true", resticEnvTask)
+	}
+	envPath := filepath.Join(dir, "restic-env")
+	vars["restic_env_path"] = envPath
 	play := []map[string]any{{
 		"hosts": "localhost", "connection": "local", "gather_facts": false,
 		"vars":  vars,
@@ -159,6 +166,46 @@ func TestRegression_ResticEnvFileReadsBackEveryValueUnchanged(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRegression_ResticEnvFileKeepsTypedInputs pins what inventory types
+// become: the default ints read back as their digits, a list joins with
+// spaces, and an unset (null) pre-hook is empty. A `| string` before `quote`
+// would turn null into the word None, and the backup script would then eval
+// "None".
+func TestRegression_ResticEnvFileKeepsTypedInputs(t *testing.T) {
+	requireAnsiblePlaybook(t)
+	dir := t.TempDir()
+	envPath := renderResticEnvVars(t, dir, map[string]any{
+		"restic_aws_access_key_id":     "key-id",
+		"restic_aws_secret_access_key": "secret",
+		"restic_repository":            "s3:http://s3-backup-server:8333/restic-backups",
+		"restic_password":              "pw",
+		"restic_backup_paths":          []any{"/etc", "/var/lib/ipa"},
+		"restic_backup_pre_hook":       nil,
+		"restic_lock_retry":            "120s",
+		"restic_retention_daily":       7,
+		"restic_retention_weekly":      4,
+		"restic_retention_monthly":     6,
+	})
+	want := map[string]string{
+		"RESTIC_REPOSITORY":        "s3:http://s3-backup-server:8333/restic-backups",
+		"RESTIC_BACKUP_PATHS":      "/etc /var/lib/ipa",
+		"RESTIC_BACKUP_PRE_HOOK":   "",
+		"RESTIC_LOCK_RETRY":        "120s",
+		"RESTIC_RETENTION_DAILY":   "7",
+		"RESTIC_RETENTION_WEEKLY":  "4",
+		"RESTIC_RETENTION_MONTHLY": "6",
+	}
+	for name, value := range want {
+		out, err := exec.Command("sh", "-c", `. "$1" && printf '%s' "$`+name+`"`, "sh", envPath).Output()
+		if err != nil {
+			t.Fatalf("source: %v", err)
+		}
+		if string(out) != value {
+			t.Errorf("%s = %q, want %q", name, out, value)
+		}
 	}
 }
 

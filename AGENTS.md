@@ -990,7 +990,12 @@ Site-wide deploy 在 operator 沒帶 `--tags` 時,`effectiveDeploymentTags` 仍�
    `internal/spec/restic_env_quoting_regression_test.go::TestRegression_ShellExportsOfJinjaValuesAreQuoted`
    對全部 `playbooks/**` 檢查 `export NAME=` 行;`TestRegression_ResticEnvFileReadsBackEveryValueUnchanged`
    用真實 `ansible-playbook` 產生檔案,再由 sh/dash/bash source 回來比對每個值,並確認沒有執行
-   任何嵌入的指令。systemd `EnvironmentFile=` 的解析規則不同(不是 shell),不適用 `quote`。
+   任何嵌入的指令。這個 lint 只看以 `export NAME=` 開頭的行,看不到 `declare -x`、`readonly`、
+   `set -a` 之後的裸 `NAME=`、寫在 YAML 字串或 `echo … >> file` 裡的 export,以及
+   `{{ prefix ~ x | quote }}` 這種只對部分值 quote 的寫法,這些要靠 review。限制:`quote` 只處理
+   shell;值本身含 `{{`、`{%`、`{#` 時,Ansible 在 `quote` 之前就先把它當模板展開(vault 與 `-e`
+   的值也一樣),這不是 shell 的問題,`quote` 擋不住。systemd `EnvironmentFile=` 的解析規則
+   不同(不是 shell),不適用 `quote`。
 
 驗證方式:改完依 §4.0 對**全新** target 跑 `--check --diff`,再依 §1.4 用
 `vm-target test`/`topology test --ephemeral` 確認 L6 冪等檢查是接在一次
