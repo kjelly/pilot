@@ -31,15 +31,18 @@ either in one batch or in `issue_statuses`, and no Issue is in two `MERGE_CANDID
 - **Per-Issue acceptance**: each Issue's `coverage` is `fully_addressable` (the primary PR's fix covers it
   and it can be closed after the merge through the existing-PR disposition), `partial_only` or
   `undecided`, with how it would be validated. Never infer that one shared change closes every Issue.
-- **Primary Issue**: the one `issue-to-pr` fixes with `Fixes #N`; the others are referenced with
-  `Refs #M` only, per [similar-defect scan](../../issue-to-pr/references/similar-defect-scan.md)
-  section 5.
+- **Primary Issue**: without an umbrella, the one `issue-to-pr` fixes with `Fixes #N`; the others are
+  referenced with `Refs #M` only, per [similar-defect scan](../../issue-to-pr/references/similar-defect-scan.md)
+  section 5. With an umbrella it is only the suggested first Issue to analyse.
 - **Blockers and open PRs**: every open PR that changes a path a member Issue references (the
   snapshot's `overlapping_prs`) is listed in `existing_prs`; anything else that stands in the way goes
   in `blockers`.
 - `human_approval_required` is always `true`.
 - An umbrella Issue (`file_umbrella.py`) only tracks an approved batch. Its sub-issues are the batch's
-  Issues; the PR still starts from the primary Issue and the others are closed after the merge, as above.
+  Issues, listed on its member line. `issue-to-pr` run on the umbrella or any sub-issue works in umbrella
+  mode (`../../issue-to-pr/references/workflow.md`, Umbrella mode): one PR closes each fixed sub-issue with
+  its own `Fixes`, and the umbrella only when every one is fixed. `coverage` therefore matters per Issue: a
+  `partial_only` Issue is expected to stay open with `Refs`.
 
 ## Untrusted content
 

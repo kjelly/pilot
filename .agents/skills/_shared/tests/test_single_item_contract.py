@@ -416,6 +416,18 @@ class ContractStructureTests(unittest.TestCase):
                     self.assertIn(required, skill)
         self.assertTrue((REPO / SHARED).is_file())
 
+    def test_the_umbrella_exception_is_bounded_to_the_planner_marker(self):
+        """The one exception to "exactly one item" is issue-to-pr's umbrella mode, tied to the lines only
+        issue-batch-planner writes, and it neither adds another Issue nor covers ordinary GitHub parents."""
+        bullets = [b for b in re.split(r"\n(?=- )", (REPO / SHARED).read_text()) if "umbrella" in b]
+        self.assertEqual(1, len(bullets), "exactly one place states the exception")
+        text = flat(bullets[0])
+        for required in ("issue-to-pr's umbrella mode", "issue-batch-planner batch: <12 hex>",
+                         "issue-batch-planner issues:", "are one item", "It never adds any other Issue",
+                         "an ordinary GitHub parent does not qualify"):
+            self.assertIn(required, text)
+        self.assertEqual([], violations(bullets[0]), "the exception itself passes the wording guard")
+
     def test_every_check_id_the_script_can_report_is_named_in_the_contract(self):
         """checkout_preflight.py is the single source of the stop conditions."""
         ids = set(re.findall(r'problem\(\s*"([a-z_]+)"', PREFLIGHT.read_text()))

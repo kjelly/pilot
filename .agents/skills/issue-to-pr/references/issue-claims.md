@@ -47,6 +47,12 @@ relaxation `AGENTS.md` forbids.
   directions (§4): one `needs_evidence` entry, or one `out_of_scope` entry without a
   verified follow-up, is enough to forbid `fixes`, and `fixes` is the default when
   `issue_resolution` is absent, so the default is rejected too.
+- [Umbrella mode](workflow.md#umbrella-mode): these outcomes apply to each sub-issue
+  on its own. A sub-issue that would be `INVALID` or `NEEDS_DECISION`, or that the PR
+  cannot fix, does not stop the PR: it becomes `partial`, the reply goes on that
+  sub-issue's own thread, and the entry goes in its own
+  `umbrella.sub_issues[].disputed_issue_claims` (§4). The umbrella's own list stays
+  empty; the umbrella is `partial` exactly when one of its sub-issues is.
 
 ## 2. Independent confirmation (issue-reviewer)
 
