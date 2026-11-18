@@ -1105,8 +1105,12 @@ vm-target 上跑出至少 11 個之前所有單元測試都是綠燈的真 bug(`
    原始擷取只放 `.verification/` 或 `/tmp`,寫進 repo 的副本把每個含秘密的
    值換成固定 placeholder,保留欄位與形狀,讓 parser 仍讀得到。會回傳秘密的
    新擷取來源,要在該 package 加 guard test(範本:
-   `internal/freeiparpc/fixture_secrets_test.go`)。什麼算秘密(含 disposable
-   lab 帳號的密碼與 hash、Kerberos key 等衍生值)、提交與 push 前怎麼檢查,
+   `internal/freeiparpc/fixture_secrets_test.go`;範本裡的負向對照值靠
+   `.github/secret-scan.json` 的路徑條目才過 secret scan,新 package 照抄會被
+   拒絕,guard 要用的對照值在執行時組出來,不寫成字面值,見下面
+   `committed-secrets.md` 的「Writing tests that carry trigger shapes」一節)。
+   什麼算秘密(含 disposable lab 帳號的密碼與 hash、Kerberos key 等衍生值)、
+   提交與 push 前怎麼檢查,
    見 [`.agents/skills/_shared/committed-secrets.md`](.agents/skills/_shared/committed-secrets.md),
    這裡不另列清單。
 
@@ -1685,7 +1689,7 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 - ❌ 不要在 runbook 寫「預期 PASS 11/11」沒實際跑過；只可寫真實 verdict 摘要與
   evidence link，完整 transcript 不得持續追加到 runbook/spec
 - ❌ 不要把硬規則繞過（「這次特例」是滑坡的開始）
-- ❌ 不要把秘密或由秘密衍生的值（密碼、NT hash、`userpassword` hash、Kerberos key、token、cookie、private key）寫進任何 Git 追蹤檔或 Issue／PR／review 文字——包括 disposable lab 帳號的密碼、真實擷取的 fixture 與 evidence 的手寫段落；命令列一律寫 `-e @~/.vault/...yaml`（見 §5.6 第 4 點、`.agents/skills/_shared/committed-secrets.md`）
+- ❌ 不要把秘密或由秘密衍生的值（例如密碼、NT hash、`userpassword` hash、Kerberos key、token、cookie、private key）寫進任何 Git 追蹤檔或 Issue／PR／review 文字——包括 disposable lab 帳號的密碼、真實擷取的 fixture 與 evidence 的手寫段落；命令列一律寫 `-e @~/.vault/...yaml`（見 §5.6 第 4 點、`.agents/skills/_shared/committed-secrets.md`）
 - ❌ 不要擅自縮寫、拼錯或發明新變數名稱（例如把 `keycloak_db_password` 寫成 `keyclack_db_passwd`），必須完全依據 Spec 與既有變數命名。
 - ❌ 不要讓 coding agent 先寫完 playbook，再反過來放寬 spec Expected 讓它 PASS；需求或驗收方法真的要改時，必須明說並記錄原因
 - ❌ 不要把 `pilot spec --generate` 的 heuristic output 當正式 apply playbook、actual-run evidence 或交付完成證明
