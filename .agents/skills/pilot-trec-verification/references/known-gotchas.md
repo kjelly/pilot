@@ -62,13 +62,34 @@ values.
 still appear in plaintext. Keep the rule above anyway, because the typed input
 events are recorded.
 
-The masked marker brings a new trap. trec's secret scan flags
-`node_exporter_basic_auth_password = <已設定>` as `inline-secret-assignment`, so
-`trec verify`/`cast_verify` fails with `safe_to_share=false` even though no
-secret is in the cast. Fix: export a variable holding the marker, for example
-`PILOT_MASKED_MARKER='<已設定>'`, and add `--secret-env PILOT_MASKED_MARKER`
-alongside the real secrets. `EXPECT`s that mention `<已設定>` still match,
-because they read the live screen before redaction.
+### Old trec builds fail `trec verify` on text that holds no secret
+
+The scan's `inline-secret-assignment` rule matched three things pilot recordings
+show routinely, so `trec verify`/`cast_verify` reported `safe_to_share=false`
+with no secret in the cast. All three are fixed in trec; check `trec version`
+(SKILL.md §0) before working around any of them.
+
+| Shown on screen | Where | Fixed in trec |
+|---|---|---|
+| `ipa_admin_password = <已設定>` followed by a cursor escape (`\x1b[K`, `\x1b[49G`) | the vault key list (every vault-editor recording) | `561e17b` (the bare form in `4b12226`) |
+| `node_exporter_basic_auth_password = {{ vault_node_exporter_basic_auth_password }}  [未設定，使用內建預設]` | the group_vars editor, which lists commented-out examples | `63c8866` |
+| `token==str(path)…`, `token = b''`, `token = line.split()[0]` | repository source printed during a run | `7eb2c1a` |
+
+`[live 2026-11-18]` Recording `pilot edit` on a vault with one set value, one
+empty value and one `CHANGE-ME-…` placeholder, and on host-monitoring's example
+group_vars: trec `e1b7f1c` reported no finding on either cast. The 2026-07-29
+build that was installed until then reported one finding on the vault cast and two
+on the group_vars cast. The set value appeared nowhere in the cast.
+
+On a build older than these, redact the marker by exporting it, for example
+`PILOT_MASKED_MARKER='<已設定>'`, and adding `--secret-env PILOT_MASKED_MARKER`
+alongside the real secrets (`EXPECT`s that mention `<已設定>` still match,
+because they read the live screen before redaction). The other two cannot be
+redacted that way: treat the cast as failed, update trec, and re-record.
+
+On a current build, a finding is a real signal. Find the flagged event
+(`trec scan --format json` gives its time) and read that event before deciding
+it is not a secret; never relax `--secret-env` coverage to make a scan pass.
 
 ### `TOGGLE`/`SELECT`/`CHOOSE docker` on the role checklist is ambiguous
 
