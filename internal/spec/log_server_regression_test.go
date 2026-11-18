@@ -1,10 +1,12 @@
 package spec
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -40,6 +42,320 @@ func TestRegression_LogServerC11AllowsAttributesAfterRuleset(t *testing.T) {
 	}
 }
 
+// logrotateDebugUbuntuSu is `LC_ALL=C logrotate -d <policy> 2>&1` captured on a
+// disposable Ubuntu 24.04.4 VM (logrotate 3.21.0, rsyslog 8.2312.0) for a copy of
+// the siem-incoming policy that adds `su syslog syslog` before `sharedscripts`,
+// as root, over a SIEM tree owned by syslog:syslog (uid 102, gid 102). The pid
+// varies per run; the path of the policy copy and the host directory name are
+// the capture host's. logrotate switches to the policy's `su` identity before
+// it handles the log set and back afterwards, and says so in debug mode.
+const logrotateDebugUbuntuSu = `warning: logrotate in debug mode does nothing except printing debug messages!  Consider using verbose mode (-v) instead if this is not what you want.
+
+reading config file /root/i93-su.conf
+Reading state from file: /var/lib/logrotate/status
+state file /var/lib/logrotate/status does not exist
+Allocating hash table for state file, size 64 entries
+
+Handling 1 logs
+
+rotating pattern: /var/log/siem/*/*.log  after 1 days (14 rotations)
+empty log files are not rotated, old logs are removed
+switching euid from 0 to 102 and egid from 0 to 102 (pid 3228)
+considering log /var/log/siem/i93-dev-deb/audit.log
+Creating new state
+  Now: 2026-11-17 07:12
+  Last rotated at 2026-11-17 07:00
+  log does not need rotating (log has already been rotated)
+considering log /var/log/siem/i93-dev-deb/auth.log
+Creating new state
+  Now: 2026-11-17 07:12
+  Last rotated at 2026-11-17 07:00
+  log does not need rotating (log has already been rotated)
+not running postrotate script, since no logs were rotated
+switching euid from 102 to 0 and egid from 102 to 0 (pid 3228)
+`
+
+// logrotateSwitchTo is the first `switching` line of the capture above, used to
+// build variants of it (another uid, gid, or no line) by replacing that line.
+const logrotateSwitchTo = "switching euid from 0 to 102 and egid from 0 to 102 (pid 3228)\n"
+
+// logrotateCaptureFor rewrites a real `su syslog syslog` capture (uid 102, gid
+// 102) to the switch logrotate prints for uid:gid: the euid fields of both
+// switching lines carry uid, the egid fields carry gid, and nothing else in the
+// capture (pids, dates, sizes) changes. Both lines (the switch to the user and
+// the switch back to root) are in logrotateDebugUbuntuSu and
+// logrotateDebugUbuntuSuNoLogs exactly once, so each must be there exactly once
+// here: a capture that stops matching fails instead of silently feeding the
+// unchanged text, and a blanket replace of "102" (which would also rewrite the
+// gid) is not what this does.
+func logrotateCaptureFor(t *testing.T, capture, uid, gid string) string {
+	t.Helper()
+	const to = "switching euid from 0 to 102 and egid from 0 to 102 (pid "
+	const back = "switching euid from 102 to 0 and egid from 102 to 0 (pid "
+	for _, line := range []string{to, back} {
+		if n := strings.Count(capture, line); n != 1 {
+			t.Fatalf("capture holds %d x %q, want exactly 1:\n%s", n, line, capture)
+		}
+	}
+	return strings.NewReplacer(
+		to, "switching euid from 0 to "+uid+" and egid from 0 to "+gid+" (pid ",
+		back, "switching euid from "+uid+" to 0 and egid from "+gid+" to 0 (pid ",
+	).Replace(capture)
+}
+
+// logrotateDebugUbuntuBase is a second real capture from the same Ubuntu 24.04.4
+// VM (logrotate 3.21.0, rsyslog 8.2312.0): `LC_ALL=C logrotate -d
+// /etc/logrotate.d/siem-incoming 2>&1` as root on the policy as it was before
+// v2.1 (no `su`), rc=0. It is the policy as installed at /etc/logrotate.d, not
+// the copy with `su syslog syslog` that the capture above was read from, so the
+// config path differs from that one; it has no `switching` line at all.
+// AlmaLinux 9.8 (logrotate 3.18.0, a root:root tree, rsyslogd as root) printed no
+// `switching` line for `su root root` either, and its output was otherwise the
+// same as this one; the full AlmaLinux text was not kept, so the root-owned case
+// below feeds this output and passes by C12's root-owned short-circuit, not by
+// anything logrotate prints.
+const logrotateDebugUbuntuBase = `warning: logrotate in debug mode does nothing except printing debug messages!  Consider using verbose mode (-v) instead if this is not what you want.
+
+reading config file /etc/logrotate.d/siem-incoming
+Reading state from file: /var/lib/logrotate/status
+state file /var/lib/logrotate/status does not exist
+Allocating hash table for state file, size 64 entries
+
+Handling 1 logs
+
+rotating pattern: /var/log/siem/*/*.log  after 1 days (14 rotations)
+empty log files are not rotated, old logs are removed
+considering log /var/log/siem/i93-dev-deb/audit.log
+Creating new state
+  Now: 2026-11-17 07:12
+  Last rotated at 2026-11-17 07:00
+  log does not need rotating (log has already been rotated)
+considering log /var/log/siem/i93-dev-deb/auth.log
+Creating new state
+  Now: 2026-11-17 07:12
+  Last rotated at 2026-11-17 07:00
+  log does not need rotating (log has already been rotated)
+not running postrotate script, since no logs were rotated
+`
+
+// logrotateDebugUbuntuSuNoLogs is a third real capture from the Ubuntu 24.04.4
+// VM (logrotate 3.21.0, rsyslog 8.2312.0), 2026-11-17: `LC_ALL=C logrotate -d
+// /etc/logrotate.d/siem-incoming 2>&1` as root, rc=0, on the candidate policy
+// (`su syslog syslog`, with `missingok`) with syslog.socket and rsyslog stopped
+// and every *.log under the SIEM tree moved away (count 0). The pattern is still
+// "considered" (and skipped as missing), so the switch is printed with no
+// landing files at all, and C12 does not depend on C7/C8 having created any.
+const logrotateDebugUbuntuSuNoLogs = `warning: logrotate in debug mode does nothing except printing debug messages!  Consider using verbose mode (-v) instead if this is not what you want.
+
+reading config file /etc/logrotate.d/siem-incoming
+Reading state from file: /var/lib/logrotate/status
+state file /var/lib/logrotate/status does not exist
+Allocating hash table for state file, size 64 entries
+
+Handling 1 logs
+
+rotating pattern: /var/log/siem/*/*.log  after 1 days (14 rotations)
+empty log files are not rotated, old logs are removed
+switching euid from 0 to 102 and egid from 0 to 102 (pid 4250)
+considering log /var/log/siem/*/*.log
+  log /var/log/siem/*/*.log does not exist -- skipping
+Creating new state
+not running postrotate script, since no logs were rotated
+switching euid from 102 to 0 and egid from 102 to 0 (pid 4250)
+`
+
+// TestRegression_LogServerC12ReadsTheEffectiveRotationIdentity runs C12's
+// command against a fake logrotate that prints real captures (above), with and
+// without the lines logrotate prints when the policy's `su` is in effect. The
+// row has to pass only for the identity that owns the landing root, and fail
+// for the policy as it was before `su` was rendered.
+func TestRegression_LogServerC12ReadsTheEffectiveRotationIdentity(t *testing.T) {
+	s, err := Parse("../../docs/verification/log-server.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var command string
+	for _, row := range s.Rows {
+		if row.ID == "C12" {
+			command = row.Command
+		}
+	}
+	if command == "" {
+		t.Fatal("missing C12")
+	}
+
+	dir := t.TempDir()
+	landing := filepath.Join(dir, "siem")
+	if err := os.MkdirAll(filepath.Join(landing, "host-a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(dir, "10-siem-receiver.conf")
+	policy := filepath.Join(dir, "siem-incoming")
+	writeConf := func(root string) {
+		t.Helper()
+		body := `template(name="SiemAuditPath" type="string" string="` + root + `/%HOSTNAME%/audit.log")` + "\n"
+		if err := os.WriteFile(conf, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{"/etc/rsyslog.d/10-siem-receiver.conf", "/etc/logrotate.d/siem-incoming"} {
+		if strings.Count(command, p) != 1 {
+			t.Fatalf("C12 must name %s exactly once, got %q", p, command)
+		}
+	}
+	command = strings.ReplaceAll(command, "/etc/rsyslog.d/10-siem-receiver.conf", conf)
+	command = strings.ReplaceAll(command, "/etc/logrotate.d/siem-incoming", policy)
+
+	// Shims: logrotate prints $FAKE_OUT and records its arguments; stat answers
+	// the uid/gid of the landing root with $FAKE_UID/$FAKE_GID, so the case does
+	// not depend on who runs the test.
+	shims := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(shims, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	args := filepath.Join(dir, "logrotate.args")
+	writeShim := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(shims, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeShim("logrotate", `printf '%s\n' "$@" > "$FAKE_ARGS"
+printf '%s' "$FAKE_OUT"
+exit "${FAKE_RC:-0}"
+`)
+	writeShim("stat", `case "$2" in
+%u) echo "$FAKE_UID" ;;
+%g) echo "$FAKE_GID" ;;
+*) exit 1 ;;
+esac
+`)
+
+	const uid, gid = "102", "102" // the syslog user and group on the captured Ubuntu 24.04 VM
+	su := logrotateDebugUbuntuSu
+	if !strings.Contains(su, logrotateSwitchTo) {
+		t.Fatal("the switching line the variants replace is not in the capture")
+	}
+	// Variants of the real capture: only the first switching line changes.
+	withTo := func(line string) string { return strings.Replace(su, logrotateSwitchTo, line, 1) }
+	for _, tc := range []struct {
+		name, uid, gid, out string
+		rc                  string
+		root                string // landing root written into the receiver config; "" = landing
+		want                string
+		logrotateRuns       bool
+	}{
+		{name: "su in effect (real Ubuntu 24.04 / logrotate 3.21.0 output)", uid: uid, gid: gid, out: su, want: "0", logrotateRuns: true},
+		{name: "no landing files yet, logrotate 3.21 still reports the switch (real capture)", uid: uid, gid: gid, out: logrotateDebugUbuntuSuNoLogs, want: "0", logrotateRuns: true},
+		// uid != gid: a C12 that swaps the stat fields, or a capture rewrite that
+		// touches both ids alike, cannot pass these.
+		{name: "su in effect, landing owner uid and gid differ", uid: "1000", gid: "100", out: logrotateCaptureFor(t, su, "1000", "100"), want: "0", logrotateRuns: true},
+		{name: "no landing files yet, uid and gid differ", uid: "1000", gid: "100", out: logrotateCaptureFor(t, logrotateDebugUbuntuSuNoLogs, "1000", "100"), want: "0", logrotateRuns: true},
+		{name: "su switches to the landing ids with euid and egid swapped", uid: "100", gid: "1000", out: logrotateCaptureFor(t, su, "1000", "100"), want: "1", logrotateRuns: true},
+		{name: "su in effect, logrotate rc=1 for an unrelated diagnostic", uid: uid, gid: gid, out: su, rc: "1", want: "0", logrotateRuns: true},
+		{name: "policy without su (real output for the policy before v2.1)", uid: uid, gid: gid, out: logrotateDebugUbuntuBase, want: "1", logrotateRuns: true},
+		// The only switching line left is the switch back to root afterwards.
+		{name: "only the switch back to root is printed", uid: uid, gid: gid, out: withTo(""), want: "1", logrotateRuns: true},
+		{name: "su names another user", uid: uid, gid: gid, out: withTo("switching euid from 0 to 103 and egid from 0 to 102 (pid 3228)\n"), want: "1", logrotateRuns: true},
+		{name: "su names another group", uid: uid, gid: gid, out: withTo("switching euid from 0 to 102 and egid from 0 to 103 (pid 3228)\n"), want: "1", logrotateRuns: true},
+		// Without the trailing space after the gid, `to 102` would match the longer gid 1020.
+		{name: "gid only a prefix of the switched gid", uid: uid, gid: gid, out: withTo("switching euid from 0 to 102 and egid from 0 to 1020 (pid 3228)\n"), want: "1", logrotateRuns: true},
+		{name: "uid only a prefix of the switched uid", uid: uid, gid: gid, out: withTo("switching euid from 0 to 1020 and egid from 0 to 102 (pid 3228)\n"), want: "1", logrotateRuns: true},
+		{name: "switch made from a non-root euid", uid: uid, gid: gid, out: withTo("switching euid from 1000 to 102 and egid from 1000 to 102 (pid 3228)\n"), want: "1", logrotateRuns: true},
+		{name: "logrotate prints nothing", uid: uid, gid: gid, out: "", rc: "127", want: "1", logrotateRuns: true},
+		// A root-owned landing root has no identity change to prove, and logrotate
+		// prints no switching line for `su root root` (AlmaLinux 9.8 capture,
+		// above): the row must pass without needing logrotate at all (EL, where
+		// siem_log_owner is root). The root-owned tree is a stat shim here: a
+		// test process that is not root cannot create one.
+		{name: "root-owned landing root (EL: su root root prints no switching line)", uid: "0", gid: "0", out: logrotateDebugUbuntuBase, want: "0"},
+		{name: "root-owned user, other group", uid: "0", gid: gid, out: logrotateDebugUbuntuBase, want: "1", logrotateRuns: true},
+		{name: "landing root missing", uid: uid, gid: gid, out: su, root: filepath.Join(dir, "absent"), want: "1"},
+		{name: "receiver config names no landing root", uid: uid, gid: gid, out: su, root: "-", want: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := landing
+			switch tc.root {
+			case "":
+			case "-":
+				root = ""
+			default:
+				root = tc.root
+			}
+			if root == "" {
+				if err := os.WriteFile(conf, []byte("module(load=\"imtcp\")\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeConf(root)
+			}
+			_ = os.Remove(args)
+			cmd := exec.Command("sh", "-c", command)
+			cmd.Env = append(os.Environ(),
+				"PATH="+shims+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"FAKE_OUT="+tc.out, "FAKE_RC="+tc.rc, "FAKE_ARGS="+args,
+				"FAKE_UID="+tc.uid, "FAKE_GID="+tc.gid)
+			out, err := cmd.CombinedOutput()
+			if err != nil || strings.TrimSpace(string(out)) != tc.want {
+				t.Fatalf("C12 = %q, %v; want %s", out, err, tc.want)
+			}
+			got, readErr := os.ReadFile(args)
+			if tc.logrotateRuns {
+				if readErr != nil || string(got) != "-d\n"+policy+"\n" {
+					t.Fatalf("logrotate was run with %q (%v); want `-d %s`", got, readErr, policy)
+				}
+			} else if readErr == nil {
+				t.Fatalf("logrotate ran (%q) but this case must not need it", got)
+			}
+		})
+	}
+
+	// The real stat on the real landing directory, with no stat shim: the
+	// captured output is rewritten to the uid:gid of the landing directory's
+	// inode, read with os.Stat (not the process ids: the inode's group is
+	// inherited from a setgid parent directory). Only a 0:0 inode takes C12's
+	// root-owned short-circuit instead of this path.
+	t.Run("real stat of the real landing directory", func(t *testing.T) {
+		info, err := os.Stat(landing)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Skip("no uid/gid on this platform's file info")
+		}
+		landingUID, landingGID := fmt.Sprint(owner.Uid), fmt.Sprint(owner.Gid)
+		if landingUID == "0" && landingGID == "0" {
+			t.Skip("the landing directory is root:root, which C12 passes without logrotate")
+		}
+		realShims := filepath.Join(dir, "bin-no-stat")
+		if err := os.MkdirAll(realShims, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		shim, err := os.ReadFile(filepath.Join(shims, "logrotate"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(realShims, "logrotate"), shim, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeConf(landing)
+		meGid := logrotateCaptureFor(t, logrotateDebugUbuntuSu, landingUID, landingGID)
+		for _, tc := range []struct{ name, out, want string }{
+			{"su in effect", meGid, "0"},
+			{"policy without su", logrotateDebugUbuntuBase, "1"},
+		} {
+			cmd := exec.Command("sh", "-c", command)
+			cmd.Env = append(os.Environ(), "PATH="+realShims+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"FAKE_OUT="+tc.out, "FAKE_ARGS="+args)
+			out, err := cmd.CombinedOutput()
+			if err != nil || strings.TrimSpace(string(out)) != tc.want {
+				t.Fatalf("%s: C12 = %q, %v; want %s", tc.name, out, err, tc.want)
+			}
+		}
+	})
+}
+
 // TestRegression_LogServerSpec locks the structure of
 // docs/verification/log-server.md (v1.2 — rsyslog central SIEM receiver,
 // TCP only):
@@ -63,6 +379,9 @@ func TestRegression_LogServerC11AllowsAttributesAfterRuleset(t *testing.T) {
 //	    ruleset's forwarding rule and re-forwards itself forever; confirmed
 //	    live 2026-08-07, minimal-poc round 20, filled a 77GB disk in under
 //	    an hour)
+//	C12 logrotate rotates the landing files as the owner of the landing root
+//	    (v2.1 — the policy's `su`; read from `logrotate -d`, which prints the
+//	    euid/egid switch it will make, rather than from the policy text)
 //
 // v1.0/v1.1 also had a UDP receiver (imudp) and its own C4/C6 rows; v1.2
 // removed UDP entirely (nothing in this repo ever forwards over UDP — see
@@ -95,7 +414,7 @@ func TestRegression_LogServerSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -117,7 +436,7 @@ func TestRegression_LogServerSpec(t *testing.T) {
 
 	// Positive-logic rc rows: rc-based numeric expected, never a bare
 	// reverse-logic grep feeding a "1 means healthy" expected.
-	for _, id := range []string{"C1", "C2", "C4", "C10", "C11"} {
+	for _, id := range []string{"C1", "C2", "C4", "C10", "C11", "C12"} {
 		if exp[id] != "0" {
 			t.Errorf("%s expected must be rc-based `0`, got %q", id, exp[id])
 		}
@@ -150,9 +469,9 @@ func TestRegression_LogServerSpec(t *testing.T) {
 		t.Errorf("C5 expected must be rc-based `0`, got %q", exp["C5"])
 	}
 
-	// C6–C8 must read the root siem_log_root resolves to from the receiver
-	// config; C7/C8 must count only this run's nonce message.
-	for _, id := range []string{"C6", "C7", "C8"} {
+	// C6–C8 and C12 must read the root siem_log_root resolves to from the
+	// receiver config; C7/C8 must count only this run's nonce message.
+	for _, id := range []string{"C6", "C7", "C8", "C12"} {
 		for _, want := range []string{"10-siem-receiver.conf", "SiemAuditPath", "sh -c '"} {
 			if !strings.Contains(cmd[id], want) {
 				t.Errorf("%s must contain %q, got %q", id, want, cmd[id])
@@ -173,6 +492,23 @@ func TestRegression_LogServerSpec(t *testing.T) {
 		}
 		if strings.Contains(cmd[id], "grep -r ") || strings.Contains(cmd[id], "; true") {
 			t.Errorf("%s must not match a fixed selftest string, got %q", id, cmd[id])
+		}
+	}
+
+	// C12: sh -c '... && echo 0 || echo 1' (outer rc always 0), and the
+	// effective identity comes from what logrotate itself says it will
+	// switch to, for the policy file Step 4 renders.
+	if !strings.Contains(cmd["C12"], "&& echo 0") || !strings.Contains(cmd["C12"], "|| echo 1") {
+		t.Errorf("C12 must use the `... && echo 0 || echo 1` form, got %q", cmd["C12"])
+	}
+	for _, want := range []string{"logrotate -d /etc/logrotate.d/siem-incoming", "switching euid from 0 to"} {
+		if !strings.Contains(cmd["C12"], want) {
+			t.Errorf("C12 must contain %q, got %q", want, cmd["C12"])
+		}
+	}
+	for _, r := range s.Rows {
+		if r.ID == "C12" && !NeedsBecome(r) {
+			t.Errorf("C12 must run as root (logrotate -d switches from euid 0): NeedsBecome(C12) = false")
 		}
 	}
 
