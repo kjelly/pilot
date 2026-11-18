@@ -1,16 +1,12 @@
 # Verification Spec — log-server（rsyslog 中央日誌接收端 / SIEM forward 目標）
 
-> 版本：v2.0
+> 版本：v2.1
 > 對齊規範：pilot 通用 config-only 服務規範（比照 `pam-oidc-sshd.md` 的
 > block/rescue + tags 模式）；為 `audit-log-forwarding.md`（client 端 auditd +
 > rsyslog 轉送）提供中央接收端，兩份 spec 搭配構成一組 Shape 3（server+client）。
 > 維護者：sre
 
-> 最後驗證：2026-10-20，candidate `34cfabea416eb9645aaa323e541198ae39bbbe96`，
-> tree `67f0299bcd8a39fc77ffd0e85821e6576ebd7211`。全新三機 L3/L4 通過，
-> receiver 11/11、sender 66/66、L6 三台 changed=0；12 項 TLS rollback 與兩項 C19 負例通過。
-> 負例後再次 77/77、全鏈 changed=0。大流量、輪替與 decommission 本輪未重跑。
-> [完整驗證摘要](../evidence/siem-relp-mtls/2026-10-20-34cfabe-review.md)。
+> 實跑證據：[evidence LATEST](../evidence/log-server/LATEST.md)（每次重新驗證只更新 evidence 目錄）。
 
 ## 1. 目標系統
 
@@ -69,6 +65,7 @@
 | C9  | file      | logrotate 策略檔存在                                                  | present  | test -f /etc/logrotate.d/siem-incoming |
 | C10 | logrotate | logrotate 策略檔語法正確（dry-run 不出錯）                            | 0        | logrotate -d /etc/logrotate.d/siem-incoming >/dev/null 2>&1; echo $? |
 | C11 | config    | `imtcp` input 綁定專屬 ruleset（不會落回 default ruleset 被轉送規則二次處理） | 0        | grep -qE 'input\(type="imtcp"[^)]*ruleset="siemReceiver"[^)]*\)' /etc/rsyslog.d/10-siem-receiver.conf; echo $? |
+| C12 | logrotate | SIEM 落地檔以落地根目錄擁有者的身分輪替（logrotate 的 `su` 生效） | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] && [ -d "$r" ] || { echo 1; exit 0; }; u=$(stat -c %u "$r") && g=$(stat -c %g "$r") || { echo 1; exit 0; }; [ "$u" = 0 ] && [ "$g" = 0 ] && { echo 0; exit 0; }; o=$(LC_ALL=C logrotate -d /etc/logrotate.d/siem-incoming 2>&1); printf "%s\n" "$o" | grep -qF "switching euid from 0 to $u and egid from 0 to $g " && echo 0 || echo 1' |
 
 > C1/C2/C4/C5/C10 用**正邏輯 rc**（`; echo $?` 或原生 rc），不用反邏輯
 > grep + 數字 expected；C5 用 `sh -c '... && echo 0 || echo 1'` 讓外層指令
@@ -95,16 +92,35 @@
 > /13GB，把 77GB 的磁碟塞爆到 100%。v1.3 把 `imtcp` 的 receive 動作移進專屬
 > `ruleset(name="siemReceiver")`，收到的訊息只會被寫進 dynaFile 一次，永遠
 > 不會再進到 default ruleset 的轉送規則——C11 直接 grep 這個綁定關係。
+>
+> **C12 的由來與判讀**：logrotate 以 root 展開 `siem_log_root/*/*.log` 後，依完整路徑
+> rename、create、compress、刪除。它拒絕 symlink 或 hard link 的 log 檔，卻不擋
+> 路徑中間的 symlink 目錄；Ubuntu 的 `siem_log_root` 由 `syslog` 擁有，各來源目錄由
+> 降權成 `syslog` 的 rsyslogd 建立，所以 `syslog` 身分的行程可以把
+> `<root>/<host>` 換成 symlink，讓 root 的每日 logrotate 在目標目錄裡動手。v2.1 起
+> 策略檔寫 `su <siem_log_owner> <siem_log_owner>`，輪替改以落地根目錄擁有者的權限
+> 進行（postrotate 腳本仍以 root 執行，`systemctl kill -s HUP` 不受影響）。C12 對**單獨**
+> 這個策略檔跑 `logrotate -d`（以 root，所以指令含 `/etc/` 時 pilot 會 become），
+> 看 logrotate 是否真的列出 `switching euid from 0 to <根目錄 uid> and egid from 0 to
+> <根目錄 gid> `。判讀注意：
+>
+> - 落地根目錄底下沒有任何 `*.log` 時，這一行照樣會印出：Ubuntu 24.04（logrotate 3.21.0）上，
+>   策略檔有 `missingok`，pattern 本身仍會被「考慮」，停掉 rsyslog 並移走所有 `*.log` 後
+>   實測仍印出 switching 行（2026-11-17）。C12 因此不依賴 C7/C8 先建出落地檔。
+> - 根目錄屬於 root（EL，`siem_log_owner` 是 root）時直接回 0：`su root root` 沒有
+>   權限切換可以證明。
+> - 比對字串結尾的空白不能省，否則 gid `110` 會被 `1100` 之類的前綴誤判符合。
+> - 指令寫在 `sh -c '… echo 0 … echo 1'` 裡，外層恆回 rc=0（陷阱 1 不適用）。
 
 ## 3. 證據收集
 
 - 工具：`go run ./cmd/pilot vm-target verify --name log-server docs/verification/log-server.md`
 - 輸出格式：`.verification/log-server-<UTC>.{ndjson,md}`
-- 預期 row 數：11（C1–C11）
+- 預期 row 數：12（C1–C12）
 
 ## 4. PASS / FAIL 規則
 
-- 全部 C1–C11 `status=pass` → **PASS**
+- 全部 C1–C12 `status=pass` → **PASS**
 - 任一 `status=fail` → **FAIL**，列出 fail id + actual + want
 
 ## 5. 例外與已知偏差
@@ -127,9 +143,9 @@
 | C6 | `create siem_log_root`（預設 `/var/log/siem`） | `createDirs="on"` 讓 rsyslog 自動建每台來源主機的子目錄，這裡先建根目錄 |
 | C6, C7, C8 | `let a confined rsyslogd write siem_log_root`（Step 2a，`tasks/rsyslog-confined-log-root.yml`，phase `grant`） | 根目錄不在 `/var/log` 底下時：AppArmor local 規則（保留區塊裡現有的規則）+ 依已載入 profile 的 sha256 判斷要不要重新載入；SELinux `var_log_t` 規則，看目錄實際的 type 決定要不要 `restorecon` |
 | C6, C7, C8 | `drop the AppArmor rules for roots rsyslog no longer writes`（Step 7a，同一個 task 檔，phase `narrow`） | 只在 Step 7 的檢查此刻成立時執行：區塊只留新根目錄的規則（`/var/log` 底下則整段移除），有變才重新載入 |
-| C9, C10 | `template /etc/logrotate.d/siem-incoming` | `rotate`/`maxage` 走 `siem_logrotate_*` 變數 |
+| C9, C10, C12 | `template /etc/logrotate.d/siem-incoming` | `rotate`/`maxage` 走 `siem_logrotate_*` 變數；策略檔內寫 `su {{ siem_log_owner }} {{ siem_log_owner }}`（與 Step 2 建立落地根目錄的 owner/group 相同），輪替以 rsyslog 帳號的權限進行，postrotate 仍以 root 執行 |
 
-> playbook 的每個 task 都帶全部 row tag（C1–C11）：這些步驟共用根目錄、port 與接收設定，只跑其中幾步會讓改過的 `siem_log_root` 只套用一半（例如 `--tags C6` 把 AppArmor 規則換成新目錄，rsyslog 卻還寫舊目錄）。上表是每列驗的是哪一步，不是 `--tags` 只跑哪一步。
+> playbook 的每個 task 都帶全部 row tag（C1–C12）：這些步驟共用根目錄、port 與接收設定，只跑其中幾步會讓改過的 `siem_log_root` 只套用一半（例如 `--tags C6` 把 AppArmor 規則換成新目錄，rsyslog 卻還寫舊目錄）。上表是每列驗的是哪一步，不是 `--tags` 只跑哪一步。
 >
 > 反過來，`--skip-tags` 任一列（例如 `--skip-tags C9`）會跳過整個 log-server 的步驟，只剩 `always` 的 gate 與 snapshot。
 
@@ -174,3 +190,4 @@ go run ./cmd/pilot vm-target run --name log-server \
 | 2026-10-15 | v1.8 | 只改說明，row 不變：v1.7 拿掉 §6 表格中間的說明時留下一個空行，C9/C10 那列仍然沒有算在表格裡（GitHub 把它顯示成表格後的一段文字）；拿掉這個空行 | pilot |
 | 2026-10-16 | v1.9 | 只改說明，row 不變：§1、§6 補上換根目錄時 AppArmor 規則的兩階段處理（重啟前保留舊根目錄的規則，Step 7 確認 rsyslog 以新設定在監聽後才拿掉）、Step 6a 對啟動時間早於設定檔的 rsyslog 也重啟，以及 rescue 對 AppArmor local 檔與接收設定修改時間的處理。起因：Step 2a 重新載入只含新根目錄的 profile 後、rsyslog 重啟前，正在跑的 rsyslogd 不能寫舊根目錄，訊息遺失（PR #79，2026-10-16 在 pr79-log 實測） | pilot |
 | 2026-10-20 | v2.0 | RELP/mTLS 接收與 loopback-only legacy TCP；C4 驗證已載入的實際 transport，C11 允許 ruleset 後的 input 屬性。驗收見本輪 evidence 摘要 | pilot |
+| 2026-11-17 | v2.1 | 新增 C12：落地檔以落地根目錄擁有者的身分輪替。根因：`/etc/logrotate.d/siem-incoming` 沒有 `su`，logrotate 以 root 展開 `siem_log_root/*/*.log` 後依完整路徑 rename、create、compress、刪除；它拒絕 symlink 與 hard link 的 log 檔，卻不擋路徑中間的 symlink 目錄，而 Ubuntu 上 `siem_log_root` 與各來源目錄由 `syslog`（rsyslogd 降權後的身分）擁有，`syslog` 身分的行程可以把 `<root>/<host>` 換成 symlink，讓 root 的每日輪替在目標目錄裡動手；Ubuntu 的全域 `su root adm` 也讓 logrotate 自己的 insecure-parent 檢查不再作用。修法：策略檔無條件寫 `su {{ siem_log_owner }} {{ siem_log_owner }}`（EL 上 `siem_log_owner` 是 root，等於不切換），輪替改用 rsyslog 帳號的權限；postrotate 腳本仍以 root 執行（logrotate 先切回 root 才 fork 腳本），原本的 `systemctl kill -s HUP rsyslog.service` 不變。playbook 的每個 task 補上 C12 tag。row C1–C11 不變。標頭原本的「最後驗證」單次摘要改為指向 `../evidence/log-server/LATEST.md` 的固定連結（AGENTS.md §1.2：spec 不累積單次驗證結果） | pilot |
