@@ -20,18 +20,19 @@ import (
 // legacy ipa_users (password, force_password, preserve_existing) in what
 // Ansible prints of its result.
 //
-// Ansible prints a task's result at -v and at every verbosity for a failed or
-// skipped iteration; a JSON/YAML stdout callback and ANSIBLE_LOG_PATH keep it.
-// What a result carries is not only its module output: a loop prints its whole
-// `item` (loop_control.label only changes the prefix of the line, a failed
-// iteration prints the item at the default verbosity too), set_fact prints its
-// facts, `debug` and `fail` print their message, and -vvv prints the module
-// arguments (`invocation`). So for every task that is not no_log the lint
-// reads the loop (`loop`, `with_*`), the set_fact values and the module
-// arguments (an assert's `that`, `fail_msg` and `success_msg` are conditions
-// and messages about a failed check, not read), with the task's own `vars:`,
-// and follows a credential through set_fact and through the register of a
-// loop (`x.results[].item`).
+// Ansible prints a task's result at -v, and a JSON/YAML stdout callback and
+// ANSIBLE_LOG_PATH keep it. What a result carries is not only its module
+// output: a loop prints its whole `item` (loop_control.label only changes the
+// prefix of the line), set_fact prints its facts, `debug` and `fail` print
+// their message, and -vvv prints the module arguments (`invocation`). At the
+// default verbosity only a FAILED loop iteration prints its whole item; a
+// successful or skipped iteration prints just its label there, and its item at
+// -v and in the JSON callback and the log (measured on ansible-core 2.19.2).
+// So for every task that is not no_log the lint reads the loop (`loop`,
+// `with_*`), the set_fact values and the module arguments (an assert's `that`,
+// `fail_msg` and `success_msg` are conditions and messages about a failed
+// check, not read), with the task's own `vars:`, and follows a credential
+// through set_fact and through the register of a loop (`x.results[].item`).
 //
 // The roster's credential paths are freeipa.admin.password and users[]; the
 // lint is path-sensitive, so `freeipa_roster.groups`, `freeipa_roster.freeipa.server`
@@ -51,11 +52,27 @@ import (
 // whose key list equals the keys freeipa-identity-normalize-users-groups.yml
 // writes when it produces the credentials (credentialKeysOfNormalizer).
 //
-// Limits: a credential reached through `hostvars[...]`/`vars[...]`/
-// `lookup('vars')`, or through the register of a task that is not a loop, is
-// not followed, and a play's own `vars:` never shadow a credential root (the
-// play's `ipa_users: []` is the default the run's facts and -e replace). Issue
-// #378 tracks RedactSecrets on nested mappings, a separate defect.
+// Limits. The lint does not follow a credential that reaches a printed place
+// by any of these routes (it is not widened to them; each is a form a new
+// playbook could use, so a reviewer has to look for it):
+//   - `hostvars[...]`, `vars[...]` or `lookup('vars')`;
+//   - the register of a task that is not a loop;
+//   - an assert's `msg`, `fail_msg` or `success_msg` (not read, like `that`);
+//   - `loop_control.label`, which prints on every line of a loop: a label that
+//     names a credential outside the item is not seen;
+//   - a play-level `vars:` alias of a credential root (a play's own `vars:`
+//     never shadow a root, because the play's `ipa_users: []` is only the
+//     default that facts and -e replace, and they are not added to the taint
+//     either; a task's or block's `vars:` and an include's `vars:` are read);
+//   - the roster loaded by `include_vars` under a name other than
+//     `freeipa_roster` (the roots are named);
+//   - the free-form `action: set_fact ...` spelling (only the `set_fact:` and
+//     `ansible.builtin.set_fact:` keys are read, and `action:` is not read as a
+//     module either).
+//
+// Issue #378 tracks RedactSecrets on nested mappings, a separate defect;
+// issue #381 tracks the source excerpt of Ansible's error banner, which a
+// no_log task still gets.
 func TestRegression_RosterCredentialsStayOutOfTaskResults(t *testing.T) {
 	keys := credentialKeysOfNormalizer(t, "../..")
 	scan := scanRosterCredentialSites(t, "../..", keys)
@@ -701,9 +718,10 @@ func templateClose(s string, from int, open byte, closer string) int {
 		c := s[j]
 		switch {
 		case quote != 0:
-			if c == '\\' {
+			switch c {
+			case '\\':
 				j++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 		case open != '#' && (c == '\'' || c == '"'):
@@ -825,7 +843,7 @@ func (e *taintEval) expr(src string) *taintTree {
 	if err != nil {
 		var mentioned []*taintTree
 		for _, word := range strings.FieldsFunc(src, func(r rune) bool {
-			return !(r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+			return r != '_' && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
 		}) {
 			if t := e.lookup(word); t != nil {
 				mentioned = append(mentioned, t)
@@ -1064,7 +1082,7 @@ func scanRosterCredentialSites(t *testing.T, root string, keys []string) rosterS
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !(strings.HasSuffix(p, ".yml") || strings.HasSuffix(p, ".yaml")) {
+		if d.IsDir() || (!strings.HasSuffix(p, ".yml") && !strings.HasSuffix(p, ".yaml")) {
 			return nil
 		}
 		raw, err := os.ReadFile(p)

@@ -19,12 +19,13 @@ import (
 )
 
 // Issues #142 and #216: what Ansible prints of a task result must never carry
-// a credential of the roster. `-v` prints the result of every task, a failed
-// loop iteration prints its whole `item` even at the default verbosity
-// (`loop_control.label` only changes the prefix), a skipped iteration prints
-// its `item`, `set_fact` prints its facts, and a JSON stdout callback or
-// ANSIBLE_LOG_PATH keep all of it. Two tasks of freeipa-identity-apply.yml put
-// a credential there:
+// a credential of the roster. `-v` prints the result of every task, and a
+// loop's whole `item` with it (`loop_control.label` only changes the prefix);
+// at the default verbosity only a failed iteration prints its item, a
+// successful or skipped one prints just its label (ansible-core 2.19.2);
+// `set_fact` prints its facts, and a JSON stdout callback or ANSIBLE_LOG_PATH
+// keep all of it. Two tasks of freeipa-identity-apply.yml put a credential
+// there:
 //
 //   - #142: "Fill canonical roster freeipa.server for this reconcile" sets the
 //     WHOLE roster as a fact when the roster omits freeipa.server, so its
