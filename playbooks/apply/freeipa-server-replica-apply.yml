@@ -482,6 +482,31 @@
         name: "{{ ipa_replica_fqdn }}"
       tags: [freeipa-replica, R1]
 
+    # rsyslog stamps every message with the hostname it read when it started, so a
+    # replica whose audit/log forwarding was applied before this rename keeps logging
+    # (and landing on the log server, and in Loki) under its old name until rsyslog is
+    # restarted (minimal-PoC five-node run 2026-11-13, finding F3: the replica kept
+    # the label freeipa-replica after it became ipa2). Judge by effective state, not by
+    # whether the hostname task changed: a replica renamed by an earlier run is stale
+    # too, and a restarted rsyslog is newer than /etc/hostname so a rerun changes nothing.
+    - name: "FreeIPA replica — is rsyslog older than the hostname it was started under?"
+      ansible.builtin.shell: |
+        if ! systemctl is-active --quiet rsyslog; then echo not-running; exit 0; fi
+        started=$(date -d "$(systemctl show rsyslog -p ActiveEnterTimestamp --value)" +%s)
+        renamed=$(stat -c %Y /etc/hostname)
+        if [ "$started" -lt "$renamed" ]; then echo stale; else echo current; fi
+      register: freeipa_replica_rsyslog_hostname_state
+      changed_when: false
+      check_mode: false
+      tags: [freeipa-replica, R1]
+
+    - name: "FreeIPA replica — restart rsyslog so its log label follows the new hostname"
+      ansible.builtin.systemd:
+        name: rsyslog
+        state: restarted
+      when: (freeipa_replica_rsyslog_hostname_state.stdout | default('')) | trim == 'stale'
+      tags: [freeipa-replica, R1]
+
     - name: "FreeIPA replica — install ipa-server package (also provides ipa-client-install for step 1)"
       ansible.builtin.dnf:
         name: "{{ ipa_packages }}"
