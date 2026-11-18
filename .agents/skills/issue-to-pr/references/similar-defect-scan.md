@@ -148,6 +148,12 @@ A PR still closes only the selected Issue. Open Issues with the same invariant j
 candidates; after the PR merges, each is closed by its own later `issue-to-pr` invocation. Claims, the gate's Issue checks and the
 `Fixes` checks of `create_pr.py`/`mark_ready.py` do not change.
 
+When the related Issues are already sub-issues of one `issue-batch-planner` umbrella, use
+[umbrella mode](workflow.md#umbrella-mode) instead: the umbrella and its open sub-issues are one item
+and the PR closes each fixed sub-issue with its own `Fixes`. This section covers every other related
+Issue, including Issues outside the umbrella in umbrella mode. The scan itself runs once for the
+umbrella, and the sites its sub-issues report are `same-invariant-in-scope`.
+
 1. **Find** (read-only): during the scan, SA searches open Issues (`gh issue list --search`) by class,
    invariant and the files or components involved. A recent `issue-batch-planner` report, when the user
    provides one, is a further input: its batches name Issues that share files, tests or references, but

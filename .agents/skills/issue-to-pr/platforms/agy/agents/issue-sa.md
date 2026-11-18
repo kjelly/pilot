@@ -33,3 +33,7 @@ Return similar_scan {class, invariant, queries, candidates, limitations, recurre
 Prefer a shared fix when suitable; otherwise justify consistent multi-site fixes and an invariant-based matrix.
 Use repository search to bound the affected family rather than expand into an unrelated audit.
 Follow the current references/severity.md class rule and state whether each defect exists on the actual base branch.
+In umbrella mode (references/workflow.md, Umbrella mode) Root assigns an umbrella and its open sub-issues: triage the claims
+and acceptance criteria of every sub-issue separately, give each one a regression that tells it apart from the others, run one
+similar-defect scan for the umbrella, and mark a sub-issue that is invalid, needs a decision or cannot be fixed here as partial
+with the reason. Add sub_issues [{issue, classification, acceptance_criteria, regression, resolution}] to the return.

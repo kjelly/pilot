@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kjelly/pilot/internal/delivery"
 	"github.com/kjelly/pilot/internal/spec"
 	"github.com/kjelly/pilot/internal/store"
 	"github.com/kjelly/pilot/internal/tools"
@@ -295,13 +296,17 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 	}
 	fmt.Printf("\nverdict: **%s**  (pass=%d fail=%d skip=%d)\n", verdict, pass, fail, skip)
 	if fail > 0 {
-		if err := writer.Finish(ctx, store.RunFinished{Outcome: "failure", ExitCode: 1}); err != nil {
+		if err := delivery.RetryTransientEvidence(ctx, func(c context.Context) error {
+			return writer.Finish(c, store.RunFinished{Outcome: "failure", ExitCode: 1})
+		}); err != nil {
 			return fmt.Errorf("finalize verification evidence: %w", err)
 		}
 		finalized = true
 		return fmt.Errorf("verification failed: %d rows", fail)
 	}
-	if err := writer.Finish(ctx, store.RunFinished{Outcome: "success", ExitCode: 0}); err != nil {
+	if err := delivery.RetryTransientEvidence(ctx, func(c context.Context) error {
+		return writer.Finish(c, store.RunFinished{Outcome: "success", ExitCode: 0})
+	}); err != nil {
 		return fmt.Errorf("finalize verification evidence: %w", err)
 	}
 	finalized = true

@@ -27,6 +27,8 @@ Fix every same-invariant-in-scope and shared-choke-point site of the approved si
 distinguishing regression; never widen scope to separate-defect sites. For recurrence_risk yes, add or extend a repo-wide
 guard, show it fails on BASE in a read-only scratch copy (git archive BASE_SHA) and report why as guard.negative_control.
 Commit messages record scan range, candidates, fixed sites and follow-ups (AGENTS.md §5.10).
+In umbrella mode each sub-issue Root marks fixes gets at least one regression that fails on base for that sub-issue's own
+symptom; one shared test is not enough. Report which test covers which sub-issue.
 If evidence shows an Issue claim or SA's diagnosis does not hold, stop and report it to Root instead of coding around it.
 Avoid workaround-only fixes, weakening assertions, disabling tests, error swallowing, and hardcoded passes.
 Run tests/lint/static checks for the packages the change touches and the regressions it adds (the whole suite

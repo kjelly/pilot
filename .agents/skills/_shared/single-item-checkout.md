@@ -14,6 +14,12 @@ not a skill, so it cannot be linked there.
   list candidates and ask which one to handle; do not silently choose, fan out,
   or drain a queue. An unambiguous current-branch PR may supply a missing PR target;
   `issue-to-pr` always requires an explicit Issue.
+- One exception, `issue-to-pr`'s umbrella mode: an umbrella Issue that
+  `issue-batch-planner` filed (its body has the line `issue-batch-planner batch: <12 hex>`
+  and the matching `issue-batch-planner issues:` member line) and its open sub-issues
+  are one item, with one branch, one claim and one PR, whether the user names the
+  umbrella or one of its sub-issues. It never adds any other Issue, and an ordinary
+  GitHub parent does not qualify.
 - SA, Coder, and independent Reviewer still collaborate on this one item. Only
   one writer owns its checkout. Finish dependent roles before the next handoff;
   preserve a fresh review context rather than simulating independent review.
