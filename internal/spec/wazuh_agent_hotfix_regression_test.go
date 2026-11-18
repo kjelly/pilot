@@ -471,8 +471,9 @@ func TestWazuhAgentHotfixDeregisterIsExactAndIdempotent(t *testing.T) {
 }
 
 // The matcher trap this spec's C6 hit (section 2, #332): when a command writes anything but a lone
-// integer to the text `pilot verify --local` matches, it cannot read an rc from that text and falls back to the process rc,
-// which is 0, so a missing coordinator PASSES. Every row must print exactly 0 or 1 even when
+// integer to the text `pilot verify --local` reads the rc from, it cannot read an rc and falls back to the process rc,
+// which is 0, so a missing coordinator PASSES. Before #332's runner fix that text included stderr; it is stdout
+// alone now, but the rows keep the stricter form so older pilot builds read them the same way. Every row must print exactly 0 or 1 even when
 // nothing it inspects exists. C6 is strict only where a manager stack runs: with no manager it is
 // vacuous (0), and with one (a fake docker below stands in for it) a missing coordinator must read 1.
 func TestWazuhAgentHotfixSpecRowsPrintALoneIntegerEvenWhenToolsAreMissing(t *testing.T) {
@@ -495,8 +496,9 @@ func TestWazuhAgentHotfixSpecRowsPrintALoneIntegerEvenWhenToolsAreMissing(t *tes
 		if withManager {
 			cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 		}
-		// pilot verify --local folds stderr into the text it matches (the `not found` the shell itself
-		// prints for a missing tool is what broke the original C6), so read both, as it does.
+		// pilot verify --local folded stderr into the text it read the rc from until #332 (the `not
+		// found` the shell itself prints for a missing tool is what broke the original C6), so read
+		// both: a row must print a lone integer even under that older reading.
 		out, runErr := cmd.CombinedOutput()
 		if runErr != nil {
 			t.Errorf("%s: sh exited non-zero: %v (rows must absorb their own failure into the printed integer)", row.ID, runErr)

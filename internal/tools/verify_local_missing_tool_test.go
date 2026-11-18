@@ -84,8 +84,10 @@ func TestProbeLocal_MissingToolFails(t *testing.T) {
 	if pr.Pass {
 		t.Fatalf("missing tool passed: rc=%d raw=%q verdict=%q", pr.RC, pr.Raw, pr.Verdict)
 	}
-	if !strings.Contains(pr.Verdict, "rc-from-stdout=1") || !strings.Contains(pr.Raw, "not found") {
-		t.Errorf("verdict=%q raw=%q; want the echoed 1 read past the shell's not-found error", pr.Verdict, pr.Raw)
+	// The shell's own wording differs (dash: "not found", bash: "No such file
+	// or directory"); it always names the path.
+	if !strings.Contains(pr.Verdict, "rc-from-stdout=1") || !strings.Contains(pr.Raw, missingToolPath) {
+		t.Errorf("verdict=%q raw=%q; want the echoed 1 read past the shell's error about %s", pr.Verdict, pr.Raw, missingToolPath)
 	}
 
 	pr = tool.Probe(ctx, "sh -c 'true >/dev/null && echo 0 || echo 1'", "0", "", 10)
@@ -96,9 +98,10 @@ func TestProbeLocal_MissingToolFails(t *testing.T) {
 
 // TestVerifyLocal_AgreesWithInventoryOnRcEcho locks the invariant the fix
 // restores: for one command result, a numeric Expected gets the same verdict
-// on the local path as on the inventory path. The inventory text has the
-// shape of the #332 capture from `ansible --one-line` (ansible-core 2.20.1):
-// "<host> | CHANGED | rc=0 | (stdout) 1 (stderr) sh: 1: <tool>: not found".
+// on the local path as on both inventory paths. The one-line text has the
+// shape #332 quotes from `ansible --one-line` (ansible-core 2.20.1):
+// "<host> | CHANGED | rc=0 | (stdout) 1 (stderr) sh: 1: <tool>: not found";
+// the per-host path (per_host_verify.go) evaluates "(rc=N) <stdout>".
 func TestVerifyLocal_AgreesWithInventoryOnRcEcho(t *testing.T) {
 	cases := []struct {
 		name, stdout, stderr string
@@ -110,6 +113,9 @@ func TestVerifyLocal_AgreesWithInventoryOnRcEcho(t *testing.T) {
 		{"warning then 0", "0\n", "warning: deprecated\n", 0},
 		{"no echo, rc 0", "", "", 0},
 		{"no echo, rc 2", "", "boom\n", 2},
+		// An integer on stderr alone is not the rc echo on any path (it was
+		// on the old local path).
+		{"integer on stderr only", "", "1\n", 0},
 	}
 	for _, c := range cases {
 		local := "(rc=" + strconv.Itoa(c.rc) + ") " + localV1Output(c.stdout, c.stderr)
@@ -124,8 +130,9 @@ func TestVerifyLocal_AgreesWithInventoryOnRcEcho(t *testing.T) {
 		for _, expected := range []string{"0", "1"} {
 			lp, lv := evaluateV1LocalExpected(expected, c.stdout, local, c.rc)
 			ip, iv := evaluateV1Expected(expected, inventory, c.rc)
-			if lp != ip {
-				t.Errorf("%s, expected %s: local pass=%v (%s), inventory pass=%v (%s)", c.name, expected, lp, lv, ip, iv)
+			hp, hv := evaluateV1Expected(expected, "(rc="+strconv.Itoa(c.rc)+") "+strings.TrimSpace(c.stdout), c.rc)
+			if lp != ip || lp != hp {
+				t.Errorf("%s, expected %s: local pass=%v (%s), one-line pass=%v (%s), per-host pass=%v (%s)", c.name, expected, lp, lv, ip, iv, hp, hv)
 			}
 		}
 	}
