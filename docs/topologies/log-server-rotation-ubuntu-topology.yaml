@@ -1,0 +1,21 @@
+# Disposable single-node topology for the SIEM logrotate rotation identity
+# (kjelly/pilot#93; docs/verification/log-server.md C9-C12).
+#
+# log-server is exactly-one per contract, so Ubuntu and EL each get their own
+# topology (see log-server-rotation-el-topology.yaml). The node is also an
+# audit-log-forwarding client of itself: log-server C7/C8 inject locally and
+# need this host to forward to its own receiver, as in every supported
+# deployment.
+# On Ubuntu rsyslogd runs as syslog, so the SIEM tree is syslog-owned and the
+# siem-incoming policy must rotate as syslog.
+services: none
+nodes:
+  - name: lrot-deb
+    base_image: ubuntu-24.04
+    memory: 2560
+    vcpus: 2
+    disk: 30
+    ssh_user: root
+    ssh_timeout: 5m
+    boot_timeout: 8m
+    groups: [log-server, audit-log-forwarding]
