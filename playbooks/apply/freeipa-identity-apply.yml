@@ -778,10 +778,10 @@
       tags: [always]
 
     # An initial password is a credential: it may sit only in no_log tasks.
-    # Ansible prints the whole loop `item` of a failed or skipped iteration
-    # (`loop_control.label` only changes the prefix), the `item` of every
-    # iteration at -v, and the facts of a set_fact at -v, to the terminal, to
-    # ANSIBLE_LOG_PATH and to JSON/YAML stdout callbacks (issue #216). So the
+    # At the default verbosity Ansible prints the whole loop `item` of a FAILED
+    # iteration; at -v, and in JSON/YAML stdout callbacks and ANSIBLE_LOG_PATH,
+    # it prints the `item` of every iteration and the facts of a set_fact
+    # (`loop_control.label` only changes the prefix) (issue #216). So the
     # users are split in two:
     #   ipa_active_user_credentials  the active users that declare a password,
     #                                whole, for the two password tasks below,
