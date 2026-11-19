@@ -156,10 +156,14 @@ func lower(s string) string { return strings.ToLower(s) }
 
 // host is a host name as FreeIPA stores it: a lower-case FQDN. A short name is
 // completed with the server's domain, as FreeIPA does (K4).
-func (b *hbacBuilder) host(name string) string {
+func (b *hbacBuilder) host(name string) string { return completeHost(name, b.in.Obs.Domain) }
+
+// completeHost is a host name as FreeIPA stores it: a lower-case FQDN, a short name
+// completed with domain (K4). The planner and the writer's re-reads use this one.
+func completeHost(name, domain string) string {
 	n := lower(strings.TrimSuffix(name, "."))
-	if !strings.Contains(n, ".") && b.in.Obs.Domain != "" {
-		return n + "." + b.in.Obs.Domain
+	if !strings.Contains(n, ".") && domain != "" {
+		return n + "." + domain
 	}
 	return n
 }
