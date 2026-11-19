@@ -127,8 +127,9 @@ func zeroRequestProblems(t *testing.T, g func(context.Context, string) error) []
 }
 
 func TestWriteGateRefusesEveryWriteMethodAndBatchWithZeroRequests(t *testing.T) {
-	if got := writeMethods(); len(got) != 11 {
-		t.Fatalf("the allowlist has %d write methods %v; spec §7.1 names 11 (a new one needs this test and the spec read again)", len(got), got)
+	// 11 of Phase 2 (spec §7.1) and 12 of the HBAC stage (Phase 3a spec §5).
+	if got := writeMethods(); len(got) != 23 {
+		t.Fatalf("the allowlist has %d write methods %v; the specs name 11 and 12 (a new one needs this test and the specs read again)", len(got), got)
 	}
 	if problems := zeroRequestProblems(t, func(context.Context, string) error { return errGateClosed }); len(problems) != 0 {
 		t.Fatal(strings.Join(problems, "\n"))

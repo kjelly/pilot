@@ -276,7 +276,7 @@ Q2 的預設需要維護者確認（見 §10）。
 | 切片 | 內容 | 需要 lab |
 |---|---|---|
 | P3-0 | K1–K8 擷取、fixture、事實測試（**已完成**，§1.3；K9 仍待量測） | 是 |
-| P3-1 | desired 解析、plan（含 blocked、順序）、唯讀 preview 納入 | 否（fixture 來自 P3-0） |
+| P3-1 | desired 解析、live 讀取、plan（含 blocked、順序）（**已完成**：`hbac_desired.go`、`hbac_live.go`、`hbac_plan.go`、`hbac_test.go`；allowlist 加入 HBAC 的讀寫方法，寫入方法由 11 個變 23 個）；唯讀 preview 納入（入口）留給 P3-5 | 否（fixture 來自 P3-0） |
 | P3-2 | writer：stage、批次、分類、驗證、journal、fake IPA 矩陣 | 否 |
 | P3-3 | lockdown | 是（K5、K6） |
 | P3-4 | playbook：`pilot_identity_hbac_engine`、settle defer、run 2 的 tag 路徑、regression test | 是（K10） |
@@ -288,4 +288,5 @@ Q2 的預設需要維護者確認（見 §10）。
 | 日期 | 變更 |
 |---|---|
 | 2026-11-19 | 初版草案。維護者決定：D1（playbook 之後的第二個 Go 階段）、D2（lockdown 一起搬）。 |
+| 2026-11-19 | P3-1：desired、live 讀取、plan 完成；`freeiparpc` 的 allowlist 加入 HBAC 方法（security boundary 的測試計數 11→23）。 |
 | 2026-11-19 | P3-0：K1–K8 擷取完成（§1.3），Q3、Q4 定案，§3.2、§4.2、§9 對應更新。 |
