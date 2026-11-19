@@ -279,7 +279,7 @@ Q2 的預設需要維護者確認（見 §10）。
 | P3-1 | desired 解析、live 讀取、plan（含 blocked、順序）（**已完成**：`hbac_desired.go`、`hbac_live.go`、`hbac_plan.go`、`hbac_test.go`；allowlist 加入 HBAC 的讀寫方法，寫入方法由 11 個變 23 個）；唯讀 preview 納入（入口）留給 P3-5 | 否（fixture 來自 P3-0） |
 | P3-2 | writer：stage、批次、分類、驗證、journal、fake IPA 矩陣（**已完成**：`hbac_execute.go`、`hbac_stage.go`、`hbac_execute_test.go`、`hbac_classify_test.go`、`hbac_fakeipa_test.go`；`ExecuteHBAC`，H8 在 P3-3 之前一律拒絕） | 否 |
 | P3-3 | lockdown（**已完成**：`hbac_lockdown.go`、`hbac_lockdown_test.go`；proof、disable、rollback、`LockdownReport`；fake 只依 K5／K6 的擷取；live 驗證留給 P3-6） | 是（K5、K6，live 端留給 P3-6） |
-| P3-4 | playbook：`pilot_identity_hbac_engine`、settle defer、run 2 的 tag 路徑、regression test | 是（K10） |
+| P3-4 | playbook：`pilot_identity_hbac_engine`、`pilot_identity_cache_settle=defer`、gate、regression test（**已完成靜態與 Ansible runtime 部分**：`internal/spec/freeipa_identity_hbac_engine_regression_test.go`；run 2 的 `--tags client-cache` 路徑與 K10（run 2 固定成本）要等 P3-5 在 lab 實跑） | 是（K10） |
 | P3-5 | transaction 整合：第二階段、run 2、結果檔、結束碼、idempotency | 是 |
 | P3-6 | live driver、evidence、文件 | 是 |
 
@@ -292,3 +292,4 @@ Q2 的預設需要維護者確認（見 §10）。
 | 2026-11-19 | P3-2：`ExecuteHBAC` 完成（H1–H7；H8 在 P3-3 之前一律拒絕）。與 §5.2 的差異：(1) HBAC 階段的 journal 事件 id 一律帶 `hbac:` 前綴（同一個 delivery run 的 users/groups 階段已用 `auth_cache`、`S*-b*`、`verify`，id 在一個 run 內不可重複）；(2) `DuplicateEntry`（`hbacsvc_add`、`hbacrule_add`）與 users/groups 的 `group_add` 同形，一律是 `conflict-failed`（不視為已收斂，run 在該 stage 停止），不是「重讀看到就算 converged」；(3) 破壞性 stage 的前置重讀：H3（移除）、H6 的 disable、H7（刪除）在送出前以 `hbacrule_find` 重讀，已離開的成員／已停用／已不存在算 noop，規則被刪除重建（`ipauniqueid` 不同）、roster 不再宣告、或有計畫沒列出的待移除成員算 `conflict-failed`；(4) `hbac.rule.disable` 與 `hbac.allow_all.disable` 在 Plan₁／Plan₂ 的比較中視為破壞性（收窄存取），與 users/groups 的 `user.disable` 同。 |
 | 2026-11-19 | P3-1：desired、live 讀取、plan 完成；`freeiparpc` 的 allowlist 加入 HBAC 方法（security boundary 的測試計數 11→23）。 |
 | 2026-11-19 | P3-0：K1–K8 擷取完成（§1.3），Q3、Q4 定案，§3.2、§4.2、§9 對應更新。 |
+| 2026-11-19 | P3-4：playbook 新增 `pilot_identity_hbac_engine`（go 時 roster 的 HBAC services、rules、absent rules、lockdown 不交給寫入的 task，grant 編譯的 rule 照舊）、`pilot_identity_cache_settle=defer`（跳過四個刷新／確認 task）與對應 gate；靜態 lint、gate 與正規化的真 Ansible 測試、拿掉一個 guard 三個測試都失敗的 mutation 檢查。gate 不提 `pilot_identity_auth_cache_output`（`TestRegression_IdentityObservationStructure` 要求只有觀察 task 提它；users/groups 的 gate 已經要求檔案）。 |
