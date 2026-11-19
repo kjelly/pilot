@@ -1394,6 +1394,8 @@ Scanned every captured step output for 0 secret-named value(s): no hit among sca
 
 ## Failure paths and arms (fill in)
 
+The chain's `--topology` is a per-run copy of the committed `docs/topologies/log-server-rotation-ubuntu-topology.yaml` with one change: the node is renamed `lrot-deb` → `i363-lsrv`. The node is a single Ubuntu 24.04 host in groups `log-server` and `audit-log-forwarding`. The scratch paths in the JSON block above are that copy and the candidate's pilot binary; neither is needed to read this record.
+
 The arms below ran by hand on `i363-log`, a single dev VM in group `log-server` only. It was built from the same Ubuntu 24.04.4 golden image as the chain (rsyslog 8.2312.0, AppArmor `rsyslogd` profile in enforce). Every command used the candidate's pilot binary (sha256 `3d827c43…`) from a clean checkout of `07ae5944`. Its `base-applied` state is `log-server-apply.yml` from a read-only `git archive` of the base `90a2249b` (PLAY RECAP `changed=9 failed=0`).
 
 **Upgrade from a base-applied log server.**
@@ -1439,4 +1441,6 @@ The arms below ran by hand on `i363-log`, a single dev VM in group `log-server` 
 - **Over-long names.** Hostnames longer than 255 bytes lose their messages, on base and candidate alike.
 - **Earlier escapes.** Files written outside `siem_log_root` before the fix (for example lines in `/var/log/audit.log` or the server's own `/var/log/auth.log`) are not removed. The operator has to check for them.
 - **Rescue path.** The rescue that restores a pre-fix receiver config ran only in Go tests (`log_server_selinux_rescue_regression_test.go`), not on a VM.
+- **Promtail.** `log-shipping.md` C3's new sed ran only in Go tests against the real `sed` (`TestRegression_SiemRootReadersAgree`). The chain has no Promtail host.
+- **RELP.** The VM and the Go harness deliver over plain `imtcp`. The RELP/mTLS input binds the same `siemReceiver` ruleset and templates, but `imrelp` delivery was not exercised.
 - **Base comparison.** Measured before the candidate existed, so it is not bound to `07ae5944`. The upgrade arm's C13 FAIL→PASS is the candidate-bound counterpart.
