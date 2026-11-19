@@ -83,7 +83,7 @@ FreeIPA server/replica 自己用得到。
 
 | 項目 | 值 |
 |------|----|
-| Inventory group | `freeipa-dns-client`（day-2/opt-in；vm-target 測試時用 `-e target_group=all`）|
+| Inventory group | `freeipa-dns-client`（opt-in，依主機角色套用；2026-11-17 起由 `playbooks/site.yml` 在 `freeipa-client` 之後執行；vm-target 單機測試時用 `-e target_group=all`）|
 | OS / version | Ubuntu/Debian（`systemd-resolved`，primary）与 EL9（`NetworkManager`，FreeIPA 相關主機）皆支援 |
 | 角色 | 任意目標主機的 DNS resolver 使用端；把系統 DNS 指向 FreeIPA server/replica 的 named |
 | FreeIPA DNS 提供者 | 自動從 inventory 偵測：`freeipa-server` 與 `freeipa-server-replica` group 裡 `freeipa_setup_dns` 不是 `false` 的主機（兩者預設都是 `true`，與安裝 playbook 一致；2026-10-13 起 replica 也預設算入，issue #67） |
@@ -392,3 +392,4 @@ FreeIPA server/replica 自己用得到。
 | 2026-10-02 | v1.3 | Checklist 不變。candidate `065a1c6` 實跑：dns tier 拓樸 C1–C7 21/21、L6 `changed=0`；Ubuntu 與 AlmaLinux 上 `timeout:10e-1`、`attempts:20e-1` 新的 C7 判 FAIL（v1.2 判 PASS），`timeout: 1` 判 PASS（v1.2 誤判 FAIL），溢位值判 `invalid`；與 VM 上 glibc 的 `res_init()` 一致（`docs/evidence/freeipa-dns-client/2026-10-02-065a1c6.md`） | sre |
 | 2026-10-15 | v1.4 | Checklist 不變。寫入前的 nameserver 檢查（PR #73 follow-up 加入）改成只擋必要的情況：有回答但沒有 A／AAAA 位址、FreeIPA 不承認也不回答的 FreeIPA server、或沒有任何一台可用；只是暫時沒回答（維護停機的已登記 FreeIPA server、停掉的 dns tier、明確指定的 server）改成 WARNING 並照樣寫入。AAAA 也算位址；只有 FreeIPA DNS server 用 `+norec`，明確指定的 `127.0.0.1` 本機 cache 用遞迴查詢；`+tries=2` | pilot |
 | 2026-11-16 | v1.5 | 新增 C8（issue #168）：glibc 實際使用的每一台 nameserver（`/etc/resolv.conf` 前 3 行，systemd-resolved stub 直接算偏離並用 `resolvectl dns` 展開）都要解析得到 FreeIPA server 的 A 或 AAAA；有回答但沒有位址（NXDOMAIN、REFUSED、NOERROR 無位址）或沒有任何一台回位址就 FAIL，SERVFAIL 與沒有回答的只列出。起因：C3／C4／C6／C7 讀的是 pilot 寫入的設定、至少一筆 nameserver、第一個答案，「FreeIPA 在前、公共 DNS 在後」的清單全部 PASS，C6 的 `dig +short` 只用第一台有回答的 server。playbook 同時加上寫入前的唯讀報告與寫入後的一致性 gate（§1.5、§6）；既有 C1–C7 的 Command 與 Expected 不變 | pilot |
+| 2026-11-17 | v1.5 | Checklist 不變（issue #362）。`playbooks/site.yml` 依主機角色套用這支 playbook：緊接在 `freeipa-client` 之後、所有跨角色使用者（pilot-session-store、NFS 等）之前；排在 `freeipa-server-replica` 與 `dns` 之後，所以它問「這個 nameserver 會不會回答」時 dns tier 與已升級的 replica 都已在服務。inventory 把這個角色指定給某台主機，全站部署就會改寫那台的 resolver（以前靜默略過）。實作與 C1–C8 都沒有變 | pilot |

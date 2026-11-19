@@ -9,6 +9,8 @@ playbooks:
 regressionTests:
   - internal/spec/log_server_regression_test.go
   - internal/spec/siem_relp_mtls_regression_test.go
+  - internal/spec/log_server_logrotate_su_regression_test.go
+  - internal/spec/logrotate_rotation_identity_regression_test.go
   - cmd/pilot/cmd/tag_coverage_test.go
 hostCardinality: exactly-one
 resources: {minCPU: 2, minRAMMiB: 2048, minDiskGiB: 20}

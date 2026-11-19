@@ -646,8 +646,8 @@ docker run --rm -it \
 | 啟用 FreeIPA automount NFS client（目標須先納入 FreeIPA） | `playbooks/apply/freeipa-nfs-client-apply.yml` | `freeipa-nfs-client` |
 | 管理 FreeIPA 使用者／權限 | `playbooks/apply/freeipa-identity-apply.yml` | (見下方「機密」) |
 | 管理 FreeIPA DNS zones／records（資料驅動 day-2 reconciler；支援 zone/record 完整 CRUD 與 authoritative prune，已對活體 FreeIPA server 實跑驗證，見 `docs/verification/freeipa-dns.md` v1.1） | `playbooks/apply/freeipa-dns-apply.yml` | `freeipa-server`（見下方「機密」，manifest 檔路徑另設於 host_vars） |
-| 把目標主機的 DNS resolver 指向 FreeIPA DNS（server/replica；day-2/opt-in，與「把機器納入 FreeIPA」互不相依，不需要 vault 機密，已對 Ubuntu/EL9 兩台 vm-target 實跑驗證，見 `docs/verification/freeipa-dns-client.md` v1.0） | `playbooks/apply/freeipa-dns-client-apply.yml` | `freeipa-dns-client` |
-| 把第二台（或後續台）FreeIPA server 加入既有 realm（multi-master HA） | `playbooks/apply/freeipa-server-replica-apply.yml` | `freeipa-server-replica`（**v0.1 草稿、未實跑**，見 `docs/verification/freeipa-server-replica.md` §0；限制與已知偏差見該檔 §5）|
+| 把目標主機的 DNS resolver 指向 FreeIPA DNS（server/replica；opt-in、依主機角色套用，2026-11-17 起 `site.yml` 在 `freeipa-client` 之後執行，inventory 指定給某台主機就會改寫它的 resolver；與「把機器納入 FreeIPA」互不相依，不需要 vault 機密，已對 Ubuntu/EL9 兩台 vm-target 實跑驗證，見 `docs/verification/freeipa-dns-client.md` v1.0） | `playbooks/apply/freeipa-dns-client-apply.yml` | `freeipa-dns-client` |
+| 把第二台（或後續台）FreeIPA server 加入既有 realm（multi-master HA；opt-in、依主機角色套用，2026-11-17 起 `site.yml` 在 `freeipa-server` 之後執行，inventory 指定給某台主機就會把它升級成 replica；primary 沒有原生 DNS 時要先做手動前置步驟，沒做會在任何變更前明確失敗） | `playbooks/apply/freeipa-server-replica-apply.yml` | `freeipa-server-replica`（已實跑，見 `docs/verification/freeipa-server-replica.md` §0；限制與已知偏差見該檔 §5）|
 | NTP 核心服務 | `playbooks/apply/core-infra-provider-apply.yml` | `ntp`（`-e infra_role=ntp`） |
 | DNS 快取層：FreeIPA 前的第一層 unbound，inventory 有 FreeIPA DNS 時內部網域自動送到 FreeIPA、其餘送到 `dns_upstream`；設定在 `group_vars/dns.yml`，`pilot edit` 可改（見 `docs/verification/dns.md`） | `playbooks/apply/dns-apply.yml` | `dns`（獨立主機，不可兼任 FreeIPA server/replica；prod 至少 2 台） |
 | Container 引擎(Docker) | `playbooks/apply/docker-apply.yml` | `docker`（keycloak-db/keycloak、seaweedfs-s3、wazuh-manager、prometheus/thanos-query/alertmanager 等角色的前置） |

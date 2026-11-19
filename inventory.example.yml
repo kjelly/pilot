@@ -85,15 +85,15 @@ all:
           hosts:
             web-1:
             web-2:
-        freeipa-server-replica:  # v0.1 草稿未實跑,見 docs/verification/freeipa-server-replica.md §5
-          hosts: {}              # 例:第二台 → hosts: { ipa-2: }
+        freeipa-server-replica:  # 依主機角色套用:site.yml 在 freeipa-server 之後把這些主機升級成 replica(見 docs/verification/freeipa-server-replica.md §5)
+          hosts: {}              # 例:第二台 → hosts: { ipa-2: };多台時每台都要設自己的 freeipa_replica_fqdn
         freeipa-nfs-server:      # Kerberos NFSv4 exports + ACL
           hosts: {}              # 例:專用 NFS → hosts: { nfs-1: }
         freeipa-nfs-client:      # IPA automount client (同時也要在 freeipa-client)
           hosts:
             web-1:
             web-2:
-        freeipa-dns-client:      # DNS resolver 指向 FreeIPA DNS;與 freeipa-client 互不相依
+        freeipa-dns-client:      # DNS resolver 指向 FreeIPA DNS;與 freeipa-client 互不相依;site.yml 依主機角色套用
           hosts:                 # 見 docs/verification/freeipa-dns-client.md;FreeIPA server/replica 自己也可加進來(自動優先指向自己)
             web-1:
             web-2:

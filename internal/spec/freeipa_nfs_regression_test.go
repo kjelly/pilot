@@ -247,13 +247,16 @@ func TestRegression_FreeIPANFSClientConsumesRosterNFSClients(t *testing.T) {
 		t.Error("freeipa-nfs-client-apply.yml must hard-fail when no nfs_clients entry covers this host")
 	}
 	// The mount-check task itself must NOT hard-fail the host: its
-	// prerequisites (the IPA automount map/key, created only by the separate
-	// freeipa-identity day-2 reconcile; and the NFS server FQDN actually
-	// resolving, which needs the separate freeipa-dns-client day-2 role)
-	// are never guaranteed to exist on a plain site.yml pass, since both run
-	// after site.yml in this project's established rebuild order. Confirmed
-	// live 2026-08-15 (round 25): without ignore_errors, a hard failure here
-	// silently excludes this host from every later site.yml play.
+	// prerequisite, the IPA automount map/key, is created only by the
+	// separate freeipa-identity reconcile (roster-driven, deliberately not in
+	// site.yml), so it is never guaranteed to exist on a plain site.yml pass.
+	// That alone justifies ignore_errors. History: on 2026-08-15 the NFS
+	// server FQDN actually resolving also needed the separate
+	// freeipa-dns-client day-2 role; since issue #362 (2026-11-17) site.yml
+	// runs it right after freeipa-client and before the NFS roles, but only
+	// on hosts the inventory assigns that role to. Confirmed live 2026-08-15
+	// (round 25): without ignore_errors, a hard failure here silently
+	// excludes this host from every later site.yml play.
 	checkStart := strings.Index(playbook, "- name: \"Verify each triggered path is a genuinely mounted, Kerberized NFSv4 filesystem\"")
 	if checkStart < 0 {
 		t.Fatal("mount-check task is missing")

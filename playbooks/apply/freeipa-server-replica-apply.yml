@@ -38,7 +38,19 @@
 # /etc/hosts on the PRIMARY (and every other existing replica) — this
 # playbook only touches ITS OWN /etc/hosts, it has no fallback write path into
 # an external DNS system. Confirmed by an actual failed run without either;
-# see docs/verification/freeipa-server-replica.md §0/§5.
+# see docs/verification/freeipa-server-replica.md §0/§5. This playbook now
+# CHECKS that step before it changes anything (issue #362; it runs from
+# site.yml, where an unmet precondition must stop the run clearly): a
+# read-only `getent ahostsv4 <replica FQDN>` on the PRIMARY must return this
+# host's IP, otherwise the pre_task gate fails and names the step. It does
+# not run when the primary has native DNS (the self-registration below
+# handles that case) or when the inventory has no freeipa-server host to ask.
+#
+# ONE REPLICA AT A TIME: the play has `serial: 1`, so playbooks/site.yml (and a
+# run against several freeipa-server-replica hosts) promotes replicas
+# sequentially, as docs/verification/freeipa-server-replica.md section 5
+# requires. A failed or unreachable replica stops the play and, from site.yml,
+# every later play (see the comment on `serial:` below). Refs issue #110.
 #
 # NOT in scope of this playbook (see docs/verification/freeipa-server-replica.md
 # §5 for the full list — read it before treating a replica as "done"):
@@ -99,6 +111,37 @@
   hosts: "{{ target_group | default('freeipa-server-replica') }}"
   become: true
   gather_facts: true
+  # One replica at a time (issue #362, review F1; refs #110). playbooks/site.yml
+  # runs this play, and ansible.cfg's forks=20 would otherwise promote every
+  # freeipa-server-replica host at once against the same primary.
+  # docs/verification/freeipa-server-replica.md section 5 ("permanent"): do not
+  # run several ipa-replica-install against one primary in parallel, a known
+  # race when 389-ds replication segments are created; and open issue #110
+  # shows the delegated `ipa dnsrecord-add` self-register below failing when two
+  # replicas run together. With serial: 1 the second replica starts only after
+  # the first one's whole batch (enroll, promote, verify) is done.
+  #
+  # What serial: 1 means for a failure (ansible-core 2.19.2,
+  # executor/playbook_executor.py: `len(batch) == failed_hosts_count` sets
+  # break_play, and `if break_play: break` leaves the loop over ALL plays of the
+  # playbook file, imported ones included): a batch is one host, so ANY replica
+  # that fails or is unreachable stops this play (the later replicas never
+  # start) and every later play of site.yml does not run. ansible-playbook
+  # exits 2 when the replica failed (ExitCode.HOST_FAILED) and 4 when it was
+  # unreachable (ExitCode.HOST_UNREACHABLE, TaskQueueManager.RUN_UNREACHABLE_HOSTS
+  # in ansible-core 2.19.2); the stop is the same for both. That is fail closed:
+  # no later replica, dns, client or NFS play runs on top of a half-built
+  # replica tier. Replicas that were already promoted stay promoted (nothing
+  # rolls them back); re-run after fixing the host.
+  # Without serial, only the failed host would drop out and the other replicas
+  # and the later plays would carry on.
+  #
+  # The pre_tasks gates split by what they read: the pool gates (G-pool) read
+  # the whole freeipa-server-replica group, so they fail on the first host's
+  # batch before any replica changes; G-ip, G-resolve, EL9, sshd -t and the
+  # stage gates are per host and run when THAT host's batch starts, so a
+  # later replica can still fail them after an earlier one was promoted.
+  serial: 1
   vars:
     stage: sandbox
     confirm_staging: false
@@ -110,7 +153,19 @@
     # freeipa-client-apply.yml: ipa_server_ip/ipa_server_fqdn point at the
     # EXISTING server this host enrolls against, not at itself.
     ipa_domain: "{{ freeipa_domain | default('ipa.pilot.internal') }}"
-    ipa_server_ip: "{{ freeipa_server_ip | default(ansible_host) }}"
+    # Derived exactly as freeipa-client-apply.yml does: an explicit
+    # freeipa_server_ip (group_vars or -e) wins, else the freeipa-server
+    # inventory host's ansible_host, else empty and the required-vars gate
+    # below fails. The old `default(ansible_host)` fell back to THIS (the
+    # replica's own) address, so an inventory without freeipa_server_ip --
+    # valid for freeipa-server and freeipa-client, which derive it -- failed
+    # "must not be the primary itself" with a misleading message on a raw
+    # `ansible-playbook site.yml` (issue #362, gate G-ip).
+    ipa_server_inventory_ip: >-
+      {{ (hostvars[groups['freeipa-server'][0]].ansible_host | default('', true))
+         if (groups['freeipa-server'] | default([]) | length > 0)
+         else '' }}
+    ipa_server_ip: "{{ freeipa_server_ip | default('', true) or ipa_server_inventory_ip }}"
     ipa_realm: "{{ freeipa_realm | default(ipa_domain | upper) }}"
     ipa_server_fqdn: "{{ freeipa_server_fqdn | default('ipa1.' ~ ipa_domain) }}"
 
@@ -184,9 +239,15 @@
           - ipa_server_ip is defined and ipa_server_ip | length > 0
           - ipa_replica_ip is defined and ipa_replica_ip | length > 0
         fail_msg: >-
-          Missing required vars. Pass -e ipa_server_ip=<PRIMARY LAN IP>,
-          -e ipa_replica_ip=<THIS HOST'S LAN IP>, and a vault file with
-          ipa_admin_password (>=8 chars), e.g. -e @~/.vault/main.yaml
+          Missing required vars. ipa_server_ip is the PRIMARY's address: set
+          freeipa_server_ip (group_vars/freeipa.yml or -e), or give the
+          freeipa-server inventory host an ansible_host (currently
+          '{{ ipa_server_ip | default('') }}'; the freeipa-server group has
+          {{ groups['freeipa-server'] | default([]) | length }} host(s)).
+          A single-host test run with -e target_group=all has no freeipa-server
+          group, so pass -e ipa_server_ip=<PRIMARY LAN IP> there. Also needed:
+          -e ipa_replica_ip=<THIS HOST'S LAN IP> (default: its ansible_host) and a
+          vault file with ipa_admin_password (>=8 chars), e.g. -e @~/.vault/main.yaml
       tags: [always]
 
     - name: "Gate: this playbook installs FreeIPA NATIVELY — require EL9 host"
@@ -245,6 +306,142 @@
     - name: "Resolve inventory-overridable defaults added to the input contract"
       ansible.builtin.set_fact:
         ipa_enroll_principal: "{{ ipa_enroll_principal | default('admin') }}"
+      tags: [always]
+
+    # ── G-pool: the server pool, checked BEFORE this play changes anything ──
+    # The pool gates in tasks/freeipa-server-pool.yml (more than one replica
+    # needs an explicit freeipa_replica_fqdn each; no duplicate FQDN across
+    # the pool, primary included) only run from dns-apply.yml and
+    # freeipa-client-apply.yml, which site.yml runs AFTER this play (so dns
+    # and the clients see the promoted replica). Left to them, two replica
+    # hosts without their own freeipa_replica_fqdn would both default to
+    # ipa2.<domain>, both run `ipa-client-install --force-join` under that
+    # name, and only then trip the shared gate (issue #362, gate G-pool).
+    # The shared task is not included here: it asserts exactly one
+    # freeipa-server host, which a single-host `-e target_group=all` run (this
+    # playbook's own vm-target convention) does not have, and it sets pool
+    # facts this play has no use for. Same inputs and the same rules,
+    # evaluated up front. These gates read the whole freeipa-server-replica
+    # group (hostvars of every member), not this host alone, so under
+    # `serial: 1` they fail on the FIRST host's batch, before any replica has
+    # changed anything.
+    - name: "FreeIPA replica pool — each replica host's effective FQDN and the hosts that leave it unset"
+      ansible.builtin.set_fact:
+        freeipa_replica_pool_fqdns: >-
+          {{ groups['freeipa-server-replica'] | default([])
+             | map('extract', hostvars)
+             | map(attribute='freeipa_replica_fqdn', default='ipa2.' ~ ipa_domain)
+             | map('lower') | list }}
+        freeipa_replica_pool_unset_hosts: >-
+          {{ groups['freeipa-server-replica'] | default([])
+             | map('extract', hostvars)
+             | rejectattr('freeipa_replica_fqdn', 'defined')
+             | map(attribute='inventory_hostname') | list }}
+      tags: [always]
+
+    - name: "Gate: more than one replica host means each sets its own freeipa_replica_fqdn"
+      ansible.builtin.assert:
+        that:
+          - (groups['freeipa-server-replica'] | default([]) | length) < 2 or (freeipa_replica_pool_unset_hosts | length) == 0
+        fail_msg: >-
+          freeipa-server-replica has {{ groups['freeipa-server-replica'] | default([]) | length }} hosts, and
+          {{ freeipa_replica_pool_unset_hosts }} leave freeipa_replica_fqdn unset: the default
+          ipa2.{{ ipa_domain }} cannot tell replicas apart, so they would all enroll under one name.
+          Set freeipa_replica_fqdn in each replica's host_vars (the same rule as the pool gate in
+          tasks/freeipa-server-pool.yml, which site.yml runs after this play). Nothing was changed.
+      tags: [always]
+
+    - name: "Gate: replica FQDNs are unique and none is the primary's"
+      ansible.builtin.assert:
+        that:
+          - (freeipa_replica_pool_fqdns | unique | length) == (freeipa_replica_pool_fqdns | length)
+          - (ipa_server_fqdn | lower) not in freeipa_replica_pool_fqdns
+        fail_msg: >-
+          Effective replica FQDNs {{ freeipa_replica_pool_fqdns }} must be unique across
+          freeipa-server-replica and differ from the primary {{ ipa_server_fqdn | lower }}: two hosts
+          sharing a name would overwrite each other's enrollment and DNS record. Fix
+          freeipa_replica_fqdn (also check it is not set once at group level for several hosts).
+          Nothing was changed.
+      tags: [always]
+
+    # ── G-resolve: the primary must be able to find this replica by name ───
+    # ipa-replica-install makes the PRIMARY connect back to this host by FQDN
+    # (its conncheck). With native DNS on the primary this play registers the
+    # A record itself (the self-register block under tasks:). Without it the
+    # operator has to do the MANUAL PRE-STEP in the header, and before this
+    # gate the play changed the hostname, installed packages and enrolled the
+    # host first, then failed inside ipa-replica-install with the reason
+    # hidden by no_log (issue #362, gate G-resolve). Read-only: it never
+    # writes anywhere.
+    #
+    # Per host, not per group: the question is about THIS replica's FQDN and
+    # address, so under `serial: 1` it is asked when this host's batch starts.
+    # A later replica can fail it after an earlier one was already promoted
+    # (that earlier replica stays promoted; see the note on serial above).
+    #
+    # Exact semantics: `getent ahostsv4 <ipa_replica_fqdn>` run on the primary
+    # (IPv4 only) must exit 0 and its address list must CONTAIN ipa_replica_ip,
+    # which defaults to this host's ansible_host; set freeipa_replica_ip when
+    # the replica is known by another address (multi-homed, or ansible_host is
+    # a hostname). An answer without that address fails the gate even when the
+    # name resolves. It runs on EVERY apply, so it also guards an
+    # already-promoted replica: with no native DNS on the primary, a primary
+    # that no longer resolves the replica's name is a real inconsistency for a
+    # promoted replica too, and the gate is kept unconditional so a rerun
+    # proves it on the target.
+    #
+    # Both facts below are also what the self-register block delegates with,
+    # so they are computed once here, for every tag.
+    - name: "FreeIPA replica — resolve whether the primary provides native DNS + who to delegate DNS registration to"
+      ansible.builtin.set_fact:
+        freeipa_replica_primary_native_dns: >-
+          {{
+            (hostvars[groups['freeipa-server'][0]].freeipa_setup_dns | default(true) | bool)
+            if (groups['freeipa-server'] | default([]) | length) > 0
+            else false
+          }}
+        freeipa_replica_primary_inventory_host: >-
+          {{
+            groups['freeipa-server'][0]
+            if (groups['freeipa-server'] | default([]) | length) > 0
+            else inventory_hostname
+          }}
+      tags: [always]
+
+    - name: "FreeIPA replica — ask the PRIMARY to resolve this replica's FQDN (read-only; only when the primary has no native DNS)"
+      ansible.builtin.command:
+        argv: [getent, ahostsv4, "{{ ipa_replica_fqdn }}"]
+      register: freeipa_replica_primary_resolve
+      delegate_to: "{{ freeipa_replica_primary_inventory_host }}"
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when:
+        - freeipa_replica_primary_inventory_host != inventory_hostname
+        - not (freeipa_replica_primary_native_dns | bool)
+      tags: [always]
+
+    - name: "Gate: the PRIMARY resolves {{ ipa_replica_fqdn }} to this replica's address (MANUAL PRE-STEP when it runs no native DNS)"
+      ansible.builtin.assert:
+        that:
+          - freeipa_replica_primary_resolve.rc == 0
+          - ipa_replica_ip in (freeipa_replica_primary_resolve.stdout_lines | map('split') | map('first') | list)
+        fail_msg: >-
+          The primary {{ freeipa_replica_primary_inventory_host }} runs no native FreeIPA DNS
+          (freeipa_setup_dns: false), so nothing registers {{ ipa_replica_fqdn }} for it, yet
+          ipa-replica-install makes the primary connect back to this host by that name. From the
+          primary, `getent ahostsv4 {{ ipa_replica_fqdn }}` returned rc={{ freeipa_replica_primary_resolve.rc }}
+          {{ freeipa_replica_primary_resolve.stdout_lines | default([]) }}, not {{ ipa_replica_ip }}.
+          The gate needs rc=0 and an IPv4 address list that CONTAINS ipa_replica_ip
+          ({{ ipa_replica_ip }}; default: this host's ansible_host; set freeipa_replica_ip when the
+          replica is known by another address, e.g. multi-homed or ansible_host is a hostname). It
+          runs on every apply, also for an already-promoted replica.
+          Do the MANUAL PRE-STEP first: register {{ ipa_replica_fqdn }} -> {{ ipa_replica_ip }} in your DNS, or
+          pin it in /etc/hosts on the primary (and on every other existing replica); see the header of
+          this playbook and docs/verification/freeipa-server-replica.md section 0/5. Nothing was changed on this host.
+      when:
+        - freeipa_replica_primary_inventory_host != inventory_hostname
+        - not (freeipa_replica_primary_native_dns | bool)
       tags: [always]
 
     # The same inputs, precedence and normalization as
@@ -377,30 +574,16 @@
     # registration block below is skipped entirely — the pre-existing manual
     # DNS/`/etc/hosts` step is still required in that case, same as before
     # this change.
-    # ALWAYS sets both facts (no `when:` gate on this task itself) — `delegate_to:`
-    # on the block below is templated by ansible BEFORE that block's `when:` is
-    # evaluated, so `freeipa_replica_primary_inventory_host` must never be left
-    # undefined or the whole play dies on "is undefined" even when the intent
-    # was simply to skip (confirmed live). Falls back to `inventory_hostname`
-    # itself (a harmless no-op delegate target — the subsequent `when:` below
-    # skips before it would ever actually delegate to itself) when there is no
-    # `freeipa-server` inventory group to look up at all.
-    - name: "FreeIPA replica — resolve whether the primary provides native DNS + who to delegate DNS registration to"
-      ansible.builtin.set_fact:
-        freeipa_replica_primary_native_dns: >-
-          {{
-            (hostvars[groups['freeipa-server'][0]].freeipa_setup_dns | default(true) | bool)
-            if (groups['freeipa-server'] | default([]) | length) > 0
-            else false
-          }}
-        freeipa_replica_primary_inventory_host: >-
-          {{
-            groups['freeipa-server'][0]
-            if (groups['freeipa-server'] | default([]) | length) > 0
-            else inventory_hostname
-          }}
-      tags: [freeipa-replica, R1]
-
+    # Both facts (freeipa_replica_primary_native_dns and
+    # freeipa_replica_primary_inventory_host) are set in pre_tasks above,
+    # always, and are never left undefined: `delegate_to:` on the block below is
+    # templated by ansible BEFORE that block's `when:` is evaluated, so
+    # `freeipa_replica_primary_inventory_host` must never be undefined or the
+    # whole play dies on "is undefined" even when the intent was simply to skip
+    # (confirmed live). It falls back to `inventory_hostname` itself (a harmless
+    # no-op delegate target — the `when:` below skips before it would ever
+    # actually delegate to itself) when there is no `freeipa-server` inventory
+    # group to look up at all.
     - name: "FreeIPA replica — self-register this host's A record in the primary's DNS"
       when:
         - not ansible_check_mode

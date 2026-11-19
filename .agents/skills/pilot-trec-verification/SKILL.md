@@ -67,6 +67,15 @@ sessions: `cmd/pilot/cmd/deploy_catalog.go` and
   memory. `trec --help` also lists an `mcp` subcommand (stdio MCP
   server) — see `references/mcp-mode.md` for when to use it instead of a
   plain shell call.
+- Check `trec version` before the first recording. It must name a clean
+  commit (no `.dirty` suffix) at or after `63c8866` (2026-11-18). Older
+  builds' secret scan flags `pilot edit`'s `<已設定>` marker, the
+  group_vars editor's `{{ vault_… }}` example rows and repository source
+  lines (`references/known-gotchas.md`), and a dirty build makes every
+  `trec verify` print `recording was produced by a dirty trec build` and
+  leaves the evidence citing a version nobody can rebuild. If it is older
+  or dirty, rebuild it from a clean checkout of `github.com/kjelly/trec`
+  (`go build -o <dir on PATH>/trec .`) rather than working around it.
 - Decide up front whether the calling agent has a genuinely persistent
   PTY/shell available for `trec drive --interactive`, or whether every
   shell tool call is an independent one-shot subprocess (true for this
@@ -422,7 +431,7 @@ because you have not read its reference.**
 | 23 | The real-apply gate defaults to **No**. A script of bare `ENTER`s records a preview, not a deploy — you must send a single `y`. Check the cast for `✅ 套用完成`. | `references/deploy-wizard.md` |
 | 24 | Script the two easily-missed confirms between the inventory-path prompt and the preflight menu (topology graph `[Y/n]`, manual sudo password `[y/N]`) or the run stalls on unscripted input. | `references/deploy-wizard.md` |
 | 25 | For `freeipa-identity` with a canonical roster, answer **`y`** to the `.vault/main.yaml` prompt; do **not** redirect it at the roster path. The roster loads separately via the `freeipa_roster_file` host var. | `references/freeipa-identity-prompt.md` |
-| 26 | Declare `--secret-env`/`--secret-file` for **every** vault key that already holds a real value in the target workspace, not just the ones this script sets — older builds re-rendered every set value in plaintext. Since the key list started showing `<已設定>` (seen 2026-09-24), trec's scan flags `…password = <已設定>` as `inline-secret-assignment`, so also redact that marker. | `references/known-gotchas.md` |
+| 26 | Declare `--secret-env`/`--secret-file` for **every** vault key that already holds a real value in the target workspace, not just the ones this script sets — older builds re-rendered every set value in plaintext. The key list now shows `<已設定>`; trec before `561e17b` flags that marker as `inline-secret-assignment`, so on such a build also redact it (better: update trec, §0). A scan finding on a current trec is a real signal: inspect the flagged event before calling it a false positive. | `references/known-gotchas.md` |
 
 ### Live-host checks
 
