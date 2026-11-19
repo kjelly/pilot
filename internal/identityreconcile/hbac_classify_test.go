@@ -146,6 +146,7 @@ func TestClassifyHBACReadsTheCapturedErrors(t *testing.T) {
 		{"hbacrule-mod-not-found", KindHBACCategoryUpdate, OutcomeConflictFailed},
 		{"hbacrule-enable-not-found", KindHBACRuleEnable, OutcomeConflictFailed},
 		{"hbacrule-disable-not-found", KindHBACRuleDisable, OutcomeConflictFailed},
+		{"hbacrule-disable-not-found", KindHBACAllowAllDisable, OutcomeConflictFailed},
 		{"hbacrule-add-host-while-hostcat-all", KindHBACHostAdd, OutcomeFailed},
 		{"hbacrule-mod-hostcat-all-with-hosts", KindHBACCategoryUpdate, OutcomeFailed},
 		// The firing cases: the same answer for another operation is not the same thing.

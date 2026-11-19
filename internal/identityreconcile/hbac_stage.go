@@ -230,7 +230,7 @@ func classifyHBACError(op Operation, err error) classified {
 		// operator reviewed no longer describes the server. Like the users and groups,
 		// not applied and not taken as done.
 		out.Outcome = OutcomeConflictFailed
-	case rpc.Name == "NotFound" && (isMember || op.Kind == KindHBACCategoryUpdate || op.Kind == KindHBACRuleEnable || op.Kind == KindHBACRuleDisable):
+	case rpc.Name == "NotFound" && (isMember || op.Kind == KindHBACCategoryUpdate || op.Kind == KindHBACRuleEnable || op.Kind == KindHBACRuleDisable || op.Kind == KindHBACAllowAllDisable):
 		out.Outcome = OutcomeConflictFailed
 	default:
 		// MutuallyExclusiveError among them (K3): the order of the stages should have
