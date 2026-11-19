@@ -379,8 +379,8 @@ Site-wide deploy 應只選一次 `全站部署(site.yml)`。不要以單一 comp
 
 正常 site-wide deployment 的依賴鏈應涵蓋：
 
-1. FreeIPA server。
-2. FreeIPA clients。
+1. FreeIPA server，接著是 `freeipa-server-replica`（`site.yml` 一次只處理一台 replica，`serial: 1`）。
+2. FreeIPA clients，接著是 `freeipa-dns-client`。
 3. FreeIPA NFS server，再到 NFS client。
 4. Docker。
 5. Wazuh manager、SeaweedFS S3。
@@ -388,9 +388,11 @@ Site-wide deploy 應只選一次 `全站部署(site.yml)`。不要以單一 comp
 7. Prometheus、Thanos Query、Alertmanager、Dashboard。
 8. Audit/FIM/log shipping 等依賴中央服務的元件。
 
-`freeipa-server-replica` 與 `agent-controller` 不會被 site-wide deployment 部署，要在 `freeipa-server`
-部署完成後、驗收前各自部署：replica 用 `pilot reconcile`（在 primary 之後）；`agent-controller`
-不在 `pilot reconcile` 的 day-2 清單裡，要用 `pilot deploy --show-experimental` 選它。
+自 kjelly/pilot#362 起，`site.yml` 會在帶有該 role 的 host 上套用 `freeipa-server-replica`（緊接在
+`freeipa-server` 之後，一次一台）與 `freeipa-dns-client`（緊接在 `freeipa-client` 之後）；沒有這些 role
+的 host 不受影響，單獨重跑仍可用 `pilot reconcile`。`agent-controller` 仍不在 `site.yml`
+（kjelly/pilot#195），也不在 `pilot reconcile` 的 day-2 清單裡，要在 `freeipa-server` 部署完成後、驗收前
+用 `pilot deploy --show-experimental` 選它。
 `detection-engine` 雖然在 contract 標為 opt-in，`site.yml` 有 import 它，site-wide deployment 已經套用
 （它依賴 `thanos-query`、`alertmanager`，順序由 `site.yml` 決定）；要單獨重跑時用 `pilot deploy`。
 `dns`、`pilot-access-gateway` 同樣在 `site.yml` 裡，不需要另外 reconcile。

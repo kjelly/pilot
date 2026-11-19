@@ -56,4 +56,4 @@ traceability:
     "docs/verification/freeipa-server-replica.md#C15": {tags: [freeipa-replica-verify], reason: topology verification}
     "docs/verification/freeipa-server-replica.md#C16": {tags: [R2, R3], reason: "fresh promotion enables DNS via --setup-dns (R2); Day-2 reconciliation enables it on an already-promoted replica whose DNS role was previously absent (R3)"}
 verification: {autoDeploy: false}
-site: {include: false, order: 0, vars: {}, tags: [], optIn: true}
+site: {include: false, order: 0, vars: {}, tags: [freeipa, freeipa-server-replica], optIn: true}
