@@ -146,7 +146,8 @@ fixture 的前三步（docker、manager、agent）只能跑一次：一旦有主
    `--local` 下，shell 自己印的 `not found` 併在 `echo` 前面，輸出不是單獨一個整數，`rc-from-stdout` 抽不出來，退回程序 rc
    （永遠 0），於是缺少 coordinator 的 manager 也 PASS。`pilot verify --local --probe` 可以重現。**範圍要說窄**：inventory 路徑
    （`ansible --one-line`，ansible-core 2.20.1，輸出 `(stdout) 1 (stderr) …`）實測不受影響，`extractRC` 讀得到 `1`；
-   `wazuh-manager.md` C11/C12、`wazuh-fim.md` C10、`wazuh-alert-delivery.md` C1 是同形寫法（#332，**本變更沒有修**）。
+   `wazuh-manager.md` C11/C12、`wazuh-fim.md` C10、`wazuh-alert-delivery.md` C1 是同形寫法。#332 之後修正了 runner：local
+   路徑改成只從 stdout 讀這個整數，stderr 不再影響；更舊的 pilot 仍有這個陷阱。
    本 spec 的 C6 加 `test -x` 與 `2>&1`，並由 regression test 對每個 row 鎖「輸出只有單獨的 0 或 1」，C6 另外對「有 manager stack 但沒有
    coordinator」鎖必須 FAIL。
 3. **套件移除會遺留 audit plugin 的 listener（Debian 與 EL 都是）。** 移除套件刪掉 `/etc/audit/plugins.d/af_wazuh.conf` 與

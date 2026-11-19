@@ -551,8 +551,9 @@ func (t *VerifySpecTool) runLocal(ctx context.Context, r spec.Row, timeoutSec in
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	rawOut, rawErr := stdout.String(), stderr.String()
+	localStdout := rawOut
 	if schemaVersion != 2 {
-		rawOut = strings.TrimSpace(rawOut + rawErr)
+		rawOut = localV1Output(rawOut, rawErr)
 		rawErr = ""
 	}
 	rc := 0
@@ -564,7 +565,15 @@ func (t *VerifySpecTool) runLocal(ctx context.Context, r spec.Row, timeoutSec in
 	if schemaVersion == 2 && cctx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 		return VerifyRow{ID: r.ID, Status: "fail", Detail: "probe_status=timeout: local probe timed out", ExitCode: -1, ProbeStatus: "timeout", Stdout: rawOut, Stderr: rawErr}
 	}
-	ok, mismatch := evaluateRow(r, schemaVersion, rawOut, rawErr, rc, fmt.Sprintf("(rc=%d) %s", rc, rawOut))
+	var (
+		ok       bool
+		mismatch string
+	)
+	if schemaVersion != 2 {
+		ok, mismatch = evaluateV1LocalExpected(r.Expected, localStdout, fmt.Sprintf("(rc=%d) %s", rc, rawOut), rc)
+	} else {
+		ok, mismatch = evaluateRow(r, schemaVersion, rawOut, rawErr, rc, "")
+	}
 	status := "pass"
 	if !ok {
 		status = "fail"
@@ -764,17 +773,52 @@ func looksLikePermissionError(out string) bool {
 // detail output to a normalized ProbeResult, then delegates all comparison to
 // spec.Expect.Eval. New formats must construct ProbeResult directly instead.
 func evaluateV1Expected(expected, detail string, rc int) (bool, string) {
+	return evaluateV1(expected, detail, legacyRCEcho(detail), rc)
+}
+
+// legacyRCEcho is the one reader of the rc a v1 command echoed itself
+// (`cmd; echo $?`, `cmd && echo 0 || echo 1`): the integer extractRC finds in
+// the runner-prefixed detail, or nil when there is none. Every runner path
+// goes through it.
+func legacyRCEcho(detail string) *int {
+	if recovered := extractRC(detail); recovered >= 0 {
+		return &recovered
+	}
+	return nil
+}
+
+// evaluateV1LocalExpected evaluates a v1 row that ran on the control node
+// (`--local`, or no inventory). The rc echo of the `cmd; echo $?` and
+// `cmd && echo 0 || echo 1` idioms is read from the command's stdout alone,
+// as `pilot verify -i` reads it: the per-host path (per_host_verify.go) hands
+// extractRC "(rc=N) <stdout>" and this builds the same text, so both paths
+// share one reader (legacyRCEcho/extractRC). Reading it from stdout and
+// stderr together let a shell error such as "sh: 1: <tool>: not found" hide
+// the echoed 1, so the matcher fell back to the process rc — always 0 for
+// that idiom — and a row whose tool was missing passed (issue #332). detail
+// is the merged "(rc=N) <stdout><stderr>" text that text matchers keep
+// seeing unchanged.
+func evaluateV1LocalExpected(expected, stdout, detail string, rc int) (bool, string) {
+	return evaluateV1(expected, detail, legacyRCEcho(fmt.Sprintf("(rc=%d) %s", rc, stdout)), rc)
+}
+
+// evaluateV1 is the shared v1 comparison: text matchers see detail without
+// the runner prefix, numeric Expected values see legacyRC when the command
+// echoed one and the process rc otherwise.
+func evaluateV1(expected, detail string, legacyRC *int, rc int) (bool, string) {
 	matcher, err := spec.CompileV1Expected(expected)
 	if err != nil {
 		return false, err.Error()
 	}
-	clean := stripRunnerPrefix(detail)
-	var legacyRC *int
-	if recovered := extractRC(detail); recovered >= 0 {
-		legacyRC = &recovered
-	}
-	verdict := matcher.Eval(spec.ProbeResult{Stdout: clean, ExitCode: rc, LegacyExitCode: legacyRC})
+	verdict := matcher.Eval(spec.ProbeResult{Stdout: stripRunnerPrefix(detail), ExitCode: rc, LegacyExitCode: legacyRC})
 	return verdict.Pass, verdict.Detail
+}
+
+// localV1Output is the text a v1 row run on the control node is matched and
+// reported with: stdout followed by stderr, trimmed. runLocal and Probe both
+// use it, so --probe shows what a real --local verify sees.
+func localV1Output(stdout, stderr string) string {
+	return strings.TrimSpace(stdout + stderr)
 }
 
 // stripRunnerPrefix removes a leading rc-only or "(rc=N)" marker from
@@ -905,7 +949,7 @@ type ProbeResult struct {
 	Module   string `json:"module"` // command | shell | local
 	Become   bool   `json:"become"`
 	RC       int    `json:"rc"`
-	Raw      string `json:"raw"`   // trimmed combined output as the matcher receives it
+	Raw      string `json:"raw"`   // trimmed output as the matcher receives it (local: stdout then stderr)
 	Clean    string `json:"clean"` // Raw with the "(rc=N)" runner prefix stripped
 	Pass     bool   `json:"pass"`  // only meaningful when Expected != ""
 	Verdict  string `json:"verdict"`
@@ -923,17 +967,23 @@ func (t *VerifySpecTool) Probe(ctx context.Context, command, expected, host stri
 	}
 	r := spec.Row{ID: "probe", Command: command, Expected: expected}
 	var (
-		rc     int
-		rawOut string
-		module string
-		become bool
+		rc          int
+		rawOut      string
+		localStdout string
+		module      string
+		become      bool
 	)
 	if t.LocalOnly || t.Inventory == "" {
 		module = "local"
 		cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
-		out, err := exec.CommandContext(cctx, "sh", "-c", command).CombinedOutput()
+		var stdout, stderr bytes.Buffer
+		cmd := exec.CommandContext(cctx, "sh", "-c", command)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
 		cancel()
-		rawOut = strings.TrimSpace(string(out))
+		localStdout = stdout.String()
+		rawOut = localV1Output(localStdout, stderr.String())
 		if ee, ok := err.(*exec.ExitError); ok {
 			rc = ee.ExitCode()
 		}
@@ -958,7 +1008,15 @@ func (t *VerifySpecTool) Probe(ctx context.Context, command, expected, host stri
 		rc, rawOut = t.execAnsible(ctx, args, timeoutSec)
 	}
 	detail := fmt.Sprintf("(rc=%d) %s", rc, rawOut)
-	pass, verdict := evaluateV1Expected(expected, detail, rc)
+	var (
+		pass    bool
+		verdict string
+	)
+	if module == "local" {
+		pass, verdict = evaluateV1LocalExpected(expected, localStdout, detail, rc)
+	} else {
+		pass, verdict = evaluateV1Expected(expected, detail, rc)
+	}
 	return ProbeResult{
 		Command:  command,
 		Expected: expected,
