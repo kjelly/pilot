@@ -16,9 +16,13 @@ import (
 // "sh: 1: <tool>: not found" on stderr, the local runner matched stdout and
 // stderr together, the merged text was no lone integer, so the echoed 1 was
 // never read and the verdict fell back to the process rc — 0 for that idiom.
-// The inventory path reads the echo from ansible's "(stdout)" segment only
-// and failed the row correctly. These tests run real `sh -c` commands, so
-// the stderr text is whatever the local shell really prints.
+// The inventory paths read the echo from the command's stdout alone and failed
+// the row correctly: `pilot verify -i` runs each host through the
+// ansible.posix.json callback and evaluates "(rc=N) <stdout>"
+// (per_host_verify.go); only `--probe -i` goes through ansible's one-line
+// callback, where the "(stdout)" segment is cut out (unwrapAdhocOneline).
+// These tests run real `sh -c` commands, so the stderr text is whatever the
+// local shell really prints.
 
 const missingToolPath = "/nonexistent/pilot-issue-332/tool"
 
@@ -96,10 +100,40 @@ func TestProbeLocal_MissingToolFails(t *testing.T) {
 	}
 }
 
+// onelineResult renders one host result the way ansible-core's oneline
+// callback prints it (callback/oneline.py, _command_generic_msg; compared
+// against a real `ansible localhost -c local -m command --one-line` run):
+// "(stdout) <stdout>" is always there, even when stdout is empty, so empty
+// stdout and a stderr line read "(stdout)  (stderr) active"; "\n" and "\r" in
+// either stream are escaped as the two characters backslash-n / backslash-r;
+// " (stderr) <text>" follows only when stderr is non-empty. The command
+// module has already stripped trailing CR/LF from both streams
+// (strip_empty_ends), so that happens here first. A non-zero rc prints the
+// FAILED caption, followed by the separate "FAILED! => {json}" line.
+func onelineResult(host string, rc int, stdout, stderr string) string {
+	escape := strings.NewReplacer("\n", `\n`, "\r", `\r`).Replace
+	stdout = escape(strings.TrimRight(stdout, "\r\n"))
+	stderr = escape(strings.TrimRight(stderr, "\r\n"))
+	caption := "CHANGED"
+	if rc != 0 {
+		caption = "FAILED"
+	}
+	line := host + " | " + caption + " | rc=" + strconv.Itoa(rc) + " | (stdout) " + stdout
+	if stderr != "" {
+		line += " (stderr) " + stderr
+	}
+	if rc != 0 {
+		line += "\n" + host + ` | FAILED! => {"changed": true,"msg": "non-zero return code","rc": ` + strconv.Itoa(rc) +
+			`,"stderr": "` + stderr + `","stdout": "` + stdout + `"}`
+	}
+	return line
+}
+
 // TestVerifyLocal_AgreesWithInventoryOnRcEcho locks the invariant the fix
 // restores: for one command result, a numeric Expected gets the same verdict
-// on the local path as on both inventory paths. The one-line text has the
-// shape #332 quotes from `ansible --one-line` (ansible-core 2.20.1):
+// on the local path as on both inventory paths (AGENTS.md §5.7: one reader of
+// the echoed integer). The one-line text is built by onelineResult, the shape
+// #332 quotes from `ansible --one-line` (ansible-core 2.20.1):
 // "<host> | CHANGED | rc=0 | (stdout) 1 (stderr) sh: 1: <tool>: not found";
 // the per-host path (per_host_verify.go) evaluates "(rc=N) <stdout>".
 func TestVerifyLocal_AgreesWithInventoryOnRcEcho(t *testing.T) {
@@ -113,28 +147,77 @@ func TestVerifyLocal_AgreesWithInventoryOnRcEcho(t *testing.T) {
 		{"warning then 0", "0\n", "warning: deprecated\n", 0},
 		{"no echo, rc 0", "", "", 0},
 		{"no echo, rc 2", "", "boom\n", 2},
+		// The real capture quoted in #332's follow-up: empty stdout, a word on stderr.
+		{"empty stdout, stderr word", "", "active\n", 0},
 		// An integer on stderr alone is not the rc echo on any path (it was
 		// on the old local path).
 		{"integer on stderr only", "", "1\n", 0},
+		// Text before the integer: no path reads the echo (#385), so all three
+		// fall back to the process rc. This case pins agreement, not the value:
+		// it keeps holding if #385 fixes the three paths together.
+		{"text before the integer", "starting\n1\n", "", 0},
 	}
 	for _, c := range cases {
 		local := "(rc=" + strconv.Itoa(c.rc) + ") " + localV1Output(c.stdout, c.stderr)
-		adhoc := "host | CHANGED | rc=" + strconv.Itoa(c.rc) + " |"
-		if out := strings.TrimSpace(c.stdout); out != "" {
-			adhoc += " (stdout) " + out
-		}
-		if errText := strings.TrimSpace(c.stderr); errText != "" {
-			adhoc += " (stderr) " + errText
-		}
-		inventory := "(rc=" + strconv.Itoa(c.rc) + ") " + adhoc
+		inventory := "(rc=" + strconv.Itoa(c.rc) + ") " + onelineResult("localhost", c.rc, c.stdout, c.stderr)
+		perHost := "(rc=" + strconv.Itoa(c.rc) + ") " + strings.TrimSpace(c.stdout)
 		for _, expected := range []string{"0", "1"} {
 			lp, lv := evaluateV1LocalExpected(expected, c.stdout, local, c.rc)
 			ip, iv := evaluateV1Expected(expected, inventory, c.rc)
-			hp, hv := evaluateV1Expected(expected, "(rc="+strconv.Itoa(c.rc)+") "+strings.TrimSpace(c.stdout), c.rc)
+			hp, hv := evaluateV1Expected(expected, perHost, c.rc)
 			if lp != ip || lp != hp {
 				t.Errorf("%s, expected %s: local pass=%v (%s), one-line pass=%v (%s), per-host pass=%v (%s)", c.name, expected, lp, lv, ip, iv, hp, hv)
 			}
 		}
+	}
+}
+
+// TestVerifyLocal_TextMatchersStillSeeStdoutThenStderr is the non-regression
+// side of the #332 fix: only the numeric echo moved to stdout. A v1 text
+// matcher (`~` contains, `^` regex, exact) on --local still matches against
+// stdout followed by stderr, whichever stream the command wrote first, so a
+// row whose Expected text appears only on stderr still passes. The inventory
+// paths match stdout alone; making the paths agree for text matchers is
+// tracked by #386, which will change this test on purpose.
+func TestVerifyLocal_TextMatchersStillSeeStdoutThenStderr(t *testing.T) {
+	specPath := filepath.Join(t.TempDir(), "x.md")
+	body := `# Verification Spec — issue-332 text matchers
+
+## 2. Checklist
+
+| ID | Category | Check | Expected | Command |
+|----|----------|-------|----------|---------|
+| C1 | functional | text only on stderr | ~only-on-stderr | sh -c 'echo only-on-stderr >&2; echo 0' |
+| C2 | functional | stdout then stderr, stderr written first | ^on-stdout\non-stderr$ | sh -c 'echo on-stderr >&2; echo on-stdout' |
+| C3 | functional | stdout then stderr, stdout written first | ^on-stdout\non-stderr$ | sh -c 'echo on-stdout; echo on-stderr >&2' |
+| C4 | functional | text on neither stream | ~absent-text | sh -c 'echo on-stdout; echo on-stderr >&2' |
+`
+	if err := writeFile(specPath, body); err != nil {
+		t.Fatal(err)
+	}
+	tool := &VerifySpecTool{LocalOnly: true}
+	res, err := tool.Execute(context.Background(), mustJSON(t, map[string]any{"spec_path": specPath}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := ReadNDJSON(res.Content)
+	if err != nil {
+		t.Fatalf("ReadNDJSON: %v\ncontent=%s", err, res.Content)
+	}
+	want := map[string]string{"C1": "pass", "C2": "pass", "C3": "pass", "C4": "fail"}
+	if len(rows) != len(want) {
+		t.Fatalf("got %d rows, want %d: %s", len(rows), len(want), res.Content)
+	}
+	for _, row := range rows {
+		if row.Status != want[row.ID] {
+			t.Errorf("%s: status=%q want %q (detail=%q)", row.ID, row.Status, want[row.ID], row.Detail)
+		}
+	}
+
+	// --probe shows the text a real --local verify matches.
+	pr := tool.Probe(context.Background(), "sh -c 'echo on-stderr >&2; echo on-stdout'", `^on-stdout\non-stderr$`, "", 10)
+	if !pr.Pass || pr.Raw != "on-stdout\non-stderr" {
+		t.Errorf("probe raw=%q pass=%v verdict=%q; want stdout then stderr", pr.Raw, pr.Pass, pr.Verdict)
 	}
 }
 

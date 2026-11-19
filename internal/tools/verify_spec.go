@@ -773,29 +773,33 @@ func looksLikePermissionError(out string) bool {
 // detail output to a normalized ProbeResult, then delegates all comparison to
 // spec.Expect.Eval. New formats must construct ProbeResult directly instead.
 func evaluateV1Expected(expected, detail string, rc int) (bool, string) {
-	var legacyRC *int
+	return evaluateV1(expected, detail, legacyRCEcho(detail), rc)
+}
+
+// legacyRCEcho is the one reader of the rc a v1 command echoed itself
+// (`cmd; echo $?`, `cmd && echo 0 || echo 1`): the integer extractRC finds in
+// the runner-prefixed detail, or nil when there is none. Every runner path
+// goes through it.
+func legacyRCEcho(detail string) *int {
 	if recovered := extractRC(detail); recovered >= 0 {
-		legacyRC = &recovered
+		return &recovered
 	}
-	return evaluateV1(expected, detail, legacyRC, rc)
+	return nil
 }
 
 // evaluateV1LocalExpected evaluates a v1 row that ran on the control node
 // (`--local`, or no inventory). The rc echo of the `cmd; echo $?` and
 // `cmd && echo 0 || echo 1` idioms is read from the command's stdout alone,
-// the way the inventory path reads it from ansible's "(stdout)" segment
-// (extractRC/unwrapAdhocOneline). Reading it from stdout and stderr together
-// let a shell error such as "sh: 1: <tool>: not found" hide the echoed 1, so
-// the matcher fell back to the process rc — always 0 for that idiom — and a
-// row whose tool was missing passed (issue #332). detail is the merged
-// "(rc=N) <stdout><stderr>" text that text matchers keep seeing unchanged.
+// as `pilot verify -i` reads it: the per-host path (per_host_verify.go) hands
+// extractRC "(rc=N) <stdout>" and this builds the same text, so both paths
+// share one reader (legacyRCEcho/extractRC). Reading it from stdout and
+// stderr together let a shell error such as "sh: 1: <tool>: not found" hide
+// the echoed 1, so the matcher fell back to the process rc — always 0 for
+// that idiom — and a row whose tool was missing passed (issue #332). detail
+// is the merged "(rc=N) <stdout><stderr>" text that text matchers keep
+// seeing unchanged.
 func evaluateV1LocalExpected(expected, stdout, detail string, rc int) (bool, string) {
-	var legacyRC *int
-	if s := strings.TrimSpace(stdout); isInt(s) {
-		recovered := atoi(s)
-		legacyRC = &recovered
-	}
-	return evaluateV1(expected, detail, legacyRC, rc)
+	return evaluateV1(expected, detail, legacyRCEcho(fmt.Sprintf("(rc=%d) %s", rc, stdout)), rc)
 }
 
 // evaluateV1 is the shared v1 comparison: text matchers see detail without
