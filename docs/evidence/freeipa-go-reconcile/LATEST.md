@@ -1,5 +1,16 @@
 # FreeIPA Go reconcile 最新驗收
 
+## Issue #394：Go engine 送出單一 `{{ name }}` 形式的 `password.initial`
+
+目前狀態：**PASS**。驗收日期 2026-11-19，candidate `9c0e2772898eff00ae98777dc3c877f7d5609ff6`，tree `a2c7a898d91bced18828712f23088940d1613d2f`。
+
+- **範圍**：`pilot reconcile --component freeipa-identity --engine golang` 對 `password.initial` 恰好是一個 `{{ name }}` 的使用者，以這次執行的變數（帶 `-e @.vault/main.yaml` 的 `ansible-inventory --list`）解析並送出；其他寫法與無法證明的值維持 `password_value_unsupported`。
+- **Target**：拋棄式 `vm-target` VM：一台 FreeIPA 4.13.4 server（AlmaLinux 9.8）與一台 enrolled client（Ubuntu 24.04）；只在這裡實跑，沒有任何正式環境。
+- **結果**：`TestLiveGoApplyDriver` 的 A1、A15、A23 共 17／17 arm 通過：Go engine 以加密 vault 的值建立使用者並以 kinit 證明（錯誤的值失敗）；Ansible engine 從同一個範本設出同一個密碼（A23(f)）；之後的 Ansible engine 完整 run 在 users／groups 區段沒有變更；6 個觸發都是 exit 3、0 寫入；混合 run 通過。前一個 candidate 的較廣 arm（A2、A10–A22、A16、A17）與一個測試本身的錯誤寫在 record 的失敗路徑。
+- **已知限制**：只驗證 ansible-core 2.19.2；`{__ansible_unsafe: x}` 這種刻意模仿 Ansible 內部標記的 vars 值；其他 roster 欄位與 run 輸入見 #397、#398。
+
+候選、各 arm 的事實、失敗路徑與限制見 [Issue #394 驗收紀錄](issue-394.md)。
+
 ## Phase 2：使用者與群組的寫入 MVP（PR #284，P2-2 到 P2-8）
 
 目前狀態：**PASS，附已記錄的未達項**（完整 identity 的 180 秒目標，見下）。驗收日期 2026-11-07。最後一個 code candidate：`7ed9f4a2dc6f9eb0d7fde55cb8e5d2a2fdbfeebd`，tree `f441d624415e4935ce339602cbceeac971da41e6`（P2-8 的測試 candidate；它之後只有一個只動測試的 CI 修正與文件）。Go engine 與 identity playbook 的**執行閉包的正式檔案**與 P2-7 的 candidate `0e364254273b917865cbe2002ac5300e1e5fdb83`（tree `b015f2326f2fcf8381577a3251f424b7b1a7e62f`）逐位元組相同（`git diff` 為空），所以 P2-6、P2-7 的 live arm 沒有重跑；P2-8 在合併 main 之後的 tree 上又跑了 users-groups 的新增、修改、刪除、重跑、預覽與混合 run。
