@@ -969,12 +969,13 @@ Scanned every captured step output for 2 secret-named value(s) (`/tmp/claude-100
 
 ## Failure paths and arms (fill in)
 
-This candidate is the change merged with main `90a2249b5516288f5582b3860d29d80f6d70471b`, through two merges: `8a414d48`, then `90a2249b`. Main added unrelated runtime files, all listed in the manifest's `rerun_paths`:
+This candidate is the change merged with main `90a2249b5516288f5582b3860d29d80f6d70471b`, through two merges: `8a414d48`, then `90a2249b`. Main added unrelated runtime files. Some match the manifest's `rerun_paths`, which always require a new run:
 
 - compiled pilot sources;
 - contracts;
-- shared task files;
-- `freeipa-server-apply.yml`, which provisions the target.
+- shared task files under `playbooks/apply/tasks/`.
+
+Others are not listed there but still affect this run, notably `freeipa-server-apply.yml`, which provisions the target.
 
 Main also added two changelog rows that conflicted with this change's row in AGENTS.md.
 
