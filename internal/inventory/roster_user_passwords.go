@@ -100,9 +100,8 @@ const (
 	// has no vault vars file, or ansible-inventory could not list them with it.
 	PasswordReasonNoRunVars
 	// PasswordReasonShadowed: the name is one the identity playbook defines for
-	// itself before it captures the password, one pilot passes with -e, or one
-	// Ansible supplies on its own (a magic variable): what the inventory says of
-	// it is not what the playbook renders.
+	// itself before it captures the password, or one pilot passes with -e: what
+	// the inventory says of it is not what the playbook renders.
 	PasswordReasonShadowed
 	// PasswordReasonInlineVault: the variable, or one on its chain of bare
 	// references, is an inline !vault value, which only Ansible can decrypt.
@@ -124,6 +123,13 @@ const (
 	// PasswordReasonInvalidText: the value holds U+FFFD, which marks bytes that
 	// did not decode: it is not text pilot can prove Ansible would send.
 	PasswordReasonInvalidText
+	// PasswordReasonReserved: the name is one Ansible reserves for its own
+	// variables: a magic variable (inventory_hostname, groups, hostvars...), a
+	// fact or other ansible_* variable, a role_* variable, or a Jinja global or
+	// literal. Pilot does not resolve these: not that something defines them
+	// before the password is read, but that they are not the inventory's to give.
+	// Added after the others so the codes of the earlier reasons do not move.
+	PasswordReasonReserved
 )
 
 func (r PasswordValueReason) String() string {
@@ -150,6 +156,8 @@ func (r PasswordValueReason) String() string {
 		return "not-a-string"
 	case PasswordReasonInvalidText:
 		return "invalid-text"
+	case PasswordReasonReserved:
+		return "reserved"
 	}
 	return fmt.Sprintf("PasswordValueReason(%d)", int(r))
 }
@@ -190,7 +198,9 @@ func DescribePasswordValue(form PasswordForm, reason PasswordValueReason, varNam
 		case PasswordReasonNoRunVars:
 			return ref + ", but the run's variables were not read (the workspace has no .vault/main.yaml, or ansible-inventory could not list them with it): use the Ansible engine for it"
 		case PasswordReasonShadowed:
-			return ref + ", a name the identity playbook, pilot or Ansible itself defines before the playbook reads the password, so the inventory's value is not what the playbook would send: use the Ansible engine for it"
+			return ref + ", a name the identity playbook or pilot's own -e defines before the playbook reads the password, so the inventory's value is not what the playbook would send: use the Ansible engine for it"
+		case PasswordReasonReserved:
+			return ref + ", a name Ansible reserves for its own variables (magic variables, facts, role variables, Jinja globals), which pilot does not resolve: use the Ansible engine for it"
 		case PasswordReasonInlineVault:
 			return ref + ", whose value is an inline !vault value (or reaches one): only Ansible can decrypt it; encrypt the whole vars file instead, or use the Ansible engine"
 		case PasswordReasonNestedTemplate:

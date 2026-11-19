@@ -62,8 +62,11 @@ func TestUserInitialPasswordResolvesOnlyWhatTheRunDecides(t *testing.T) {
 		{"pilot's own -e name: pilot_identity_users_groups_engine", `{{ pilot_identity_users_groups_engine }}`, `{"pilot_identity_users_groups_engine": "inventory-value"}`, nil, "", PasswordReasonShadowed},
 		{"pilot's own -e name: pilot_identity_auth_cache_output", `{{ pilot_identity_auth_cache_output }}`, `{"pilot_identity_auth_cache_output": "inventory-value"}`, nil, "", PasswordReasonShadowed},
 		{"a shadowed name at the end of a chain", `{{ a }}`, `{"a": "{{ identity_admin_password }}", "identity_admin_password": "inventory-value"}`, nil, "", PasswordReasonShadowed},
-		{"an implicit name: inventory_hostname", `{{ inventory_hostname }}`, `{}`, nil, "", PasswordReasonShadowed},
-		{"an implicit name: an ansible_ fact", `{{ ansible_host }}`, `{"ansible_host": "192.0.2.1"}`, nil, "", PasswordReasonShadowed},
+		{"a magic variable: inventory_hostname", `{{ inventory_hostname }}`, `{}`, nil, "", PasswordReasonReserved},
+		{"an ansible_ variable", `{{ ansible_host }}`, `{"ansible_host": "192.0.2.1"}`, nil, "", PasswordReasonReserved},
+		{"a role_ variable", `{{ role_default_password }}`, `{"role_default_password": "inventory-value"}`, nil, "", PasswordReasonReserved},
+		{"a Jinja global", `{{ range }}`, `{}`, nil, "", PasswordReasonReserved},
+		{"a reserved name at the end of a chain", `{{ a }}`, `{"a": "{{ role_x }}", "role_x": "inventory-value"}`, nil, "", PasswordReasonReserved},
 		{"a name passed with -e that the listing does not hold", `{{ v }}`, `{}`, []string{"v"}, "", PasswordReasonShadowed},
 		{"an inline !vault value", `{{ v }}`, `{"v": {"__ansible_vault": "$ANSIBLE_VAULT;1.1;AES256"}}`, nil, "", PasswordReasonInlineVault},
 		{"an inline !vault value at the end of a chain", `{{ a }}`, `{"a": "{{ v }}", "v": {"__ansible_vault": "$ANSIBLE_VAULT;1.1;AES256"}}`, nil, "", PasswordReasonInlineVault},
@@ -300,7 +303,7 @@ func TestPasswordSendableIsExactlyHavingAValue(t *testing.T) {
 func TestDescribePasswordValueNamesTheReasonAndNeverAValue(t *testing.T) {
 	secret := sentinelSecret(t)
 	seen := map[string]PasswordValueReason{}
-	for reason := PasswordReasonNotBare; reason <= PasswordReasonInvalidText; reason++ {
+	for reason := PasswordReasonNotBare; reason <= PasswordReasonReserved; reason++ {
 		text := DescribePasswordValue(PasswordTemplate, reason, "the_var")
 		if text == "" {
 			t.Fatalf("%s has no text", reason)
@@ -318,6 +321,15 @@ func TestDescribePasswordValueNamesTheReasonAndNeverAValue(t *testing.T) {
 		if reason == PasswordReasonNotBare && strings.Contains(text, "the_var") {
 			t.Errorf("a template that is not bare names a variable: %q", text)
 		}
+	}
+	// A name refused for its prefix (ansible_, role_) or for being a magic variable is not one that
+	// anything "defines" before the password is read: the text must not say it is.
+	reserved := DescribePasswordValue(PasswordTemplate, PasswordReasonReserved, "role_default_password")
+	if !strings.Contains(reserved, "reserves") || strings.Contains(reserved, "defines") {
+		t.Errorf("the text for a reserved name is not true of a prefix match: %q", reserved)
+	}
+	if shadowed := DescribePasswordValue(PasswordTemplate, PasswordReasonShadowed, "ipa_domain"); !strings.Contains(shadowed, "defines before the playbook reads the password") {
+		t.Errorf("the text for a name the playbook defines changed: %q", shadowed)
 	}
 	if DescribePasswordValue(PasswordTemplate, PasswordValueOK, "v") != "" || DescribePasswordValue(PasswordLiteral, PasswordValueOK, "") != "" {
 		t.Fatal("a sendable password has a refusal text")

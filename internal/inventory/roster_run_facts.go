@@ -79,7 +79,10 @@ func (r RosterRunVars) lookup(name string, shadow map[string]bool, visited map[s
 		return runValue{state: runUnknown, reason: PasswordReasonChain}
 	}
 	visited[name] = true
-	if implicitVarName(name) || shadow[name] {
+	if implicitVarName(name) {
+		return runValue{state: runUnknown, reason: PasswordReasonReserved}
+	}
+	if shadow[name] {
 		return runValue{state: runUnknown, reason: PasswordReasonShadowed}
 	}
 	v, ok := r.HostVars[name]

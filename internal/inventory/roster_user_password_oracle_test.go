@@ -64,7 +64,7 @@ type pwOracleRow struct {
 }
 
 type oracleSecrets struct {
-	vault, group, host, inv, play, over, c2, nested, admin, inventoryAdmin, inlineVault, rosterInline, chain, item, roster string
+	vault, group, host, inv, play, over, c2, nested, admin, inventoryAdmin, inlineVault, rosterInline, chain, item, roster, role string
 }
 
 func newOracleSecrets(t *testing.T) oracleSecrets {
@@ -72,7 +72,7 @@ func newOracleSecrets(t *testing.T) oracleSecrets {
 	g := func() string { return sentinelSecret(t) }
 	return oracleSecrets{
 		vault: g(), group: g(), host: g(), inv: g(), play: g(), over: g(), c2: g(), nested: g(), admin: g(),
-		inventoryAdmin: g(), inlineVault: g(), rosterInline: g(), chain: g(), item: g(), roster: g(),
+		inventoryAdmin: g(), inlineVault: g(), rosterInline: g(), chain: g(), item: g(), roster: g(), role: g(),
 	}
 }
 
@@ -103,6 +103,7 @@ func pwOracleRows(s oracleSecrets, encryptedVaultVar, encryptedRosterScalar, cap
 	ref := func(n string) string { return `"{{ ` + n + ` }}"` }
 	chain9, first9 := chainLines("n", maxRunVarHops+1, s.chain)
 	chain10, first10 := chainLines("m", maxRunVarHops+2, s.chain)
+	chain30, first30 := chainLines("k", 30, s.chain)
 	two := "c2a: \"{{ c2b }}\"\nc2b: " + q(s.c2) + "\n"
 	rows := []pwOracleRow{
 		// ---- the sources of a variable, and what outranks what ----
@@ -166,11 +167,14 @@ func pwOracleRows(s oracleSecrets, encryptedVaultVar, encryptedRosterScalar, cap
 			sends(authCacheOutput), map[string]string{"inventory": "pilot_identity_auth_cache_output: from-inventory\n"}),
 		refused("pilot_deferred_hosts, passed with -e, in the inventory", ref("pilot_deferred_hosts"), "shadowed",
 			differsFrom("from-inventory"), map[string]string{"inventory": "pilot_deferred_hosts: from-inventory\n"}),
-		refused("inventory_hostname, a magic variable", ref("inventory_hostname"), "shadowed", sends("localhost"), nil),
+		refused("inventory_hostname, a magic variable", ref("inventory_hostname"), "reserved", sends("localhost"), nil),
 		// Ansible sends the inventory's value here too: Go refuses it by design (it cannot prove a
 		// magic variable is the inventory's).
-		refused("ansible_host, a fact-family name", ref("ansible_host"), "shadowed", sends("192.0.2.1"),
+		refused("ansible_host, a fact-family name", ref("ansible_host"), "reserved", sends("192.0.2.1"),
 			map[string]string{"inventory": "ansible_host: 192.0.2.1\n"}),
+		// The same for a role_ name, refused by its prefix: Ansible sends the inventory's value.
+		refused("role_default_password, a role_ variable", ref("role_default_password"), "reserved", sends(s.role),
+			map[string]string{"inventory": "role_default_password: " + q(s.role) + "\n"}),
 		// The vault's own ipa_admin_password is no name the playbook defines: Go resolves it.
 		resolved("ipa_admin_password, the vault's own", ref("ipa_admin_password"), s.admin, nil),
 
@@ -179,6 +183,8 @@ func pwOracleRows(s oracleSecrets, encryptedVaultVar, encryptedRosterScalar, cap
 		refused("a value that is a template that is not bare", ref("v_nested"), "nested-template", sends("a"+s.vault+"c"),
 			map[string]string{"vault": "v_nested: \"a{{ v_vault }}c\"\n"}),
 		refused(fmt.Sprintf("a chain of %d names, past the bound", maxRunVarHops+2), ref(first10), "chain", sends(s.chain), map[string]string{"vault": chain10}),
+		// Ansible resolves chains far longer than pilot follows (the bound is pilot's, not Ansible's).
+		refused("a chain of 30 names, far past the bound", ref(first30), "chain", sends(s.chain), map[string]string{"vault": chain30}),
 		refused("an empty string", ref("v_empty"), "empty", sends(""), map[string]string{"vault": "v_empty: \"\"\n"}),
 		refused("null: Ansible sets no password", ref("v_null"), "not-a-string", ansibleDoes{kind: "none"}, map[string]string{"vault": "v_null:\n"}),
 		refused("a number: Ansible sends a JSON number", ref("v_num"), "not-a-string", sendsJSON("12345678"), map[string]string{"vault": "v_num: 12345678\n"}),
@@ -568,12 +574,17 @@ func TestRosterUserPasswordValuesMatchAnsible(t *testing.T) {
 // nor the listing, given the playbook directory, loads), or they change what every other row means
 // (a name the vault passes with -e). Each is its own run; Go refuses each, naming why.
 func pwIsolatedRows(s oracleSecrets) []pwOracleRow {
+	lines100, first100 := chainLines("z", 100, s.chain)
 	return []pwOracleRow{
 		{name: "a variable nothing defines", scalar: `"{{ v_undefined }}"`, goWhy: "undefined",
 			ansible: ansibleDoes{kind: "fails", undefined: "v_undefined", failsWith: "is undefined"}},
 		{name: "a variable only the working directory's group_vars hold", scalar: `"{{ v_cwd_only }}"`, goWhy: "undefined",
 			cwd: "v_cwd_only: from-the-working-directory\n", ansible: ansibleDoes{kind: "fails", undefined: "v_cwd_only", failsWith: "is undefined"}},
 		{name: "a cycle", scalar: `"{{ cy1 }}"`, goWhy: "chain", vault: "cy1: \"{{ cy2 }}\"\ncy2: \"{{ cy1 }}\"\n",
+			ansible: ansibleDoes{kind: "fails", failsWith: "Recursive loop detected in template"}},
+		// A long enough chain is more than Ansible's own template recursion allows: the play fails and
+		// nothing is sent. Go refuses it long before.
+		{name: "a chain of 100 names: Ansible's own limit", scalar: `"{{ ` + first100 + ` }}"`, goWhy: "chain", vault: lines100,
 			ansible: ansibleDoes{kind: "fails", failsWith: "Recursive loop detected in template"}},
 		// -e outranks the settings set_fact: with identity_admin_password in the vault (not the
 		// inventory) Ansible sends the vault's value. Go refuses the name all the same.
