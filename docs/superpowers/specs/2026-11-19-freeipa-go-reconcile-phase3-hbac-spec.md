@@ -223,9 +223,11 @@ idempotency: Go(users/groups) plan 與 Go(HBAC) plan 都必須沒有操作
 |---|---|
 | Go(users/groups) blocked／失敗 | 不啟動 playbook，沿用 P2 |
 | run 1 非 0 | **不跑** HBAC 階段與 run 2；義務欠著；`partial_failed`，結束碼 1（Go 已寫入）或沿用 P2 |
-| HBAC 階段 blocked（apply 時重讀發現 host 不存在等） | 零寫入、不跑 run 2，義務欠著、結束碼 3 若整輪沒有任何寫入，否則 1 |
-| HBAC 階段部分失敗 | 不跑 run 2？**Q2：** 預設仍跑 run 2 結清已發生的變更的快取（失敗的 rule 保持原狀），結束碼 1 |
-| run 2 失敗或沒觀察到 ack | 結束碼 4（未結清） |
+| HBAC 階段 blocked（apply 時重讀發現 host 不存在等） | HBAC 階段零寫入、**仍跑 run 2**（其他寫入的快取要結清），整輪是失敗，**結束碼 1（不是 3）**，錯誤訊息明說 HBAC 階段沒有寫入任何東西。理由：3 的意思是「整輪沒有任何寫入」，而 run 1 已經跑過、可能寫了東西，沒有辦法說真話；原因以文字保留、不帶 `ErrBlocked`（P3-5 實作） |
+| HBAC 階段部分失敗 | 仍跑 run 2 結清已發生的變更的快取（失敗的 rule 保持原狀），整輪失敗：有寫入是部分套用，結束碼 1（Q2 預設，P3-5 實作） |
+| run 2 失敗（錯誤或非 0） | 整輪失敗（有寫入是部分套用），結束碼 1；觀察結果是 run 2 的，沒有被接受就是義務未結清 |
+| run 2 啟動了、成功，但觀察結果沒有說 ack | 結束碼 4（未結清）；義務由**最後一次** apply run 的觀察決定，第 1 次（defer）的 `acked=false` 不算 |
+| 這一輪的 context 在 run 1 之後結束 | HBAC 階段與 run 2 都不啟動，錯誤說義務未結清；在 HBAC 階段之中結束則 run 2 不啟動 |
 
 Q2 的預設需要維護者確認（見 §10）。
 
@@ -280,7 +282,7 @@ Q2 的預設需要維護者確認（見 §10）。
 | P3-2 | writer：stage、批次、分類、驗證、journal、fake IPA 矩陣（**已完成**：`hbac_execute.go`、`hbac_stage.go`、`hbac_execute_test.go`、`hbac_classify_test.go`、`hbac_fakeipa_test.go`；`ExecuteHBAC`，H8 在 P3-3 之前一律拒絕） | 否 |
 | P3-3 | lockdown（**已完成**：`hbac_lockdown.go`、`hbac_lockdown_test.go`；proof、disable、rollback、`LockdownReport`；fake 只依 K5／K6 的擷取；live 驗證留給 P3-6） | 是（K5、K6，live 端留給 P3-6） |
 | P3-4 | playbook：`pilot_identity_hbac_engine`、`pilot_identity_cache_settle=defer`、gate、regression test（**已完成靜態與 Ansible runtime 部分**：`internal/spec/freeipa_identity_hbac_engine_regression_test.go`；run 2 的 `--tags client-cache` 路徑與 K10（run 2 固定成本）要等 P3-5 在 lab 實跑） | 是（K10） |
-| P3-5 | transaction 整合：第二階段、run 2、結果檔、結束碼、idempotency | 是 |
+| P3-5 | transaction 整合：第二階段、run 2、結果檔、結束碼、idempotency（**程式碼與假 server 測試已完成**：`cmd/pilot/cmd/reconcile_golang_mixed.go` 的 `applyMixedPlaybook`、`mixedHBACStage`、`mixedHBACPlanDoc`；`identityreconcile` 的 `Document.HBAC`、`ApplyDocument.HBAC`、`HBACReport`、環境變數常數；**尚未在 lab 實跑**，K10 也還沒量） | 是 |
 | P3-6 | live driver、evidence、文件 | 是 |
 
 ## 12 變更紀錄
@@ -288,6 +290,7 @@ Q2 的預設需要維護者確認（見 §10）。
 | 日期 | 變更 |
 |---|---|
 | 2026-11-19 | 初版草案。維護者決定：D1（playbook 之後的第二個 Go 階段）、D2（lockdown 一起搬）。 |
+| 2026-11-19 | P3-5：`--scope full` 接線。流程 Go(users/groups) → playbook 第 1 次 apply（`-e pilot_identity_hbac_engine=go`、`-e pilot_identity_cache_settle=defer`）→ Go(HBAC)（同一把鎖、自己的連線與入口、journal `hbac:` 前綴）→ playbook 第 2 次 apply（`--tags client-cache`，沒有 defer）；每次 playbook 執行（preview、兩次 apply、idempotency）都帶兩個 engine 變數，只有第 1 次 apply 帶 defer。預覽在同一個唯讀連線上讀並規劃 HBAC（`BuildHBAC` Preview=true；blocked 也是結束碼 3，在任何 playbook task 之前），`--plan-out` 在 full 時多一個 `hbac` 欄位且 scope 是 full（users-groups 的文件不變）；冪等性檢查要求 users/groups 與 HBAC 兩個 plan 都沒有操作，訊息指出是哪一個；結果檔多一個選用的 `hbac` 物件（ran、skipped、error、HBACResult、stats），義務由最後一次 apply run 的觀察或 HBAC 階段的入口決定；`Desired.NotInScope` 在 full 不再列 `hbac`；run 的 metadata 加 `hbac_engine=go`。與 §7.3 原文的差異：HBAC 階段在 apply 時被阻擋是結束碼 1、仍跑 run 2（見 §7.3 表）。`--scope users-groups` 與預設 engine 不讀 HBAC、不帶任何新變數（測試鎖住）。實跑：只有假 server 與假 ansible-playbook 的 CLI 測試（真 cobra、真 transaction、真 store），沒有 lab。 |
 | 2026-11-19 | P3-3：lockdown（H8）完成。流程：`hbactest`（`value` 布林，不比對文字）→ 讀 `allow_all`（已停用算 noop）→ 送 `hbacrule_disable allow_all` → `hbactest` → 任一步在 disable 送出後失敗就 `hbacrule_enable allow_all` 回滾。與 §6 的差異：(1) 前置 proof 失敗、讀不到 `allow_all` 時**不送任何寫入**，op 是 `conflict-failed`（而不是 `failed`）；(2) 回滾只在「disable 可能已生效」時送（成功後 proof 失敗、結果未知、答案不是 true）；server 明確拒絕 disable（`RPCError`）時 allow_all 沒被碰，不送回滾；(3) disable 之後的 proof 與回滾走 `context.WithoutCancel` 加 `VerifyTimeout` 的 context（run 在 disable 之後被取消，仍要證明與回滾），回滾仍過 Gate 與鎖；(4) lockdown 失敗的 op 一律 `failed`，**不**是 `unknown`：回滾失敗時 allow_all 停用而 proof 不過，若記成 unknown，寫入後的重讀會把它解成 converged；(5) 訊息只在 `hbacrule_enable` 回 true 時才寫「allow_all was re-enabled」，否則寫「re-enabling allow_all FAILED (<原因>); check HBAC access now」；(6) `LockdownReport`（before/after/disabled/rollback）在 `HBACResult.Lockdown` 與 H8 的 journal result 事件；`DisableAllowAll` 而沒有 `TestHost` 的選項在讀取前就拒絕。 |
 | 2026-11-19 | P3-2：`ExecuteHBAC` 完成（H1–H7；H8 在 P3-3 之前一律拒絕）。與 §5.2 的差異：(1) HBAC 階段的 journal 事件 id 一律帶 `hbac:` 前綴（同一個 delivery run 的 users/groups 階段已用 `auth_cache`、`S*-b*`、`verify`，id 在一個 run 內不可重複）；(2) `DuplicateEntry`（`hbacsvc_add`、`hbacrule_add`）與 users/groups 的 `group_add` 同形，一律是 `conflict-failed`（不視為已收斂，run 在該 stage 停止），不是「重讀看到就算 converged」；(3) 破壞性 stage 的前置重讀：H3（移除）、H6 的 disable、H7（刪除）在送出前以 `hbacrule_find` 重讀，已離開的成員／已停用／已不存在算 noop，規則被刪除重建（`ipauniqueid` 不同）、roster 不再宣告、或有計畫沒列出的待移除成員算 `conflict-failed`；(4) `hbac.rule.disable` 與 `hbac.allow_all.disable` 在 Plan₁／Plan₂ 的比較中視為破壞性（收窄存取），與 users/groups 的 `user.disable` 同。 |
 | 2026-11-19 | P3-1：desired、live 讀取、plan 完成；`freeiparpc` 的 allowlist 加入 HBAC 方法（security boundary 的測試計數 11→23）。 |
