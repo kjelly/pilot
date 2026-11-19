@@ -174,6 +174,14 @@ const (
 	acOldBinBackupFails = "#!/bin/sh\n# old build, backup fails\nif [ \"$1 $2\" = \"db check\" ]; then echo ok; exit 0; fi\n[ \"$1 $2\" = \"db backup\" ] && exit 1\nexit 0\n"
 	// An installed binary whose snapshot fails the integrity check.
 	acOldBinCheckBad = "#!/bin/sh\n# old build, snapshot corrupt\nif [ \"$1 $2\" = \"db check\" ]; then echo '*** in database main ***'; exit 1; fi\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\nexit 0\n"
+	// An installed binary whose `db backup` exits 0 but leaves a zero-byte
+	// snapshot. `db check` still says ok for it (the real binary and SQLite's
+	// integrity_check both do, captured), so only Step 4c can refuse it.
+	acOldBinEmptySnapshot = "#!/bin/sh\n# old build, backup leaves an empty file\nif [ \"$1 $2\" = \"db check\" ]; then echo ok; exit 0; fi\n[ \"$1 $2\" = \"db backup\" ] && : > \"$6\"\nexit 0\n"
+	// An installed binary whose `db backup` leaves a good database snapshot but
+	// plants a directory where Step 5 copies the binary snapshot
+	// (<private dir>/pilot-agent-controller.prev, next to the --output file).
+	acOldBinSnapshotIsDir = "#!/bin/sh\n# old build, a directory sits where the binary snapshot lands\nif [ \"$1 $2\" = \"db check\" ]; then echo ok; exit 0; fi\nif [ \"$1 $2\" = \"db backup\" ]; then cp \"$4\" \"$6\" && mkdir \"$(dirname \"$6\")/pilot-agent-controller.prev\"; fi\nexit 0\n"
 )
 
 // acUnitDest is where Step 11 writes the unit; it needs root, so the tests that
@@ -489,11 +497,16 @@ func TestAgentControllerRescueRestoresOnlyThisRunsSnapshots(t *testing.T) {
 		t.Skip("ansible-playbook not installed")
 	}
 	reset, steps, rescue := agentControllerTasks(t)
-	run := func(t *testing.T, f acFixture, preReset, beforeFail []any, failTags []string, args ...string) acOutcome {
+	runLog := func(t *testing.T, f acFixture, preReset, beforeFail []any, failTags []string, args ...string) (acOutcome, string) {
 		t.Helper()
 		facts := filepath.Join(f.dir, "outcome.json")
-		runACPlay(t, ansible, f, acFailingPlay(reset, steps, rescue, facts, preReset, beforeFail, failTags), args...)
-		return readACOutcome(t, facts)
+		log := runACPlay(t, ansible, f, acFailingPlay(reset, steps, rescue, facts, preReset, beforeFail, failTags), args...)
+		return readACOutcome(t, facts), log
+	}
+	run := func(t *testing.T, f acFixture, preReset, beforeFail []any, failTags []string, args ...string) acOutcome {
+		t.Helper()
+		o, _ := runLog(t, f, preReset, beforeFail, failTags, args...)
+		return o
 	}
 	staleSnapshots := func(t *testing.T, f acFixture) {
 		acWrite(t, filepath.Join(f.backups, "pilot-agent-controller.prev"), "#!/bin/sh\n# stale\n", 0o755)
@@ -547,14 +560,28 @@ func TestAgentControllerRescueRestoresOnlyThisRunsSnapshots(t *testing.T) {
 
 	for _, tc := range []struct {
 		name, installed string
+		// refusedBy is the fail_msg of the check that must be the one that
+		// stops the run, so another gate cannot make the row pass; empty for
+		// the rows whose own failing command is the stop.
+		refusedBy string
 	}{
-		{"`db backup` fails before Step 6: healthy service left running", acOldBinBackupFails},
-		{"the database snapshot fails `db check` before Step 6: healthy service left running", acOldBinCheckBad},
+		{"`db backup` fails before Step 6: healthy service left running", acOldBinBackupFails, ""},
+		{"the database snapshot fails `db check` before Step 6: healthy service left running", acOldBinCheckBad, ""},
+		// `db backup` exits 0 and `db check` passes, so only Step 4c refuses. Without it
+		// the upgrade goes on and the rescue overwrites state.db with an empty file.
+		{"an empty database snapshot is refused before Step 6: healthy service left running", acOldBinEmptySnapshot, "refusing to replace the binary without a database to restore"},
+		// Step 5's copy lands inside the directory, so only Step 5c refuses. Without it
+		// (and with Step 5's failures tolerated) the binary is replaced and the rescue is
+		// granted authority over a snapshot that is not there.
+		{"a directory where the binary snapshot lands is refused before Step 6: healthy service left running", acOldBinSnapshotIsDir, "refusing to replace the binary without it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newACFixture(t, tc.installed, acNewBin)
 			staleSnapshots(t, f)
-			o := run(t, f, nil, nil, nil)
+			o, log := runLog(t, f, nil, nil, nil)
+			if tc.refusedBy != "" && !strings.Contains(strings.Join(strings.Fields(log), " "), tc.refusedBy) {
+				t.Errorf("the run was not stopped by the check that refuses this snapshot (no %q in the ansible output):\n%s", tc.refusedBy, log)
+			}
 			if o.Restored || o.Failed || o.Rollback["install_started"] == true {
 				t.Fatalf("restored=%v failed=%v rollback=%v, want the run to stop before Step 6", o.Restored, o.Failed, o.Rollback)
 			}
