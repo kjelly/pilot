@@ -84,18 +84,35 @@ func TestVerifyFinishRetriesATransientStoreFailure(t *testing.T) {
 	}
 }
 
-// A failure that is not transient is reported, not retried.
+// A failure that is not transient is reported, not retried, for both verdicts.
+// The FAIL row matters: its Finish site returns the verdict error
+// ("verification failed: N rows") next, so a site that swallows the Finish error
+// still returns an error and would pass any test that only checks for one. Here
+// the error must be the evidence failure, and the run must not be recorded as a
+// success (the deferred fallback Finish records the failure).
 func TestVerifyFinishReportsAPermanentStoreFailure(t *testing.T) {
-	calls := 0
-	err := runVerifyWithFinish(t, "| C1 | functional | ok | 0 | sh -c 'echo 0' |", func(context.Context, *store.RunWriter, store.RunFinished) error {
-		calls++
-		return errors.New("disk I/O error")
-	})
-	if err == nil || !strings.HasPrefix(err.Error(), "finalize verification evidence: ") {
-		t.Fatalf("pilot verify = %v, want the evidence failure reported", err)
-	}
-	if calls != 1 {
-		t.Errorf("Finish called %d times, want 1 (no retry for a permanent failure)", calls)
+	for _, tc := range []struct {
+		name, row string
+	}{
+		{"pass verdict", "| C1 | functional | ok | 0 | sh -c 'echo 0' |"},
+		{"fail verdict", "| C1 | functional | ok | 0 | sh -c 'echo 1' |"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			err := runVerifyWithFinish(t, tc.row, func(context.Context, *store.RunWriter, store.RunFinished) error {
+				calls++
+				return errors.New("disk I/O error")
+			})
+			if err == nil || !strings.HasPrefix(err.Error(), "finalize verification evidence: ") || !strings.Contains(err.Error(), "disk I/O error") {
+				t.Fatalf("pilot verify = %v, want the evidence failure reported (not the verdict, not nil)", err)
+			}
+			if calls != 1 {
+				t.Errorf("Finish called %d times, want 1 (no retry for a permanent failure)", calls)
+			}
+			if got := lastVerifyOutcome(t); got != "failure" {
+				t.Errorf("recorded outcome = %q, want failure: a run whose evidence could not be finalized is not a success", got)
+			}
+		})
 	}
 }
 
@@ -109,11 +126,19 @@ func runVerifyWithFinish(t *testing.T, row string, finish func(context.Context, 
 	if err := os.WriteFile(filepath.Join(tmp, "spec.md"), []byte(spec), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Package state the verify entry reads: saved and restored, and set to what
+	// this test needs. dataDir (the --data-dir flag) outranks PILOT_DATA_DIR, so a
+	// value another test left there would send the evidence run to its directory;
+	// verifyDir, verifyProbe and verifyStage would send runVerify to another mode
+	// or reject the stage.
 	savedRoot, savedReport, savedInv, savedLocal, savedFinish := verifyRoot, verifyReportDir, verifyInventory, verifyLocal, finishVerifyRun
+	savedDataDir, savedDir, savedStage, savedProbe := dataDir, verifyDir, verifyStage, verifyProbe
 	t.Cleanup(func() {
 		verifyRoot, verifyReportDir, verifyInventory, verifyLocal, finishVerifyRun = savedRoot, savedReport, savedInv, savedLocal, savedFinish
+		dataDir, verifyDir, verifyStage, verifyProbe = savedDataDir, savedDir, savedStage, savedProbe
 	})
 	verifyRoot, verifyInventory, verifyLocal = tmp, "", true
+	dataDir, verifyDir, verifyStage, verifyProbe = "", "", "", ""
 	finishVerifyRun = finish
 	return runVerify(nil, []string{"spec.md"})
 }
