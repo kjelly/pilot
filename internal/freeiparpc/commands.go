@@ -79,11 +79,17 @@ func (c *Client) Ping(ctx context.Context) (ServerInfo, error) {
 }
 
 // validateCommandResult applies the same success contract to single calls
-// and batch items. Ping has a summary instead of an inner result.
+// and batch items. Ping has a summary instead of an inner result, and hbactest
+// a value (captured: hbactest-granted, hbactest-denied: an answer with the
+// keys summary, value, matched, notmatched, warning and error, and no result;
+// found by the first live lockdown, which a fake RPC had not shown).
 func validateCommandResult(method string, raw json.RawMessage) error {
-	if method == "ping" {
+	switch method {
+	case "ping":
 		_, err := decodePing(raw)
 		return err
+	case "hbactest":
+		return requireField(raw, "value")
 	}
 	return requireField(raw, "result")
 }

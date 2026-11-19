@@ -700,6 +700,11 @@ func hbacVerifyLine(res *identityreconcile.HBACResult) string {
 		return "讀回與 roster 一致"
 	case res.Stop != nil:
 		return "沒有做(" + res.Stop.Reason + ")"
+	case !res.Verify.Done && len(res.Ops) == 0:
+		// A plan with nothing to write ends the stage before the read-back: there is nothing to verify.
+		return "計畫沒有操作，沒有寫入，不需要讀回"
+	case !res.Verify.Done:
+		return "沒有讀回，見 --result-out"
 	}
 	return "讀回與 roster 不一致，見 --result-out"
 }

@@ -761,3 +761,25 @@ func TestPrintMixedHBAC(t *testing.T) {
 		t.Errorf("no reason given: %q", out.String())
 	}
 }
+
+// The verification line of the stage says what happened: a converged run has nothing to read back, and is not
+// a roster the read-back disagrees with (the lab run of the second apply printed that).
+func TestHBACVerifyLine(t *testing.T) {
+	op := identityreconcile.OpResult{}
+	for _, tc := range []struct {
+		name string
+		res  *identityreconcile.HBACResult
+		want string
+	}{
+		{"converged, nothing to write", &identityreconcile.HBACResult{Observed: true}, "沒有寫入，不需要讀回"},
+		{"wrote and read back clean", &identityreconcile.HBACResult{Observed: true, Ops: []identityreconcile.OpResult{op}, Verify: identityreconcile.Verification{Done: true}}, "讀回與 roster 一致"},
+		{"wrote and the read-back differs", &identityreconcile.HBACResult{Observed: true, Ops: []identityreconcile.OpResult{op}, Verify: identityreconcile.Verification{Done: true, Remaining: []string{"hbac.rule.create:x"}}}, "讀回與 roster 不一致"},
+		{"wrote and never read back", &identityreconcile.HBACResult{Observed: true, Ops: []identityreconcile.OpResult{op}}, "沒有讀回"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hbacVerifyLine(tc.res); !strings.Contains(got, tc.want) {
+				t.Errorf("got %q, want it to say %q", got, tc.want)
+			}
+		})
+	}
+}
