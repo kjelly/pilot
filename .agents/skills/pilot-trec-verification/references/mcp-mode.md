@@ -51,7 +51,25 @@ What `terminal_write` does depends on what `terminal_start` launched
 - **`--pointer '^\s*┃?\s*>\s'` applies here too**; see `select-labels.md`.
   `WAIT_CHILD_EXIT` and `ASSERT_EXIT` are script-only.
 - **`terminal_read_screen` can lag the raw stream.** Wait with `terminal_expect`
-  or `terminal_wait_quiet` before reading it.
+  or `terminal_wait_quiet` before reading it. `terminal_wait_quiet` requires
+  both `quiet_duration_seconds` and `timeout_seconds` (a guessed `quiet_ms`
+  fails with `quiet_duration_seconds must be greater than zero`).
+- **In the raw mode, give every
+  `terminal_activate`/`terminal_choose`/`terminal_focus`/`terminal_toggle`
+  call a `pointer` of `^\s*┃?\s*>\s`,** the same regex as `--pointer`. These tools default to trec's own pointer regex, which never matches
+  a Huh row (`┃ > …`); without it the call fails with
+  `context deadline exceeded` `[2026-11-13]`. The label also has to be the
+  `text` argument, not `option`.
+- **When a label tool reports `not reached after sweeping both directions`,**
+  the label is only in rows left over from a previous screen (pilot does not
+  use the alt screen) `[2026-11-13]`. Fall back to `terminal_key`, one key per
+  call, with `terminal_read_screen` after each.
+- **`terminal_key` takes named keys only, with no pacing.** `ENTER`, `DOWN`,
+  `ESCAPE`, `CTRLU` and the like work; a printable key such as `y` fails with
+  `unsupported terminal key "y"`, so send a single-keypress confirm with
+  `terminal_write` and `"y"`. Back-to-back `terminal_key` calls with no read in
+  between can all be dropped (eight `DOWN`s left the cursor where it was,
+  2026-08-24): read the screen between keys.
 - **`terminal_close`** — call once the exploration is done, every time. An
   unclosed session leaks the child process; `session_list` can audit for ones you
   forgot.

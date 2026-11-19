@@ -188,7 +188,7 @@ func TestCIIntegrationSuitesRemainParallelAndBlocking(t *testing.T) {
 	if err := job.Strategy.Matrix.Decode(&integrationMatrix); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"alert-rules-test", "identity-noop-test", "identity-ssh-cache-test", "identity-secret-test", "freeipa-server-pool-test"}
+	want := []string{"alert-rules-test", "identity-noop-test", "identity-ssh-cache-test", "identity-secret-test", "freeipa-server-pool-test", "site-day2-roles-test"}
 	if !slices.Equal(integrationMatrix.Target, want) || job.Strategy.FailFast {
 		t.Fatal("each required runtime suite must run in its own non-fail-fast matrix job")
 	}

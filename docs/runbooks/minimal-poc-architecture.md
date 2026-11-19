@@ -699,17 +699,11 @@ attempt; all are wizard behaviour, not defects):
   immediately — a run that dies before any save can still have created
   `.vault/ipa-identity.yaml`, `.vault/main.yaml` and `host_vars/<host>.yml`.
   Wipe the workspace between scripted attempts to keep them deterministic.
-- **A recorded vault fill will fail `trec verify`'s secret scan, and that is
-  expected.** The vault key-list screen re-renders `<key> = <value>` for every key
-  each time it opens, and the scanner's `inline-secret-assignment` rule fires on
-  that *pattern* — it matches the shipped `CHANGE-ME-…` placeholders and even
-  redacted or empty values. Round 22's fill was correct (all keys set on disk,
-  every declared secret redacted, literal greps clean) yet still scored 33
-  findings. Do **not** chase these as leaks and do not weaken `--secret-env`
-  coverage to silence them. Treat the vault-fill cast as a diagnostic and let the
-  checkpoint's evidence be the on-disk key check — `grep` each key and confirm no
-  `CHANGE-ME` remains. Verify first that your own declared secrets really are
-  redacted; only the placeholder/pattern findings are benign.
+- **After a vault fill, check the keys on disk.** A saved cast proves a save
+  happened, not that every key holds a value: `grep` each key and confirm no
+  `CHANGE-ME` remains. Whether the recording itself passes `trec verify` is a
+  recording matter, covered in
+  `.agents/skills/pilot-trec-verification/references/known-gotchas.md`.
 - **Scope that `CHANGE-ME` check to *uncommented* lines (corrected round 23).** A
   correct, fully-filled vault still greps one hit: the generator writes each
   **optional** key commented-out but keeps its `CHANGE-ME-…` placeholder text, so
@@ -1169,6 +1163,12 @@ confirmed live via `dig`/`getent hosts` from all three nodes. See
 > list; `reverse-proxy` is still a single-component deploy but `site.yml` already applies it on hosts that carry the
 > role (a rerun is `changed=0`). See §3.10.
 
+> **Correction (kjelly/pilot#362, 2026-11-17):** `site.yml` now also applies `freeipa-dns-client` (right after
+> `freeipa-client`) and `freeipa-server-replica` (right after `freeipa-server`, one replica at a time) on hosts that
+> carry those roles. The separate `freeipa-dns-client` step below is therefore a rerun of what the site-wide deploy
+> already did, and the "None of these … are in `site.yml`" paragraph describes the state when round 25 ran. This
+> procedure has not been rerun on the five-node topology since that change.
+
 > Merged in from the retired `delivery-test` skill, 2026-08-14. **Executed against this exact
 > topology in round 25 (2026-08-15)** — all three single-component deploys passed `failed=0` on
 > every targeted host, with a clean idempotent rerun for each. See
@@ -1384,6 +1384,9 @@ which needs the FreeIPA server the same deploy creates. So:
 `reverse-proxy` (already applied by `site.yml`, `changed=0`); `pilot reconcile` → `internal-endpoint`;
 `pilot deploy --show-experimental` → `agent-controller`; `pilot deploy` → `detection-engine` (already applied by
 `site.yml`, `changed=0`).
+*(Dated 2026-11-17: since kjelly/pilot#362 `site.yml` also applies `freeipa-server-replica` and `freeipa-dns-client`,
+so those two steps are now reruns of the site-wide deploy; this order has not been rerun on the five-node topology
+since.)*
 
 **Prompt chains that differ from §3.4/§3.5 (re-derive from the live screen, do not copy blindly).**
 

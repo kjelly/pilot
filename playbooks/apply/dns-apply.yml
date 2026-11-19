@@ -354,9 +354,13 @@
 
     # ── Replicas FreeIPA does not list as DNS servers yet ──────────────────
     # A replica that leaves freeipa_setup_dns unset is a DNS provider in the
-    # pool (it gets DNS when it is promoted), but freeipa-server-replica is a
-    # day-2 playbook outside site.yml, so the inventory may list it before it
-    # is promoted. tasks/freeipa-dns-providers-live.yml asks FreeIPA (NS
+    # pool (it gets DNS when it is promoted). site.yml promotes it BEFORE this
+    # play (issue #362: freeipa-server-replica-apply.yml is imported right
+    # after freeipa-server-apply.yml), so within a site-wide run it is already
+    # in FreeIPA's NS records by now; the inventory can still list a replica
+    # that is not promoted yet (this playbook run on its own, a --limit that
+    # leaves the replica out, a promotion that failed).
+    # tasks/freeipa-dns-providers-live.yml asks FreeIPA (NS
     # records, +norec) which servers run its DNS and leaves such a replica
     # out of the stubs with a warning; an explicit freeipa_setup_dns: true
     # stays in and G5 below fails closed if it does not answer. Runs after

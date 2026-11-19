@@ -68,6 +68,8 @@ check 真正需要的兩個前置條件——IPA automount map/key（只有另�
 `failed=`——真正要看它有沒有過，讀 task 本身的輸出（或另外對 `findmnt` 結果做 topology evidence 檢查），
 不要只看 recap 的 `failed=0`。
 
+更正（2026-11-17，issue #362）：上段「需要另外跑的 `freeipa-dns-client` day-2 角色」是 2026-08-15 的狀態；現在 `site.yml` 在 `freeipa-client` 之後、NFS server/client 之前執行 `freeipa-dns-client`（inventory 指定這個角色的主機才會套用），被指定的主機單純跑一次 `site.yml` 時，NFS server FQDN 就解析得到，沒被指定的主機仍然不保證。本檔 checklist row 沒有變。
+
 ## 5. 例外與已知偏差
 
 RW/RO/deny 是跨主機動態行為，放在 topology evidence，不以單機靜態 row 取代。
