@@ -163,6 +163,17 @@ C3、C7-C11、C13 是 `verifyOnly`(contract 的 exemption 表有列原因)——
 冪等重跑(§3.2 用同樣的 `-e` 值再跑一次):`PLAY RECAP: ok=34 changed=0
 failed=0`。升級路徑(重建 binary 後帶新 sha256 重跑)也真的跑過一次——
 `agent_controller_is_upgrade` 判斷正確觸發、backup/rollback 素材有寫入。
+(以上是 #195 之前的實跑。)
+
+#195 之後的升級備份與 rollback:備份只在這次 run 真的會換 binary(Step 6,
+`agent-controller-C4`)時才做,不選到 Step 6 的 run(例如 `--tags` 只選別的 row)
+不備份、也不回報 changed。每次升級在 `/var/backups/pilot-agent-controller/` 底下
+建一個自己的 `apply-*` 目錄放 `pre-upgrade.db` 與 `pilot-agent-controller.prev`,
+兩者都驗證過(SQLite `db check`、checksum)才授權 rescue 還原;rescue 只用這次
+run 的目錄,不會拿舊 run 留下的檔案(包括舊版放在備份目錄最上層的
+`pre-upgrade.db`/`pilot-agent-controller.prev`)。`apply-*` 目錄不會自動清除。
+這段行為只有 real-ansible 測試(`cmd/pilot/cmd/agent_controller_backup_tags_test.go`),
+還沒有 vm-target 實跑。
 
 ## 6. 已知限制 / 尚未完成
 
