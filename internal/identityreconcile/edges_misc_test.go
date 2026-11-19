@@ -70,13 +70,13 @@ func TestACommandIsBuiltOnlyFromFieldsOfTheRightForm(t *testing.T) {
 
 // The password source: what it refuses, by name, and what it hands out.
 func TestThePasswordSourceRefusesWhatItCannotHandOut(t *testing.T) {
-	if _, err := NewRosterPasswords([]byte("users: [")); err == nil {
+	if _, err := NewRosterPasswords([]byte("users: ["), nil); err == nil {
 		t.Error("a roster that is not YAML was accepted")
 	}
-	if _, err := NewRosterPasswords([]byte("users:\n  - {name: Alice, password: {initial: a}}\n  - {name: alice, password: {initial: b}}\n")); err == nil || !strings.Contains(err.Error(), "differ only in case") {
+	if _, err := NewRosterPasswords([]byte("users:\n  - {name: Alice, password: {initial: a}}\n  - {name: alice, password: {initial: b}}\n"), nil); err == nil || !strings.Contains(err.Error(), "differ only in case") {
 		t.Errorf("two users that differ only in case: %v", err)
 	}
-	src, err := NewRosterPasswords([]byte("users:\n  - {name: Alice, password: {initial: \"a-" + pwSecret + "\"}}\n  - name: tpl\n    password: {initial: \"{{ lookup('env', 'X') }}\"}\n  - {name: none}\n"))
+	src, err := NewRosterPasswords([]byte("users:\n  - {name: Alice, password: {initial: \"a-"+pwSecret+"\"}}\n  - name: tpl\n    password: {initial: \"{{ lookup('env', 'X') }}\"}\n  - {name: none}\n"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestThePasswordSourceRefusesWhatItCannotHandOut(t *testing.T) {
 	if _, err := src.InitialPassword("nobody"); err == nil || !strings.Contains(err.Error(), "has no user") {
 		t.Errorf("a user the roster does not have: %v", err)
 	}
-	if _, err := src.InitialPassword("tpl"); err == nil || !strings.Contains(err.Error(), "not a string written out") {
+	if _, err := src.InitialPassword("tpl"); err == nil || !strings.Contains(err.Error(), "cannot be sent") || !strings.Contains(err.Error(), "is a Jinja template") {
 		t.Errorf("a template: %v", err)
 	}
 	if _, err := src.InitialPassword("none"); err == nil {
@@ -264,18 +264,18 @@ func TestPasswordActionForAUserThatDoesNotExist(t *testing.T) {
 func TestFromRosterWithFormsRecordsTheFormsAndFailsWithEitherStep(t *testing.T) {
 	doc := "schema_version: 3\nusers:\n  - {name: alice, password: {initial: \"" + pwSecret + "\"}}\n"
 	root := roster(t, doc)
-	d, err := FromRosterWithForms(root, []byte(doc))
+	d, err := FromRosterWithForms(root, []byte(doc), nil)
 	if err != nil || len(d.Users) != 1 || !d.Users[0].PasswordFormRead {
 		t.Fatalf("%+v, %v", d.Users, err)
 	}
-	if _, err := FromRosterWithForms(root, []byte("users: [")); err == nil {
+	if _, err := FromRosterWithForms(root, []byte("users: ["), nil); err == nil {
 		t.Error("bytes that are not a roster were accepted")
 	}
 	// With no user to look for, the bytes are still the roster's and must be one.
-	if _, err := FromRosterWithForms(roster(t, "schema_version: 3\n"), []byte("users: [")); err == nil {
+	if _, err := FromRosterWithForms(roster(t, "schema_version: 3\n"), []byte("users: ["), nil); err == nil {
 		t.Error("bytes that are not a roster were accepted for a roster with no users")
 	}
-	if _, err := FromRosterWithForms(map[string]any{"users": "not a list"}, []byte(doc)); err == nil {
+	if _, err := FromRosterWithForms(map[string]any{"users": "not a list"}, []byte(doc), nil); err == nil {
 		t.Error("a root that is not a roster was accepted")
 	}
 }

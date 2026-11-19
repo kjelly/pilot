@@ -51,10 +51,14 @@ const (
 	BlockedCaseCollision     = "case_collision"
 	BlockedReferenceToAbsent = "reference_to_absent"
 	// BlockedPasswordValue: the user's password operation cannot be sent because
-	// the password is not a string written out in the roster (a template, an
-	// inline !vault value, a value YAML may read as a number, an empty string, or
-	// a roster whose password forms were not read). Only an operation that is
-	// planned is blocked on it; a user whose password needs no change is not.
+	// the password is not a string the engine can prove the playbook would send:
+	// a template that is not one bare {{ name }} reference, or a reference whose
+	// value the run's variables do not decide (undefined, a name the playbook
+	// defines for itself, an inline !vault value, empty, not a string, no run
+	// variables read), an inline !vault value in the roster, a value YAML may read
+	// as a number, an empty string, a value shared between !unsafe and normal
+	// YAML, or a roster whose password forms were not read. Only an operation that
+	// is planned is blocked on it; a user whose password needs no change is not.
 	BlockedPasswordValue = "password_value_unsupported"
 	// BlockedProtectedObject: running the plan would take away what the engine
 	// itself needs: the login it uses, its path to admins, or a group FreeIPA
@@ -448,25 +452,18 @@ func passwordAction(u DesiredUser, live LiveUser, exists bool) string {
 }
 
 // passwordUnsupported is why the password of u cannot be sent, "" when it can.
-// The engine sets only a password written out in the roster: anything Ansible
-// would render or decrypt is not something it can read, and an empty one is
-// refused by FreeIPA (RequirementError, captured K6). The text names the form,
-// never the value.
+// The engine sets a password written out in the roster, or a bare {{ name }}
+// reference that the run's variables resolved to a string (the one rule is
+// inventory.PasswordSendable, which the source of the passwords asks too):
+// anything Ansible would render some other way or decrypt is not something it can
+// read, and an empty one is refused by FreeIPA (RequirementError, captured K6).
+// The text names the user's field and the reason, and the variable of a bare
+// reference, never a value.
 func passwordUnsupported(u DesiredUser) string {
 	if !u.PasswordFormRead {
 		return "the roster's password forms were not read, so what password.initial holds is not known (Desired.WithPasswordForms)"
 	}
-	switch u.PasswordForm {
-	case inventory.PasswordLiteral:
-		return ""
-	case inventory.PasswordTemplate:
-		return "password.initial is a Jinja template: pilot does not render templates, and the Go engine sets only a password written out in the roster; use the Ansible engine for it"
-	case inventory.PasswordEncrypted:
-		return "password.initial is an inline !vault value: only Ansible can decrypt it; use the Ansible engine for it, or encrypt the whole roster file instead"
-	case inventory.PasswordNotString:
-		return "password.initial may be read as something other than a string: quote it so it stays one"
-	}
-	return "password.initial is empty: FreeIPA refuses an empty password"
+	return inventory.DescribePasswordValue(u.PasswordForm, u.PasswordReason, u.PasswordVar)
 }
 
 func idChange(u DesiredUser, live LiveUser) string {

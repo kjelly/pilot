@@ -41,7 +41,7 @@ var golangGateExemptions = map[string]string{
 	// returns that pass on a refusal whose own gates have rows.
 	"apply-lock-wait":       "the value was parsed and refused at the entry (entry-lock-wait-value) before golangApply is reached",
 	"apply-runtime-prepare": "the same call as the preview's runtime-prepare, whose row is the pilot data directory that cannot be created",
-	"apply-passwords":       "RosterUserPasswords fails only on a roster that FromRosterWithForms has already read; two names that differ only in case are refused by the roster's own validator first (a row of the roster-adapter tests)",
+	"apply-passwords":       "RosterUserPasswords fails only on a roster that FromRosterWithForms has already read (the same bytes and the same run variables, prep.runVars: the source is built from the call the plan's Desired was); two names that differ only in case are refused by the roster's own validator first (a row of the roster-adapter tests)",
 	"apply-root":            "resolveContractRoot fails only when the working directory no longer exists",
 	"apply-auth-output":     "the private directory for the entry's result file cannot be made only when the temporary directory is unusable",
 	"apply-entry":           "NewAuthCacheEntry refuses only a missing result file, command, lock or FQDN, all of which this function has just made or checked",

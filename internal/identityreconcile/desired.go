@@ -50,14 +50,24 @@ type DesiredUser struct {
 	HasInitialPassword bool
 	PreserveExisting   bool // password.preserve_existing, default true
 	// PasswordForm is how Ansible reads password.initial: a literal the engine
-	// can set, or something it cannot (a template, an inline !vault value, a
-	// value that may not be a string). It is read from the roster's bytes,
-	// because the decoded roster has lost it (WithPasswordForms), and only
-	// matters when a password operation is planned. PasswordFormRead is false
-	// until it was read; a password operation of a user whose form was never
+	// can set, a bare {{ name }} reference it could resolve from the run's
+	// variables, or something it cannot send (any other template, an inline
+	// !vault value, a value that may not be a string). It is read from the
+	// roster's bytes, because the decoded roster has lost it (WithPasswordForms),
+	// and only matters when a password operation is planned. PasswordFormRead is
+	// false until it was read; a password operation of a user whose form was never
 	// read is blocked, not sent.
+	//
+	// PasswordReason and PasswordVar are all a template leaves here: why it was not
+	// resolved (inventory.PasswordValueOK when it was) and the variable of a bare
+	// reference, a name from the roster. Never the password, and never a hash or a
+	// length of it: Desired is fingerprinted into the published plan
+	// (DesiredRevision), and a value-derived field would let anyone with the plan
+	// test guesses offline.
 	PasswordForm     inventory.PasswordForm
 	PasswordFormRead bool
+	PasswordReason   inventory.PasswordValueReason
+	PasswordVar      string
 
 	// SSHKeys is the normalized ssh_keys.values; nil when not declared
 	// (unmanaged). An empty, non-nil slice clears every key.
@@ -209,24 +219,28 @@ func FromRoster(root map[string]any) (Desired, error) {
 // hand, which is every roster the engine reads: it also records how Ansible reads
 // each user's password.initial (WithPasswordForms), so that the plan made from it
 // knows which password operations it can send. The preview and the writer both
-// build their Desired through it, so they judge a roster's passwords alike.
-func FromRosterWithForms(root map[string]any, rosterData []byte) (Desired, error) {
+// build their Desired through it, so they judge a roster's passwords alike. run
+// is the variables of the run the Ansible engine would make, for a password that
+// is a bare reference to one of them; nil when they were not read.
+func FromRosterWithForms(root map[string]any, rosterData []byte, run *inventory.RosterRunVars) (Desired, error) {
 	d, err := FromRoster(root)
 	if err != nil {
 		return d, err
 	}
-	return d.WithPasswordForms(rosterData)
+	return d.WithPasswordForms(rosterData, run)
 }
 
 // WithPasswordForms records, for every user, how Ansible reads password.initial
-// in rosterData, the plaintext bytes the roster was decoded from. The decoded
-// map has lost the tags and quoting that decide it (spec §7.8), and one
-// classifier judges it for every consumer (inventory.RosterUserPasswords). It
-// returns a copy; d is not changed. A roster whose users cannot be read again
-// from the bytes is an error: no user is then trusted to have a password the
-// engine can set.
-func (d Desired) WithPasswordForms(rosterData []byte) (Desired, error) {
-	forms, err := inventory.RosterUserPasswords(rosterData, nil)
+// in rosterData, the plaintext bytes the roster was decoded from, and, for a
+// template, whether it resolved against run. The decoded map has lost the tags
+// and quoting that decide it (spec §7.8), and one classifier judges it for every
+// consumer (inventory.RosterUserPasswords, whose answer NewRosterPasswords reads
+// again for the values: one call, one rule). It returns a copy; d is not
+// changed. A roster whose users cannot be read again from the bytes is an error:
+// no user is then trusted to have a password the engine can set. Only the form,
+// the reason and the variable's name are kept: never the value.
+func (d Desired) WithPasswordForms(rosterData []byte, run *inventory.RosterRunVars) (Desired, error) {
+	forms, err := inventory.RosterUserPasswords(rosterData, run)
 	if err != nil {
 		return d, err
 	}
@@ -237,6 +251,7 @@ func (d Desired) WithPasswordForms(rosterData []byte) (Desired, error) {
 			return d, fmt.Errorf("the user %q is not in the roster bytes the passwords were read from", users[i].Name)
 		}
 		users[i].PasswordForm, users[i].PasswordFormRead = p.Form, true
+		users[i].PasswordReason, users[i].PasswordVar = p.Reason, p.Var
 	}
 	d.Users = users
 	return d, nil
