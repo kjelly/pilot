@@ -61,6 +61,9 @@ type Play struct {
 	// ("Missing ipa_admin_password and canonical roster fallback") and does not
 	// name the variable. The oracle reports it as AdminGateMarker.
 	AdminGate string
+	// AfterTasks is the YAML text of a list of tasks appended after LastPreTask: what an
+	// oracle asks of the play's state at that point (IdentityCapture's dump).
+	AfterTasks string
 }
 
 // AdminGateMarker stands for "an admin password reference is undefined" where
@@ -74,6 +77,22 @@ var (
 		LastPreTask: "Gate: admin credential present (fail early, before any mutation)",
 		AdminGate:   "Missing ipa_admin_password and canonical roster fallback",
 	}
+	// IdentityCapture is freeipa-identity-apply.yml up to and including the include
+	// that captures every user's password.initial into ipa_users ("Normalize
+	// canonical users and groups (shared with drift)"), the point at which the
+	// password the playbook SENDS is rendered, followed by a task that writes, for
+	// every user the passwd call would set a password for, what that call reads on
+	// stdin: the same expression, in the same module, over ipa_users. (Not over
+	// ipa_active_users: only ipa_users is what that include captured, and nothing
+	// between it and the passwd call changes the password.) The files are
+	// <oracle_out>/<n>.json, oracle_out being an -e variable of the run. The run's
+	// play is not expected to fail: a password that does not render fails it
+	// before the dump, which is what the harness reports.
+	IdentityCapture = Play{
+		File:        "freeipa-identity-apply.yml",
+		LastPreTask: "Normalize canonical users and groups (shared with drift)",
+		AfterTasks:  captureDump,
+	}
 	// NFS is freeipa-nfs-server-apply.yml up to the gate that renders the
 	// roster's admin password.
 	NFS = Play{
@@ -83,6 +102,26 @@ var (
 		ExtraVars: []string{"ansible_os_family=Debian"},
 	}
 )
+
+// captureDump writes what the identity playbook's passwd call would read on stdin for each
+// user it sets a password for: `stdin: "{{ {'principal': item.name, 'password': item.password}
+// | to_json }}"` of the "Set password for users that need one" task, as the command module's
+// own stdin, over the users that task loops over (those with a password that is not none).
+const captureDump = `
+- name: "ORACLE: what the passwd call reads on stdin, per user"
+  ansible.builtin.command:
+    argv:
+      - /bin/sh
+      - -c
+      - 'cat > "$0"'
+      - "{{ oracle_out }}/{{ oracle_index }}.json"
+    stdin: "{{ {'principal': item.name, 'password': item.password} | to_json }}"
+  loop: "{{ ipa_users | selectattr('password', 'defined') | rejectattr('password', 'none') | list }}"
+  loop_control:
+    index_var: oracle_index
+    label: "{{ item.name }}"
+  changed_when: false
+`
 
 // stripNoLog removes every no_log from node, in place.
 func stripNoLog(node *yaml.Node) {
@@ -142,7 +181,14 @@ func WriteHarness(t *testing.T, dir string, play Play) {
 	if cut < 0 {
 		t.Fatalf("%s has no pre_task %q: update the oracle with the playbook", play.File, play.LastPreTask)
 	}
-	kept := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: preTasks.Content[:cut+1]}
+	kept := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: append([]*yaml.Node{}, preTasks.Content[:cut+1]...)}
+	if play.AfterTasks != "" {
+		var extra yaml.Node
+		if err := yaml.Unmarshal([]byte(play.AfterTasks), &extra); err != nil {
+			t.Fatal(err)
+		}
+		kept.Content = append(kept.Content, extra.Content[0].Content...)
+	}
 
 	harness := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	add := func(key string, value *yaml.Node) {
@@ -267,13 +313,45 @@ type Outcome struct {
 // ansible-playbook, a crash) fails the test.
 func Run(t *testing.T, dir string, play Play, rosterPath, varsPath string) Outcome {
 	t.Helper()
-	args := []string{"-i", "localhost,", filepath.Join(dir, "harness.yml"), "-e", "@" + varsPath, "-e", "freeipa_roster_file=" + rosterPath}
-	for _, extra := range play.ExtraVars {
+	return RunWith(t, dir, play, RunOptions{RosterPath: rosterPath, VarsPath: varsPath})
+}
+
+// RunOptions are the ways a run of the harness differs from Run's.
+type RunOptions struct {
+	RosterPath, VarsPath string
+	// Inventory is the inventory file the play runs on (a host named localhost with
+	// ansible_connection: local, and the group_vars and host_vars next to it); empty
+	// is the inline `localhost,`.
+	Inventory string
+	// WorkDir is the working directory of ansible-playbook; empty is dir, where the
+	// harness is, so the group_vars next to the playbook are the working directory's.
+	WorkDir string
+	// VaultPasswordFile is the ambient vault secret (ANSIBLE_VAULT_PASSWORD_FILE).
+	VaultPasswordFile string
+	// ExtraVars are more -e values, as pilot passes its own (target_group and the like).
+	ExtraVars []string
+}
+
+// RunWith is Run with options.
+func RunWith(t *testing.T, dir string, play Play, opts RunOptions) Outcome {
+	t.Helper()
+	inventory := opts.Inventory
+	if inventory == "" {
+		inventory = "localhost,"
+	}
+	args := []string{"-i", inventory, filepath.Join(dir, "harness.yml"), "-e", "@" + opts.VarsPath, "-e", "freeipa_roster_file=" + opts.RosterPath}
+	for _, extra := range append(append([]string{}, play.ExtraVars...), opts.ExtraVars...) {
 		args = append(args, "-e", extra)
 	}
 	cmd := exec.Command("ansible-playbook", args...)
 	cmd.Dir = dir
+	if opts.WorkDir != "" {
+		cmd.Dir = opts.WorkDir
+	}
 	cmd.Env = Env(t, dir)
+	if opts.VaultPasswordFile != "" {
+		cmd.Env = append(cmd.Env, "ANSIBLE_VAULT_PASSWORD_FILE="+opts.VaultPasswordFile)
+	}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	// Every Ansible command runs while its log is held (TestAnsibleCommandsHoldTheLog);
