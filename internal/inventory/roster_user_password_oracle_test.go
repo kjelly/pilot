@@ -61,12 +61,10 @@ type pwOracleRow struct {
 	goWhy   string // when it refuses: the form (ambiguous, inline-vault) or the reason (shadowed, ...)
 	// The Ansible side.
 	ansible ansibleDoes
-	// more users sharing nodes with this one (the alias rows): each a full user's YAML, named by the harness.
-	extra []string
 }
 
 type oracleSecrets struct {
-	vault, group, host, inv, play, over, c2, unsafeText, nested, admin, inventoryAdmin, inlineVault, rosterInline, chain, item, roster string
+	vault, group, host, inv, play, over, c2, nested, admin, inventoryAdmin, inlineVault, rosterInline, chain, item, roster string
 }
 
 func newOracleSecrets(t *testing.T) oracleSecrets {

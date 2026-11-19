@@ -70,10 +70,14 @@ type Play struct {
 // Ansible does not name the variable.
 const AdminGateMarker = "<admin password>"
 
+// identityApplyPlaybook is the playbook both identity plays below are cut from; one literal, so the
+// repo-wide lint that counts the places that name it (identity_lock_funnel_test.go) sees one.
+const identityApplyPlaybook = "freeipa-identity-apply.yml"
+
 var (
 	// Identity is freeipa-identity-apply.yml up to its admin credential gate.
 	Identity = Play{
-		File:        "freeipa-identity-apply.yml",
+		File:        identityApplyPlaybook,
 		LastPreTask: "Gate: admin credential present (fail early, before any mutation)",
 		AdminGate:   "Missing ipa_admin_password and canonical roster fallback",
 	}
@@ -89,7 +93,7 @@ var (
 	// play is not expected to fail: a password that does not render fails it
 	// before the dump, which is what the harness reports.
 	IdentityCapture = Play{
-		File:        "freeipa-identity-apply.yml",
+		File:        identityApplyPlaybook,
 		LastPreTask: "Normalize canonical users and groups (shared with drift)",
 		AfterTasks:  captureDump,
 	}
