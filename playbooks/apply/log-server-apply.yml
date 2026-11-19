@@ -1,4 +1,4 @@
-# Apply playbook for docs/verification/log-server.md v2.1
+# Apply playbook for docs/verification/log-server.md v2.2
 # rsyslog central receiver (TCP plus optional RELP with mandatory mTLS)
 # client hosts. It writes two drop-ins (10-siem-receiver.conf,
 # siem-incoming) and, for a siem_log_root outside /var/log, a block in the
@@ -286,11 +286,11 @@
     # grant to the new root and restarted rsyslog, which still wrote the old
     # one (PR #79 review, 2026-10-15). Step 1 installs what Steps 4 and 5 run.
     - name: "Step 1: Install rsyslog (Debian family)"
-      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
       ansible.builtin.include_tasks:
         file: tasks/apt-package-install.yml
         apply:
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
       vars:
         pilot_apt_packages: "{{ ['rsyslog', 'rsyslog-relp', 'openssl'] if siem_receiver_relp_enabled | bool else ['rsyslog'] }}"
         pilot_apt_policy: tolerant
@@ -301,7 +301,7 @@
       when: ansible_os_family == "Debian"
 
     - name: "Step 1a: Install rsyslog (RedHat family)"
-      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
       ansible.builtin.dnf:
         name: "{{ ['rsyslog', 'rsyslog-relp', 'openssl'] if siem_receiver_relp_enabled | bool else ['rsyslog'] }}"
         state: present
@@ -312,11 +312,11 @@
     # pilot-target-ubuntu do not ship it. Tagged with Step 4's rows so a
     # --tags C9/C10/C12 run installs it too.
     - name: "Step 1b: Install logrotate (Debian family)"
-      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
       ansible.builtin.include_tasks:
         file: tasks/apt-package-install.yml
         apply:
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
       vars:
         pilot_apt_packages: [logrotate]
         pilot_apt_policy: tolerant
@@ -327,7 +327,7 @@
       when: ansible_os_family == "Debian"
 
     - name: "Step 1c: Install logrotate (RedHat family)"
-      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+      tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
       ansible.builtin.dnf:
         name: logrotate
         state: present
@@ -335,11 +335,11 @@
 
     - block:
         - name: "Step 1d: Provision the receiver TLS profile and snapshot its material"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.include_tasks:
             file: tasks/rsyslog-relp-tls.yml
             apply:
-              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           vars:
             siem_tls_role: receiver
             siem_tls_enabled: "{{ siem_receiver_relp_enabled | bool }}"
@@ -379,7 +379,7 @@
         - name: "Step 2: Ensure {{ siem_log_root }} exists"
           # C7, C8: Step 2a labels this directory under SELinux and runs
           # under those tags too.
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.file:
             # The gates checked the directory siem_log_root resolves to. Work
             # on that path and do not follow a symlink: on Ubuntu the rsyslog
@@ -398,7 +398,7 @@
         # files and discarded every message while the apply succeeded (see
         # the task file).
         - name: "Step 2a: Reset the log-root access results"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.set_fact:
             rsyslog_apparmor_local: {}
             rsyslog_apparmor_reload: {}
@@ -407,11 +407,11 @@
             rsyslog_selinux_relabel: {}
 
         - name: "Step 2a: Let a confined rsyslogd write siem_log_root"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.include_tasks:
             file: tasks/rsyslog-confined-log-root.yml
             apply:
-              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           vars:
             rsyslog_log_root: "{{ siem_log_root_real }}"
             rsyslog_log_root_phase: grant
@@ -422,31 +422,31 @@
         # label added earlier in this site.yml run (by another play on this
         # host) does not trigger the restart below.
         - name: "Step 2b: Reset the SELinux port label result"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.set_fact:
             rsyslog_selinux_port_label: {}
 
         - name: "Step 2b: Let rsyslogd bind siem_receiver_tcp_port under SELinux"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.include_tasks:
             file: tasks/rsyslog-selinux-tcp-port.yml
             apply:
-              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           vars:
             rsyslog_selinux_tcp_port: "{{ siem_receiver_tcp_port }}"
 
         - name: "Step 2b: Label the RELP receiver port under SELinux"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.include_tasks:
             file: tasks/rsyslog-selinux-tcp-port.yml
             apply:
-              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           vars:
             rsyslog_selinux_tcp_port: "{{ siem_relp_port }}"
           when: siem_receiver_relp_enabled | bool
 
         - name: "Install the Wazuh real-delivery oracle"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.copy:
             src: ../files/pilot-wazuh-delivery
             dest: /usr/local/libexec/pilot-wazuh-delivery
@@ -455,7 +455,7 @@
             mode: "0755"
 
         - name: "Step 3: Render 10-siem-receiver.conf (imtcp + %HOSTNAME% dynaFile routing)"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.copy:
             dest: "{{ siem_receiver_conf }}"
             owner: root
@@ -490,10 +490,19 @@
               module(load="imrelp" tls.tlsLib="gnutls")
               {% endif %}
 
-              template(name="SiemAuditPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/audit.log")
-              template(name="SiemAuthPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/auth.log")
+              # %HOSTNAME% comes from the sender's message and decides a path:
+              # without an option, ".." (RFC 5424, or a bare RFC 3164 frame)
+              # puts the file one level above the root, and "a/../../x" walks
+              # out of it. secpath-replace turns every "/" into "_" and a
+              # name that is "." or ".." into "_" or "_.", so each source
+              # stays exactly one directory under the root. Keep it the ONLY
+              # option: rsyslog 8.2312 mishandles it combined with another
+              # (lowercase,secpath-replace turns "a//b" into "a_/b", which
+              # is two components again).
+              template(name="SiemAuditPath" type="string" string="{{ siem_log_root }}/%HOSTNAME:::secpath-replace%/audit.log")
+              template(name="SiemAuthPath" type="string" string="{{ siem_log_root }}/%HOSTNAME:::secpath-replace%/auth.log")
 
-              template(name="SiemWazuhPath" type="string" string="{{ siem_log_root }}/%HOSTNAME%/wazuh-alerts.log")
+              template(name="SiemWazuhPath" type="string" string="{{ siem_log_root }}/%HOSTNAME:::secpath-replace%/wazuh-alerts.log")
               template(name="SiemWazuhJSON" type="string" string="%msg:::drop-last-lf%\n")
 
               ruleset(name="siemReceiver") {
@@ -545,7 +554,7 @@
         # switches back before it forks them), so the HUP below is unchanged.
         # Spec row C12 reads the effective identity from `logrotate -d`.
         - name: "Step 4: Render /etc/logrotate.d/siem-incoming"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.copy:
             dest: "{{ siem_logrotate_conf }}"
             owner: root
@@ -579,14 +588,14 @@
               }
 
         - name: "Step 5: Validate the effective rsyslog config (rsyslogd -N1)"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.command: rsyslogd -N1 -f /etc/rsyslog.conf
           register: rsyslog_syntax
           changed_when: false
           failed_when: rsyslog_syntax.rc != 0
 
         - name: "Step 6: Ensure rsyslog enabled + started (spec C2, C5)"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.systemd:
             name: rsyslog
             state: started
@@ -598,7 +607,7 @@
         # Step 3. rsyslog that started before the config was last written
         # restarts too.
         - name: "Step 6a: Check whether rsyslog started before the receiver config was last written"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.shell:
             executable: /bin/sh
             cmd: |
@@ -620,7 +629,7 @@
         # until rsyslog restarted), so a reload that changed the loaded
         # AppArmor profile, or an SELinux relabel, restarts it too.
         - name: "Step 6a: Restart rsyslog only if the receiver config, its SELinux port label or its log-root access changed"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.systemd:
             name: rsyslog
             state: restarted
@@ -635,7 +644,7 @@
             or ((log_server_restart_pending.stdout | default('')) == 'pending')
 
         - name: "Step 6a: Best-effort firewall opening — ufw (Debian)"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           when: ansible_os_family == "Debian"
           block:
             - name: "Check ufw status"
@@ -650,7 +659,7 @@
               when: "'Status: active' in ufw_status.stdout"
 
         - name: "Step 6b: Best-effort firewall opening — firewalld (RedHat)"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           when: ansible_os_family == "RedHat"
           block:
             - name: "Check firewalld state"
@@ -674,7 +683,7 @@
         # and rsyslogd listens on the receiver port. This step checks that
         # itself rather than trusting that Step 6a ran.
         - name: "Step 7: Check that rsyslog runs the receiver config and listens on its port"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.shell:
             executable: /bin/sh
             cmd: |
@@ -696,7 +705,7 @@
           when: not ansible_check_mode
 
         - name: "Step 7: rsyslog is running and listens on the receiver port"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.assert:
             that: log_server_receiver_state.stdout not in ['inactive', 'not-listening']
             fail_msg: >-
@@ -706,21 +715,21 @@
           when: not ansible_check_mode
 
         - name: "Step 7a: Retire receiver TLS material after disabling RELP"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.include_tasks:
             file: tasks/rsyslog-relp-retire.yml
             apply:
-              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           vars:
             siem_tls_role: receiver
           when: not (siem_receiver_relp_enabled | bool)
 
         - name: "Step 7a: Drop the AppArmor rules for roots rsyslog no longer writes"
-          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+          tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           ansible.builtin.include_tasks:
             file: tasks/rsyslog-confined-log-root.yml
             apply:
-              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12]
+              tags: [C1, C2, C3, C4, C5, C6, C7, C8, C9, C10, C11, C12, C13]
           vars:
             rsyslog_log_root: "{{ siem_log_root_real }}"
             rsyslog_log_root_phase: narrow
@@ -911,6 +920,10 @@
         # invocation does not prove which on-disk config it originally loaded.
         # Only undo labels on a newly created root, after a successful rescue
         # restart, with a recognized restored receiver using another tree.
+        # The restored file is the one this run replaced, so it may still hold
+        # the old %HOSTNAME% templates as well as the %HOSTNAME:::secpath-replace%
+        # ones this playbook renders; both are recognized, any other option
+        # string is not (fail closed).
         - name: "ROLLBACK — resolve the roots used by the restored receiver"
           tags: [always]
           ansible.builtin.command:
@@ -928,7 +941,7 @@
                     roots = []
                     for name, leaf in [('SiemAuditPath', 'audit'), ('SiemAuthPath', 'auth')]:
                         pattern = (r'^[ \t]*template\(name="' + name
-                                   + r'" type="string" string="(/[A-Za-z0-9._/-]+)/%HOSTNAME%/'
+                                   + r'" type="string" string="(/[A-Za-z0-9._/-]+)/%HOSTNAME(?::::secpath-replace)?%/'
                                    + leaf + r'\.log"\)[ \t]*$')
                         matches = re.findall(pattern, text, re.M)
                         if len(matches) != 1:

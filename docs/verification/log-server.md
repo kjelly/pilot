@@ -1,6 +1,6 @@
 # Verification Spec — log-server（rsyslog 中央日誌接收端 / SIEM forward 目標）
 
-> 版本：v2.1
+> 版本：v2.2
 > 對齊規範：pilot 通用 config-only 服務規範（比照 `pam-oidc-sshd.md` 的
 > block/rescue + tags 模式）；為 `audit-log-forwarding.md`（client 端 auditd +
 > rsyslog 轉送）提供中央接收端，兩份 spec 搭配構成一組 Shape 3（server+client）。
@@ -59,20 +59,23 @@
 | C3  | file      | 接收端 drop-in 設定檔存在                                             | present  | test -f /etc/rsyslog.d/10-siem-receiver.conf |
 | C4  | config    | TCP listener 已載入；啟用 RELP 時另驗證 mTLS 契約、有效憑證、載入時間與 daemon listener | 0 | sudo /usr/local/libexec/pilot-siem-relp-check receiver; echo $? |
 | C5  | network   | 接收設定裡 `imtcp` 的 TCP port（`siem_receiver_tcp_port`，預設 514）確實在監聽 | 0        | sh -c 'p=$(grep -o "imtcp\" port=\"[0-9]*" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null | grep -o "[0-9]*$"); [ -n "$p" ] && ss -Hlnt "( sport = :$p )" | grep -q . && echo 0 || echo 1' |
-| C6  | dir       | 接收設定裡 `SiemAuditPath` 的落地根目錄（`siem_log_root`，預設 `/var/log/siem`）存在 | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] && [ -d "$r" ] && echo 0 || echo 1' |
-| C7  | functional| 本機注入這次唯一的 `local6` 測試訊息，6 秒內依 `%HOSTNAME%` 落地到接收設定那個根目錄下的 `audit.log` | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] || { echo 1; exit 0; }; n="PILOT-SIEM-SELFTEST-AUDIT-$$-$(date +%s%N)"; logger -p local6.info "$n"; i=0; while [ $i -lt 6 ]; do grep -qsF "$n" "$r"/*/audit.log && { echo 0; exit 0; }; sleep 1; i=$((i+1)); done; echo 1' |
-| C8  | functional| 本機注入這次唯一的 `authpriv` 測試訊息，6 秒內依 `%HOSTNAME%` 落地到接收設定那個根目錄下的 `auth.log` | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] || { echo 1; exit 0; }; n="PILOT-SIEM-SELFTEST-AUTH-$$-$(date +%s%N)"; logger -p authpriv.info "$n"; i=0; while [ $i -lt 6 ]; do grep -qsF "$n" "$r"/*/auth.log && { echo 0; exit 0; }; sleep 1; i=$((i+1)); done; echo 1' |
+| C6  | dir       | 接收設定裡 `SiemAuditPath` 的落地根目錄（`siem_log_root`，預設 `/var/log/siem`）存在 | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"%]*\)/%HOSTNAME[^%]*%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] && [ -d "$r" ] && echo 0 || echo 1' |
+| C7  | functional| 本機注入這次唯一的 `local6` 測試訊息，6 秒內依 `%HOSTNAME%` 落地到接收設定那個根目錄下的 `audit.log` | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"%]*\)/%HOSTNAME[^%]*%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] || { echo 1; exit 0; }; n="PILOT-SIEM-SELFTEST-AUDIT-$$-$(date +%s%N)"; logger -p local6.info "$n"; i=0; while [ $i -lt 6 ]; do grep -qsF "$n" "$r"/*/audit.log && { echo 0; exit 0; }; sleep 1; i=$((i+1)); done; echo 1' |
+| C8  | functional| 本機注入這次唯一的 `authpriv` 測試訊息，6 秒內依 `%HOSTNAME%` 落地到接收設定那個根目錄下的 `auth.log` | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"%]*\)/%HOSTNAME[^%]*%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] || { echo 1; exit 0; }; n="PILOT-SIEM-SELFTEST-AUTH-$$-$(date +%s%N)"; logger -p authpriv.info "$n"; i=0; while [ $i -lt 6 ]; do grep -qsF "$n" "$r"/*/auth.log && { echo 0; exit 0; }; sleep 1; i=$((i+1)); done; echo 1' |
 | C9  | file      | logrotate 策略檔存在                                                  | present  | test -f /etc/logrotate.d/siem-incoming |
 | C10 | logrotate | logrotate 策略檔語法正確（dry-run 不出錯）                            | 0        | logrotate -d /etc/logrotate.d/siem-incoming >/dev/null 2>&1; echo $? |
 | C11 | config    | `imtcp` input 綁定專屬 ruleset（不會落回 default ruleset 被轉送規則二次處理） | 0        | grep -qE 'input\(type="imtcp"[^)]*ruleset="siemReceiver"[^)]*\)' /etc/rsyslog.d/10-siem-receiver.conf; echo $? |
-| C12 | logrotate | SIEM 落地檔以落地根目錄擁有者的身分輪替（logrotate 的 `su` 生效） | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] && [ -d "$r" ] || { echo 1; exit 0; }; u=$(stat -c %u "$r") && g=$(stat -c %g "$r") || { echo 1; exit 0; }; [ "$u" = 0 ] && [ "$g" = 0 ] && { echo 0; exit 0; }; o=$(LC_ALL=C logrotate -d /etc/logrotate.d/siem-incoming 2>&1); printf "%s\n" "$o" | grep -qF "switching euid from 0 to $u and egid from 0 to $g " && echo 0 || echo 1' |
+| C12 | logrotate | SIEM 落地檔以落地根目錄擁有者的身分輪替（logrotate 的 `su` 生效） | 0        | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"%]*\)/%HOSTNAME[^%]*%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] && [ -d "$r" ] || { echo 1; exit 0; }; u=$(stat -c %u "$r") && g=$(stat -c %g "$r") || { echo 1; exit 0; }; [ "$u" = 0 ] && [ "$g" = 0 ] && { echo 0; exit 0; }; o=$(LC_ALL=C logrotate -d /etc/logrotate.d/siem-incoming 2>&1); printf "%s\n" "$o" | grep -qF "switching euid from 0 to $u and egid from 0 to $g " && echo 0 || echo 1' |
+| C13 | security  | 接收端把來源 hostname 當路徑時，只落在落地根目錄底下的單一層子目錄：本機送一則 hostname 為 `..` 的 RFC 5424 `local6` 測試訊息，6 秒內只出現在 `<根目錄>/<單一層>/audit.log`，不出現在根目錄的上一層 | 0        | bash -c 'c=/etc/rsyslog.d/10-siem-receiver.conf; r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"%]*\)/%HOSTNAME[^%]*%/audit\.log\".*#\1#p" "$c" 2>/dev/null); p=$(grep -o "imtcp\" port=\"[0-9]*" "$c" 2>/dev/null | grep -o "[0-9]*$"); [ -n "$r" ] && [ -n "$p" ] && [ -d "$r" ] || { echo 1; exit 0; }; o=$(readlink -f "$r/..")/audit.log; n="PILOT-SIEM-SELFTEST-PATH-$$-$(date +%s%N)"; { printf "<182>1 - .. pilot-selftest - - - %s\n" "$n" >/dev/tcp/127.0.0.1/"$p"; } 2>/dev/null || { echo 1; exit 0; }; i=0; while [ $i -lt 6 ]; do grep -qsF "$n" "$o" && { echo 1; exit 0; }; grep -qsF "$n" "$r"/*/audit.log && { echo 0; exit 0; }; sleep 1; i=$((i+1)); done; echo 1' |
 
 > C1/C2/C4/C5/C10 用**正邏輯 rc**（`; echo $?` 或原生 rc），不用反邏輯
 > grep + 數字 expected；C5 用 `sh -c '... && echo 0 || echo 1'` 讓外層指令
 > 恆回 rc=0，避免 ansible ad-hoc 把「沒監聽」的判定結果誤判成 task FAILED
 > 而把 rc 吃成 2（見 `verification-spec-template.md` 陷阱 1）。
 > C6–C8 從 `10-siem-receiver.conf` 的 `SiemAuditPath` 讀出實際生效的落地根目錄
-> （`siem_log_root`），不寫死 `/var/log/siem`。C7/C8 每次送出唯一的 nonce 訊息（`$$` 加
+> （`siem_log_root`），不寫死 `/var/log/siem`；讀法同時接受 `%HOSTNAME%` 與帶 option 的
+> `%HOSTNAME:::secpath-replace%`（C6、C7、C8、C12、`log-shipping.md` C3 都用同一個 sed），
+> 所以還沒套用 v2.2 的主機照樣驗得到根目錄；其他拼法讀不出根目錄，回 1。C7/C8 每次送出唯一的 nonce 訊息（`$$` 加
 > `date +%s%N`），最多等 6 秒，只認這一則（`grep -qsF "$n"`），用 `sh -c '… echo 0 … echo 1'`
 > 讓外層恆回 rc=0、expected `0`：先前留在任何目錄裡的舊 selftest 字串都不會讓它們 PASS。
 > C7/C8 只驗證**本機注入**：訊息走 `/dev/log` 進 default ruleset，由同機的
@@ -111,16 +114,58 @@
 >   權限切換可以證明。
 > - 比對字串結尾的空白不能省，否則 gid `110` 會被 `1100` 之類的前綴誤判符合。
 > - 指令寫在 `sh -c '… echo 0 … echo 1'` 裡，外層恆回 rc=0（陷阱 1 不適用）。
+>
+> **C13 的由來與判讀**：接收設定的落地路徑含 `%HOSTNAME%`，這個值取自 client 送來的訊息，不是
+> log-server 自己決定的，而 rsyslog 在沒有 option 時原樣把它接進路徑。Ubuntu 24.04.4（rsyslog
+> 8.2312.0，AppArmor enforce，rsyslogd 降權成 `syslog`）實測：RFC 5424 的 HOSTNAME 欄位是 `..` 時，
+> `local6` 訊息寫到落地根目錄上一層的 `audit.log`（`/var/log/audit.log`），`auth`/`authpriv`
+> 訊息寫進這台自己的 `/var/log/auth.log`（`syslog:adm 640`，與本機的認證日誌混在一起）；
+> `a/../../x` 寫到 `/var/log/x/audit.log`；沒有 tag、hostname 之後什麼都沒有的 RFC 3164 裸訊息
+> 也一樣（hostname 的檢查被跳過）；`../../tmp` 被擋下的是 AppArmor（`mknod /var/tmp/audit.log`
+> 被拒），不是 rsyslog，而且被拒的那一次寫入讓同一條 TCP 連線上的下一則合法訊息一起遺失。
+> `.` 與空 hostname 則寫到落地根目錄本身。任何能連到接收 port 的 client 都能這樣寫（RELP 模式只限
+> 持有合法憑證的 client，但憑證只驗證 peer，不驗證訊息裡的 hostname）。
+>
+> v2.2 起三個路徑 template（`SiemAuditPath`、`SiemAuthPath`、`SiemWazuhPath`）都寫
+> `%HOSTNAME:::secpath-replace%`：`/` 換成 `_`，`.` 與 `..` 換成 `_` 與 `_.`，每個來源因此恰好是落地根目錄底下
+> 的一層目錄。合法名稱（`host1.example.com`、`HOST2.EXAMPLE.COM`、`-`）的路徑與修正前相同；
+> `a/b` 變 `a_b`，`a//b` 變 `a__b`，`a/../../x` 變 `a_.._.._x`。**只准用這一個 option**：8.2312
+> 把它與別的 option 併用時有 bug（`lowercase,secpath-replace` 把 `a//b` 變成 `a_/b`，又是兩層），
+> `secpath-drop` 則把 `a//b` 併成 `ab`，讓不同來源寫進同一個目錄。全 repo 的
+> `internal/spec/rsyslog_dynafile_secpath_regression_test.go` 對 `playbooks/**` 每個 dynaFile template
+> 鎖住這一點。
+>
+> C13 用 bash 的 `/dev/tcp` 對接收設定裡 `imtcp` 的 port 送一則 hostname 為 `..`、帶這次唯一 nonce 的
+> RFC 5424 `local6` 訊息（RELP 模式時 `imtcp` 只聽 loopback，仍連得上；RELP 的 input 與它共用同一個
+> `siemReceiver` ruleset 與同一組 template，所以這一列驗的 template 也管 RELP）。最多等 6 秒：
+>
+> - nonce 出現在落地根目錄**上一層**的 `audit.log`：回 1（沒修的主機就是這樣 FAIL）；
+> - nonce 出現在 `<根目錄>/*/audit.log`（根目錄底下恰好一層）：回 0；
+> - 兩處都沒出現（rsyslog 停了、連不上、訊息被丟或被擋）：回 1。
+>
+> 最後一條是刻意的：只檢查「根目錄外沒有新檔案」，rsyslog 什麼都沒收到時也會通過。指令寫在
+> `bash -c '… echo 0 … echo 1'` 裡，不論哪種結果都只印單獨的 `0` 或 `1`（`/dev/tcp` 是 bash 的功能，
+> `sh` 是 dash 時不能用），讀不到根目錄或 port 也印 `1`，不讓 `pilot verify` 退回程序 rc。
+> 指令含 `/etc/`，pilot 會以 root 執行，才讀得到 `syslog:adm 640` 的落地檔。
+>
+> 副作用：
+>
+> - 每次驗證都在 `<根目錄>/_./audit.log` 留一行 `PILOT-SIEM-SELFTEST-PATH-…`。這個目錄與各來源目錄一樣由
+>   logrotate 輪替（`*/*.log`）、被 `log-shipping` 的 Promtail 掃到（`host` label 是 `_.`），
+>   不會另外清理，與 C7/C8 留在各目錄的 selftest 行相同。
+> - 沒修的主機上 C13 FAIL 時，會在落地根目錄上一層的 `audit.log` 留下這一行（例如 `/var/log/audit.log`）。
+> - apply 只改規則，不會移除修正前已經寫到根目錄外的檔案或行（`/var/log/audit.log`、`/var/log/auth.log`
+>   裡的偽造行、`/var/log/x/` 之類），這些要操作者自己檢查與清理。
 
 ## 3. 證據收集
 
 - 工具：`go run ./cmd/pilot vm-target verify --name log-server docs/verification/log-server.md`
 - 輸出格式：`.verification/log-server-<UTC>.{ndjson,md}`
-- 預期 row 數：12（C1–C12）
+- 預期 row 數：13（C1–C13）
 
 ## 4. PASS / FAIL 規則
 
-- 全部 C1–C12 `status=pass` → **PASS**
+- 全部 C1–C13 `status=pass` → **PASS**
 - 任一 `status=fail` → **FAIL**，列出 fail id + actual + want
 
 ## 5. 例外與已知偏差
@@ -139,13 +184,13 @@
 | C1 | `install rsyslog` | apt/dnf 依 `ansible_os_family` |
 | C2, C5 | `ensure rsyslog enabled+restarted` | 只在設定檔語法檢查通過後才重啟（`rsyslogd -N1` gate）；rsyslog 啟動時間早於接收設定最後寫入的時間（上一次 run 中斷，或 rescue 還原設定卻無法重啟）時也重啟 |
 | C2, C5 | `Step 7: rsyslog runs the receiver config and listens on its port` | 重啟後 rsyslog 必須在跑、接收 port 由 rsyslogd 監聽，否則 apply 失敗 |
-| C3, C4, C7, C8, C11 | `template 10-siem-receiver.conf` | RainerScript：`imtcp` + `%HOSTNAME%` dynaFile 路由，`imtcp` 綁定 `ruleset="siemReceiver"` 避免自我轉送迴圈 |
+| C3, C4, C7, C8, C11, C13 | `template 10-siem-receiver.conf` | RainerScript：`imtcp` + `%HOSTNAME:::secpath-replace%` dynaFile 路由（來源 hostname 一律轉成落地根目錄底下的單一層目錄名，見 C13），`imtcp` 綁定 `ruleset="siemReceiver"` 避免自我轉送迴圈 |
 | C6 | `create siem_log_root`（預設 `/var/log/siem`） | `createDirs="on"` 讓 rsyslog 自動建每台來源主機的子目錄，這裡先建根目錄 |
 | C6, C7, C8 | `let a confined rsyslogd write siem_log_root`（Step 2a，`tasks/rsyslog-confined-log-root.yml`，phase `grant`） | 根目錄不在 `/var/log` 底下時：AppArmor local 規則（保留區塊裡現有的規則）+ 依已載入 profile 的 sha256 判斷要不要重新載入；SELinux `var_log_t` 規則，看目錄實際的 type 決定要不要 `restorecon` |
 | C6, C7, C8 | `drop the AppArmor rules for roots rsyslog no longer writes`（Step 7a，同一個 task 檔，phase `narrow`） | 只在 Step 7 的檢查此刻成立時執行：區塊只留新根目錄的規則（`/var/log` 底下則整段移除），有變才重新載入 |
 | C9, C10, C12 | `template /etc/logrotate.d/siem-incoming` | `rotate`/`maxage` 走 `siem_logrotate_*` 變數；策略檔內寫 `su {{ siem_log_owner }} {{ siem_log_owner }}`（與 Step 2 建立落地根目錄的 owner/group 相同），輪替以 rsyslog 帳號的權限進行，postrotate 仍以 root 執行 |
 
-> playbook 的每個 task 都帶全部 row tag（C1–C12）：這些步驟共用根目錄、port 與接收設定，只跑其中幾步會讓改過的 `siem_log_root` 只套用一半（例如 `--tags C6` 把 AppArmor 規則換成新目錄，rsyslog 卻還寫舊目錄）。上表是每列驗的是哪一步，不是 `--tags` 只跑哪一步。
+> playbook 的每個 task 都帶全部 row tag（C1–C13）：這些步驟共用根目錄、port 與接收設定，只跑其中幾步會讓改過的 `siem_log_root` 只套用一半（例如 `--tags C6` 把 AppArmor 規則換成新目錄，rsyslog 卻還寫舊目錄）。上表是每列驗的是哪一步，不是 `--tags` 只跑哪一步。
 >
 > 反過來，`--skip-tags` 任一列（例如 `--skip-tags C9`）會跳過整個 log-server 的步驟，只剩 `always` 的 gate 與 snapshot。
 
@@ -191,3 +236,4 @@ go run ./cmd/pilot vm-target run --name log-server \
 | 2026-10-16 | v1.9 | 只改說明，row 不變：§1、§6 補上換根目錄時 AppArmor 規則的兩階段處理（重啟前保留舊根目錄的規則，Step 7 確認 rsyslog 以新設定在監聽後才拿掉）、Step 6a 對啟動時間早於設定檔的 rsyslog 也重啟，以及 rescue 對 AppArmor local 檔與接收設定修改時間的處理。起因：Step 2a 重新載入只含新根目錄的 profile 後、rsyslog 重啟前，正在跑的 rsyslogd 不能寫舊根目錄，訊息遺失（PR #79，2026-10-16 在 pr79-log 實測） | pilot |
 | 2026-10-20 | v2.0 | RELP/mTLS 接收與 loopback-only legacy TCP；C4 驗證已載入的實際 transport，C11 允許 ruleset 後的 input 屬性。驗收見本輪 evidence 摘要 | pilot |
 | 2026-11-17 | v2.1 | 新增 C12：落地檔以落地根目錄擁有者的身分輪替。根因：`/etc/logrotate.d/siem-incoming` 沒有 `su`，logrotate 以 root 展開 `siem_log_root/*/*.log` 後依完整路徑 rename、create、compress、刪除；它拒絕 symlink 與 hard link 的 log 檔，卻不擋路徑中間的 symlink 目錄，而 Ubuntu 上 `siem_log_root` 與各來源目錄由 `syslog`（rsyslogd 降權後的身分）擁有，`syslog` 身分的行程可以把 `<root>/<host>` 換成 symlink，讓 root 的每日輪替在目標目錄裡動手；Ubuntu 的全域 `su root adm` 也讓 logrotate 自己的 insecure-parent 檢查不再作用。修法：策略檔無條件寫 `su {{ siem_log_owner }} {{ siem_log_owner }}`（EL 上 `siem_log_owner` 是 root，等於不切換），輪替改用 rsyslog 帳號的權限；postrotate 腳本仍以 root 執行（logrotate 先切回 root 才 fork 腳本），原本的 `systemctl kill -s HUP rsyslog.service` 不變。playbook 的每個 task 補上 C12 tag。row C1–C11 不變。標頭原本的「最後驗證」單次摘要改為指向 `../evidence/log-server/LATEST.md` 的固定連結（AGENTS.md §1.2：spec 不累積單次驗證結果） | pilot |
+| 2026-11-20 | v2.2 | 新增 C13（security）：來源 hostname 取自訊息、直接接進落地路徑，`..`（RFC 5424 HOSTNAME 欄位，或沒有 tag 的 RFC 3164 裸訊息）把檔案寫到落地根目錄的上一層（`/var/log/audit.log`，`authpriv` 則寫進這台自己的 `/var/log/auth.log`），`a/../../x` 走出根目錄，`.` 與空 hostname 寫到根目錄本身；Ubuntu 24.04.4/rsyslog 8.2312.0 實測，AppArmor 只擋下 `/var/tmp`（kjelly/pilot#363）。修法：`SiemAuditPath`、`SiemAuthPath`、`SiemWazuhPath` 三個 template 都改寫 `%HOSTNAME:::secpath-replace%`（只用這一個 option；與別的 option 併用在 8.2312 有 bug，`secpath-drop` 會合併來源），合法 hostname 的路徑與修正前相同。C6、C7、C8、C12 與 `log-shipping.md` C3 讀根目錄的 sed 同步改成同時接受 `%HOSTNAME%` 與 `%HOSTNAME:::secpath-replace%`（否則新 template 讓它們全部讀不出根目錄而 FAIL），Expected 不變；rescue 解析還原後接收設定的 Python 也同時接受兩種拼法（還原的可能是修正前的檔案），其他拼法仍 fail closed。C13 要求 `..` 的 nonce 訊息落在根目錄底下恰好一層、且不出現在上一層：只檢查「根目錄外沒有新檔案」，rsyslog 什麼都沒收到時也會通過。每次驗證在 `<根目錄>/_./audit.log` 留一行 selftest，沒修的主機 FAIL 時會在上一層 `audit.log` 留一行，修正前已寫到根目錄外的檔案不會被移除。playbook 的每個 task 補上 C13 tag。row C1–C12 的 Expected 不變 | pilot |

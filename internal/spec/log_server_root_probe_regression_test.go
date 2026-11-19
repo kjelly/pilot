@@ -42,10 +42,11 @@ func TestRegression_LogServerProbesUseTheEffectiveRoot(t *testing.T) {
 	dir := t.TempDir()
 	root := filepath.Join(dir, "srv", "siem")
 	conf := filepath.Join(dir, "10-siem-receiver.conf")
-	// The two template lines exactly as log-server-apply.yml renders them.
+	// The two template lines exactly as log-server-apply.yml renders them,
+	// taken from the playbook itself.
 	body := `module(load="imtcp")` + "\n" +
-		`template(name="SiemAuditPath" type="string" string="` + root + `/%HOSTNAME%/audit.log")` + "\n" +
-		`template(name="SiemAuthPath" type="string" string="` + root + `/%HOSTNAME%/auth.log")` + "\n"
+		siemReceiverTemplate(t, "SiemAuditPath", root) + "\n" +
+		siemReceiverTemplate(t, "SiemAuthPath", root) + "\n"
 	if err := os.WriteFile(conf, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

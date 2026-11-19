@@ -143,7 +143,14 @@ func TestRegression_LogServerRestoredRootParser(t *testing.T) {
 	}
 	task := taskNamed(t, rescue, "ROLLBACK — resolve the roots used by the restored receiver")
 	args := task["ansible.builtin.command"].(map[string]any)["argv"].([]any)
+	// The two path templates exactly as the playbook renders them. The
+	// pre-#363 spelling (a bare %HOSTNAME%) is what a restored receiver may
+	// still hold, so it is spelled out below instead of taken from the
+	// playbook.
 	template := func(root string) string {
+		return siemReceiverTemplate(t, "SiemAuditPath", root) + "\n" + siemReceiverTemplate(t, "SiemAuthPath", root) + "\n"
+	}
+	oldTemplate := func(root string) string {
 		return `template(name="SiemAuditPath" type="string" string="` + root + `/%HOSTNAME%/audit.log")
 template(name="SiemAuthPath" type="string" string="` + root + `/%HOSTNAME%/auth.log")
 `
@@ -152,6 +159,24 @@ template(name="SiemAuthPath" type="string" string="` + root + `/%HOSTNAME%/auth.
 		{"managed", template("/srv/old"), "/srv/old"},
 		{"same root", template("/srv/new"), "/srv/new"},
 		{"subtree", template("/srv/new/old"), "/srv/new/old"},
+		// The rescue restores the file this run replaced: on a host that last
+		// applied before #363 that is the bare %HOSTNAME% spelling, and a
+		// parser that only knew the new one would find no root and keep (or
+		// never withdraw) a SELinux grant on a guess.
+		{"restored receiver from before #363", oldTemplate("/srv/old"), "/srv/old"},
+		{"restored receiver from before #363, same root", oldTemplate("/srv/new"), "/srv/new"},
+		{"restored receiver from before #363, subtree", oldTemplate("/srv/new/old"), "/srv/new/old"},
+		{"audit template old, auth template new, one root",
+			strings.SplitAfter(oldTemplate("/srv/old"), "\n")[0] + strings.SplitAfter(template("/srv/old"), "\n")[1], "/srv/old"},
+		{"audit template new, auth template old, one root",
+			strings.SplitAfter(template("/srv/old"), "\n")[0] + strings.SplitAfter(oldTemplate("/srv/old"), "\n")[1], "/srv/old"},
+		{"old and new spelling with two roots", oldTemplate("/srv/old") + template("/srv/other"), ""},
+		// Only the two spellings production has rendered are recognized.
+		{"another option on %HOSTNAME%", strings.ReplaceAll(template("/srv/old"), ":::secpath-replace", ":::lowercase"), ""},
+		{"secpath-replace combined with another option", strings.ReplaceAll(template("/srv/old"), ":::secpath-replace", ":::lowercase,secpath-replace"), ""},
+		{"secpath-drop instead of secpath-replace", strings.ReplaceAll(template("/srv/old"), "secpath-replace", "secpath-drop"), ""},
+		{"another property than %HOSTNAME%", strings.ReplaceAll(template("/srv/old"), "%HOSTNAME:::secpath-replace%", "%FROMHOST:::secpath-replace%"), ""},
+		{"options without a closing percent sign", strings.ReplaceAll(template("/srv/old"), "secpath-replace%/", "secpath-replace/"), ""},
 		{"unknown", "# no recognized templates", ""},
 		{"ambiguous", template("/srv/old") + template("/srv/other"), ""},
 		{"commented old templates and unknown same-root syntax", "# " + strings.ReplaceAll(strings.TrimSpace(template("/srv/old")), "\n", "\n# ") + "\n" + strings.ReplaceAll(template("/srv/new"), "template(", "template( "), ""},
