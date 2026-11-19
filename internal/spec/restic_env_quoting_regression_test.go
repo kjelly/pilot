@@ -38,9 +38,19 @@ var resticEnvVars = []struct{ env, input string }{
 
 // hostileValues are values a shell would rewrite or run if they were not
 // quoted for it; %[1]s is a file that only a command run by the shell creates.
+//
+// The value with balanced single quotes (x'$(touch ...)'y) is the one that can
+// reach the marker assertion on the unfixed form export NAME='<value>': it
+// sources cleanly there (the quotes pair up, the command substitution sits
+// between them, outside any quotes), the shell runs the embedded command and
+// reads back a different value. The other injecting value ('; touch ...; ')
+// leaves an empty command behind, so the file fails to source (rc 127); the
+// marker is therefore checked before the sourcing error is judged, and a test
+// that stopped at that error would never have proved the marker check can fire.
 var hostileValues = []string{
 	`q"uo'te\back slash`,
 	`'; touch %[1]s; '`,
+	`x'$(touch %[1]s)'y`,
 	"x$(touch %[1]s)y",
 	"a`touch %[1]s`b",
 	"$HOME and ${PATH}",
@@ -148,21 +158,29 @@ func TestRegression_ResticEnvFileReadsBackEveryValueUnchanged(t *testing.T) {
 			}
 			script := `. "$1" && printf '%s\0' ` + strings.Join(names, " ")
 			for _, sh := range shells {
+				// The marker is checked per shell, right after that shell
+				// sourced the file and before anything else is judged: a value
+				// that runs its command and then fails to source must still
+				// report the command, and one shell's marker must not be
+				// blamed on the next.
+				_ = os.Remove(marker)
 				out, err := exec.Command(sh, "-c", script, sh, envPath).Output()
+				if _, statErr := os.Stat(marker); statErr == nil {
+					t.Errorf("%s ran a command embedded in a value while sourcing the env file (marker %s was created)", sh, marker)
+				}
 				if err != nil {
-					t.Fatalf("%s could not source the env file: %v", sh, err)
+					t.Errorf("%s could not source the env file: %v", sh, err)
+					continue
 				}
 				got := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
 				if len(got) != len(values) {
-					t.Fatalf("%s read %d values, want %d: %q", sh, len(got), len(values), got)
+					t.Errorf("%s read %d values, want %d: %q", sh, len(got), len(values), got)
+					continue
 				}
 				for j, v := range resticEnvVars {
 					if got[j] != values[j] {
 						t.Errorf("%s: %s = %q, want %q", sh, v.env, got[j], values[j])
 					}
-				}
-				if _, err := os.Stat(marker); err == nil {
-					t.Fatalf("%s ran a command embedded in a value while sourcing the env file", sh)
 				}
 			}
 		})
