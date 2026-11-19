@@ -560,7 +560,11 @@
             state: started
             enabled: true
           when: not ansible_check_mode
+          register: agent_controller_service_ensure_result
 
+        # Registered so the rescue can say whether this run restarted the service. The
+        # result reads above use `default({})`: a selection that skips Step 6, 8, 9 or 11
+        # never registers it, and a bare `x is changed` on a missing result fails the run.
         - name: "Step 14: restart if the binary, secret, config, or unit changed"
           ansible.builtin.systemd:
             name: pilot-agent-controller.service
@@ -571,6 +575,7 @@
             or (agent_controller_secret_env_result | default({})) is changed
             or (agent_controller_config_result | default({})) is changed
             or (agent_controller_unit_result | default({})) is changed)
+          register: agent_controller_service_restart_result
 
         - name: "Step 15: wait for the service to report active"
           ansible.builtin.command:
@@ -624,11 +629,33 @@
 
       rescue:
         # Only a run that reached Step 6 (install_started) may have left a new binary
-        # behind, so only that run stops the service. A failure earlier (a snapshot or
-        # validation step refused, or a run that did not select Step 6) changed no binary
-        # and leaves the service exactly as it was: stopping and disabling a healthy
-        # service there was an availability regression (#195 review; before #195 the
-        # stale-restore path restarted it).
+        # behind, so only that run stops the service. A run that fails before Step 6 (a
+        # snapshot or validation step refused) has rewritten nothing the service uses, and
+        # the rescue leaves the service alone: stopping and disabling a healthy service
+        # there was an availability regression (#195 review; before #195 the stale-restore
+        # path restarted it). A run that did not select Step 6 can still have rewritten
+        # config.yaml, webhook-secret.env or the unit, or restarted the service, before it
+        # failed; the rescue does not undo that, and its final message lists what changed.
+        #
+        # Known limitation, kjelly/pilot#395: a run that selects Step 6 without replacing
+        # the binary and then fails still gets the stop below, and no run restores
+        # config.yaml, the unit or webhook-secret.env.
+        #
+        # What the final message says is decided from facts every `--tags` selection can
+        # read: always-tagged registers, and the registers of tagged steps read with
+        # `is defined` (a selection that skips a step never registers it).
+        - name: "ROLLBACK — list what this run changed on the host besides the binary"
+          tags: [always]
+          ansible.builtin.set_fact:
+            agent_controller_rescue_changes: >-
+              {{ [] if ansible_check_mode else (
+                   (['rewrote config.yaml'] if (agent_controller_config_result is defined and agent_controller_config_result is changed) else [])
+                 + (['rewrote webhook-secret.env'] if (agent_controller_secret_env_result is defined and agent_controller_secret_env_result is changed) else [])
+                 + (['rewrote the systemd unit'] if (agent_controller_unit_result is defined and agent_controller_unit_result is changed) else [])
+                 + (['started or enabled the service'] if (agent_controller_service_ensure_result is defined and agent_controller_service_ensure_result is changed) else [])
+                 + (['restarted the service'] if (agent_controller_service_restart_result is defined and agent_controller_service_restart_result is changed) else [])
+                 ) }}
+
         - name: "ROLLBACK — stop the newly (mis)configured service"
           tags: [always]
           ansible.builtin.systemd:
@@ -638,6 +665,19 @@
           register: agent_controller_rescue_stop
           ignore_errors: true
           when: agent_controller_rollback is defined and agent_controller_rollback.install_started
+
+        # A stop that failed is either a service that cannot be stopped or no service at
+        # all. A status-only query does not fail on a missing unit: it reports
+        # LoadState=not-found (ansible-core 2.19.2 and systemd 259, captured; the same
+        # module with state: stopped fails with "Could not find the requested service").
+        # A query that itself fails leaves the "could NOT be stopped" message.
+        - name: "ROLLBACK — read whether systemd knows the unit (status only)"
+          tags: [always]
+          ansible.builtin.systemd:
+            name: pilot-agent-controller.service
+          register: agent_controller_rescue_unit
+          ignore_errors: true
+          when: agent_controller_rescue_stop is failed
 
         # Restore only what this invocation snapshotted and validated (Steps 4f/5d/5e).
         # No fallback to shared historical backup names: when this run took no snapshot
@@ -769,9 +809,21 @@
           ansible.builtin.fail:
             msg: >-
               agent-controller apply FAILED (see task output above).
-              {% if agent_controller_rescue_stop is skipped %}It failed before Step 6 replaced
-              the binary (or this run did not select Step 6): no binary was replaced and the
-              service was left as it was.
+              {% if agent_controller_rescue_stop is skipped %}{% if agent_controller_rescue_changes | length == 0 %}It
+              failed before Step 6 replaced the binary (or this run did not select Step 6): no
+              binary, config.yaml, webhook-secret.env or unit was rewritten and the service was
+              not started, enabled or restarted, so it was left as it was.
+              {% else %}No binary was replaced (it failed before Step 6, or this run did not
+              select Step 6), but before it failed this run
+              {{ agent_controller_rescue_changes | join(', ') }}. None of that was rolled
+              back; check `journalctl -u pilot-agent-controller`.
+              {% endif %}
+              {% elif agent_controller_rescue_stop is failed and agent_controller_rescue_unit is succeeded and (agent_controller_rescue_unit.status.LoadState | default('')) == 'not-found' %}systemd
+              has no pilot-agent-controller.service (LoadState=not-found, for example a first
+              install that failed before the unit was rendered and loaded), so there was no
+              service to stop and nothing was restored. This run had started replacing the
+              binary at {{ agent_controller_bin_dest }}; fix the cause and re-run to finish the
+              install.
               {% elif agent_controller_rescue_stop is failed %}The service could NOT be stopped;
               it may still be running the binary this run installed. Nothing was restored.
               {% elif agent_controller_rollback_restored and agent_controller_rescue_restart is succeeded %}This

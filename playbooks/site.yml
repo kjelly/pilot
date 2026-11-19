@@ -41,7 +41,9 @@
 #  表達、可重複執行 changed=0、第一次套用可自動進行且前置條件不滿足時明確失敗、
 #  不需要額外的單次授權);freeipa-server-replica 與 freeipa-dns-client 符合,
 #  2026-11-17 起(issue #362)在下方依主機角色套用——inventory 把這兩個角色指定給
-#  某台主機,全站部署就會安裝/改寫它,不再靜默略過。agent-controller 等待 #195。
+#  某台主機,全站部署就會安裝/改寫它,不再靜默略過。agent-controller 的備份步驟問題
+#  (#195)已修,但還沒放進來:是否 import 與全站部署的實跑證據(AGENTS.md §5.7
+#  第 5 點)是 #362 剩下的範圍,目前仍單獨執行。
 #
 #  注意:FreeIPA 使用者/權限(freeipa-identity-apply.yml)是「資料驅動的 day-2
 #  維運」,需要 vault roster,刻意不放進 site.yml。單獨執行,見 DELIVERY.md。

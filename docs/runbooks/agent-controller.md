@@ -174,11 +174,19 @@ run 的目錄,不會拿舊 run 留下的檔案(包括舊版放在備份目錄最
 `pre-upgrade.db`/`pilot-agent-controller.prev`)。`apply-*` 目錄不會自動清除
 (每次升級、包括失敗的升級都會留一個,而且在 restic 備份範圍內)。
 
-失敗時 rescue 的行為:在 Step 6 開始換 binary 之前失敗(快照或驗證步驟拒絕、或這次 run
-沒選到 Step 6),服務維持原狀,不停止;換過 binary 之後失敗,先停止服務,還原這次的
-binary 與 state.db,還原成功才重啟;還原失敗、或這次沒有快照可還原(第一次安裝、binary
-沒變)時,服務維持停止且停用,最後的錯誤訊息會說明是哪一種。config.yaml、unit 與
-`webhook-secret.env` 不會還原(detection-engine 有,這裡尚未移植)。
+失敗時 rescue 的行為:rescue 只在這次 run 已經開始換 binary(Step 5e 之後,選到 Step 6)時才停止服務。
+在 Step 6 之前失敗(快照或驗證步驟拒絕)的 run 沒有改過 binary、config.yaml、unit 或
+`webhook-secret.env`,也沒有啟動或重啟服務,服務維持原狀。沒選到 Step 6 的 run(例如
+`--skip-tags agent-controller-C4`)rescue 同樣不停止服務,但這種 run 在失敗之前可能已經改寫了
+config.yaml、unit 或 `webhook-secret.env`、重啟過服務;這些不會還原,最後的錯誤訊息會列出這次改了什麼。
+換過 binary 之後失敗:先停止服務,還原這次的 binary 與 state.db,還原成功才重啟;還原失敗、或這次沒有快照
+可還原(第一次安裝、binary 沒變)時,服務維持停止且停用。第一次安裝在 unit 建立之前失敗時,systemd 沒有這個
+unit(`LoadState=not-found`),沒有服務可停,訊息會這樣說,不會寫成「無法停止」。最後的錯誤訊息只描述實際發生的事。
+
+已知限制(kjelly/pilot#395,尚未修):run 選到 Step 6 但沒有真的換掉 binary(例如 binary 已是這個版本),
+Step 6 之後才失敗時,rescue 仍會停止並停用一個健康的服務,沒有快照可還原就不會重啟;升級的 run 會還原
+binary 與 state.db 並重啟,但 rescue 從不還原 config.yaml、unit 與 `webhook-secret.env`(detection-engine
+有,這裡尚未移植),也不在重啟後檢查服務是否可用。細節見 #395。
 這段行為只有 real-ansible 測試(`cmd/pilot/cmd/agent_controller_backup_tags_test.go`),
 還沒有 vm-target 實跑。
 
