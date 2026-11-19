@@ -112,8 +112,15 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   `non_execution_paths`, or a reviewed `target_reuse`) is `WAITING`, never `MERGE` (`references/evidence-contract.md`). The
   reviewer still files a blocking `P1` at the changed path when a change needs a record
   and has none: that is a confirmed violation of a hard repository rule and the only way
-  this becomes `DRAFT`. Docs-, skill- or pure-Go changes proven by native-tool tests need
+  a missing record becomes `DRAFT`. Docs-, skill- or pure-Go changes proven by native-tool tests need
   no VM run; the reviewer says so in `target_validation` with the reason.
+  A record that cannot cover HEAD once the merge train integrates the base (whether or not it
+  covers HEAD today) is `DRAFT` without a finding: when HEAD lacks the live tip (`alignment: train`), `target_validation`
+  is `required` and the base changed a file that is neither evidence-only nor in the manifest's
+  `non_execution_paths` (`contracts/**`, Go code, `docs/verification/**`, ...), the train's step 5
+  would return the PR to Draft after an integration and a CI run, so the gate decides that Draft
+  now (`train_import_rerun` in the result) with the steps for `pr-ready`: merge the live base, run
+  the target chain again (or record a reviewed `target_reuse`), commit the record, get a fresh review.
 - **Cost.** The full Go suite takes about 45 minutes in CI. Reviewers run the
   packages the diff touches (and `make skill-test` for `.agents/skills` changes)
   locally and rely on the `Go test` check for the whole suite.
@@ -153,6 +160,17 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   reviewer findings and fails if a state `pr-ready` accepts is drafted here. A
   reviewer's blocking finding still drafts, as anywhere else: for a missing actual-run
   record that is the `P1` described above, the one route from this state to `DRAFT`.
+- **Every result has an owner.** A PR the gate cannot merge must not stay Ready with nobody
+  acting on it (PR #375 waited that way: `pr-ready` takes Drafts only, and each new
+  `pr-review-merge` run costs a fresh review to reach the same answer). Work `pr-ready` can do
+  on the branch is a `DRAFT` with the steps: the train-import case above, and an unresolved
+  dependency the reviewer marks `branch_repair` (`references/evidence-contract.md`). A `WAITING`
+  whose `wait_kind` is `person` stays Ready, and the actor (`--execute`) comments the reasons with
+  the judged HEAD and adds the `needs-person` label, once per HEAD and set of reasons (`scripts/needs_person.py`);
+  `DRAFT`, `ENQUEUED` and a `transient` `WAITING` remove it. `list_ready.py` leaves a labelled PR out
+  while its HEAD is the one the actor's comment names and lists it again once the HEAD moves. The
+  label must exist in the repository. A failure to comment or label is a warning, never a
+  different outcome.
 - **Disputed findings.** Before dispatching a reviewer, collect the earlier
   findings on the PR (`Automated PR review: Draft required` comments, reviews,
   threads) and every reply disputing one: a conversation comment containing the
@@ -180,8 +198,8 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 | Decision | Conditions | GitHub action |
 |---|---|---|
 | `MERGE` | Valid independent review covering HEAD (the reviewed HEAD, or every change since a pure base import); zero P0–P2 blockers; relevant tests at the reviewed HEAD succeed; the base manifest's required record covers HEAD (or is reasoned `not-needed`); CI all passed (or narrowly justified no-CI policy); required approvals and rules satisfied; no unresolved threads/dependencies; current mergeable and safe | Queue for the merge train (`merge-queue` label, saved evidence; `ENQUEUED`); the train integrates the base when needed, reruns this gate, `gh pr merge --match-head-commit <SHA>` and verifies `MERGED` |
-| `DRAFT` | Confirmed live base tip absent from HEAD with a merge conflict or a file changed on both sides (independent of semantic review), confirmed blocking defect, failed CI not confirmed unrelated, failing tests, substantive review finding (a repeated disputed one only with new evidence), merge conflict, unresolved review thread or a secret in any commit of the PR (the local scan) | Post actionable reasons and HEAD/Base/live-base SHAs for alignment failures, then `gh pr ready --undo`; hand repair to `pr-ready` |
-| `WAITING` | Pending CI, HEAD behind the live base with mergeability or the changed files not known yet, pending required approval, `CHANGES_REQUESTED` awaiting re-review, a failing check the reviewer confirmed unrelated to the PR, a disputed finding repeated without new evidence, the mandated actual-run record missing or not covering HEAD (no reviewer finding), unknown GitHub status, evidence incomplete, stale review HEAD/Base without a confirmed live-base mismatch, movement during live confirmation, merge queue, missing access, unmet dependency or a secret scan that could not run | Leave Ready **unchanged**; report blocker and recommended next action |
+| `DRAFT` | Confirmed live base tip absent from HEAD with a merge conflict or a file changed on both sides (independent of semantic review), confirmed blocking defect, failed CI not confirmed unrelated, failing tests, substantive review finding (a repeated disputed one only with new evidence), merge conflict, unresolved review thread, a secret in any commit of the PR (the local scan), a base the merge train would integrate that brings runtime files the target record cannot cover afterwards (the train's step-5 Draft, decided before the queue), or an unresolved dependency the reviewer marks `branch_repair` | Post actionable reasons (with the steps for the last two) and HEAD/Base/live-base SHAs for alignment failures, then `gh pr ready --undo`; hand repair to `pr-ready` |
+| `WAITING` | Pending CI, HEAD behind the live base with mergeability or the changed files not known yet, pending required approval, `CHANGES_REQUESTED` awaiting re-review, a failing check the reviewer confirmed unrelated to the PR, a disputed finding repeated without new evidence, the mandated actual-run record missing or not covering HEAD (no reviewer finding), unknown GitHub status, evidence incomplete, stale review HEAD/Base without a confirmed live-base mismatch, movement during live confirmation, merge queue, missing access, unmet dependency (without `branch_repair`) or a secret scan that could not run | Leave Ready. `wait_kind: transient`: **unchanged** (a stale `needs-person` label is removed). `wait_kind: person`: comment the reasons with the judged HEAD and add the `needs-person` label. Report blocker and recommended next action |
 | `SKIP` | Already Draft, closed or merged | No action |
 
 `WAITING` is intentional: lack of evidence or a transient pending check is not proof the code is defective. **Do not automatically downgrade in these situations**. If the PR has *any confirmed* blocking defect, classify `DRAFT` even if some checks are pending.
@@ -225,7 +243,7 @@ Review CI with `gh pr checks --json name,state,bucket,link,workflow` plus live P
 
 ## 6. Final report (selected PR)
 
-Return `PR # / URL | ENQUEUED (merged later by the train) / MERGED / DRAFT-BLOCKED / WAITING / SKIPPED / ERROR | reviewed HEAD/Base SHA | review summary & blocking findings | CI & test evidence | GitHub action + verified remote state | next action | checkout (restored to the starting branch, or stayed and why) | role DRIFT, if any (role, hashes, `header_changes`; also in the evidence `summary`)`.
+Return `PR # / URL | ENQUEUED (merged later by the train) / MERGED / DRAFT-BLOCKED / WAITING / SKIPPED / ERROR | reviewed HEAD/Base SHA | review summary & blocking findings | CI & test evidence | GitHub action + verified remote state | next action | checkout (restored to the starting branch, or stayed and why) | for WAITING, `wait_kind` and the actor's `handoff` (`needs-person`, `released`) and warnings | role DRIFT, if any (role, hashes, `header_changes`; also in the evidence `summary`)`.
 
 Keep Root context small: include structured findings and essential citations/paths, **not full diffs or raw logs**.
 
@@ -236,7 +254,8 @@ Keep Root context small: include structured findings and essential citations/pat
 - [Quality gate and merge-queue safety](references/quality-gate.md)
 - [Merge train](references/merge-train.md)
 - [Platforms and repository layout](references/platforms.md)
-- `scripts/list_ready.py` — lists candidate open Ready PRs (paginated) so the user can choose one; listing is not authorization to process them
+- `scripts/list_ready.py` — lists candidate open Ready PRs (paginated) so the user can choose one, leaving out the merge train's (`merge-queue`) and those waiting for a person at their current HEAD (`needs-person`, under `excluded`); listing is not authorization to process them
+- `scripts/needs_person.py` — the `needs-person` hand-off comment, its HEAD marker (only the `gh` account's own comments count) and the label name
 - `scripts/review_gate.py` — live read-only decision gate (scans every commit of the PR for secrets with `--worktree`)
 - `scripts/apply_decision.py` — gated GitHub mutation (`--execute` required; takes the same `--worktree`/`--secret-file`); MERGE queues the PR
 - `scripts/merge_train.py` — the merge train's single consumer (`process`, `status`)

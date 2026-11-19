@@ -59,6 +59,13 @@ if a[0] == 'api' and '/git/ref/heads/' in a[-1]:
     emit({'object': {'type': 'commit', 'sha': d.get('live_base', d['view']['baseRefOid'])}})
 if a[0] == 'api' and '/pulls?' in a[-1]:
     emit(d.get('pages', []))
+if a[0] == 'api' and a[-1] == 'user':
+    emit({'login': d.get('viewer', 'prm-bot')})
+if a[0] == 'api' and '/issues/' in a[-1] and '/comments?' in a[-1]:
+    if d.get('comments_error'):
+        persist(); print('comments unavailable', file=sys.stderr); sys.exit(1)
+    number = a[-1].split('/issues/')[1].split('/')[0]
+    emit([d.get('issue_comments', {}).get(number, [])])
 if a[0] == 'api' and '/issues?' in a[-1]:
     label = a[-1].split('labels=')[1].split('&')[0]
     d['listing_reads'] = d.get('listing_reads', 0) + 1
@@ -92,6 +99,9 @@ if a[:2] == ['pr', 'comment']:
         persist(); print('comment denied', file=sys.stderr); sys.exit(1)
     path = a[a.index('--body-file')+1]
     d.setdefault('comments', []).append(Path(path).read_text())
+    # The same comment as the issues comments API lists it, authored by the account gh runs as.
+    d.setdefault('issue_comments', {}).setdefault(a[2], []).append(
+        {'body': Path(path).read_text(), 'user': {'login': d.get('viewer', 'prm-bot')}})
     persist(); sys.exit(0)
 if a[:2] == ['pr', 'ready']:
     if d.get('fail_draft'):
@@ -136,7 +146,10 @@ def fixture():
             'not_found': GITHUB_API['contents']['manifest_absent_at_d013ed95']}
 
 
-class Integration(unittest.TestCase):
+class IntegrationBase(unittest.TestCase):
+    """The fake gh executable and the per-test state directory; no tests of its own, so a subclass
+    does not run another class's tests again."""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='prm-test-')
         self.addCleanup(self.temp.cleanup)
@@ -184,6 +197,8 @@ class Integration(unittest.TestCase):
         except ValueError: self.fail(f'bad json: {proc.stdout}\n{proc.stderr}')
         return proc, output
 
+
+class Integration(IntegrationBase):
     def test_read_only_gate(self):
         proc = self.script('review_gate.py','--pr','42','--evidence',str(self.evidence_file))
         self.assertEqual(proc.returncode,0,proc.stderr)
@@ -566,8 +581,14 @@ class Integration(unittest.TestCase):
         proc, out = self.actor(execute=True)
         self.assertEqual(out['outcome'], 'WAITING', proc.stderr)
         self.assertIn("requires the 'actual-run' record", ' '.join(out['gate']['reasons']))
-        self.assertFalse(any(a[:2] in (['pr', 'merge'], ['pr', 'comment'], ['pr', 'ready'])
-                             for a in self.state()['calls']))
+        self.assertFalse(any(a[:2] in (['pr', 'merge'], ['pr', 'ready']) for a in self.state()['calls']))
+        # No reviewer finding drafts it, so it waits for a person, and says so on the PR.
+        self.assertEqual(('person', 'needs-person'), (out['wait_kind'], out.get('handoff')), out)
+        d = self.state()
+        self.assertEqual(['needs-person'], d['labels'])
+        self.assertEqual(1, len(d['comments']))
+        self.assertIn('waiting for a person', d['comments'][0])
+        self.assertIn("requires the 'actual-run' record", d['comments'][0])
 
     def test_captured_pr_record_of_an_older_candidate_waits(self):
         self.use_captured_pr(self.captured_record(tested_revision='d013ed95cf65216a40deefcc2de9c6a4dd57f4ef'))
@@ -591,5 +612,144 @@ class Integration(unittest.TestCase):
         self.assertEqual(proc.returncode,0,proc.stderr)
         arr = json.loads(proc.stdout)['pull_requests']
         self.assertEqual([a['number'] for a in arr],[42,50])
+
+
+class NeedsPersonHandoff(IntegrationBase):
+    """A WAITING gate that waits for a person leaves the PR Ready with a comment and the `needs-person`
+    label; DRAFT, ENQUEUED and a transient WAITING take the label off again."""
+
+    def waits_for_a_person(self, **kwargs):
+        d = self.state()
+        d['view']['reviewDecision'] = 'CHANGES_REQUESTED'
+        d.update(kwargs)
+        self.fixture_file.write_text(json.dumps(d))
+
+    def marker_comment(self, login, head=HEAD):
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import needs_person
+        body = needs_person.comment_text({'head_sha': head, 'base_sha': BASE, 'live_base_sha': BASE,
+                                          'reasons': ['GitHub reviewDecision is CHANGES_REQUESTED: waiting for '
+                                                      'that reviewer to re-review']})
+        return {'body': body, 'user': {'login': login}}
+
+    def writes(self):
+        return [a[1] for a in self.state()['calls'] if a[:2] in
+                (['pr', 'comment'], ['pr', 'edit'], ['pr', 'ready'], ['pr', 'merge'])]
+
+    def test_a_wait_for_a_person_is_commented_and_labelled(self):
+        self.waits_for_a_person()
+        proc, out = self.actor(execute=True)
+        self.assertEqual((proc.returncode, out['outcome'], out['wait_kind'], out.get('handoff')),
+                         (1, 'WAITING', 'person', 'needs-person'), proc.stdout + proc.stderr)
+        d = self.state()
+        self.assertEqual(['needs-person'], d['labels'])
+        self.assertFalse(d['view']['isDraft'])
+        self.assertEqual(['comment', 'edit'], self.writes())
+        comment = d['comments'][0]
+        self.assertIn(f'Judged HEAD: `{HEAD}`', comment)
+        self.assertIn('CHANGES_REQUESTED', comment)
+        self.assertIn(f'<!-- pr-review-merge:needs-person head={HEAD} ', comment)
+
+    def test_the_hand_off_is_made_once_per_head_and_reasons(self):
+        self.waits_for_a_person()
+        self.actor(execute=True)
+        proc, out = self.actor(execute=True)
+        self.assertEqual('needs-person', out.get('handoff'), proc.stdout)
+        self.assertEqual(1, len(self.state()['comments']), 'the same HEAD and reasons are not commented again')
+        # A person removes the label while the reasons stand: the next run puts it back without a comment.
+        self.patch(labels=[])
+        self.actor(execute=True)
+        self.assertEqual((['needs-person'], 1), (self.state()['labels'], len(self.state()['comments'])))
+        # Different reasons on the same HEAD: a new comment, the label stays.
+        self.patch(rules=[{'type': 'merge_queue'}])
+        self.actor(execute=True)
+        d = self.state()
+        self.assertEqual(2, len(d['comments']))
+        self.assertIn('merge queue', d['comments'][1])
+        self.assertEqual(['needs-person'], d['labels'])
+
+    def test_a_marker_by_another_account_does_not_count(self):
+        self.waits_for_a_person(labels=['needs-person'],
+                                issue_comments={'42': [self.marker_comment('someone-else')]})
+        _, out = self.actor(execute=True)
+        self.assertEqual('needs-person', out.get('handoff'))
+        self.assertEqual(['comment'], self.writes(), 'only the comment: the label is already on')
+        # The actor's own marker for this HEAD and these reasons suppresses it.
+        self.patch(calls=[], issue_comments={'42': [self.marker_comment('prm-bot')]})
+        _, out = self.actor(execute=True)
+        self.assertEqual(('needs-person', []), (out.get('handoff'), self.writes()))
+
+    def test_a_transient_wait_releases_the_label(self):
+        self.patch(labels=['needs-person'], checks=[{'name': 'lint', 'state': 'PENDING', 'bucket': 'pending'}])
+        _, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', 'transient', 'released'), (out['outcome'], out['wait_kind'], out.get('handoff')))
+        self.assertEqual([], self.state()['labels'])
+        self.assertFalse(self.state().get('comments'))
+
+    def test_enqueue_releases_the_label(self):
+        self.patch(labels=['needs-person'])
+        proc, out = self.actor(execute=True)
+        self.assertEqual(('ENQUEUED', 'released'), (out['outcome'], out.get('handoff')), proc.stdout + proc.stderr)
+        self.assertEqual(['merge-queue'], self.state()['labels'])
+
+    def test_draft_releases_the_label(self):
+        self.patch(labels=['needs-person'], checks=[{'name': 'lint', 'state': 'FAILURE', 'bucket': 'fail'}])
+        _, out = self.actor(execute=True)
+        self.assertEqual(('DRAFT-BLOCKED', 'released'), (out['outcome'], out.get('handoff')))
+        self.assertEqual([], self.state()['labels'])
+
+    def test_a_label_that_cannot_be_removed_after_a_draft_is_a_warning(self):
+        self.patch(labels=['needs-person'], fail_label=True,
+                   checks=[{'name': 'lint', 'state': 'FAILURE', 'bucket': 'fail'}])
+        proc, out = self.actor(execute=True)
+        self.assertEqual((0, 'DRAFT-BLOCKED'), (proc.returncode, out['outcome']), proc.stdout)
+        self.assertIn('could not be removed', ' '.join(out['warnings']))
+
+    def test_a_label_that_cannot_be_added_is_a_warning(self):
+        self.waits_for_a_person(fail_label=True)
+        proc, out = self.actor(execute=True)
+        self.assertEqual((1, 'WAITING'), (proc.returncode, out['outcome']))
+        self.assertIsNone(out.get('handoff'))
+        self.assertIn('label denied', ' '.join(out['warnings']))
+        self.assertEqual(1, len(self.state()['comments']), 'the explanation is posted before the label')
+
+    def test_unreadable_comments_hand_off_nothing(self):
+        self.waits_for_a_person(comments_error=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', None), (out['outcome'], out.get('handoff')))
+        self.assertIn('comments unavailable', ' '.join(out['warnings']))
+        self.assertEqual([], self.writes())
+
+    def test_a_dry_run_hands_off_nothing(self):
+        self.waits_for_a_person()
+        _, out = self.actor()
+        self.assertEqual(('WAITING', 'person'), (out['outcome'], out['wait_kind']))
+        self.assertEqual([], self.writes())
+
+    def test_a_head_that_moves_after_the_gate_hands_off_nothing(self):
+        self.waits_for_a_person(race_on_view=3)
+        _, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', None), (out['outcome'], out.get('handoff')))
+        self.assertIn('changed after the gate', ' '.join(out['warnings']))
+        self.assertEqual([], self.writes())
+
+    def test_list_ready_leaves_out_the_queue_and_a_current_wait(self):
+        pr = {'number': 1, 'state': 'open', 'draft': False, 'html_url': 'u', 'title': 't', 'labels': [],
+              'head': {'sha': HEAD}, 'base': {'sha': BASE, 'ref': 'main'}}
+        queued = dict(pr, number=2, labels=[{'name': 'merge-queue'}])
+        waiting = dict(pr, number=3, labels=[{'name': 'needs-person'}])
+        moved = dict(pr, number=4, labels=[{'name': 'needs-person'}], head={'sha': 'c' * 40})
+        forged = dict(pr, number=5, labels=[{'name': 'needs-person'}])
+        unmarked = dict(pr, number=6, labels=[{'name': 'needs-person'}])
+        self.patch(pages=[[pr, queued, waiting, moved, forged, unmarked]],
+                   issue_comments={'3': [self.marker_comment('prm-bot')], '4': [self.marker_comment('prm-bot')],
+                                   '5': [self.marker_comment('someone-else')]})
+        proc = self.script('list_ready.py')
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        out = json.loads(proc.stdout)
+        listed = {p['number']: p.get('stale_needs_person', False) for p in out['pull_requests']}
+        self.assertEqual({1: False, 4: True, 5: True, 6: True}, listed)
+        self.assertEqual([2, 3], [e['number'] for e in out['excluded']])
+        self.assertEqual([], self.writes(), 'listing is read-only')
 
 if __name__ == '__main__': unittest.main()

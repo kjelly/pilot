@@ -46,6 +46,18 @@ A blocking finding that repeats a claim already disputed on this PR (usually by 
 
 `dependencies.resolved` must be `true` with a nonempty, checked explanation. This is an agent-authored assertion; code cannot independently prove an undocumented dependency.
 
+An unresolved dependency (`"resolved": false`, still with its `evidence`) is `WAITING` for a person, unless `pr-ready` can resolve it on this PR's branch. Then add `branch_repair` and the gate decides `DRAFT` with those steps, so the PR has an owner instead of staying Ready:
+
+```json
+"dependencies": {"resolved": false,
+  "evidence": "Merging main brings contracts/log-server.yaml, which the record's closure reads.",
+  "branch_repair": {"reason": "The actual-run record must be rerun after main is integrated",
+                    "steps": ["Merge live main into HEAD", "Run vm-target test with --evidence-record on the new candidate",
+                              "Commit the evidence-only record and request a fresh independent review"]}}
+```
+
+`reason` has at least 20 characters and `steps` 1–12 non-empty strings; anything else, or `branch_repair` on a resolved dependency, is `WAITING`. Use it only for work on this branch (integrating the base, rerunning a check or the target chain, a change the PR itself must make); a dependency on another PR merging first, or on a decision, has no `branch_repair`. The gate already drafts one such case by itself: a base the merge train would integrate that brings runtime files the record cannot cover (`SKILL.md`, "Mandated actual-run evidence").
+
 `coverage`: each field must be explicitly `true` for MERGE; an inapplicable category can still be `true` *only after explicit consideration*, e.g. "no concurrent execution touched" in reviewer summary. If any field is missing/false, decision is `WAITING`, not `MERGE`.
 
 `unrelated_failing_checks`: `[{"name": "exact check name", "reason": "evidence it fails the same way without this diff (at least 30 characters)", "reviewer_confirmed": true}]`. A listed `fail`/`cancel` check makes the decision `WAITING` (rerun once the cause is fixed) instead of `DRAFT`; it never allows `MERGE`. Same shape as `pr-ready`'s field, so a PR it marked Ready with that exemption is not returned to Draft.
@@ -60,7 +72,7 @@ When there are no check runs, use `no_ci_rationale` only if no CI truly applies 
 - `not-needed` is accepted with its reason, except that the PR may not change a path matching the requirement's `required_paths` (`playbooks/**`, `contracts/**` here). Changes the manifest's prose also covers but no glob can tell apart stay the reviewer's call: specs (`docs/verification/**`; an edit that changes no command, Expected, target or variable contract needs no new run, `docs/actual-run-evidence.md` §4), Go inventory handling and deploy orchestration.
 - A manifest the gate cannot read or validate, or one with more than one `required_evidence` item, is `WAITING`.
 
-The manifest schema, globs and the evidence-only delta rule are issue-to-pr's `scripts/repo_evidence.py`, loaded by path. The gate result carries `target_validation` (manifest state, required ids, accepted deltas). A missing or stale record is `WAITING` in the gate; it becomes `DRAFT` only through the reviewer's blocking `P1` finding at the changed path (AGENTS.md §1), like every other Draft.
+The manifest schema, globs and the evidence-only delta rule are issue-to-pr's `scripts/repo_evidence.py`, loaded by path. The gate result carries `target_validation` (manifest state, required ids, accepted deltas). A missing or stale record is `WAITING` in the gate; it becomes `DRAFT` only through the reviewer's blocking `P1` finding at the changed path (AGENTS.md §1), like every other Draft. One exception is the gate's own: with `decision: required` and HEAD behind a live base the merge train would integrate, a base change that is neither evidence-only nor in `non_execution_paths` means the record cannot cover HEAD after the integration (a saved `target_reuse` names the old HEAD and base), so the gate decides the Draft the train's step 5 would make, listing those files in `train_import_rerun`.
 
 Secret scan (not reviewer evidence): the gate reads no field for it. With `--worktree` it scans every commit of the PR's `baseRefOid..headRefOid` itself and the result carries a value-free `secret_scan` summary (`status`, `commits_scanned`, `findings`). A finding is `DRAFT`; a scan that could not run (no `--worktree`, a commit not in the clone, a scanner that does not load) is `WAITING`. A reviewer's own secret finding is still a blocking P0 (`.agents/skills/_shared/committed-secrets.md`).
 

@@ -3,7 +3,9 @@
 
 DRAFT posts the reasons and converts the PR to Draft. MERGE queues the PR for the merge train
 (`merge_train.py`, kjelly/pilot#307): the train is the only merger, so a merge never races another
-PR's CI on an aligned HEAD.
+PR's CI on an aligned HEAD. WAITING keeps the PR Ready; one that waits for a person (`wait_kind:
+person`) is commented and labelled `needs-person` (`needs_person.py`), which DRAFT, ENQUEUED and a
+transient WAITING remove again.
 
 A write is reported as done only when the PR itself shows it (`gh pr view`), read again a bounded number
 of times: GitHub's reads lag its writes by a few seconds, and a PR that was enqueued must not be reported
@@ -27,8 +29,10 @@ from typing import Any, Callable, Sequence
 # Running from the skill snapshot must not add __pycache__ there: `skill_snapshot.py verify`
 # counts any added file and would STOP every later step. Set before the first sibling import.
 sys.dont_write_bytecode = True
-from gh_runtime import GitHubError, MutationLockHeld, MutationLockUnavailable, Repo, branch_head, pr_view, run_gh
+from gh_runtime import (GitHubError, MutationLockHeld, MutationLockUnavailable, Repo, branch_head, edit_label,
+                        issue_comments, post_comment, pr_view, run_gh, viewer_login)
 from review_gate import evaluate, load_evidence, resolve_repo
+import needs_person
 
 # A write is read back from the PR at most READ_TRIES times, READ_INTERVAL seconds apart: 25 s at most.
 # The reads run while the actor holds the repository mutation lock (the train sees it as held and
@@ -140,6 +144,62 @@ def _read_until(repo: Repo, number: int, confirmed: Callable[[dict[str, Any]], b
     return False, view, error
 
 
+def _warn(out: dict[str, Any], message: str) -> None:
+    out.setdefault("warnings", []).append(message)
+
+
+def _release_needs_person(repo: Repo, number: int, view: dict[str, Any], out: dict[str, Any]) -> None:
+    """Remove a `needs-person` label left by an earlier run. Housekeeping: a failure is a warning and never
+    changes the outcome (the label only keeps the PR out of `list_ready.py`)."""
+    if not needs_person.has_label(view):
+        return
+    try:
+        edit_label(repo, number, needs_person.LABEL, add=False)
+        out["handoff"] = "released"
+    except GitHubError as exc:
+        _warn(out, f"The `{needs_person.LABEL}` label from an earlier run could not be removed: {exc}")
+
+
+def _waiting_handoff(repo: Repo, number: int, gate: dict[str, Any], out: dict[str, Any], *,
+                     sleep: Callable[[float], None]) -> None:
+    """A WAITING gate leaves the PR Ready. One that waits for a person (`wait_kind: person`) gets a comment
+    with the reasons and the judged HEAD (once per HEAD and set of reasons) and the `needs-person` label, so
+    the PR has a visible owner instead of being picked up and reviewed again for the same answer. One that
+    settles by itself (`transient`) removes such a label: no person is waited for any more.
+
+    Nothing here changes the outcome, which stays WAITING: a failure is a warning in `warnings`."""
+    try:
+        view = pr_view(repo, number)
+        if gate.get("wait_kind") != "person":
+            _release_needs_person(repo, number, view, out)
+            return
+        head, base, live, base_name = (gate.get("head_sha"), gate.get("base_sha"), gate.get("live_base_sha"),
+                                       gate.get("base_name"))
+        if not all(isinstance(v, str) and v for v in (head, base, live, base_name)):
+            _warn(out, "The gate result lacks the PR or live base identity; no needs-person hand-off was made")
+            return
+        if view.get("state") != "OPEN" or view.get("isDraft") is not False or view.get("headRefOid") != head or \
+                view.get("baseRefOid") != base or view.get("baseRefName") != base_name or \
+                branch_head(repo, base_name) != live:
+            _warn(out, "PR state/HEAD/Base changed after the gate; no needs-person hand-off was made, rerun it")
+            return
+        marker = needs_person.latest_marker(issue_comments(repo, number), viewer_login(repo))
+        if not (marker and marker["head"] == head.lower()
+                and marker["reasons"] == needs_person.reasons_digest(gate.get("reasons", []))):
+            post_comment(repo, number, needs_person.comment_text(gate))
+            out["comment_posted"] = True
+        if not needs_person.has_label(view):
+            edit_label(repo, number, needs_person.LABEL, add=True)
+            labelled, _, error = _read_until(repo, number, needs_person.has_label, sleep=sleep)
+            if not labelled:
+                _warn(out, f"The `{needs_person.LABEL}` label was added but the PR does not show it after "
+                      f"{READ_TRIES} reads" + (f"; the last read failed: {error}" if error else ""))
+                return
+        out["handoff"] = "needs-person"
+    except GitHubError as exc:
+        _warn(out, f"needs-person hand-off failed: {exc}")
+
+
 def perform(repo: Repo, number: int, evidence: dict[str, Any], method: str, execute: bool, *,
             worktree: Any = None, secret_files: Sequence[Any] = (),
             sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
@@ -159,9 +219,13 @@ def _perform_locked(repo: Repo, number: int, evidence: dict[str, Any], method: s
     gate = evaluate(repo, number, evidence, worktree=worktree, secret_files=secret_files)
     out = {"repo": repo.raw, "pr": number, "gate": gate, "executed": False,
            "outcome": gate["decision"], "verified_remote_state": None}
+    if gate["decision"] == "WAITING":
+        out["wait_kind"] = gate.get("wait_kind")
     if gate["decision"] not in ("DRAFT", "MERGE") or not execute:
         if gate["decision"] in ("DRAFT", "MERGE") and not execute:
             out["outcome"] = "DRY_RUN_" + gate["decision"]
+        elif gate["decision"] == "WAITING" and execute:
+            _waiting_handoff(repo, number, gate, out, sleep=sleep)
         return out
     try:
         # A branch name is part of the confirmed identity, even when two tips share a SHA.
@@ -192,6 +256,8 @@ def _perform_locked(repo: Repo, number: int, evidence: dict[str, Any], method: s
             out["verified_remote_state"] = after.get("state")
             if drafted:
                 out["outcome"] = "DRAFT-BLOCKED"
+                # pr-ready owns the PR now: a `needs-person` mark from an earlier run no longer applies.
+                _release_needs_person(repo, number, after, out)
             else:
                 out["outcome"] = "ERROR"
                 out["error"] = ("Draft conversion command returned success but remote Draft state was not "
@@ -205,14 +271,16 @@ def _perform_locked(repo: Repo, number: int, evidence: dict[str, Any], method: s
             out["enqueued"] = enqueued
             # The PR itself says whether it carries the label (the train trusts the same read); the issues
             # listing lags the write by seconds and is not consulted. Read again before calling it absent.
-            labelled, _, error = _read_until(repo, number, lambda v: _has_label(v, merge_train.QUEUE_LABEL),
-                                             sleep=sleep)
+            labelled, after, error = _read_until(repo, number, lambda v: _has_label(v, merge_train.QUEUE_LABEL),
+                                                 sleep=sleep)
             out["verified_remote_state"] = "ENQUEUED" if labelled else None
             if labelled:
                 out["outcome"] = "ENQUEUED"
                 if enqueued.get("comment_error"):
                     out["warnings"] = ["The PR is enqueued, but its \"enqueued\" comment could not be posted: "
                                        f"{enqueued['comment_error']}"]
+                # The merge train owns the PR now.
+                _release_needs_person(repo, number, after, out)
             else:
                 out["outcome"] = "ERROR"
                 out["error"] = ("Queue label command returned success but the PR does not show the label after "

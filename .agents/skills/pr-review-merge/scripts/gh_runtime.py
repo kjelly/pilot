@@ -371,6 +371,31 @@ def label_added_at(repo: Repo, number: int, label: str) -> str | None:
     return added
 
 
+def issue_comments(repo: Repo, number: int) -> list[dict[str, Any]]:
+    """Every conversation comment on the PR, oldest first: `[{"body": str, "login": str}]`."""
+    endpoint = f"repos/{repo.owner}/{repo.name}/issues/{number}/comments?per_page=100"
+    result = gh_json(["api", *host_args(repo), "--paginate", "--slurp", endpoint])
+    if not isinstance(result, list) or not all(isinstance(page, list) for page in result):
+        raise GitHubError("gh api --paginate --slurp did not return pages")
+    comments = []
+    for item in (entry for page in result for entry in page):
+        user = item.get("user") if isinstance(item, dict) else None
+        if not isinstance(item, dict) or not isinstance(item.get("body"), str) or not isinstance(user, dict) \
+                or not isinstance(user.get("login"), str):
+            raise GitHubError("Invalid issue comment entry")
+        comments.append({"body": item["body"], "login": user["login"]})
+    return comments
+
+
+def viewer_login(repo: Repo) -> str:
+    """The login `gh` is authenticated as on the repository's host (the author of the actor's comments)."""
+    data = gh_json(["api", *host_args(repo), "user"])
+    login = data.get("login") if isinstance(data, dict) else None
+    if not isinstance(login, str) or not login:
+        raise GitHubError("gh api user returned no login")
+    return login
+
+
 def edit_label(repo: Repo, number: int, label: str, *, add: bool) -> None:
     run_gh(["pr", "edit", str(number), "-R", repo.raw, "--add-label" if add else "--remove-label", label])
 

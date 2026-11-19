@@ -241,7 +241,11 @@ The consumer takes the oldest PR in the queue and:
 5. Finish:
    - The saved review no longer covers HEAD: leave the queue (needs a new `pr-review-merge` run).
    - The target record no longer covers HEAD (for example, main brought in a `rerun_paths` file):
-     Draft, so `pr-ready` runs the chain again or records `unrelated_runtime_changes`.
+     Draft, so `pr-ready` runs the chain again or records `unrelated_runtime_changes`. The gate
+     already decides this Draft before the queue when the base it sees brings a file that is neither
+     evidence-only nor in `non_execution_paths` (`train_import_rerun`), so a PR reaches it here when
+     the base moved again after the enqueue, or when an imported non-execution file is one the
+     recorded closure reaches (only the train, after integrating, reads that).
    - A GitHub or infrastructure failure while checking either of those: WAITING. A failure to read
      says nothing about the review or the record, so it never dequeues or drafts the PR.
    - Otherwise rerun `review_gate.evaluate()` with the saved evidence:

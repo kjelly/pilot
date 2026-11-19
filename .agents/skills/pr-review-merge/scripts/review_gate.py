@@ -399,7 +399,78 @@ def train_alignment(client: Any, repo: Repo, number: int, view: dict[str, Any]) 
         return out
     out["overlap"] = sorted(set(pr_side["files"]) & set(base_side["files"]))
     out["alignment"] = "overlap" if out["overlap"] else "train"
+    # What the train's integration commit would bring in: the files the base changed since the merge base.
+    out["base_import"] = sorted(base_side["files"])
     return out
+
+
+def train_import_invalidates_record(manifest: dict[str, Any] | None, tv: Any,
+                                    base_import: Sequence[str]) -> dict[str, list[str]]:
+    """The base files the merge train's integration would bring in that the saved target record cannot
+    cover afterwards: `{"files": [...], "rerun": [...]}` (`rerun` is the subset matching the item's
+    `rerun_paths`), empty lists when nothing does.
+
+    After the train integrates the live base, the saved evidence keeps the record only through an
+    evidence-only delta or a pure import of `non_execution_paths` (a reviewed `target_reuse` names the
+    old HEAD and base, so it cannot match the train's new HEAD). An imported file that is neither
+    evidence-only nor non-execution therefore always ends in the train's step-5 Draft ("the target
+    record no longer covers HEAD"). Deciding it here is the same verdict, before the PR waits in the
+    queue for an integration and a CI run that can only end in Draft. Files that are non-execution but
+    reachable from a recorded closure are left to the train, which reads the closure after integrating.
+    """
+    empty: dict[str, list[str]] = {"files": [], "rerun": []}
+    if manifest is None or not isinstance(tv, dict) or tv.get("decision") != "required" or not base_import:
+        return empty
+    ctx = repo_evidence.Context(None, "", manifest, [], [])
+    items = [item for item in ctx.required.values() if item.get("kind") == "target-run"]
+    if len(items) != 1:
+        return empty
+    rerun = [repo_evidence.glob_regex(g) for g in items[0].get("rerun_paths", [])]
+    files = sorted(p for p in base_import
+                   if not any(rx.match(p) for rx in ctx.patterns) and not ctx.non_execution_path(p))
+    return {"files": files, "rerun": [p for p in files if any(rx.match(p) for rx in rerun)]}
+
+
+def _rerun_reason(base_name: str, live_base: str, files: Sequence[str], rerun: Sequence[str]) -> str:
+    shown = ", ".join(f"{p} (rerun_paths)" if p in rerun else p for p in files[:8])
+    if len(files) > 8:
+        shown += f", and {len(files) - 8} more"
+    return (f"The merge train would integrate live {base_name} {live_base[:12]}, which brings runtime files the "
+            f"saved target record cannot cover after the integration: {shown}. The train would return the PR to "
+            "Draft for this after integrating (references/merge-train.md, step 5), so it is decided now. "
+            f"Steps for pr-ready: 1. merge live {base_name} into HEAD; 2. run the target chain again on the new "
+            "candidate (`pilot vm-target test` / `topology test` with `--evidence-record`), or have the independent "
+            "reviewer record `target_reuse` for the integrated base where "
+            ".agents/skills/_shared/target-evidence-reuse.md allows it; 3. commit the evidence-only record; "
+            "4. get a fresh independent review of the new HEAD before Ready.")
+
+
+def _dependency_gate(deps: Any) -> tuple[list[str], list[str]]:
+    """(defects, gaps) for the reviewer's `dependencies` object.
+
+    `resolved: true` with a checked explanation passes. An unresolved dependency waits for a person,
+    unless the reviewer says `pr-ready` can resolve it on this branch (`branch_repair`: a reason and the
+    concrete steps, for example integrating the base and running the target chain again): that is a
+    Draft with those steps, so the PR has an owner instead of staying Ready with nobody acting on it."""
+    if not isinstance(deps, dict) or not isinstance(deps.get("evidence"), str) or \
+            len(deps["evidence"].strip()) < 12:
+        return [], ["Unresolved/unverified inter-PR dependencies"]
+    repair = deps.get("branch_repair")
+    if deps.get("resolved") is True:
+        if repair is not None:
+            return [], ["dependencies.branch_repair is only for an unresolved dependency"]
+        return [], []
+    if repair is None:
+        return [], ["Unresolved/unverified inter-PR dependencies"]
+    steps = repair.get("steps") if isinstance(repair, dict) else None
+    reason = repair.get("reason") if isinstance(repair, dict) else None
+    if deps.get("resolved") is not False or not isinstance(reason, str) or len(reason.strip()) < 20 or \
+            not isinstance(steps, list) or not 1 <= len(steps) <= 12 or \
+            any(not isinstance(s, str) or not s.strip() for s in steps):
+        return [], ["dependencies.branch_repair needs resolved: false, a reason (20+ characters) and 1-12 steps"]
+    listing = " ".join(f"{i}. {s.strip()[:300]}" for i, s in enumerate(steps, 1))
+    return [f"Inter-PR dependency pr-ready can resolve on this branch: {reason.strip()[:600]} | "
+            f"Steps for pr-ready: {listing}"], []
 
 
 def review_covers(client: Any, repo: Repo, reviewed: Any, head: str, live_base: str,
@@ -611,10 +682,9 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
             area for area in COVERAGE if not isinstance(coverage, dict) or coverage.get(area) is not True))
     if not isinstance(evidence.get("summary"), str) or len(evidence["summary"].strip()) < 20:
         missing.append("Reviewer summary insufficient")
-    deps = evidence.get("dependencies")
-    if not isinstance(deps, dict) or deps.get("resolved") is not True or \
-       not isinstance(deps.get("evidence"), str) or len(deps["evidence"].strip()) < 12:
-        missing.append("Unresolved/unverified inter-PR dependencies")
+    dep_defects, dep_gaps = _dependency_gate(evidence.get("dependencies"))
+    defects.extend(dep_defects)
+    missing.extend(dep_gaps)
 
     # A failing check the reviewer confirmed unrelated to this PR (for example the
     # same failure on the base branch) is not something the PR can fix: it keeps the
@@ -640,6 +710,18 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
         integrated_base=True, infra=target_infra)
     missing.extend(target_gaps)
     missing.extend(kinds.later(message) for message in target_infra)
+    if result.get("alignment") == "train" and not target_infra:
+        # The train's integration would bring files the saved record cannot cover: its step 5 would
+        # Draft the PR after an integration and a CI run, so the same Draft is decided now.
+        manifest, manifest_errors, _ = read_manifest(client, repo, live_base)
+        if manifest_errors:
+            missing.append(kinds.later("; ".join(manifest_errors)))
+        else:
+            invalid = train_import_invalidates_record(manifest, evidence.get("target_validation"),
+                                                      result.get("base_import") or [])
+            result["train_import_rerun"] = invalid["files"]
+            if invalid["files"]:
+                defects.append(_rerun_reason(base_name, live_base, invalid["files"], invalid["rerun"]))
 
     # Every commit of the PR, scanned locally by the PR's own SHAs. A leaked secret is a DRAFT even when
     # HEAD no longer has it; a scan that could not run is WAITING, never a pass.
