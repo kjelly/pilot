@@ -714,6 +714,7 @@
           - "--no-ntp"
           - "--no-dns-sshfp"
           - "--force-join"
+        expand_argument_vars: false  # the secret in argv must reach the installer unchanged (AGENTS.md 4.5 item 15)
         creates: "{{ ipa_client_log_marker }}"
       register: ipa_replica_enroll
       no_log: true
@@ -738,6 +739,7 @@
     - name: "FreeIPA replica — step 2/2: ipa-replica-install (promote; first run 8-12 min)"
       ansible.builtin.command:
         argv: "{{ ipa_replica_install_args }}"
+        expand_argument_vars: false  # the secret in argv must reach the installer unchanged (AGENTS.md 4.5 item 15)
         creates: "{{ ipa_replica_config_marker }}"
       vars:
         ipa_replica_install_base_args:

@@ -736,6 +736,7 @@
               '--force-join',
             ]
           }}
+        expand_argument_vars: false  # the secret in argv must reach the installer unchanged (AGENTS.md 4.5 item 15)
         creates: "{{ ipa_config_marker }}"
       register: ipa_enroll
       no_log: true
