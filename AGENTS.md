@@ -452,16 +452,24 @@ IPA 帳號生效」需要 FreeIPA **server** 上先有帳號 + sudo 規則）。
 
 ### 4.3 stage gate 必須跟 inventory 的環境 group 對齊(cross-check assert)
 
-`playbooks/apply/*.yml` 現在**全部 41 支**都有 `stage`/`confirm_staging`/
-`confirm_prod` gate,規則一致、沒有例外(`core-infra-provider`、`dns`、`docker`、
-`freeipa-server`、`freeipa-client`、`freeipa-identity`、`freeipa-dns`、
-`freeipa-dns-client`、`freeipa-ca-trust`、`freeipa-nfs-server`、
-`freeipa-nfs-client`、`freeipa-server-replica`、`freeipa-realm-replacement`、
-`keycloak`、`keycloak-db`、`seaweedfs-s3`、`pam-oidc-sshd`、`log-server`、
-`audit-log-forwarding`、`wazuh-manager`、`wazuh-fim`、`restic-backup`、
-`os-patch-sla`(用 `patch_stage`)、`host-monitoring`、`dcgm-exporter`、`prometheus`、`thanos-query`、
-`detection-engine`、`alertmanager`、`snmp-exporter`、`dashboard`、`log-shipping`、`reverse-proxy`、`internal-endpoint`、
-`agent-controller`、`gateway-scope`、`pilot-access-gateway`、`pilot-access-directory`、`pilot-session-store`、`pilot-access-target-policy`、`login-probe`)。
+`playbooks/apply/*.yml` 的**每一個 play** 都要有 `stage`/`confirm_staging`/
+`confirm_prod` 的 confirm gate、下面的環境 group cross-check 與 prod attestation
+gate(第 5 點),規則一致:一般元件的 `<component>-apply.yml`、§4.0 的內部入口
+(`<component>-<purpose>.yml`)與 hotfix 都算在內,一個檔案有多個 play 時每個 play
+各自要有(例如 `internal-endpoint-apply.yml` 的 fleet-wide baseline play、
+`wazuh-fim-agent-skew-hotfix.yml` 的唯讀判定 play)。本節刻意不列總數與元件清單:
+先前寫死的「全部 41 支」是照 deploy catalog 的元件數手動更新,漏算了沒有 catalog
+項目的內部入口(`freeipa-identity-auth-cache.yml`、`wazuh-fim-agent-skew-hotfix.yml`),
+而且沒有任何測試要求每個 play 都帶 gate(issue #315)。唯一的例外是純唯讀、不
+mutate 任何東西的 play:在檔頭註解寫明為什麼不需要 gate,並登記在
+`everyApplyPlayStageGateAllowlist`(每筆附理由;目前是空的)。
+`internal/spec/tagged_run_gates_regression_test.go::TestRegression_EveryApplyPlayHasAStageGate`
+對每個 play 檢查:沒有 confirm gate 或沒有 prod attestation gate、又不在 allowlist
+的 play 讓測試失敗並指名檔案與 play;allowlist 裡的 play 已經有 gate 或已經不存在時,
+測試要求刪掉那一筆。環境 group cross-check 由第 6 點的
+`TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck` 檢查(對每個有 confirm gate
+的 play)。兩者以 `assert` 的 `that:` 文字判斷(`when:` 不會被求值,寫成 `fail` 的
+gate 不算,gate 與第一個 mutation 的先後不檢查)。
 **不要因為一支 playbook 單獨執行、或「角色感覺不重要」就假設它可以不用 gate**,新增任何 apply
 playbook 一律要帶。
 
@@ -503,7 +511,8 @@ playbook 讀 `group_names` 去反推 `stage`,導致「機器已經歸進 `stagin
    的可觀測性角色,兩輪才補齊——教訓是「規則要對所有 `playbooks/apply/*.yml`
    一致套用,不要因為某支還沒接進 site.yml、或角色看起來次要,就假設它可以
    例外」。真的有理由不需要 gate 的 playbook(純唯讀、不 mutate 任何東西的
-   inspect playbook),在檔頭註解寫清楚原因,不要沉默省略。
+   inspect playbook),在檔頭註解寫清楚原因,並登記在
+   `everyApplyPlayStageGateAllowlist`,不要沉默省略。
 5. prod attestation gate 一律寫成
    `that: [(staging_attested_within_hours | int) <= 168]` + `when: stage == 'prod'`。
    **不要**在 `that:` 裡再放 `stage != 'prod'`:`that:` 的每一項都要成立,
@@ -1722,7 +1731,7 @@ package 變數本身並掛 `t.Cleanup` 復原,不能只 `t.Setenv` 就假設下�
 - ❌ 不要因為 Codex/Claude 是主要 authoring 介面，就把 LLM provider / prompt orchestration / agent loop 重新加回 pilot runtime
 - ❌ 新增或移除會產生資料/設定檔的軟體角色時，不要漏改 `group_vars/restic-backup.example.yml` 的對應備份範例（見 §4.2）
 - ❌ 新增/改 stage gate 時，不要只做「confirm 旗標」檢查而漏掉「host 的環境 group 是否與 stage 一致」的 cross-check（見 §4.3）——否則機器已歸類進 `staging`/`prod`，但指令忘了帶 `-e stage=`，會靜默用 `sandbox` 門檻套用
-- ❌ 新增 apply playbook 時，不要沒有依 §4.3 的四點說明它為什麼放進或不放進 `playbooks/site.yml`——放不進去的元件被指定給主機時，全站部署會靜默略過它且 run 仍回報成功（issue #362）
+- ❌ 新增 apply playbook 時，不要沒有依 §4.3.1 的四點說明它為什麼放進或不放進 `playbooks/site.yml`——放不進去的元件被指定給主機時，全站部署會靜默略過它且 run 仍回報成功（issue #362）
 - ❌ 不要移除或繞過 `playbooks/site.yml` 開頭的 `target_group` 安全閥（見 §4.3）——它擋的是「全站入口誤帶 `-e target_group=` 同時覆寫全部子 playbook 目標」的事故
 - ❌ 新增/改 `playbooks/apply/*.yml` 的 task 標 `tags: [always]` 時，不要漏查它依賴的前置 fact/探測 task 是否也標了 `always`（見 §4.4）——`pre_tasks:` 跟 `tasks:` 都要檢查
 - ❌ 改動 `deploy.go` 的 `--limit`/依賴展開/tags 篩選邏輯時，不要只憑既有 mock 測試綠燈就合併；至少要有一個跨兩跳依賴的 regression test + 一次真實 topology 部署證據（見 §5.5）
@@ -1857,6 +1866,8 @@ git status --short
 
 ## 8. 變更紀錄
 
+版本號依合併到 main 的順序遞增,日期是該列撰寫的日期;平行 PR 合併時兩者可能不同序。
+
 | 日期       | 版本 | 變更 | 變更者 |
 |------------|------|------|--------|
 | 2026-07-01 | v1.0 | 初版（spec-vs-inventory 事故後寫的硬規則）| sre |
@@ -1877,8 +1888,8 @@ git status --short
 | 2026-07-22 | v1.15 | 新增「Trec-related issues never go in runbooks」：任何 trec 驅動 wizard 過程中發現的 issue（opcodes 行為、MCP/CLI 差異、wizard prompt chain、host-key churn、預填行為等）一律記錄在 `.agents/skills/pilot-trec-verification/SKILL.md` 及其同層 tool-driver skills；operational runbook 只記錄「這次 pass 做了什麼/驗證了什麼」，不記錄「trec 驅動時踩了什麼坑」。原因：v11.0 重新驗證時把 wizard banner 的 UI 落差誤列為「Real bugs #27」，實際是 trec 驅動時的 prompting 路徑問題，應該留在 trec skill 的 §7 gotcha list 而非 runbook 的 bug table | pilot |
 | 2026-07-22 | v1.16 | actual-run evidence 與操作文件分離：runbook/spec 只留目前有效摘要與連結，完整輸出進獨立 artifact；正式完整測試改為先凍結本地 candidate commit，再從乾淨隔離 checkout 驗證，後續 evidence-only commit 引用 tested revision/tree。日常 dirty worktree 仍可跑快速測試 | pilot |
 | 2026-07-23 | v1.17 | 新增 committed-document link rule：tracked 文件的 repository-relative Markdown link 必須指向 Git 追蹤檔；不得連到 `.verification/`、暫存、vault、generated local-only、ignored 或不存在的檔案。一次性驗收改以 sanitized candidate/tree、target 與 verdict 摘要表達 | pilot |
-| 2026-08-03 | v1.19 | 新增 per-run wizard driver 與路徑刪除規則：agent 依當前環境產生暫存 driver，不提交、不當作 runbook 契約；刪除／搬移 tracked path 前後必須盤點並清除引用 | pilot |
 | 2026-07-31 | v1.18 | 新增第 25 支 apply playbook `freeipa-dns-client-apply.yml`(目標主機把 DNS resolver 指向已經在跑 DNS 的 FreeIPA server/replica;與 `freeipa-client` AAA 納管互不相依,day-2/opt-in,不接進 `site.yml`,比照 `freeipa-server-replica`/`freeipa-dns`);§4.3 playbook 清點更新為 25 支,補上先前清點漏掉的 `freeipa-dns` | pilot |
+| 2026-08-03 | v1.19 | 新增 per-run wizard driver 與路徑刪除規則：agent 依當前環境產生暫存 driver，不提交、不當作 runbook 契約；刪除／搬移 tracked path 前後必須盤點並清除引用 | pilot |
 | 2026-08-24 | v1.20 | 新增 `dcgm-exporter` apply playbook(GPU 主機的 NVIDIA dcgm-exporter 監控 agent,獨立於 `host-monitoring` 之外的 component,依賴 `docker`;已接進 `site.yml`);§4.3 playbook 清點更新為 31 支 | sre |
 | 2026-08-28 | v1.21 | Stage A-2:新增 `detection-engine` apply playbook(中央 Detection Engine,從 Thanos metrics 建立 adaptive SignalEvent,依賴 host-monitoring/thanos-query/alertmanager,已接進 `site.yml`,見 `docs/superpowers/specs/2026-08-28-detection-engine-spec.md`);§4.3 playbook 清點更新為 32 支 | sre |
 | 2026-09-01 | v1.22 | Agent Monitoring Phase 1:新增 `agent-controller` apply playbook(observe-only incident controller,接收 Alertmanager webhook、正規化成 incident、派送唯讀診斷請求給外部 Agent Runtime,零 mutation 權限,不依賴其他 component,experimental/day-2 opt-in,不接進 `site.yml`,見 `docs/superpowers/specs/2026-09-01-agent-monitoring-phase-1-observe-only-controller-spec.md`、`docs/architecture/agent-monitoring.md`);§4.3 playbook 清點更新為 33 支 | pilot |
@@ -1929,3 +1940,4 @@ git status --short
 | 2026-11-13 | v1.67 | 新增 `pilot hotfix <子指令>`（容器指令，每個「修正已知環境問題」的情境一個子指令，旗標與 `pilot deploy` 同語意並重用它的 inventory／stage／limit 實作）與第一個子指令 `wazuh-agent-skew`：移除版本比 Wazuh manager 新的 agent，讓之後的 `pilot deploy` 能重裝正確版本（`wazuh-fim-apply.yml` 對 V > M 一律拒絕、沒有降級路徑；既有 `wazuh-agent-decommission.yml` 只刪 `client.keys`、保留套件與 hold，所以救不了）。內部入口 playbook `playbooks/apply/wazuh-fim-agent-skew-hotfix.yml`（§4.0；完整 §4.3 gate，另對被 deregister 的 manager 做環境 group cross-check）、helper `playbooks/apply/files/wazuh-agent-hotfix.py`（版本比較**只在這裡做一次**，Go 只讀 playbook 的 marker；不修改 `wazuh-transaction.py`，重複的常數由 `TestWazuhAgentHotfixConstantsMatchTheTransactionCoordinator` 鎖）、`internal/hotfix`、spec `docs/verification/wazuh-fim-agent-skew-hotfix.md`。設計決定由使用者確認：完整移除（停服務、解 hold、卸載、刪 `client.keys`、manager 取消登記）、以 agent 主機實際安裝版本為準、任何無法判定即整次 fail closed（read-only play `any_errors_fatal` 先判定全部主機，之後才逐台 `serial: 1` 變更；所有不需要先變更才能判斷的拒絕——stage／confirm／環境 group／prod attestation、確認過的主機清單、manager 登記表與 `client.keys` 的比對、做不完的 skewed 主機〔EL 沒有 auditd legacy restart action、`ss` 不能用〕——都在這個唯讀 play，因為 `serial: 1` 的 play 對第二台主機的 gate 會在第一台已被卸載之後才跑；移除順序是解除 policy → 移除 `client.keys` → 卸載 → 清 audit plugin，卸載最後，所以卸載之前的中斷會讓套件仍在、重跑選得到，卸載之後唯一可能殘留的 audit plugin 以 `residue` 狀態〔沒有套件且 plugin 孤立〕被重跑選到；卸載本身被殺掉與 controller 被殺後殘留的 writer marker 不在這個保證內，見 runbook）。順帶發現的 matcher 陷阱：`sh -c '<缺少的 binary> … && echo 0 \|\| echo 1'` 在 `pilot verify --local` 下，shell 自己印的 `not found` 併在 `echo` 前面，讓輸出不是單獨整數，`rc-from-stdout` 抽不出來而退回程序 rc=0，**缺 binary 也 PASS**；inventory 路徑（`ansible --one-line`，ansible-core 2.20.1 的 `(stdout) 1 (stderr) …` 格式）實測不受影響（#332 追蹤，`wazuh-manager.md` C11/C12、`wazuh-fim.md` C10、`wazuh-alert-delivery.md` C1 是同形寫法，未在本變更修）；本 spec 的 C6 加 `test -x` 與 `2>&1`，並由 `TestWazuhAgentHotfixSpecRowsPrintALoneIntegerEvenWhenToolsAreMissing` 對每個 row 鎖「輸出只有單獨的 0 或 1」 | pilot |
 | 2026-11-17 | v1.68 | `playbooks/site.yml` 依主機角色 import `freeipa-server-replica`(`freeipa-server` 之後、`dns` 與 `freeipa-client` 之前)與 `freeipa-dns-client`(`freeipa-client` 之後、所有跨角色使用者之前),部分解決 issue #362(`Refs`;`agent-controller` 等 #195)。§4.3 取代原本「不是每個部署都要的穩態角色」的理由(同時也過時:那段把已 import 的可觀測性元件說成還沒接進 `site.yml`),改寫成四點標準(由主機角色表達、可重複執行 `changed=0`、第一次套用可自動進行且前置條件不滿足時明確失敗、不需要額外的單次授權)與目前的歸類,新增元件的 PR 要依這四點說明放進或不放進;這段放在 §4.3 底下自己的小節 §4.3.1,與 stage gate 清單分開(§4.3 的引用不變)。起因:`optInRolesAssignedInScope` 對 `site.yml` 沒有 import 的 opt-in 元件靜默略過(9550b38a 正確地不把它記成已部署),某個 staging 環境重建 replica 主機後,全站 Deploy 回報成功(`failed=0`、第二次 `changed=0`)但那台主機沒有 FreeIPA。真正的原因是缺 import,不是 9550b38a 的篩選。因為這個 playbook 現在是例行執行,`freeipa-server-replica-apply.yml` 在任何變更之前新增三道 fail-closed 檢查(命名為 `G-ip`、`G-pool`、`G-resolve`,不是該 playbook 的 R1/R2/R3 row tag):`G-ip`:`ipa_server_ip` 與 `freeipa-client-apply.yml` 相同的推導(原本預設成這台自己的位址);`G-pool`:多台 replica 要各自設 `freeipa_replica_fqdn` 且不重複(`tasks/freeipa-server-pool.yml` 的同一組規則,原本排在它之後才擋);`G-resolve`:primary 沒有原生 DNS 時 primary 要解析得到這台的 FQDN(`getent ahostsv4` 的位址清單包含 `ipa_replica_ip`,每次 apply 都跑,已 promote 的 replica 也一樣;原本是檔頭的手動前置步驟,沒做會在 `ipa-replica-install` 才失敗且原因被 `no_log` 藏起來)。同一個 play 加上 `serial: 1`(獨立 review 指出 `site.yml` 與 `forks = 20` 會同時升級所有 replica,replica spec §5 禁止,issue #110 的 self-register 失敗也是兩台同時跑):一次升級一台,任何一台失敗或連不上,後面的 replica 與 `site.yml` 後面的 play 都不跑(ansible-core 2.19.2 實測:失敗 exit 2、連不上 exit 4,停下的方式相同,已升級的不還原;refs #110,沒有兩台 replica 的 VM run,所以不宣稱已修);兩個 contract 的 `site.tags` 補成與 import 相同,讓 `--tags freeipa` 會記錄與驗證它們。新增全 repo 守衛 `TestSiteYMLHostRolesAreImportedOrStandalone`(`cmd/pilot/cmd/site_yml_consistency_test.go`)與 `site_yml_day2_roles_test.go`(真實 contracts 與真實 `site.yml` 的選擇、部分 `--limit`,以及用真實 `ansible-playbook --list-tasks` 確認 tags 選得到 tasks),replica 的 `serial: 1` 由 `internal/spec/freeipa_server_replica_site_gates_regression_test.go` 的 `TestRegression_SiteDay2RolesReplicaPlayIsSerial`(結構)與 `TestRegression_SiteDay2RolesReplicasPromoteOneAtATime`(真實 `ansible-playbook`:第一台失敗時第二台不啟動、後面的 play 不跑,拿掉 serial 的對照組則照跑)鎖住。後續 issue:全站部署要列出「inventory 有指定、`site.yml` 不會執行」的主機角色(`agent-controller`、`pilot-access-target-policy`)是 #367;contract `site.tags` 與 import tags 在 8 個元件上不一致(含 `os-patch-sla`)是 #368。行為變更:已把這兩個角色指定給主機的既有 inventory,下一次全站部署就會升級 replica、改寫 resolver | pilot |
 | 2026-11-17 | v1.69 | §4.5 第 15 點(issue #118 第 2 批):26 個把密碼插進 shell 指令文字的 task 改成 `ansible.builtin.command` 的 `argv` + `stdin` + `no_log: true`——22 個 kinit(freeipa-dns、internal-endpoint ×3、pilot-access-directory/gateway/session-store、freeipa-client-host-dns ×2、4 支 `playbooks/check` probe、9 個 test fixtures)、3 個 `kadmin.local cpw`(audit-demo、hostauthz-demo ×2)、1 個 389-ds audit 寫入的 `ldapmodify -w`(改成 root 經 ldapi SASL EXTERNAL,不需要 Directory Manager 密碼,寫入失敗會讓 task 失敗;原本 `echo INITIALIZED` 無論 ldapmodify 結果都回報 changed);指令文字 allowlist 從 29 筆降到只剩三個 htpasswd task(第 3 批)。更正本條原本「argv 元素不會被改寫」的說法:`ansible.builtin.command` 預設 `expand_argument_vars: true`,argv 的 `$HOME`/`$name` 會被展開(ansible-core 2.19.2 實測),argv 只留給 FreeIPA installer。開發階段在一台拋棄式 FreeIPA server 上的檢查(FreeIPA 4.13.4、krb5 1.21.1、389-ds-base 2.9.0,BASE 與 HEAD 從同一個 snapshot 起跑;這是 dev-level 檢查,不是 candidate-bound 的正式 evidence,下面的結果只代表這一台 server 當時的狀態):含 `$(touch …)` 與反引號的 admin 密碼讓 BASE 的 `freeipa-client-fixtures.yml` kinit 失敗,而且兩個指令在 server 上以 root 執行,HEAD 同一密碼完成、沒有指令被執行;`kadmin.local cpw` 無論成功、密碼不一致、不存在的 principal、太短、`Too soon to change password`、stdin 提早結束都以 rc=0 結束,失敗原因在 stderr,成功是 stdout 的 `Password for "<principal>" changed.`,所以三個 cpw fixture 改成先用 `kinit -c MEMORY:` 探測宣告的密碼是否已經有效、才 `cpw`,再由一個 `assert` gate 以 kadmin 自己的 stderr 失敗(BASE 的 `printf` 會把 `%s%d` 改寫成別的密碼卻回報 changed,這台 server 上 kinit 以宣告的密碼得到 `Password incorrect`)。candidate 凍結後的六節點 topology run 記錄在 `docs/evidence/secret-stdin/issue-118.md`。guard(`internal/spec/secret_command_text_regression_test.go`):command 的 argv(含 task `vars:` 間接引用,FreeIPA installer 例外)與 `script` 的文字也檢查、`stdin` 帶秘密的 task 必須 `no_log: true`、`secretIdentRe` 加 passphrase/credential/private·signing·master_key/otp;`TestRegression_FreeIPAKinitTasksPassPasswordUnchanged` 改成自動找出全部以 `stdin` 帶秘密的 task(46 個,沒有 row 就失敗),對每個餵 13 個敵意值並檢查 stdin 逐 byte、argv 不含秘密、沒有指令被執行,`TestRegression_StdinHarnessDetectsAShellSpelling` 證明這個 oracle 看得出舊寫法;新增 `internal/spec/secret_stdin_outcomes_regression_test.go`(真實擷取的 kadmin.local 與 ldapmodify 輸出,見 `internal/spec/testdata/kadmin-cpw/`、`ldapmodify-ldapi/`)。`TestRegression_PipefailShellTasksHaveNoEarlyExitReader` 的下限 20 降為 10(pipefail shell task 從 27 降到 13)。不在本批:三個 htpasswd task、FreeIPA installer 的 argv(`expand_argument_vars`)、restic-env 引號、transport fixture 的 `ipa user-mod --password` 空白、docs SOP(#97)。#370（v1.68）也新增列，後合併者重新編號 | pilot |
+| 2026-11-19 | v1.73 | §4.3:「全部 41 支都有 stage gate」改成集合規則(issue #315)。41 是照 deploy catalog 的元件數手動更新,漏算沒有 catalog 項目的 §4.0 內部入口(`freeipa-identity-auth-cache.yml`、`wazuh-fim-agent-skew-hotfix.yml`;實際是 43 個檔案、45 個 play),`TestDeployCatalog_PlaybooksExistAndAreWellFormed` 的註解還把這個數字寫成「AGENTS.md §4.3 tracks this count」。而且沒有任何測試要求每個 play 都有 gate:`TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck` 只檢查已經有 confirm gate 的 play,所以一支沒有 gate 的新 apply playbook,或只被拿掉 prod attestation gate 的 play,通過所有既有 lint。現在 §4.3 不再列總數與清單,改成「每一個 play(元件、內部入口、hotfix 都算,多 play 的檔案逐 play)都要有 confirm gate、環境 group cross-check 與 prod attestation gate」,例外只有檔頭註明原因、登記在 `everyApplyPlayStageGateAllowlist` 的純唯讀 play(目前是空的)。新增全 repo lint `TestRegression_EveryApplyPlayHasAStageGate`(`internal/spec/tagged_run_gates_regression_test.go`;與 `TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck` 共用 `playGates`,「什麼算 confirm gate」只有一份定義;`TestEveryApplyPlayStageGateDetection` 用合成 YAML 鎖住通過與觸發的案例,含兩種過期 allowlist),`TestDeployCatalog_PlaybooksExistAndAreWellFormed` 寫死的數字改成 deployCatalog 與 `playbooks/apply/*-apply.yml` 的集合比對,`DELIVERY.md` 的「全部 20 支」改成指向 §4.3,§6 的「依 §4.3 的四點」更正為 §4.3.1。§8 加一句版本號與日期的說明,並把 v1.19、v1.18 兩列對調回版本順序(只移動、文字不變);版本號依合併順序遞增、日期是撰寫日期,所以 v1.53/54、v1.55/56、v1.66 的日期也不同序。掃描範圍:`playbooks/apply/*.yml`、`*.yaml` 頂層共 45 個 play,目前全部帶有 confirm 與 prod attestation gate,沒有 playbook 需要修改。未處理(另列 follow-up):§4.3 第 4 點「gate 放在其他 gate/pre-flight 檢查之前」的先後沒有 lint(部分 play 先跑唯讀檢查);`playbooks/decommission/wazuh-manager-agent-deregister.yml` 沒有 cross-check,decommission 目錄不在這個 lint 的範圍;§4.2 的「四組/四個範例」restic 範例數已過時 | pilot |

@@ -459,6 +459,66 @@ func TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck(t *testing.T) {
 	}
 }
 
+// everyApplyPlayStageGateAllowlist lists the apply plays exempt from
+// TestRegression_EveryApplyPlayHasAStageGate: a purely read-only play that
+// mutates nothing, whose file header says why it needs no gate (AGENTS.md
+// §4.3 point 4). Keys are "<playbook>|<play name>" (a name that appears twice
+// in one file cannot be listed), values the reason. It is empty: every play
+// in playbooks/apply/ carries the gates. An entry that matches no play, or
+// whose play has since gained a gate, fails the test, so entries can only be
+// removed.
+var everyApplyPlayStageGateAllowlist = map[string]string{}
+
+// TestRegression_EveryApplyPlayHasAStageGate locks the AGENTS.md §4.3 set
+// rule: every play in playbooks/apply/*.yml has the staging/prod confirm gate
+// and the prod attestation gate. That covers component playbooks, the §4.0
+// internal entries (<component>-<purpose>.yml) and hotfixes, and a file with
+// several plays is checked per play. The environment-group cross-check stays
+// with TestRegression_ApplyPlaysWithConfirmGateHaveCrossCheck, which checks
+// every play that has a confirm gate; together the two cover all three.
+//
+// §4.3 used to say "all 41 apply playbooks have the gate" and list them. The
+// 41 was kept by hand from the deploy catalog, so the two internal entries
+// without a catalog item (freeipa-identity-auth-cache.yml and
+// wazuh-fim-agent-skew-hotfix.yml) were never counted, and no test required
+// the gate: a new apply playbook with none, or one that lost only its prod
+// attestation, passed every lint (kjelly/pilot#315).
+//
+// Scope and limits. Top-level playbooks/apply/*.yml and *.yaml; tasks/ is not
+// read, and a document that is not a list (the data manifests) is skipped. A
+// play is a list item with `hosts`. An import_playbook that resolves outside
+// playbooks/apply/ fails, because its plays would not be seen. The gates are
+// found by text in `that:` (playGates): `when:` is not evaluated, a gate
+// written as `fail` does not count, and where the gate sits relative to the
+// first mutation is not checked (the always-tag lints cover the tags).
+func TestRegression_EveryApplyPlayHasAStageGate(t *testing.T) {
+	var files []string
+	for _, pattern := range []string{"../../playbooks/apply/*.yml", "../../playbooks/apply/*.yaml"} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, matches...)
+	}
+	sort.Strings(files)
+	hit := map[string]bool{}
+	plays := 0
+	for _, path := range files {
+		rel := strings.TrimPrefix(filepath.ToSlash(path), "../../")
+		problems, n := stageGateProblems(rel, loadYAML(t, path), everyApplyPlayStageGateAllowlist, hit)
+		plays += n
+		for _, problem := range problems {
+			t.Error(problem)
+		}
+	}
+	if plays < 40 {
+		t.Fatalf("only %d apply plays found in %d files; the walker is broken", plays, len(files))
+	}
+	for _, key := range unmatchedStageGateAllowlist(everyApplyPlayStageGateAllowlist, hit) {
+		t.Errorf("everyApplyPlayStageGateAllowlist entry %q matches no play — drop it", key)
+	}
+}
+
 // TestRegression_DecommissionQueryCrossCheckExemptions locks the two
 // read-only host-decommission queries that skip the environment-group
 // cross-check: they run without a stage (the freeipa-identity one already
@@ -538,6 +598,317 @@ func TestStageGateDetection(t *testing.T) {
 	}
 }
 
+// TestEveryApplyPlayStageGateDetection runs the per-play lint on synthetic
+// playbooks: each shape it must accept, and each way a play can fail it.
+func TestEveryApplyPlayStageGateDetection(t *testing.T) {
+	const (
+		confirm = `    - name: confirm
+      ansible.builtin.assert: {that: ["stage == 'sandbox' or confirm_staging | bool"]}
+`
+		cross = `    - name: xcheck
+      ansible.builtin.assert: {that: ["not ('prod' in group_names and stage != 'prod')"]}
+`
+		attest = `    - name: attest
+      ansible.builtin.assert: {that: ["(staging_attested_within_hours | int) <= 168"]}
+      when: stage == 'prod'
+`
+		rel = "playbooks/apply/x.yml"
+	)
+	play := func(name, sections string) string {
+		return "- name: " + name + "\n  hosts: all\n" + sections
+	}
+	pre := func(tasks ...string) string { return "  pre_tasks:\n" + strings.Join(tasks, "") }
+	post := func(tasks ...string) string { return "  post_tasks:\n" + strings.Join(tasks, "") }
+	const noGateTask = `    - name: noop
+      ansible.builtin.debug: {msg: x}
+`
+
+	cases := []struct {
+		name  string
+		src   string
+		allow map[string]string
+		want  []string // exact problem strings, in order
+		plays int
+		hit   []string // allowlist keys that must have matched a play
+	}{
+		{
+			name:  "gates in pre_tasks",
+			src:   play("pre", pre(confirm, cross, attest)),
+			plays: 1,
+		},
+		{
+			name: "gates nested in a block in tasks",
+			src: play("nested", `  tasks:
+    - name: wrapper
+      block:
+        - ansible.builtin.assert: {that: ["confirm_prod | bool"]}
+        - ansible.builtin.assert: {that: ["(staging_attested_within_hours | int) <= 168"]}
+`),
+			plays: 1,
+		},
+		{
+			// the cross-check is another lint's job: a play with both
+			// other gates and no cross-check passes this one
+			name:  "no cross-check is left to the cross-check lint",
+			src:   play("nocross", pre(confirm, attest)),
+			plays: 1,
+		},
+		{
+			name:  "a data manifest map is skipped",
+			src:   "freeipa:\n  hosts: {a: b}\n  users: []\n",
+			plays: 0,
+		},
+		{
+			name: "no gate at all",
+			src:  play("bare", pre(noGateTask)),
+			want: []string{
+				`playbooks/apply/x.yml: play #0 "bare" has no staging/prod confirm gate (AGENTS.md §4.3)`,
+				`playbooks/apply/x.yml: play #0 "bare" has no prod attestation gate (AGENTS.md §4.3)`,
+			},
+			plays: 1,
+		},
+		{
+			name: "the second play of a file is the one named",
+			src:  play("gated", pre(confirm, cross, attest)) + play("fleet", pre(cross, attest)),
+			want: []string{
+				`playbooks/apply/x.yml: play #1 "fleet" has no staging/prod confirm gate (AGENTS.md §4.3)`,
+			},
+			plays: 2,
+		},
+		{
+			name: "confirm only in a when:",
+			src: play("whenonly", `  tasks:
+    - name: guarded
+      ansible.builtin.debug: {msg: x}
+      when: confirm_prod | bool and staging_attested_within_hours | int <= 168
+`),
+			want: []string{
+				`playbooks/apply/x.yml: play #0 "whenonly" has no staging/prod confirm gate (AGENTS.md §4.3)`,
+				`playbooks/apply/x.yml: play #0 "whenonly" has no prod attestation gate (AGENTS.md §4.3)`,
+			},
+			plays: 1,
+		},
+		{
+			name: "gates only in post_tasks",
+			src:  play("late", post(confirm, attest)),
+			want: []string{
+				`playbooks/apply/x.yml: play #0 "late" has no staging/prod confirm gate (AGENTS.md §4.3)`,
+				`playbooks/apply/x.yml: play #0 "late" has no prod attestation gate (AGENTS.md §4.3)`,
+			},
+			plays: 1,
+		},
+		{
+			name: "gates written as fail instead of assert",
+			src: play("failgate", pre(`    - name: confirm
+      ansible.builtin.fail: {msg: need confirm}
+      when: stage == 'prod' and not confirm_prod | bool
+`, `    - name: attest
+      ansible.builtin.fail: {msg: stale}
+      when: stage == 'prod' and (staging_attested_within_hours | int) > 168
+`)),
+			want: []string{
+				`playbooks/apply/x.yml: play #0 "failgate" has no staging/prod confirm gate (AGENTS.md §4.3)`,
+				`playbooks/apply/x.yml: play #0 "failgate" has no prod attestation gate (AGENTS.md §4.3)`,
+			},
+			plays: 1,
+		},
+		{
+			name: "confirm without the prod attestation",
+			src:  play("noattest", pre(confirm, cross)),
+			want: []string{
+				`playbooks/apply/x.yml: play #0 "noattest" has no prod attestation gate (AGENTS.md §4.3)`,
+			},
+			plays: 1,
+		},
+		{
+			name: "import outside playbooks/apply",
+			src:  "- import_playbook: ../test/fixtures/x-fixtures.yml\n" + play("pre", pre(confirm, cross, attest)),
+			want: []string{
+				`playbooks/apply/x.yml: import_playbook "../test/fixtures/x-fixtures.yml" resolves to playbooks/test/fixtures/x-fixtures.yml, outside playbooks/apply/, so this lint cannot see its plays`,
+			},
+			plays: 1,
+		},
+		{
+			name: "import from tasks/ is not a playbook of this directory",
+			src:  "- ansible.builtin.import_playbook: tasks/x.yml\n",
+			want: []string{
+				`playbooks/apply/x.yml: import_playbook "tasks/x.yml" resolves to playbooks/apply/tasks/x.yml, outside playbooks/apply/, so this lint cannot see its plays`,
+			},
+		},
+		{
+			name: "import of a sibling in playbooks/apply is checked as its own file",
+			src:  "- import_playbook: y-apply.yml\n",
+		},
+		{
+			name:  "an allowlisted gate-less play is exempt and counted as matched",
+			src:   play("inspect", pre(noGateTask)),
+			allow: map[string]string{rel + "|inspect": "read-only"},
+			plays: 1,
+			hit:   []string{rel + "|inspect"},
+		},
+		{
+			name:  "stale allowlist entry: the play now has the gates",
+			src:   play("inspect", pre(confirm, cross, attest)),
+			allow: map[string]string{rel + "|inspect": "read-only"},
+			want: []string{
+				`allowlist entry "playbooks/apply/x.yml|inspect": the play now has a stage gate — drop the entry`,
+			},
+			plays: 1,
+			hit:   []string{rel + "|inspect"},
+		},
+		{
+			name:  "stale allowlist entry: the play has started to gate",
+			src:   play("inspect", pre(confirm)),
+			allow: map[string]string{rel + "|inspect": "read-only"},
+			want: []string{
+				`allowlist entry "playbooks/apply/x.yml|inspect": the play now has a stage gate — drop the entry`,
+			},
+			plays: 1,
+			hit:   []string{rel + "|inspect"},
+		},
+		{
+			// an allowlist entry names a play, so it must not also exempt a
+			// gate-less copy that kept the name
+			name:  "allowlisted name used by two plays",
+			src:   play("inspect", pre(noGateTask)) + play("inspect", pre(noGateTask)),
+			allow: map[string]string{rel + "|inspect": "read-only"},
+			want: []string{
+				`allowlist entry "playbooks/apply/x.yml|inspect" matches 2 plays; give each play its own name`,
+				`allowlist entry "playbooks/apply/x.yml|inspect" matches 2 plays; give each play its own name`,
+			},
+			plays: 2,
+			hit:   []string{rel + "|inspect"},
+		},
+		{
+			name:  "an allowlist entry for another play does not exempt this one",
+			src:   play("bare", pre(noGateTask)),
+			allow: map[string]string{rel + "|other": "read-only"},
+			want: []string{
+				`playbooks/apply/x.yml: play #0 "bare" has no staging/prod confirm gate (AGENTS.md §4.3)`,
+				`playbooks/apply/x.yml: play #0 "bare" has no prod attestation gate (AGENTS.md §4.3)`,
+			},
+			plays: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var doc any
+			if err := yaml.Unmarshal([]byte(tc.src), &doc); err != nil {
+				t.Fatal(err)
+			}
+			hit := map[string]bool{}
+			got, n := stageGateProblems(rel, doc, tc.allow, hit)
+			if !slices.Equal(got, tc.want) || n != tc.plays {
+				t.Errorf("stageGateProblems = %q over %d plays, want %q over %d", got, n, tc.want, tc.plays)
+			}
+			for _, key := range tc.hit {
+				if !hit[key] {
+					t.Errorf("allowlist key %q was not recorded as matched", key)
+				}
+			}
+			if tc.hit == nil && len(hit) != 0 {
+				t.Errorf("matched allowlist keys %v, want none", hit)
+			}
+		})
+	}
+
+	t.Run("unmatched allowlist entries are reported", func(t *testing.T) {
+		allow := map[string]string{"playbooks/apply/gone.yml|inspect": "r", rel + "|inspect": "r"}
+		got := unmatchedStageGateAllowlist(allow, map[string]bool{rel + "|inspect": true})
+		if want := []string{"playbooks/apply/gone.yml|inspect"}; !slices.Equal(got, want) {
+			t.Errorf("unmatchedStageGateAllowlist = %q, want %q", got, want)
+		}
+		if got := unmatchedStageGateAllowlist(nil, nil); len(got) != 0 {
+			t.Errorf("empty allowlist reported %q", got)
+		}
+	})
+}
+
+// applyPlay is one play of an apply playbook and which of the §4.3 stage
+// gates playGates found in it.
+type applyPlay struct {
+	index                  int // position among the file's plays, from 0
+	name                   string
+	confirm, cross, attest bool
+}
+
+// applyPlaysOf returns the plays of one parsed apply playbook (list items with
+// `hosts`) and the targets of its import_playbook items. A document that is
+// not a list, such as a data manifest, has neither.
+func applyPlaysOf(doc any) (plays []applyPlay, imports []string) {
+	items, _ := doc.([]any)
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"import_playbook", "ansible.builtin.import_playbook"} {
+			if v, ok := m[key]; ok {
+				imports = append(imports, fmt.Sprint(v))
+			}
+		}
+		if _, ok := m["hosts"]; !ok {
+			continue
+		}
+		name, _ := m["name"].(string)
+		confirm, cross, attest := playGates(m)
+		plays = append(plays, applyPlay{index: len(plays), name: name, confirm: confirm, cross: cross, attest: attest})
+	}
+	return plays, imports
+}
+
+// stageGateProblems returns one message per violation of the apply-play stage
+// gate rule in the playbook rel (repo-relative, slash-separated) and the
+// number of plays it checked. hit collects the allowlist keys that matched a
+// play, for unmatchedStageGateAllowlist.
+func stageGateProblems(rel string, doc any, allow map[string]string, hit map[string]bool) ([]string, int) {
+	plays, imports := applyPlaysOf(doc)
+	var out []string
+	for _, imp := range imports {
+		target := filepath.ToSlash(filepath.Clean(filepath.Join(filepath.Dir(rel), imp)))
+		if filepath.ToSlash(filepath.Dir(target)) != "playbooks/apply" {
+			out = append(out, fmt.Sprintf("%s: import_playbook %q resolves to %s, outside playbooks/apply/, so this lint cannot see its plays", rel, imp, target))
+		}
+	}
+	perKey := map[string]int{}
+	for _, pl := range plays {
+		perKey[rel+"|"+pl.name]++
+	}
+	for _, pl := range plays {
+		key := rel + "|" + pl.name
+		if _, ok := allow[key]; ok {
+			hit[key] = true
+			switch {
+			case perKey[key] > 1:
+				out = append(out, fmt.Sprintf("allowlist entry %q matches %d plays; give each play its own name", key, perKey[key]))
+			case pl.confirm || pl.attest:
+				out = append(out, fmt.Sprintf("allowlist entry %q: the play now has a stage gate — drop the entry", key))
+			}
+			continue
+		}
+		if !pl.confirm {
+			out = append(out, fmt.Sprintf("%s: play #%d %q has no staging/prod confirm gate (AGENTS.md §4.3)", rel, pl.index, pl.name))
+		}
+		if !pl.attest {
+			out = append(out, fmt.Sprintf("%s: play #%d %q has no prod attestation gate (AGENTS.md §4.3)", rel, pl.index, pl.name))
+		}
+	}
+	return out, len(plays)
+}
+
+// unmatchedStageGateAllowlist returns the allowlist keys no play matched, in
+// order.
+func unmatchedStageGateAllowlist(allow map[string]string, hit map[string]bool) []string {
+	var out []string
+	for key := range allow {
+		if !hit[key] {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // stageGatesNotAlways returns, for every play in doc with a task tagged
 // other than `always`, the names of the asserts that read the stage but
 // are not tagged `always` (own or inherited), and how many such plays it
@@ -579,6 +950,40 @@ func stageGatesNotAlways(doc any) ([]string, int) {
 	return out, checked
 }
 
+// crossCheckStageText matches the stage variable a cross-check compares with
+// group_names.
+var crossCheckStageText = regexp.MustCompile(`\b(patch_)?stage\b`)
+
+// playGates reports which of the three AGENTS.md §4.3 stage gates a play has.
+// This is the one definition of them; every lint that asks "does this play
+// have the confirm gate" calls it. Only asserts in pre_tasks and tasks
+// (including blocks) count, read from `that:` as text:
+//   - confirm: that: names confirm_staging or confirm_prod;
+//   - cross: that: names group_names and the stage variable (the
+//     environment-group cross-check);
+//   - attest: that: names staging_attested_within_hours (the prod
+//     attestation gate).
+//
+// A `when:` that mentions these names, a `fail` task, and anything in
+// post_tasks or rescue-only paths are not a gate. The text is not evaluated.
+func playGates(play map[string]any) (confirm, cross, attest bool) {
+	for _, section := range []string{"pre_tasks", "tasks"} {
+		walkTaskTree(play[section], nil, func(task map[string]any, _ []string) {
+			that := assertThat(task)
+			if strings.Contains(that, "confirm_staging") || strings.Contains(that, "confirm_prod") {
+				confirm = true
+			}
+			if strings.Contains(that, "group_names") && crossCheckStageText.MatchString(that) {
+				cross = true
+			}
+			if strings.Contains(that, "staging_attested_within_hours") {
+				attest = true
+			}
+		})
+	}
+	return confirm, cross, attest
+}
+
 // playsMissingCrossCheck returns the names of the plays in doc that have a
 // confirm_staging/confirm_prod assert but no assert comparing the stage
 // with group_names, and how many plays with a confirm assert it checked.
@@ -594,18 +999,7 @@ func playsMissingCrossCheck(doc any) ([]string, int) {
 		if _, ok := play["hosts"]; !ok {
 			continue
 		}
-		confirm, cross := false, false
-		for _, section := range []string{"pre_tasks", "tasks"} {
-			walkTaskTree(play[section], nil, func(task map[string]any, _ []string) {
-				that := assertThat(task)
-				if strings.Contains(that, "confirm_staging") || strings.Contains(that, "confirm_prod") {
-					confirm = true
-				}
-				if strings.Contains(that, "group_names") && regexp.MustCompile(`\b(patch_)?stage\b`).MatchString(that) {
-					cross = true
-				}
-			})
-		}
+		confirm, cross, _ := playGates(play)
 		if !confirm {
 			continue
 		}
