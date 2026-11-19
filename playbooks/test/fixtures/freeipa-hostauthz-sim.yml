@@ -90,8 +90,9 @@
         # ══ POSITIVE — safe regardless of allow_all state ═══════════════════
         - name: "Sim[+] — kinit as {{ sim_local_user }}"
           become: true
-          ansible.builtin.shell:
-            cmd: 'echo "{{ sim_local_password }}" | kinit -r 7d {{ sim_local_user }}'
+          ansible.builtin.command:
+            argv: [kinit, -r, 7d, "{{ sim_local_user }}"]
+            stdin: "{{ sim_local_password }}"
           register: kinit_local
           changed_when: false
           no_log: true
