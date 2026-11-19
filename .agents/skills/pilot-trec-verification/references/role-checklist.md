@@ -54,26 +54,28 @@ silently hand-editing would.
 Those rounds succeeded because they toggled each role with `DOWN <n>` then
 `SPACE`. That matters structurally, not stylistically:
 
-- `multiSelectModel` (`cmd/pilot/cmd/tui_multiselect.go`) renders only a
-  **scrolling window** of the item list (`listVisibleRows`, capped at 15 rows by
-  default). With ~19+ roles most rows are off-screen at any moment, and `SELECT`
-  works by scanning the *currently rendered* screen text — so it cannot reliably
-  target a scrolled-out row.
+- `multiSelectModel` (`cmd/pilot/cmd/tui_multiselect.go`, deleted in
+  `521366e`) rendered only a **scrolling window** of the item list
+  (`listVisibleRows`, capped at 15 rows by default). With ~19+ roles most rows
+  were off-screen at any moment, and `SELECT` works by scanning the *currently
+  rendered* screen text — so it could not reliably target a scrolled-out row.
+  The Huh checklist above renders every row, which is why `TOGGLE` now works.
 - The screen's own title (`主機 "<host>" 的角色`) and its in-screen hint line
-  (`☑ 逐項勾選角色(...)`) routinely share substrings with role names or with each
-  other — the same collision class documented in `select-labels.md`, one more
-  reason content-based matching is fragile here specifically.
-- `up`/`down` in `multiSelectModel.Update` is pure `cursor++`/`cursor--` with no
-  dependency on what's rendered, and `windowStart` auto-follows the cursor. So
-  `DOWN <n>` + `SPACE` is fully content-independent and immune to both problems.
+  (`☑ 逐項勾選角色(...)`) routinely shared substrings with role names or with
+  each other — the same collision class documented in `select-labels.md`. Still
+  true of role descriptions on the Huh screen: match on row-unique text.
+- `up`/`down` in `multiSelectModel.Update` was pure `cursor++`/`cursor--` with no
+  dependency on what was rendered, and `windowStart` auto-followed the cursor. So
+  `DOWN <n>` + `SPACE` was fully content-independent and immune to both problems.
+  Its lint-accepted descendant is `CHECKLIST_DOWN <n>` + `SPACE`.
 
 Get the role's position from `internal/inventory/contracts.go`
 (`roleContracts` order), not from memory — the same "recompute indices fresh"
 discipline as `../SKILL.md` §2.
 
-**If a `SELECT`-based script gets the checklist's pointer stuck, the fix is to
-switch that screen's navigation to `DOWN`/`SPACE` — not to conclude the wizard
-can't do the job.**
+**If a label-based script gets the checklist's pointer stuck, the fix is a
+row-unique `TOGGLE` label or `CHECKLIST_DOWN <n>` + `SPACE` — not to conclude
+the wizard can't do the job.**
 
 ## Never write `DOWN 0`
 
@@ -102,8 +104,8 @@ checklist row got checked" as this bug. A current build refuses to run the
 script at all, which makes the mistake self-evident. Either way the rule is
 unchanged. This remains the single most likely explanation for a wrong-row
 symptom on an older build, or a script load failure mentioning `DOWN` on a
-current one — check your script for a literal `DOWN 0` before suspecting
-`multiSelectModel`'s cursor logic, which is correct.
+current one — check your script for a literal `DOWN 0` before suspecting the
+checklist's own cursor logic.
 
 Commit `6f77bfc` also normalizes extra/leading whitespace between an opcode and
 its argument in the plain-text script format. If a `TEXT` payload genuinely needs
