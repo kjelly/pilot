@@ -71,9 +71,11 @@ func TestUserInitialPasswordResolvesOnlyWhatTheRunDecides(t *testing.T) {
 		{"a value with a filter", `{{ v }}`, `{"v": "{{ b | default('x') }}", "b": "y"}`, nil, "", PasswordReasonNestedTemplate},
 		{"a cycle", `{{ a }}`, `{"a": "{{ b }}", "b": "{{ a }}"}`, nil, "", PasswordReasonChain},
 		{"a reference to itself", `{{ a }}`, `{"a": "{{ a }}"}`, nil, "", PasswordReasonChain},
-		// The first name and maxRunVarHops more are followed: maxRunVarHops+1 names.
-		{"a chain exactly at the bound", `{{ v1 }}`, chainVars(maxRunVarHops + 1), nil, "end", ok},
-		{"a chain longer than the bound", `{{ v1 }}`, chainVars(maxRunVarHops + 2), nil, "", PasswordReasonChain},
+		// The first name and eight more are followed (the spec and the runbook say eight):
+		// nine names resolve, ten do not. The counts are literal on purpose: the oracle's
+		// rows are relative to maxRunVarHops, so this is what pins the number itself.
+		{"a chain of nine names, the bound", `{{ v1 }}`, chainVars(9), nil, "end", ok},
+		{"a chain of ten names, past the bound", `{{ v1 }}`, chainVars(10), nil, "", PasswordReasonChain},
 
 		// ---- G6: what the value must be ----
 		{"an empty string", `{{ v }}`, `{"v": ""}`, nil, "", PasswordReasonEmpty},
