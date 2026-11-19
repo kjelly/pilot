@@ -22,6 +22,9 @@ SSH 憑證。
 - `pilot verify docs/verification/agent-controller.md`:**13/13 PASS**(見 §5)。
 - 冪等重跑:`changed=0`(見 §3.2)。
 - 真實 Alertmanager v0.27 → agent-controller 的 webhook 全鏈路成功遞送(見 §4)。
+- #195(升級備份與 rollback)另在 vm-target 上以拋棄式單機實跑:全新主機的 L1–L6、升級、不選 Step 6 的
+  tag 選擇、check mode、Step 6 前後的失敗、空快照、沒有 `state.db` 的升級,以及 main 的對照組;tested
+  revision、verdict、各情境結果與未涵蓋範圍見[最新 evidence](../evidence/agent-controller/LATEST.md)。
 
 ## 2. 部署鏈(實際指令 + 真實輸出摘要)
 
@@ -187,8 +190,8 @@ unit(`LoadState=not-found`),沒有服務可停,訊息會這樣說,不會寫成�
 Step 6 之後才失敗時,rescue 仍會停止並停用一個健康的服務,沒有快照可還原就不會重啟;升級的 run 會還原
 binary 與 state.db 並重啟,但 rescue 從不還原 config.yaml、unit 與 `webhook-secret.env`(detection-engine
 有,這裡尚未移植),也不在重啟後檢查服務是否可用。細節見 #395。
-這段行為只有 real-ansible 測試(`cmd/pilot/cmd/agent_controller_backup_tags_test.go`),
-還沒有 vm-target 實跑。
+這段行為由 real-ansible 測試(`cmd/pilot/cmd/agent_controller_backup_tags_test.go`)鎖住,並在 vm-target 上
+實跑過(見 §1 與[最新 evidence](../evidence/agent-controller/LATEST.md))。
 
 ## 6. 已知限制 / 尚未完成
 
@@ -217,3 +220,4 @@ pilot vm-target down --name agentctl
 | 日期 | 版本 | 變更 |
 |---|---|---|
 | 2026-09-01 | v1.0 | Phase 1 初次實跑:vm-target 四層部署鏈全綠、13/13 Spec v2 PASS、冪等 changed=0、真實 Alertmanager v0.27 webhook 遞送鏈驗證通過;實跑中發現並修好 3 個真 bug(HMAC→bearer token、C3 探針位址、C8 探針期望值反了)。tested revision: `38d7ed7`(`feat(agent-monitoring): implement Phase 1 observe-only Incident Controller`)。 |
+| 2026-11-19 | v1.1 | kjelly/pilot#195:升級備份與 rollback 改成只在 Step 6 會換 binary 時才備份,每次升級用自己的 `apply-*` 目錄,rescue 只還原這次驗證過的快照,Step 6 之前失敗不動服務(§5);已知限制見 #395。vm-target 實跑結果見 §1 的 evidence 連結。 |
