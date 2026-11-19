@@ -70,8 +70,9 @@
 
         # ── Admin authentication ──────────────────────────────────────────
         - name: "Fixtures — kinit admin"
-          ansible.builtin.shell:
-            cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ ipa_realm }}"]
+            stdin: "{{ ipa_admin_password }}"
           register: ipa_kinit
           changed_when: false
           no_log: true
@@ -226,15 +227,56 @@
     # `ipa passwd` sets a password that expires immediately and requires
     # change-on-next-login.  Use kadmin.local to set a stable password so
     # `sudo kinit` in the audit sim works without interactive prompts.
+    #
+    # The password goes to kadmin.local on stdin, two lines (never into a shell
+    # string: `$`, backticks, `%` and `\` would be expanded or rewritten, issue
+    # #118). kadmin.local exits 0 whatever happens (captured on FreeIPA 4.13.4,
+    # krb5 1.21.1: success, password mismatch, unknown principal, too short and
+    # "Too soon to change password" are all rc=0); success is the stdout line
+    # `Password for "<principal>" changed.`, the reason for a failure is on
+    # stderr. The realm's minimum password lifetime (1 hour) makes a second
+    # change in a row fail, so the password is only set when the declared one
+    # does not work yet, and the gate after it fails with kadmin's own words.
+    - name: "Fixtures — does {{ audit_demo_user }} already have the declared password?"
+      become: true
+      ansible.builtin.command:
+        argv: [kinit, -c, "MEMORY:pilot-audit-demo-pwcheck", "{{ audit_demo_user }}@{{ ipa_realm }}"]
+        stdin: "{{ audit_demo_user_pass }}"
+      register: ipa_cpw_check
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [fixtures]
+
     - name: "Fixtures — set stable password for {{ audit_demo_user }} via kadmin.local (no forced change)"
       become: true
-      ansible.builtin.shell:
-        cmd: |
-          printf "cpw {{ audit_demo_user }}\n{{ audit_demo_user_pass }}\n{{ audit_demo_user_pass }}\n" \
-            | kadmin.local 2>&1 | grep -E "(changed|error|Error)" || true
+      ansible.builtin.command:
+        argv: [kadmin.local, -q, "cpw {{ audit_demo_user }}"]
+        stdin: "{{ audit_demo_user_pass }}\n{{ audit_demo_user_pass }}"
       register: ipa_cpw
-      changed_when: "'changed' in ipa_cpw.stdout"
+      changed_when: "' changed.' in ipa_cpw.stdout"
       failed_when: false
+      no_log: true
+      when:
+        - not ansible_check_mode
+        - ipa_cpw_check.rc != 0
+      tags: [fixtures]
+
+    - name: "Gate: kadmin.local changed the password of {{ audit_demo_user }}"
+      ansible.builtin.assert:
+        that:
+          - ipa_cpw.rc == 0
+          - "' changed.' in ipa_cpw.stdout"
+          - "'change_password:' not in ipa_cpw.stderr"
+        fail_msg: >-
+          kadmin.local did not change the password of {{ audit_demo_user }}
+          (rc={{ ipa_cpw.rc }}; it exits 0 even on failure):
+          {{ ipa_cpw.stderr | default('') | trim }} ("Too soon to change
+          password" means the realm's minimum password lifetime has not passed:
+          ipa pwpolicy-mod --minlife=0 on a lab realm).
+      when:
+        - not ansible_check_mode
+        - ipa_cpw_check.rc != 0
       tags: [fixtures]
 
     # ── End state summary ──────────────────────────────────────────────
