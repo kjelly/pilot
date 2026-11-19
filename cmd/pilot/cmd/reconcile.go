@@ -40,13 +40,25 @@ const golangEngineHelp = `--engine golang --component freeipa-identity 只處理
                             等鎖的時間。
   --scope full              混合執行(--preview-only 與 --force 都可以)：沿用 Ansible engine 的 reconcile
                             流程(依賴、availability、預覽、stage、history、webhook、冪等性)，但 identity
-                            這一步改由 Go engine 先寫 users 與 groups(取鎖之後，入口 → 寫入 → 重讀驗證)，
-                            Go 階段完成並通過驗證之後才執行 identity playbook(以 -e
-                            pilot_identity_users_groups_engine=go 略過 users／groups 的兩個區段，SSH key
-                            與其餘 section 照常)，最後要求 playbook 的觀察結果說已確認授權快取義務。
+                            這一步由 Go engine 寫 users、groups 與 roster 的 HBAC(services、rules、成員、
+                            分類、enabled、刪除、allow_all lockdown)，順序是：
+                              Go(users／groups) → identity playbook 第 1 次執行 → Go(HBAC) →
+                              identity playbook 第 2 次執行(--tags client-cache)
+                            Go 的 users／groups 階段在取鎖之後執行(入口 → 寫入 → 重讀驗證)，完成並通過
+                            驗證之後才執行 playbook(以 -e pilot_identity_users_groups_engine=go 與
+                            -e pilot_identity_hbac_engine=go 略過 users／groups 與 roster 的 HBAC，SSH key、
+                            hosts、hostgroups、sudo、NFS 與 pilot access 編譯出的 rule 照常)。HBAC 在
+                            playbook 之後，因為它引用的 host 與 hostgroup 由 playbook 建立；HBAC 階段在同一把
+                            鎖之下、用自己的入口與連線，寫入並重讀驗證。第 1 次執行帶 -e
+                            pilot_identity_cache_settle=defer，不刷新 client 的 SSSD 快取也不確認義務(HBAC
+                            階段還要寫)；第 2 次執行只做授權快取的刷新與確認，最後要求它的觀察結果說已確認。
+                            第 1 次執行失敗則不執行 HBAC 階段與第 2 次執行；HBAC 階段失敗(或被阻擋)時第 2
+                            次執行仍會執行，以刷新已寫入的部分，整輪是失敗(結束碼 1，有寫入時是部分套用)。
                             Go 階段失敗、重讀失敗、或這一輪動過的物件在重讀後仍有操作，playbook 不會
-                            執行。預覽是 Go 的唯讀 plan 加 Ansible 的 --check --diff(不取鎖)；plan 有
-                            被阻擋的物件時預覽在 playbook 開始之前就失敗。
+                            執行。預覽是 Go 的唯讀 plan(users、groups 與 HBAC；預覽時 roster 宣告而 FreeIPA
+                            還沒有的 host、hostgroup、service 視為 playbook 會建立)加 Ansible 的 --check
+                            --diff(不取鎖)；plan 有被阻擋的物件時預覽在 playbook 開始之前就失敗。冪等性檢查
+                            要求 users／groups 與 HBAC 的 Go 唯讀 plan 都沒有操作。
 結束碼：0 成功(全部完成並驗證，且沒有義務未結清)；1 失敗(含結果不明、部分套用)；3 plan 有被阻擋的
 物件(零寫入)；4 每個 Go 操作都已完成並驗證，只剩授權快取義務未結清(--scope full：playbook 已執行，但它的
 觀察結果沒有說已確認，例如 ipa_identity_refresh_sssd_cache 為 false 或有 optional client 被延後)。

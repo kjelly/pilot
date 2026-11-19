@@ -318,6 +318,16 @@ func (f *fakeIPA) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(f.fixture("group-find-no-match"))
 	case req.Method == "group_find":
 		_, _ = w.Write(f.adminsGroupRead())
+	// Phase 3a: the mixed run reads the HBAC too. A server with its built-in rules and services, no host
+	// and no hostgroup; a scenario with HBAC of its own answers through respond (hbacFake).
+	case req.Method == "hbacrule_find":
+		_, _ = w.Write(f.fixture("hbacrule-find-builtin"))
+	case req.Method == "hbacsvc_find":
+		_, _ = w.Write(f.fixture("hbacsvc-find-builtin"))
+	case req.Method == "host_find" || req.Method == "hostgroup_find":
+		_, _ = w.Write([]byte(`{"result":{"result":[],"count":0,"truncated":false,"summary":"0 matched"},"error":null,"id":0,"principal":"admin@EXAMPLE.TEST","version":"4.13.4"}`))
+	case req.Method == "env":
+		_, _ = w.Write(f.fixture("env-domain"))
 	case req.Method == "session_logout":
 		_, _ = w.Write([]byte(`{"result":{"result":null},"error":null,"id":0,"principal":"admin@EXAMPLE.TEST","version":"4.13.4"}`))
 	default:

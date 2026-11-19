@@ -252,6 +252,18 @@ func newMixedEnv(t *testing.T, roster string) *mixedEnv {
 	return m
 }
 
+// applyCtx is the context of the apply step's playbook run: it carries the lock the step holds, which the HBAC
+// stage between the playbook's two apply runs takes (identitylock.Require).
+func (m *mixedEnv) applyCtx(t *testing.T) context.Context {
+	t.Helper()
+	held, err := m.lock.Acquirer()(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = held.Release() })
+	return held.Attach(context.Background())
+}
+
 // goPhase takes the fake lock the apply step would have taken and runs PrepareApply under it.
 func (m *mixedEnv) goPhase(t *testing.T) (*identitylock.Held, error) {
 	t.Helper()
@@ -391,8 +403,17 @@ func TestMixedGoPhaseRefusesAServerThatIsNotTheLockedOne(t *testing.T) {
 func observeWrite(t *testing.T, host, fqdn string, res *identityreconcile.AuthCacheResult, exit int) playbookRun {
 	t.Helper()
 	return func(_ context.Context, extra []string) (*ansible.Result, error) {
-		if len(extra) != 2 || extra[0] != "-e" {
+		// -e <the observation file's variable>, then what only the apply's two runs are told: the first
+		// defers the settlement, the second selects the tasks that settle it.
+		if len(extra) < 2 || extra[0] != "-e" {
 			t.Fatalf("the run was handed %v, want -e <the observation file's variable>", extra)
+		}
+		switch tail := extra[2:]; {
+		case len(tail) == 0:
+		case slices.Equal(tail, []string{"-e", identityreconcile.CacheSettleVar + "=" + identityreconcile.CacheSettleDefer}):
+		case slices.Equal(tail, []string{"--tags", identityreconcile.ClientCacheTag}):
+		default:
+			t.Fatalf("the run was handed %v after the observation file", tail)
 		}
 		var vars map[string]string
 		if err := json.Unmarshal([]byte(extra[1]), &vars); err != nil || vars[identityreconcile.AuthCacheOutputVar] == "" {
@@ -455,7 +476,7 @@ func TestMixedVerifyConsumesTheObservationOfTheApply(t *testing.T) {
 				m.step.res.Ops = append(m.step.res.Ops, identityreconcile.OpResult{Outcome: identityreconcile.OutcomeSuccess})
 			}
 			if !tc.skipRun {
-				if _, err := m.step.RunPlaybook(context.Background(), "apply", observeWrite(t, tc.host, m.step.fqdn, tc.obs, tc.exit)); err != nil {
+				if _, err := m.step.RunPlaybook(m.applyCtx(t), "apply", observeWrite(t, tc.host, m.step.fqdn, tc.obs, tc.exit)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -506,7 +527,7 @@ func TestMixedRunPlaybookObservesTheApplyAndLeavesTheCommandsResultAlone(t *test
 		t.Fatalf("the preview left an observation (%+v, %v) or counts as the playbook having run", m.step.obs, m.step.obsErr)
 	}
 	// The apply: acknowledged.
-	if res, err := m.step.RunPlaybook(context.Background(), "apply", observeWrite(t, "ipa-1", m.step.fqdn, acked, 0)); err != nil || res.ExitCode != 0 {
+	if res, err := m.step.RunPlaybook(m.applyCtx(t), "apply", observeWrite(t, "ipa-1", m.step.fqdn, acked, 0)); err != nil || res.ExitCode != 0 {
 		t.Fatalf("apply: %+v, %v", res, err)
 	}
 	if m.step.obs == nil || !m.step.obs.Acked || m.step.obsErr != nil || !m.step.playbookRan {
@@ -520,14 +541,14 @@ func TestMixedRunPlaybookObservesTheApplyAndLeavesTheCommandsResultAlone(t *test
 		t.Fatalf("the idempotency run replaced the apply's observation: %+v", m.step.obs)
 	}
 	// A second apply that wrote nothing does not keep the first one's: the file was made empty first.
-	if _, err := m.step.RunPlaybook(context.Background(), "apply", observeWrite(t, "ipa-1", m.step.fqdn, nil, 0)); err != nil {
+	if _, err := m.step.RunPlaybook(m.applyCtx(t), "apply", observeWrite(t, "ipa-1", m.step.fqdn, nil, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if m.step.obs != nil || m.step.obsErr == nil {
 		t.Fatalf("a run that wrote nothing was read as the earlier run's result: %+v, %v", m.step.obs, m.step.obsErr)
 	}
 	// The playbook failed (exit 2): its result comes back as it was, and what it wrote before failing is not accepted.
-	res, err := m.step.RunPlaybook(context.Background(), "apply", observeWrite(t, "ipa-1", m.step.fqdn, acked, 2))
+	res, err := m.step.RunPlaybook(m.applyCtx(t), "apply", observeWrite(t, "ipa-1", m.step.fqdn, acked, 2))
 	if err != nil || res == nil || res.ExitCode != 2 {
 		t.Fatalf("a failed playbook's result was changed: %+v, %v", res, err)
 	}
@@ -536,7 +557,7 @@ func TestMixedRunPlaybookObservesTheApplyAndLeavesTheCommandsResultAlone(t *test
 	}
 	// The command could not be started: its error comes back, and is not a parse rejection.
 	boom := errors.New("no ansible-playbook")
-	if _, err := m.step.RunPlaybook(context.Background(), "apply", func(context.Context, []string) (*ansible.Result, error) { return nil, boom }); !errors.Is(err, boom) {
+	if _, err := m.step.RunPlaybook(m.applyCtx(t), "apply", func(context.Context, []string) (*ansible.Result, error) { return nil, boom }); !errors.Is(err, boom) {
 		t.Fatalf("a run that did not start: %v", err)
 	}
 }
@@ -683,7 +704,7 @@ func TestMixedFinishWritesTheResultFileAndTheSummary(t *testing.T) {
 	if _, err := m.goPhase(t); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.step.RunPlaybook(context.Background(), "apply", observeWrite(t, "ipa-1", m.step.fqdn, &identityreconcile.AuthCacheResult{Prepared: true, Dirty: boolPtr(true), Refreshed: true, Acked: true}, 0)); err != nil {
+	if _, err := m.step.RunPlaybook(m.applyCtx(t), "apply", observeWrite(t, "ipa-1", m.step.fqdn, &identityreconcile.AuthCacheResult{Prepared: true, Dirty: boolPtr(true), Refreshed: true, Acked: true}, 0)); err != nil {
 		t.Fatal(err)
 	}
 	m.step.finished(delivery.Result{Outcome: delivery.OutcomeSuccess}, m.writer.RunID())
@@ -741,7 +762,7 @@ func TestMixedMarkerIsOnTheContextOnlyWhereTheCommandPutIt(t *testing.T) {
 	if mixedIdentityRunFrom(withMixedIdentityRun(context.Background(), run)) != run {
 		t.Fatal("the marker does not come back")
 	}
-	if got := (&mixedStep{}).extraVars(); !slices.Equal(got, []string{"pilot_identity_users_groups_engine=go"}) {
+	if got := (&mixedStep{}).extraVars(); !slices.Equal(got, []string{"pilot_identity_users_groups_engine=go", "pilot_identity_hbac_engine=go"}) {
 		t.Fatalf("extra vars %v, want exactly the engine variable the playbook's gate accepts", got)
 	}
 }

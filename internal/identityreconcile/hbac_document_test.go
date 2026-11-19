@@ -112,3 +112,14 @@ func TestApplyDocumentOfAMixedRunCarriesTheHBACStageAndItsObligation(t *testing.
 		t.Errorf("a stage that did not run is not reported as skipped: %+v", skipped.HBAC)
 	}
 }
+
+func TestDocumentBlockedCountAddsTheHBACPlans(t *testing.T) {
+	base := NewDocument(desired(t, validRoster), Observation{}, Plan{Operations: []Operation{}, Blocked: []Blocked{{Reason: "r", Object: "o"}}}, Target{}, Server{}, "rev", time.Unix(0, 0), Stats{})
+	if base.BlockedCount() != 1 {
+		t.Fatalf("users and groups only: %d", base.BlockedCount())
+	}
+	hbac := &HBACPlanDoc{HBACPlan: HBACPlan{Blocked: []Blocked{{Reason: "a"}, {Reason: "b"}}}}
+	if got := base.WithHBAC(hbac).BlockedCount(); got != 3 {
+		t.Fatalf("with the HBAC plan's two: %d", got)
+	}
+}

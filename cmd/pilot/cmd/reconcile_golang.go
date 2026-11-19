@@ -190,16 +190,18 @@ func golangPreview(cmd *cobra.Command) error {
 	if err != nil {
 		return err // gate: preview-preflight
 	}
-	_, err = golangPreviewPlan(ctx, out, prep, planOut)
+	_, err = golangPreviewPlan(ctx, out, prep, planOut, golangHBACOff)
 	return err // gate: preview-plan-passthrough
 }
 
 // golangPreviewPlan is the read-only plan of the Go engine for a prepared run (spec §2.2 steps 7
 // to 15): it connects with a read-only client, reads, plans, prints the plan and writes the plan
 // file. It sends no write, and no ssh it started outlives it. The preview is this function, and
-// so are the preview and the idempotency check of the mixed run (--scope full). It returns the
-// plan document, and the error of a plan with blocked objects (exit code 3).
-func golangPreviewPlan(ctx context.Context, out io.Writer, prep *golangPrep, planOut *outputFile) (identityreconcile.Document, error) {
+// so are the preview and the idempotency check of the mixed run (--scope full), which also read and
+// plan the roster's HBAC on the same session (hbac says how; golangHBACOff, the users-groups scope's,
+// leaves the document what it was). It returns the plan document, and the error of a plan with
+// blocked objects (exit code 3), the HBAC plan's included.
+func golangPreviewPlan(ctx context.Context, out io.Writer, prep *golangPrep, planOut *outputFile, hbac golangHBACMode) (identityreconcile.Document, error) {
 	dialer := newGolangDialer(prep.target)
 	// The first deferred call here, so the last to run: after the logout
 	// and CloseIdleConnections it ends what is still running, among it a
@@ -219,6 +221,12 @@ func golangPreviewPlan(ctx context.Context, out io.Writer, prep *golangPrep, pla
 		return identityreconcile.Document{}, err // gate: observe
 	}
 	plan := identityreconcile.Build(desired, obs.Users, obs.Groups)
+	var hbacDoc *identityreconcile.HBACPlanDoc
+	if hbac != golangHBACOff {
+		if hbacDoc, err = mixedHBACPlanDoc(ctx, client, prep, hbac == golangHBACPreview); err != nil {
+			return identityreconcile.Document{}, err // gate: preview-hbac
+		}
+	}
 	stats := client.Stats()
 	if stats.Writes != 0 {
 		// Before anything is printed or written: a preview that sent a write
@@ -229,7 +237,11 @@ func golangPreviewPlan(ctx context.Context, out io.Writer, prep *golangPrep, pla
 		pilotRevision(), observedAt,
 		identityreconcile.Stats{HTTPRequests: stats.HTTPRequests, Reads: stats.Reads, Writes: stats.Writes, Relogins: stats.Relogins, ReadRetries: stats.ReadRetries},
 	)
+	doc = doc.WithHBAC(hbacDoc)
 	printGolangPreview(out, doc, prep.stage)
+	if doc.HBAC != nil {
+		printHBACPreview(out, doc.HBAC)
+	}
 	if planOut != nil {
 		data, err := json.MarshalIndent(doc, "", "  ")
 		if err != nil {
@@ -241,7 +253,7 @@ func golangPreviewPlan(ctx context.Context, out io.Writer, prep *golangPrep, pla
 		fmt.Fprintf(out, "plan JSON：%s\n", planOut.path)
 	}
 	if doc.Result == identityreconcile.ResultBlocked {
-		return doc, &golangPreviewError{err: fmt.Errorf("--engine %s 預覽：%d 個物件被阻擋，見上方清單", reconcileEngineGolang, len(doc.Blocked)), code: golangPreviewBlockedExitCode} // gate: blocked-plan
+		return doc, &golangPreviewError{err: fmt.Errorf("--engine %s 預覽：%d 個物件被阻擋，見上方清單", reconcileEngineGolang, doc.BlockedCount()), code: golangPreviewBlockedExitCode} // gate: blocked-plan
 	}
 	return doc, nil
 }
@@ -250,12 +262,15 @@ func golangPreviewPlan(ctx context.Context, out io.Writer, prep *golangPrep, pla
 // FreeIPA server the roster is for, the stage, the desired state and the credentials to
 // reach it, from the workspace alone (spec §2.2 steps 1 to 6).
 type golangPrep struct {
-	inv            string
-	host           string
-	stage          string
-	groups         map[string][]string
-	hostVars       map[string]any
-	rosterData     []byte
+	inv        string
+	host       string
+	stage      string
+	groups     map[string][]string
+	hostVars   map[string]any
+	rosterData []byte
+	// root is the roster as it was decoded: the mixed run's HBAC part is read from it
+	// (identityreconcile.HBACFromRoster), the users and groups part is desired.
+	root           map[string]any
 	desired        identityreconcile.Desired
 	declaredServer string
 	password       string
@@ -351,7 +366,7 @@ func golangPreflightFor(ctx context.Context, runtime deployAnsibleRuntime, in go
 		return nil, fmt.Errorf("--engine %s 不支援這台主機的 SSH 連線設定：%w", reconcileEngineGolang, err) // gate: ssh-target
 	}
 	return &golangPrep{
-		inv: inv, host: host, stage: stage, groups: snapshot.Groups, hostVars: hostVars, rosterData: rosterData,
+		inv: inv, host: host, stage: stage, groups: snapshot.Groups, hostVars: hostVars, rosterData: rosterData, root: root,
 		desired: desired, declaredServer: declaredServer, password: password, target: target,
 	}, nil
 }

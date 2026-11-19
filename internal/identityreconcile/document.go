@@ -113,6 +113,16 @@ func NewHBACPlanDoc(plan HBACPlan, obs HBACObservation, preview bool) *HBACPlanD
 	}
 }
 
+// BlockedCount is the number of blocked objects of the document: the users and groups plan's and,
+// in a mixed run, the HBAC plan's.
+func (d Document) BlockedCount() int {
+	n := len(d.Blocked)
+	if d.HBAC != nil {
+		n += len(d.HBAC.Blocked)
+	}
+	return n
+}
+
 // WithHBAC is the document of a mixed run: the users and groups plan with the HBAC plan next to it. The
 // scope is then full, and a blocked HBAC plan makes the whole document blocked, as a blocked users and
 // groups plan does. The document is returned as a copy.
