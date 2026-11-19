@@ -255,9 +255,10 @@ func TestRegression_PipefailShellTasksHaveNoEarlyExitReader(t *testing.T) {
 			t.Errorf("%s: %s", path, v)
 		}
 	}
-	// playbooks/** has dozens of pipefail shell tasks; a much smaller count
+	// playbooks/** still has a dozen pipefail shell tasks (27 before issue
+	// #118 moved 14 kinit pipes to stdin, 13 after); a much smaller count
 	// means the walker stopped finding them.
-	if scripts < 20 {
+	if scripts < 10 {
 		t.Fatalf("only %d pipefail shell tasks found; the walker is broken", scripts)
 	}
 }

@@ -850,29 +850,48 @@
             ('nsslapd-auditfaillog-logging-enabled: on' not in ipa_ds_audit_cfg.stdout)
           changed_when: true
 
+        # The dummy write goes over the ldapi socket with SASL EXTERNAL, as
+        # root (we are `become: true`): 389-ds maps root's peer credentials to
+        # Directory Manager, so no password is needed, and none sits in a
+        # command line or shell text (before issue #118 it was a heredoc
+        # fed to `ldapmodify -w <Directory Manager password>`). The LDIF goes
+        # in on stdin.
+        # ldapmodify exits non-zero when the write fails (rc 32 for a missing
+        # entry, 65 for a schema violation, 255 for no socket, captured on
+        # 389-ds-base 2.9.0), and the task then fails with its stderr; the
+        # old shell echoed INITIALIZED and exited 0 whatever ldapmodify did.
+        - name: "FreeIPA — 389-ds audit log: check whether the audit file already has entries"
+          ansible.builtin.stat:
+            path: "/var/log/dirsrv/{{ ipa_ds_instance }}/audit"
+            # Only the size matters, and the audit file can be 100 MB.
+            get_checksum: false
+          register: ipa_ds_audit_before
+
         - name: "FreeIPA — 389-ds audit log: write dummy description to trigger audit log (spec C16)"
-          ansible.builtin.shell: |
-            if [ ! -s /var/log/dirsrv/{{ ipa_ds_instance }}/audit ]; then
-            ldapmodify -x -H ldap://localhost -D "cn=Directory Manager" -w "{{ ipa_dm_password }}" <<EOF
-            dn: dc={{ ipa_domain.replace('.', ',dc=') }}
-            changetype: modify
-            replace: description
-            description: FreeIPA Directory Server for pilot.internal (initialized at {{ ansible_date_time.iso8601 }})
-            EOF
-              echo "INITIALIZED"
-            fi
+          ansible.builtin.command:
+            argv:
+              - ldapmodify
+              - -Q
+              - -Y
+              - EXTERNAL
+              - -H
+              - "ldapi://%2Frun%2F{{ ipa_ds_instance }}.socket"
+            stdin: |
+              dn: dc={{ ipa_domain.replace('.', ',dc=') }}
+              changetype: modify
+              replace: description
+              description: FreeIPA Directory Server for pilot.internal (initialized at {{ ansible_date_time.iso8601 }})
           register: audit_init
-          changed_when: "'INITIALIZED' in audit_init.stdout"
-          no_log: true
+          when: not (ipa_ds_audit_before.stat.exists and ipa_ds_audit_before.stat.size > 0)
+          changed_when: audit_init.rc == 0
 
         # 389-ds buffers the audit log (nsslapd-auditlog-logbuffering is on
         # by default and left that way), so the entries above reach the file
         # some seconds later: 8 s and 29 s on 389-ds-base 2.8.0 (2026-09-24).
         # With no client enrolling after the server play, verify could check
         # C16 before the flush and see an empty file. Wait for the flush
-        # here instead of changing 389-ds. This also catches a dummy write
-        # that failed: the task above hides its output (no_log) and does not
-        # check the ldapmodify exit code.
+        # here instead of changing 389-ds. A dummy write that failed already
+        # failed its task above; this wait is only for the flush.
         # wait_for rather than stat + until: when until runs out of retries,
         # ansible-core 2.19 marks the task failed and prints an error even
         # with failed_when: false. The gate below makes the decision.
@@ -887,6 +906,7 @@
         - name: "FreeIPA — 389-ds audit log: read the audit file size"
           ansible.builtin.stat:
             path: "/var/log/dirsrv/{{ ipa_ds_instance }}/audit"
+            get_checksum: false
           register: ipa_ds_audit_file
 
         - name: "Gate: the 389-ds audit file is non-empty (spec C16)"
@@ -902,9 +922,11 @@
               {{ 'missing' if not ipa_ds_audit_file.stat.exists else 'empty' }}
               after {{ ipa_ds_audit_wait.elapsed | default('?') }} s
               ({{ ipa_ds_audit_wait.msg | default('') }}), although audit
-              logging is on and a directory write was made. Check that the
-              dummy write above succeeded (run it by hand with the Directory
-              Manager password) and that dirsrv can write the file.
+              logging is on and a directory write was made. Check that
+              dirsrv can write the file. To repeat the dummy write by hand,
+              run it as root over ldapi with SASL EXTERNAL (ldapmodify -Q -Y
+              EXTERNAL -H ldapi://%2Frun%2F{{ ipa_ds_instance }}.socket); no
+              Directory Manager password is needed.
 
   handlers:
     - name: "Validate httpd configuration after FreeIPA WSGI timeout change"

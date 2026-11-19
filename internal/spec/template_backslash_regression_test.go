@@ -21,7 +21,7 @@ var templateBackslashAllowlist = map[string]string{
 	// backslash or t", not "space or tab". `ipa dnsrecord-show` indents
 	// with spaces only, so it still finds the TTL; changing it needs its
 	// own freeipa-dns vm-target run.
-	"../../playbooks/apply/freeipa-dns-apply.yml:480": "harmless with real ipa output; fix with a freeipa-dns run",
+	"../../playbooks/apply/freeipa-dns-apply.yml:482": "harmless with real ipa output; fix with a freeipa-dns run",
 }
 
 var jinjaTemplateBlock = regexp.MustCompile(`(?s)\{\{.*?\}\}|\{%.*?%\}`)

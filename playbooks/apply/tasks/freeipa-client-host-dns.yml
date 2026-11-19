@@ -567,11 +567,11 @@
       check_mode: false
 
     - name: "FreeIPA client DNS backfill — kinit admin into the dedicated ccache"
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          printf %s "{{ ipa_enroll_password }}" | KRB5CCNAME="{{ ipa_client_dns_ccache_file.path }}" kinit {{ ipa_enroll_principal }}@{{ ipa_realm }}
-        executable: /bin/bash
+      ansible.builtin.command:
+        argv: [kinit, "{{ ipa_enroll_principal }}@{{ ipa_realm }}"]
+        stdin: "{{ ipa_enroll_password }}"
+      environment:
+        KRB5CCNAME: "{{ ipa_client_dns_ccache_file.path }}"
       changed_when: false
       no_log: true
       check_mode: false
@@ -640,11 +640,11 @@
       check_mode: false
 
     - name: "FreeIPA client DNS replace — kinit admin into the dedicated ccache"
-      ansible.builtin.shell:
-        cmd: |
-          set -o pipefail
-          printf %s "{{ ipa_enroll_password }}" | KRB5CCNAME="{{ ipa_client_dns_replace_ccache_file.path }}" kinit {{ ipa_enroll_principal }}@{{ ipa_realm }}
-        executable: /bin/bash
+      ansible.builtin.command:
+        argv: [kinit, "{{ ipa_enroll_principal }}@{{ ipa_realm }}"]
+        stdin: "{{ ipa_enroll_password }}"
+      environment:
+        KRB5CCNAME: "{{ ipa_client_dns_replace_ccache_file.path }}"
       changed_when: false
       no_log: true
       check_mode: false
