@@ -285,22 +285,31 @@
         # Contains S3 credentials and the repository encryption password —
         # 0600 + no_log so neither the rendered content nor a diff ever hits
         # Ansible's output/logs.
+        #
+        # The file is shell: the backup script, Steps 10/10a and spec rows
+        # C4-C6 `.` it. Every value therefore goes through `quote`
+        # (shlex.quote, POSIX single quotes with ' written as '"'"'), so the
+        # shell reads back exactly the configured bytes. Wrapping the raw
+        # value in '...' let a single quote in a password end the string: a
+        # syntax error at best, and with a crafted value a command run by the
+        # root shell that sources the file (#360). no_log and 0600 do not help
+        # with that.
         - name: "Step 4: Render restic env file (spec C2, C3)"
           tags: [C2, C3]
           ansible.builtin.copy:
             dest: "{{ restic_env_path }}"
             mode: "0600"
             content: |
-              export AWS_ACCESS_KEY_ID='{{ restic_aws_access_key_id }}'
-              export AWS_SECRET_ACCESS_KEY='{{ restic_aws_secret_access_key }}'
-              export RESTIC_REPOSITORY='{{ restic_repository }}'
-              export RESTIC_PASSWORD='{{ restic_password }}'
-              export RESTIC_BACKUP_PATHS='{{ restic_backup_paths | join(" ") }}'
-              export RESTIC_BACKUP_PRE_HOOK='{{ restic_backup_pre_hook }}'
-              export RESTIC_LOCK_RETRY='{{ restic_lock_retry }}'
-              export RESTIC_RETENTION_DAILY='{{ restic_retention_daily }}'
-              export RESTIC_RETENTION_WEEKLY='{{ restic_retention_weekly }}'
-              export RESTIC_RETENTION_MONTHLY='{{ restic_retention_monthly }}'
+              export AWS_ACCESS_KEY_ID={{ restic_aws_access_key_id | quote }}
+              export AWS_SECRET_ACCESS_KEY={{ restic_aws_secret_access_key | quote }}
+              export RESTIC_REPOSITORY={{ restic_repository | quote }}
+              export RESTIC_PASSWORD={{ restic_password | quote }}
+              export RESTIC_BACKUP_PATHS={{ restic_backup_paths | join(" ") | quote }}
+              export RESTIC_BACKUP_PRE_HOOK={{ restic_backup_pre_hook | quote }}
+              export RESTIC_LOCK_RETRY={{ restic_lock_retry | quote }}
+              export RESTIC_RETENTION_DAILY={{ restic_retention_daily | quote }}
+              export RESTIC_RETENTION_WEEKLY={{ restic_retention_weekly | quote }}
+              export RESTIC_RETENTION_MONTHLY={{ restic_retention_monthly | quote }}
           no_log: true
           register: restic_env_result
 
