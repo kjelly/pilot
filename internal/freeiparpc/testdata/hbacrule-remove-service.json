@@ -1,0 +1,33 @@
+{
+  "result": {
+    "completed": 1,
+    "failed": {
+      "memberservice": {
+        "hbacsvc": [],
+        "hbacsvcgroup": []
+      }
+    },
+    "result": {
+      "description": [
+        "p3a capture"
+      ],
+      "ipaenabledflag": [
+        true
+      ],
+      "cn": [
+        "p3acap-r6"
+      ],
+      "memberuser_user": [
+        "p3acap-u1"
+      ],
+      "memberhost_host": [
+        "p3acap-h2.ipa.pilot.internal"
+      ],
+      "dn": "ipaUniqueID=c56c4116-e3ea-11f1-b5df-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    }
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

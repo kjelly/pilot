@@ -1,0 +1,45 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "ipaobject",
+          "ipahbacservice"
+        ],
+        "ipauniqueid": [
+          "c114e244-e3ea-11f1-ac6d-525400dff9fd"
+        ],
+        "cn": [
+          "p3acap-svc1"
+        ],
+        "description": [
+          "p3a capture"
+        ],
+        "dn": "cn=p3acap-svc1,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipaobject",
+          "ipahbacservice"
+        ],
+        "ipauniqueid": [
+          "c11d2526-e3ea-11f1-821b-525400dff9fd"
+        ],
+        "cn": [
+          "p3acap-svc2"
+        ],
+        "description": [
+          "p3a capture"
+        ],
+        "dn": "cn=p3acap-svc2,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 2,
+    "truncated": false,
+    "summary": "2 HBAC services matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

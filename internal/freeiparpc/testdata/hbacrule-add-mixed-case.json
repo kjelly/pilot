@@ -1,0 +1,35 @@
+{
+  "result": {
+    "result": {
+      "cn": [
+        "P3aCap-CaseRule"
+      ],
+      "ipauniqueid": [
+        "ccfc57c2-e3ea-11f1-ac98-525400dff9fd"
+      ],
+      "hostcategory": [
+        "all"
+      ],
+      "ipaenabledflag": [
+        true
+      ],
+      "servicecategory": [
+        "all"
+      ],
+      "accessruletype": [
+        "allow"
+      ],
+      "objectclass": [
+        "ipaassociation",
+        "ipahbacrule"
+      ],
+      "dn": "ipaUniqueID=ccfc57c2-e3ea-11f1-ac98-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "P3aCap-CaseRule",
+    "summary": "Added HBAC rule \"P3aCap-CaseRule\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -1,0 +1,14 @@
+{
+  "result": null,
+  "error": {
+    "code": 4303,
+    "message": "host category cannot be set to 'all' while there are allowed hosts",
+    "data": {
+      "reason": "host category cannot be set to 'all' while there are allowed hosts"
+    },
+    "name": "MutuallyExclusiveError"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

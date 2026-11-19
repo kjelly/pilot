@@ -1,0 +1,24 @@
+{
+  "result": {
+    "warning": null,
+    "matched": null,
+    "notmatched": [
+      "allow_systemd-user",
+      "P3aCap-CaseRule",
+      "p3acap-r1",
+      "p3acap-r3",
+      "p3acap-r4",
+      "p3acap-r5",
+      "p3acap-r6",
+      "p3acap-r7",
+      "p3acap-r8"
+    ],
+    "error": null,
+    "summary": "Access granted: False",
+    "value": false
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

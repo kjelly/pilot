@@ -1,0 +1,41 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "ipaassociation",
+        "ipahbacrule"
+      ],
+      "accessruletype": [
+        "allow"
+      ],
+      "ipauniqueid": [
+        "cd31818c-e3e9-11f1-9895-525400dff9fd"
+      ],
+      "description": [
+        "Allow all users to access any host from any host"
+      ],
+      "servicecategory": [
+        "all"
+      ],
+      "hostcategory": [
+        "all"
+      ],
+      "ipaenabledflag": [
+        true
+      ],
+      "cn": [
+        "allow_all"
+      ],
+      "usercategory": [
+        "all"
+      ],
+      "dn": "ipaUniqueID=cd31818c-e3e9-11f1-9895-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "allow_all",
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

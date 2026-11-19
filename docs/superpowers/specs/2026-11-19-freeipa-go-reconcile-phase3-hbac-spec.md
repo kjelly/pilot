@@ -2,7 +2,7 @@
 
 日期：2026-11-19。前一階段：`docs/superpowers/specs/2026-11-06-freeipa-go-reconcile-phase2-spec.md`（下稱 P2）、Phase 1：`2026-10-30-freeipa-go-reconcile-phase1-spec.md`（下稱 P1）。
 
-狀態：**草案，尚未實作，沒有任何實跑**。本文件是 acceptance contract：它定義完成後外部可觀察到什麼，不是實作的逐行翻譯。文中的指令、旗標、變數是要實作的介面，不是已實跑的步驟。凡是寫成「K-」開頭的項目都是**尚未擷取的事實**：實作前要在拋棄式 FreeIPA lab 擷取真實輸出，不可由本文件推測（AGENTS.md §5.6）。
+狀態：**草案；P3-0（K1–K8 的擷取）已在拋棄式 lab 完成（§1.3），其餘尚未實作、沒有實跑**。本文件是 acceptance contract：它定義完成後外部可觀察到什麼，不是實作的逐行翻譯。文中的指令、旗標、變數是要實作的介面，不是已實跑的步驟。凡是寫成「K-」開頭的項目都是**要擷取的事實**，不可由本文件推測（AGENTS.md §5.6）；已擷取的列在 §1.3，K9、K10 仍未做。
 
 ## 0 範圍
 
@@ -44,7 +44,24 @@ Phase 3a 把 **roster 的 HBAC** 從 identity playbook 搬到 Go engine，只在
 | K8 | 一個 rule 引用了 `state: absent` 的 user 或 group 時，Go 階段與 playbook 的行為（E47 的失敗形狀） | lab | blocked 規則（§4） |
 | K9 | 正式規模的 rule 數量與讀取成本（`hbacrule_find` 的 `sizelimit`；P2 的 K3 經驗） | lab + 正式環境唯讀 | 讀取層（X2 仍未解） |
 
-### 1.3 風險
+### 1.3 已擷取的事實（P3-0）
+
+在拋棄式 lab（FreeIPA 4.13.4、API 2.257，AlmaLinux 9 單台 server）以 `internal/freeiparpc/capture_p3a_live_test.go` 擷取，97 個 fixture 在 `internal/freeiparpc/testdata/`（`hbac*`、`batch-hbac-*`、`env-domain`），事實與負向對照在 `capture_p3a_facts_test.go`（每個事實都用「換掉一個它讀的 fixture」證明會失敗）。這些結論**推翻或定案**了本文件原本的幾處假設：
+
+| K | 擷取到的事實 | 對設計的影響 |
+|---|---|---|
+| K1 | `ipaenabledflag` 是一個元素的布林 list（`[true]`）；沒有分類時 `hostcategory`／`servicecategory`／`usercategory` **整個 key 不存在**，有分類是 `["all"]`；成員欄位 `memberuser_user`、`memberuser_group`、`memberhost_host`（小寫 FQDN）、`memberhost_hostgroup`、`memberservice_hbacsvc`；`hbacrule_find` 帶 `all`、無條件即回傳全部，附 `count`、`truncated`；新裝 server 有兩條內建 rule：`allow_all`、`allow_systemd-user` | 讀取層以 key 不存在表示「沒有分類」；`allow_systemd-user` 不能被當成未管理的使用者 rule 報告（§4.3） |
+| K2 | 成員指令（add／remove）一律 HTTP 200，結果有 `completed` 與每種成員的 `failed` list：新增成功 `completed 1`；已是成員 `completed 0` 加 `This entry is already a member`；物件不存在 `no such entry`；**移除**不是成員、或物件根本不存在，都是 `This entry is not a member`；一次兩個成員其中一個已存在，只改另一個並列出前者。rule 不存在是 `NotFound 4001`。`hbacrule_add`／`hbacsvc_add` 重複是 `DuplicateEntry 4002`；沒有變更的 `hbacrule_mod` 是 `EmptyModlist 4202`（要視為 converged）。**`hbacrule_enable`／`_disable` 對已經是該狀態的 rule 也回成功**（`result: true`，summary 與真的變更相同），所以 Go 一定要靠讀回判斷有沒有變更，不能靠回應；`hbacrule_del` 的結果是 `{"failed": []}`，value 是名稱 list | 分類沿用 P2 K13 的逐成員分類；「已是成員」與「不是成員」是 converged；enable／disable 只在 live 狀態不符時送；verify 靠重讀 |
+| K3 | 分類與成員互斥是 `MutuallyExclusiveError 4303`，兩個方向各有固定訊息（`hosts cannot be added when host category='all'`、`host category cannot be set to 'all' while there are allowed hosts`）；`hbacrule_mod` 帶空字串清除分類（之後 key 消失），再清一次是 `EmptyModlist`；`servicecategory` 同形 | stage 順序（§5.2）成立：先移除成員、再改分類、最後附加 |
+| K4 | **短名稱會被 FreeIPA 補上 server 的 domain**，存成小寫 FQDN；大寫 FQDN 與小寫是同一個成員（`already a member`）；`env` 回 `domain`、`realm`、`host` | **Q3 定案**：host 比對用小寫 FQDN，roster 的短名稱以 `env` 的 `domain` 補全。與 playbook 的「去掉網域後比較」不同（§9） |
+| K5 | `hbactest` 回 `value`（布林）、`summary`（`Access granted: True／False`）、`matched`（沒有符合時是 null）、`notmatched`、`warning`、`error`；`allow_all` 停用時，沒有 break-glass rule 的 `admin` 是 `False`，有 enabled 的 break-glass 是 `True`，停用它就回 `False`；對不存在的主機與服務不報錯（rule 的分類是 all 時仍符合） | lockdown 以 `value` 判斷（不比對文字） |
+| K6 | `allow_all` 停用後 `ipaenabledflag` 是 `[false]`；重複停用、重複啟用都成功 | 回滾與冪等成立 |
+| K7 | **rule 名稱不分大小寫**，保留第一次建立的拼法：以小寫再建一次是 `DuplicateEntry`，以任一種大小寫 show 都回原拼法；`hbacrule_find` 的條件也不分大小寫 | **Q4 定案**：比對一律小寫；roster 內兩個只差大小寫的 rule 是 `case_collision`；送指令時保留 roster 的拼法 |
+| K8 | **刪除使用者會自動把他從引用它的 rule 移掉**；對不存在的使用者附加是 `no such entry` 的逐成員失敗 | 「roster 把已刪使用者仍列在 rule」的行為：Go 階段的 user 刪除之後 rule 已經沒有他，HBAC 階段再附加會逐成員失敗，所以要在 plan 階段分類（§4.2 Q1） |
+
+K9（正式規模的 rule 數與 `hbacrule_find` 成本）與 K10（run 2 的固定成本）仍未量測。
+
+### 1.4 風險
 
 - R1（**鎖死登入**）：HBAC 寫錯會讓使用者無法登入。lockdown 把 `allow_all` 關掉，若沒有可用的 break-glass rule，所有人（含 admin）被擋。緩解：沿用 playbook 的前置檢查與 `hbactest` 前後證明、失敗回滾（§6），且 lockdown 在所有 rule 收斂**之後**、最後一步執行。
 - R2（**順序**）：HBAC 引用的 host／hostgroup 由 playbook 建立。Go 階段放在 playbook 之後（§2 D1）。第二個階段若在 playbook 失敗後仍執行，會對不完整的 FreeIPA 寫入：因此 playbook 失敗時 HBAC 階段**不執行**（§7.3）。
@@ -53,7 +70,7 @@ Phase 3a 把 **roster 的 HBAC** 從 identity playbook 搬到 Go engine，只在
 - R5（**quota／規模**）：`hbacrule_find` 的預設回傳上限；沿用 P2 K3 的 `sizelimit=0` 做法，且讀到的筆數與 server 的 `count` 不符就失敗（K9）。
 - R6（**混合 run 變長**）：多一次 playbook 啟動（§7.2 的 run 2），固定成本約是 always 標記的 task（K10 量測）。取代的是正式環境約 280 秒的重複 SSSD 刷新。
 
-### 1.4 destructive 邊界
+### 1.5 destructive 邊界
 
 - HBAC 的移除（成員）與刪除（rule）都標 `destructive: true`；沿用 P2 §1.4 的規則：Plan₁ 沒有、Plan₂ 才出現的 destructive 操作不送出（`ErrDestructiveDiff`）。
 - `allow_all` 永不刪除（validator 已擋，Go 再擋一次，§4.2）。
@@ -82,7 +99,7 @@ Phase 3a 把 **roster 的 HBAC** 從 identity playbook 搬到 Go engine，只在
 
 | roster | desired |
 |---|---|
-| `name` | rule 名稱（大小寫 K7 決定後定案） |
+| `name` | rule 名稱（小寫比對，送出時保留拼法，K7） |
 | `subjects.users`／`subjects.groups` | `users`／`groups`（預設 `[]`） |
 | `services` | `services`（validator 要求至少一個，所以 roster 的 rule 不會用 `servicecat`） |
 | `enabled` | 預設 `true` |
@@ -94,7 +111,8 @@ Phase 3a 把 **roster 的 HBAC** 從 identity playbook 搬到 Go engine，只在
 ### 3.2 比對規則（與 playbook 相同，不是新設計）
 
 - user、group、hostgroup、service：比對前轉小寫；送指令時保留 roster 的原拼法。
-- host：playbook 比對時**去掉網域、轉小寫**（`regex_replace('\..*$', '')`）。Go 要得到同樣的「是否已附加」判斷（idempotency 要與舊 engine 一致，P1 D12）；但這與 AGENTS.md §5.13（FQDN）的規則有張力：K4 擷取之後，若 FreeIPA 一律回 FQDN 且 roster 一律寫 FQDN，兩種比對等價，採 FQDN 轉小寫；若兩者不等價，沿用 playbook 的短名稱比對並把差異記進 §9。**未決，等 K4。**
+- host：**小寫 FQDN**（K4 定案）。roster 的短名稱以 `env` 的 `domain` 補全（FreeIPA 自己也這樣做），讀回的 `memberhost_host` 本來就是小寫 FQDN。playbook 比對時是**去掉網域、轉小寫**（`regex_replace('\\..*$', '')`），所以它會把 `web1.a.example` 與 `web1.b.example` 當成同一台；Go 不會。兩者在 roster 一律寫同一個 domain 的 FQDN 或短名稱時等價，差異記在 §9。
+- rule 名稱：小寫比對（K7），送指令時保留 roster 的拼法；兩個只差大小寫的 rule 是 `case_collision`。
 
 ### 3.3 playbook 與 Go 的分工
 
@@ -121,7 +139,7 @@ Phase 3a 把 **roster 的 HBAC** 從 identity playbook 搬到 Go engine，只在
 | `reference_to_absent` | 引用的 user／group 是 `state: absent`（與 P1 同名原因；E49：Go **不**因此擋 preflight，維持 P2 的決定——是否改變是 Q1） |
 | `lockdown_no_break_glass` | `disable_allow_all: true` 而沒有 enabled、subjects 含 `admin`、`hostcat: all` 的 rule |
 | `name_collision_with_grant` | §3.3 |
-| `case_collision` | 兩個 rule 名稱只差大小寫（K7 決定後定案） |
+| `case_collision` | 兩個 rule 名稱只差大小寫（K7：FreeIPA 的 rule 名稱不分大小寫，第二個會是 `DuplicateEntry`） |
 
 `reference_to_absent` 的處理要與 P2 E49(1) 一致；**Q1 未決**：沿用「不擋」（playbook 會 `partial_failed`，E47(10)(a)）或改成擋。預設沿用，因為兩個 engine 同形。
 
@@ -241,7 +259,7 @@ Q2 的預設需要維護者確認（見 §10）。
 
 ## 9 與 playbook 的已知差異（實作時填，目前為空）
 
-預期會有的：host 比對（§3.2）、`reference_to_absent`（§4.2）。每一項要寫出理由與 live 證據。
+已知的：(1) host 比對：Go 用小寫 FQDN，playbook 去掉網域後比（§3.2，K4）；(2) `reference_to_absent`（§4.2，K8：刪使用者已自動移出 rule）；(3) rule 名稱 `case_collision`：playbook 沒有這個檢查，同名只差大小寫時 playbook 會在 `hbacrule-add` 之後把第二個當成「已存在」而靜默合併，Go 擋下。每一項要寫出理由與 live 證據。
 
 ## 10 待確認
 
@@ -249,15 +267,15 @@ Q2 的預設需要維護者確認（見 §10）。
 |---|---|---|
 | Q1 | HBAC 引用 `state: absent` 的 user／group，Go 是否在 preflight 擋 | 不擋（與 P2 E49(1)、Ansible 同形） |
 | Q2 | HBAC 階段部分失敗時，是否仍跑 run 2 結清快取 | 跑，結束碼 1 |
-| Q3 | host 比對採 FQDN 或短名稱（等 K4） | 等擷取 |
-| Q4 | rule 名稱是否大小寫敏感（等 K7） | 等擷取 |
+| Q3 | host 比對採 FQDN 或短名稱 | **已定案（K4）**：小寫 FQDN，短名稱以 `env` 的 domain 補全 |
+| Q4 | rule 名稱是否大小寫敏感 | **已定案（K7）**：不分大小寫，保留第一次的拼法 |
 | Q5 | run 2 的固定成本可接受嗎（等 K10；對照：省下約 280 秒的重複刷新） | 等量測 |
 
 ## 11 實作切片
 
 | 切片 | 內容 | 需要 lab |
 |---|---|---|
-| P3-0 | K1–K9 擷取、fixture、擷取測試 | 是 |
+| P3-0 | K1–K8 擷取、fixture、事實測試（**已完成**，§1.3；K9 仍待量測） | 是 |
 | P3-1 | desired 解析、plan（含 blocked、順序）、唯讀 preview 納入 | 否（fixture 來自 P3-0） |
 | P3-2 | writer：stage、批次、分類、驗證、journal、fake IPA 矩陣 | 否 |
 | P3-3 | lockdown | 是（K5、K6） |
@@ -270,3 +288,4 @@ Q2 的預設需要維護者確認（見 §10）。
 | 日期 | 變更 |
 |---|---|
 | 2026-11-19 | 初版草案。維護者決定：D1（playbook 之後的第二個 Go 階段）、D2（lockdown 一起搬）。 |
+| 2026-11-19 | P3-0：K1–K8 擷取完成（§1.3），Q3、Q4 定案，§3.2、§4.2、§9 對應更新。 |

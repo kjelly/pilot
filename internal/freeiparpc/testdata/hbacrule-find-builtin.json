@@ -1,0 +1,75 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "ipaassociation",
+          "ipahbacrule"
+        ],
+        "accessruletype": [
+          "allow"
+        ],
+        "ipauniqueid": [
+          "cd31818c-e3e9-11f1-9895-525400dff9fd"
+        ],
+        "cn": [
+          "allow_all"
+        ],
+        "description": [
+          "Allow all users to access any host from any host"
+        ],
+        "hostcategory": [
+          "all"
+        ],
+        "ipaenabledflag": [
+          true
+        ],
+        "usercategory": [
+          "all"
+        ],
+        "servicecategory": [
+          "all"
+        ],
+        "dn": "ipaUniqueID=cd31818c-e3e9-11f1-9895-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipaassociation",
+          "ipahbacrule"
+        ],
+        "accessruletype": [
+          "allow"
+        ],
+        "ipauniqueid": [
+          "cd323078-e3e9-11f1-acef-525400dff9fd"
+        ],
+        "cn": [
+          "allow_systemd-user"
+        ],
+        "description": [
+          "Allow pam_systemd to run user@.service to create a system user session"
+        ],
+        "hostcategory": [
+          "all"
+        ],
+        "ipaenabledflag": [
+          true
+        ],
+        "usercategory": [
+          "all"
+        ],
+        "memberservice_hbacsvc": [
+          "systemd-user"
+        ],
+        "dn": "ipaUniqueID=cd323078-e3e9-11f1-acef-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 2,
+    "truncated": false,
+    "summary": "2 HBAC rules matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

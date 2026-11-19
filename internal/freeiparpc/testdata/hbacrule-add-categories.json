@@ -1,0 +1,35 @@
+{
+  "result": {
+    "result": {
+      "ipauniqueid": [
+        "c25efeaa-e3ea-11f1-8dd0-525400dff9fd"
+      ],
+      "ipaenabledflag": [
+        true
+      ],
+      "cn": [
+        "p3acap-r2"
+      ],
+      "objectclass": [
+        "ipaassociation",
+        "ipahbacrule"
+      ],
+      "hostcategory": [
+        "all"
+      ],
+      "servicecategory": [
+        "all"
+      ],
+      "accessruletype": [
+        "allow"
+      ],
+      "dn": "ipaUniqueID=c25efeaa-e3ea-11f1-8dd0-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p3acap-r2",
+    "summary": "Added HBAC rule \"p3acap-r2\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}
