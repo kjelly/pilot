@@ -45,6 +45,30 @@ const UsersGroupsEngineVar = "pilot_identity_users_groups_engine"
 // accepts "ansible" (the default) and this, and refuses any other.
 const UsersGroupsEngineGo = "go"
 
+// HBACEngineVar is the Ansible variable with which a mixed run tells the identity playbook that the
+// Go engine owns the roster's HBAC (value "go", HBACEngineGo): the services, the rules and the
+// allow_all lockdown of the roster are then not handed to the tasks that would write them, and the
+// rules `pilot access` compiles stay with the playbook (spec 2026-11-19 phase 3a §3.3). Like
+// UsersGroupsEngineVar it is an `-e` variable only: never a contract input or an inventory variable,
+// which a lint enforces.
+const HBACEngineVar = "pilot_identity_hbac_engine"
+
+// HBACEngineGo is the value of HBACEngineVar the mixed run passes.
+const HBACEngineGo = "go"
+
+// CacheSettleVar is the Ansible variable that defers the playbook's authorization cache settlement
+// (value CacheSettleDefer): the first playbook run of a mixed run does not refresh the clients' SSSD
+// caches or acknowledge the obligation, because the Go HBAC stage writes after it. The second run
+// (`--tags client-cache`, without the variable) does both (spec 2026-11-19 phase 3a D6, §7.1).
+const CacheSettleVar = "pilot_identity_cache_settle"
+
+// CacheSettleDefer is the value of CacheSettleVar that defers the settlement.
+const CacheSettleDefer = "defer"
+
+// ClientCacheTag is the playbook tag of the tasks that settle the authorization cache: the second
+// playbook run of a mixed run selects it.
+const ClientCacheTag = "client-cache"
+
 // AuthCacheActionVar is the Ansible variable that selects the entry's mode.
 const AuthCacheActionVar = "pilot_identity_auth_cache_action"
 

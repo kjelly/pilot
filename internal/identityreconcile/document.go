@@ -74,8 +74,58 @@ type Document struct {
 	Server          Server             `json:"server"`
 	DesiredRevision string             `json:"desired_revision"`
 	Observation     ObservationSummary `json:"observation"`
+	// HBAC is the HBAC plan of a mixed run (--scope full, spec 2026-11-19 phase 3a §7.2); absent
+	// in the users-groups scope, whose document is what it was.
+	HBAC *HBACPlanDoc `json:"hbac,omitempty"`
 	Plan
 	Stats Stats `json:"stats"`
+}
+
+// HBACObservationSummary identifies the live HBAC state a plan was built from.
+type HBACObservationSummary struct {
+	Fingerprint string `json:"fingerprint"`
+	Rules       int    `json:"rules"`
+	Services    int    `json:"services"`
+	Hosts       int    `json:"hosts"`
+	Hostgroups  int    `json:"hostgroups"`
+	Domain      string `json:"domain"`
+}
+
+// HBACPlanDoc is the HBAC part of a plan document. It holds no secret: names and the fields the
+// operations change, as the users and groups plan does.
+type HBACPlanDoc struct {
+	// Preview: the plan was made before the playbook phase, so the hosts, hostgroups and
+	// services the roster declares were assumed to exist (spec D8).
+	Preview     bool                   `json:"preview"`
+	Observation HBACObservationSummary `json:"observation"`
+	HBACPlan
+}
+
+// NewHBACPlanDoc wraps an HBAC plan with the observation it was built from.
+func NewHBACPlanDoc(plan HBACPlan, obs HBACObservation, preview bool) *HBACPlanDoc {
+	return &HBACPlanDoc{
+		Preview: preview,
+		Observation: HBACObservationSummary{
+			Fingerprint: fingerprint(obs), Rules: len(obs.Rules), Services: len(obs.Services),
+			Hosts: len(obs.Hosts), Hostgroups: len(obs.Hostgroups), Domain: obs.Domain,
+		},
+		HBACPlan: plan,
+	}
+}
+
+// WithHBAC is the document of a mixed run: the users and groups plan with the HBAC plan next to it. The
+// scope is then full, and a blocked HBAC plan makes the whole document blocked, as a blocked users and
+// groups plan does. The document is returned as a copy.
+func (d Document) WithHBAC(hbac *HBACPlanDoc) Document {
+	if hbac == nil {
+		return d
+	}
+	d.Scope = ScopeFull
+	d.HBAC = hbac
+	if len(hbac.Blocked) > 0 {
+		d.Result = ResultBlocked
+	}
+	return d
 }
 
 // NewDocument wraps a plan with what it was built from.
