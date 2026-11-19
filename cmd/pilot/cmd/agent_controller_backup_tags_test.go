@@ -28,7 +28,7 @@ import (
 // fake binary on localhost.
 
 // agentControllerTasks returns the real Step 0e reset, the Steps 3-6 of the
-// install block and the rescue's restore block, unprivileged.
+// install block and the rescue without its final fail, unprivileged.
 func agentControllerTasks(t *testing.T) (reset, steps, restore []any) {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(repoRootForTest(t), "playbooks", "apply", "agent-controller-apply.yml"))
@@ -79,12 +79,23 @@ func agentControllerTasks(t *testing.T) (reset, steps, restore []any) {
 			t.Fatalf("no task named %q* in the install block", prefix)
 		}
 	}
+	// The whole real rescue except its final `fail`, so the play goes on to
+	// record what the rescue did.
+	sawRestore := false
 	for _, task := range rescue {
-		if m, ok := task.(map[string]any); ok && m["name"] == "ROLLBACK — restore only this invocation's validated material" {
-			restore = append(restore, acUnprivileged(m))
+		m, ok := task.(map[string]any)
+		if !ok {
+			continue
 		}
+		if _, isFail := m["ansible.builtin.fail"]; isFail {
+			continue
+		}
+		if m["name"] == "ROLLBACK — restore only this invocation's validated material" {
+			sawRestore = true
+		}
+		restore = append(restore, acUnprivileged(m))
 	}
-	if len(restore) != 1 {
+	if !sawRestore {
 		t.Fatal("the rescue lost its \"restore only this invocation's validated material\" block")
 	}
 	return reset, steps, restore
@@ -116,11 +127,42 @@ func acUnprivileged(task map[string]any) map[string]any {
 const (
 	acOldBin = "#!/bin/sh\n# old build\nif [ \"$1 $2\" = \"db check\" ]; then echo ok; exit 0; fi\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\nexit 0\n"
 	acNewBin = "#!/bin/sh\n# new build\nif [ \"$1 $2\" = \"db check\" ]; then echo ok; exit 0; fi\nexit 0\n"
+	// An installed binary whose `db backup` fails (disk full, locked db, ...).
+	acOldBinBackupFails = "#!/bin/sh\n# old build, backup fails\nif [ \"$1 $2\" = \"db check\" ]; then echo ok; exit 0; fi\n[ \"$1 $2\" = \"db backup\" ] && exit 1\nexit 0\n"
+	// An installed binary whose snapshot fails the integrity check.
+	acOldBinCheckBad = "#!/bin/sh\n# old build, snapshot corrupt\nif [ \"$1 $2\" = \"db check\" ]; then echo '*** in database main ***'; exit 1; fi\n[ \"$1 $2\" = \"db backup\" ] && cp \"$4\" \"$6\"\nexit 0\n"
 )
 
+// acFakeSystemctl stands in for systemctl under ansible.builtin.systemd: the
+// unit's state is files in $FAKE_SD (loaded, active, enabled) and every call
+// is appended to $FAKE_SD/calls.log. Taken from the #195 review's harness.
+const acFakeSystemctl = `#!/bin/bash
+sd=$FAKE_SD; cmd=; skip=0
+for a in "$@"; do
+  if [ $skip = 1 ]; then skip=0; continue; fi
+  case "$a" in -p|--property) skip=1;; -*) ;; *) [ -z "$cmd" ] && cmd=$a;; esac
+done
+echo "$*" >> $sd/calls.log
+case "$cmd" in
+ show) if [ -e $sd/loaded ]; then echo LoadState=loaded
+         [ -e $sd/active ] && echo ActiveState=active || echo ActiveState=inactive
+         [ -e $sd/enabled ] && echo UnitFileState=enabled || echo UnitFileState=disabled
+       else echo LoadState=not-found; echo ActiveState=inactive; echo UnitFileState=; fi ;;
+ is-active) [ -e $sd/active ] && { echo active; exit 0; }; echo inactive; exit 3 ;;
+ is-enabled) [ -e $sd/enabled ] && { echo enabled; exit 0; }; echo disabled; exit 1 ;;
+ start|restart) [ -e $sd/loaded ] || exit 5; touch $sd/active ;;
+ stop) [ -e $sd/loaded ] || exit 5; rm -f $sd/active ;;
+ enable) [ -e $sd/loaded ] || exit 1; touch $sd/enabled ;;
+ disable) [ -e $sd/loaded ] || exit 1; rm -f $sd/enabled ;;
+ daemon-reload) true ;;
+ *) exit 1 ;;
+esac
+`
+
 type acFixture struct {
-	dir, bin, artifact, db, backups string
-	vars                            map[string]any
+	dir, bin, artifact, db, backups, sd string
+	vars                                map[string]any
+	env                                 map[string]any
 }
 
 func newACFixture(t *testing.T, installed, artifact string) acFixture {
@@ -139,6 +181,19 @@ func newACFixture(t *testing.T, installed, artifact string) acFixture {
 	if err := os.Mkdir(f.backups, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// A loaded, active, enabled unit: the healthy service an upgrade starts from.
+	f.sd = filepath.Join(dir, "sd")
+	fakebin := filepath.Join(dir, "fakebin")
+	for _, d := range []string{f.sd, fakebin} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, flag := range []string{"loaded", "active", "enabled"} {
+		acWrite(t, filepath.Join(f.sd, flag), "", 0o644)
+	}
+	acWrite(t, filepath.Join(fakebin, "systemctl"), acFakeSystemctl, 0o755)
+	f.env = map[string]any{"PATH": fakebin + ":" + os.Getenv("PATH"), "FAKE_SD": f.sd}
 	sum := sha256.Sum256([]byte(artifact))
 	f.vars = map[string]any{
 		"agent_controller_db_path":           f.db,
@@ -147,10 +202,17 @@ func newACFixture(t *testing.T, installed, artifact string) acFixture {
 		"agent_controller_artifact_abs_path": f.artifact,
 		"agent_controller_artifact_sha256":   hex.EncodeToString(sum[:]),
 		"agent_controller_user":              "unused-in-tests",
-		// The rescue's stop result, as a succeeded registered result.
-		"agent_controller_rescue_stop": map[string]any{"failed": false, "changed": true},
 	}
 	return f
+}
+
+// serviceState is the fake unit's state after a run.
+func (f acFixture) serviceState(t *testing.T) (active, enabled, stopped bool) {
+	t.Helper()
+	_, errA := os.Stat(filepath.Join(f.sd, "active"))
+	_, errE := os.Stat(filepath.Join(f.sd, "enabled"))
+	calls, _ := os.ReadFile(filepath.Join(f.sd, "calls.log"))
+	return errA == nil, errE == nil, strings.Contains(string(calls), "stop")
 }
 
 func acWrite(t *testing.T, path, content string, mode os.FileMode) {
@@ -175,8 +237,9 @@ func runACPlay(t *testing.T, ansible string, f acFixture, tasks []any, args ...s
 	t.Helper()
 	play := []any{map[string]any{
 		"hosts": "localhost", "connection": "local", "gather_facts": false,
-		"vars":  f.vars,
-		"tasks": tasks,
+		"vars":        f.vars,
+		"environment": f.env,
+		"tasks":       tasks,
 	}}
 	out, err := yaml.Marshal(play)
 	if err != nil {
@@ -274,9 +337,11 @@ func TestAgentControllerBackupFollowsStep6TagSelection(t *testing.T) {
 	}
 }
 
-// acFailingPlay injects the failure: a task right after Step 6, in the
-// same block as the real steps, with the real restore block as the rescue.
-func acFailingPlay(reset, steps, restore []any, factsPath string, beforeFail []any, failTags []string) []any {
+// acFailingPlay runs the real reset and Steps 3-6, then beforeFail and an
+// injected failure, in one block whose rescue is the real rescue (without its
+// final fail) followed by a task that records the outcome. preReset runs
+// before the reset, as an earlier play's leftovers would.
+func acFailingPlay(reset, steps, rescue []any, factsPath string, preReset, beforeFail []any, failTags []string) []any {
 	fail := map[string]any{"name": "injected failure after Step 6", "ansible.builtin.fail": map[string]any{"msg": "injected"}}
 	if failTags != nil {
 		fail["tags"] = failTags
@@ -290,10 +355,11 @@ func acFailingPlay(reset, steps, restore []any, factsPath string, beforeFail []a
 			"content": "{{ {'restored': agent_controller_rollback_restored, 'failed': agent_controller_rollback_failed, 'rollback': agent_controller_rollback} | to_json }}",
 		},
 	}
-	return append(append([]any{}, reset...), map[string]any{
+	out := append(append([]any{}, preReset...), reset...)
+	return append(out, map[string]any{
 		"name":   "install block under test",
 		"block":  body,
-		"rescue": append(append([]any{}, restore...), record),
+		"rescue": append(append([]any{}, rescue...), record),
 	})
 }
 
@@ -312,19 +378,34 @@ func readACOutcome(t *testing.T, path string) acOutcome {
 	return o
 }
 
+func acTask(name, module string, args map[string]any) map[string]any {
+	return map[string]any{"name": name, module: args}
+}
+
 func TestAgentControllerRescueRestoresOnlyThisRunsSnapshots(t *testing.T) {
 	ansible, err := exec.LookPath("ansible-playbook")
 	if err != nil {
 		t.Skip("ansible-playbook not installed")
 	}
-	reset, steps, restore := agentControllerTasks(t)
-
-	t.Run("upgrade fails after Step 6: binary and state.db come back", func(t *testing.T) {
-		f := newACFixture(t, acOldBin, acNewBin)
+	reset, steps, rescue := agentControllerTasks(t)
+	run := func(t *testing.T, f acFixture, preReset, beforeFail []any, failTags []string, args ...string) acOutcome {
+		t.Helper()
 		facts := filepath.Join(f.dir, "outcome.json")
-		migrate := map[string]any{"name": "the new binary migrates state.db", "ansible.builtin.copy": map[string]any{"dest": f.db, "content": "state-migrated"}}
-		runACPlay(t, ansible, f, acFailingPlay(reset, steps, restore, facts, []any{migrate}, nil))
-		o := readACOutcome(t, facts)
+		runACPlay(t, ansible, f, acFailingPlay(reset, steps, rescue, facts, preReset, beforeFail, failTags), args...)
+		return readACOutcome(t, facts)
+	}
+	staleSnapshots := func(t *testing.T, f acFixture) {
+		acWrite(t, filepath.Join(f.backups, "pilot-agent-controller.prev"), "#!/bin/sh\n# stale\n", 0o755)
+		acWrite(t, filepath.Join(f.backups, "pre-upgrade.db"), "state-stale", 0o600)
+	}
+
+	t.Run("upgrade fails after Step 6: binary and state.db come back, service restarted", func(t *testing.T) {
+		f := newACFixture(t, acOldBin, acNewBin)
+		staleSnapshots(t, f)
+		migrate := acTask("the new binary migrates state.db and leaves WAL/SHM", "ansible.builtin.shell", map[string]any{
+			"cmd": "printf state-migrated > " + f.db + " && touch " + f.db + "-wal " + f.db + "-shm",
+		})
+		o := run(t, f, nil, []any{migrate}, nil)
 		if !o.Restored || o.Failed {
 			t.Fatalf("restored=%v failed=%v, want a restore", o.Restored, o.Failed)
 		}
@@ -332,20 +413,82 @@ func TestAgentControllerRescueRestoresOnlyThisRunsSnapshots(t *testing.T) {
 			t.Errorf("binary not restored: %q", got)
 		}
 		if got := acRead(t, f.db); got != "state-before" {
-			t.Errorf("state.db not restored: %q", got)
+			t.Errorf("state.db not restored from this run's snapshot: %q", got)
+		}
+		for _, side := range []string{"-wal", "-shm"} {
+			if _, err := os.Stat(f.db + side); err == nil {
+				t.Errorf("the new database's %s file was left next to the restored snapshot", side)
+			}
+		}
+		if active, enabled, stopped := f.serviceState(t); !active || !enabled || !stopped {
+			t.Errorf("service active=%v enabled=%v stopped-first=%v, want stopped for the restore and then active+enabled", active, enabled, stopped)
 		}
 	})
 
-	t.Run("a stale snapshot under the old fixed names is never restored", func(t *testing.T) {
-		// The installed binary already matches the artifact: no upgrade, no
-		// snapshot this run. An older run left fixed-name backups behind.
+	t.Run("upgrade without a state.db keeps the database the new binary created", func(t *testing.T) {
+		f := newACFixture(t, acOldBin, acNewBin)
+		if err := os.Remove(f.db); err != nil {
+			t.Fatal(err)
+		}
+		staleSnapshots(t, f)
+		create := acTask("the new binary creates state.db", "ansible.builtin.copy", map[string]any{"dest": f.db, "content": "SERVICE-CREATED"})
+		o := run(t, f, nil, []any{create}, nil)
+		if !o.Restored || o.Rollback["db_ready"] == true {
+			t.Fatalf("restored=%v rollback=%v, want the binary restored with no database authority", o.Restored, o.Rollback)
+		}
+		if got := acRead(t, f.bin); got != acOldBin {
+			t.Errorf("binary not restored: %q", got)
+		}
+		if got := acRead(t, f.db); got != "SERVICE-CREATED" {
+			t.Errorf("state.db = %q; a stale snapshot replaced the database this run created", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name, installed string
+	}{
+		{"`db backup` fails before Step 6: healthy service left running", acOldBinBackupFails},
+		{"the database snapshot fails `db check` before Step 6: healthy service left running", acOldBinCheckBad},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newACFixture(t, tc.installed, acNewBin)
+			staleSnapshots(t, f)
+			o := run(t, f, nil, nil, nil)
+			if o.Restored || o.Failed || o.Rollback["install_started"] == true {
+				t.Fatalf("restored=%v failed=%v rollback=%v, want the run to stop before Step 6", o.Restored, o.Failed, o.Rollback)
+			}
+			if got := acRead(t, f.bin); got != tc.installed {
+				t.Errorf("binary changed: %q", got)
+			}
+			if got := acRead(t, f.db); got != "state-before" {
+				t.Errorf("state.db changed: %q", got)
+			}
+			if active, enabled, stopped := f.serviceState(t); !active || !enabled || stopped {
+				t.Errorf("service active=%v enabled=%v stopped=%v, want it untouched (nothing was replaced)", active, enabled, stopped)
+			}
+		})
+	}
+
+	t.Run("a run that never selected Step 6 leaves binary and service alone", func(t *testing.T) {
+		f := newACFixture(t, acOldBin, acNewBin)
+		staleSnapshots(t, f)
+		o := run(t, f, nil, nil, []string{"agent-controller-C2"}, "--tags", "agent-controller-C2")
+		if o.Restored || o.Failed || o.Rollback["install_started"] == true {
+			t.Fatalf("restored=%v failed=%v rollback=%v, want no restore authority", o.Restored, o.Failed, o.Rollback)
+		}
+		if acRead(t, f.bin) != acOldBin {
+			t.Errorf("binary changed by a run that did not select Step 6")
+		}
+		if active, enabled, stopped := f.serviceState(t); !active || !enabled || stopped {
+			t.Errorf("service active=%v enabled=%v stopped=%v, want it untouched", active, enabled, stopped)
+		}
+	})
+
+	t.Run("no upgrade: stale fixed-name snapshots are never restored", func(t *testing.T) {
 		f := newACFixture(t, acNewBin, acNewBin)
-		acWrite(t, filepath.Join(f.backups, "pilot-agent-controller.prev"), "#!/bin/sh\n# stale\n", 0o755)
-		acWrite(t, filepath.Join(f.backups, "pre-upgrade.db"), "state-stale", 0o600)
+		staleSnapshots(t, f)
 		acWrite(t, f.db, "state-current", 0o600)
-		facts := filepath.Join(f.dir, "outcome.json")
-		runACPlay(t, ansible, f, acFailingPlay(reset, steps, restore, facts, nil, nil))
-		o := readACOutcome(t, facts)
+		o := run(t, f, nil, nil, nil)
 		if o.Restored || o.Failed {
 			t.Fatalf("restored=%v failed=%v, want nothing restored", o.Restored, o.Failed)
 		}
@@ -354,37 +497,65 @@ func TestAgentControllerRescueRestoresOnlyThisRunsSnapshots(t *testing.T) {
 		}
 	})
 
-	t.Run("a run that never selected Step 6 restores nothing", func(t *testing.T) {
-		f := newACFixture(t, acOldBin, acNewBin)
-		facts := filepath.Join(f.dir, "outcome.json")
-		runACPlay(t, ansible, f, acFailingPlay(reset, steps, restore, facts, nil, []string{"agent-controller-C2"}), "--tags", "agent-controller-C2")
-		o := readACOutcome(t, facts)
-		if o.Restored || o.Failed || o.Rollback["install_started"] == true {
-			t.Fatalf("restored=%v failed=%v rollback=%v, want no restore authority", o.Restored, o.Failed, o.Rollback)
+	t.Run("restore authority left by an earlier play is reset", func(t *testing.T) {
+		f := newACFixture(t, acNewBin, acNewBin)
+		stale := filepath.Join(f.backups, "apply-earlier")
+		if err := os.Mkdir(stale, 0o700); err != nil {
+			t.Fatal(err)
 		}
-		if acRead(t, f.bin) != acOldBin {
-			t.Errorf("binary changed by a run that did not select Step 6")
+		acWrite(t, filepath.Join(stale, "pilot-agent-controller.prev"), acOldBin, 0o755)
+		sum := sha256.Sum256([]byte(acOldBin))
+		leftover := acTask("an earlier play granted restore authority", "ansible.builtin.set_fact", map[string]any{
+			"agent_controller_rollback": map[string]any{"binary_ready": true, "db_ready": false, "install_started": true, "path": stale, "binary_sha256": hex.EncodeToString(sum[:])},
+		})
+		o := run(t, f, []any{leftover}, nil, nil)
+		if o.Restored || o.Rollback["binary_ready"] == true {
+			t.Fatalf("restored=%v rollback=%v, want the earlier play's authority reset by Step 0e", o.Restored, o.Rollback)
+		}
+		if acRead(t, f.bin) != acNewBin {
+			t.Errorf("binary restored from an earlier play's snapshot")
 		}
 	})
 
-	t.Run("a snapshot changed after validation is refused", func(t *testing.T) {
-		f := newACFixture(t, acOldBin, acNewBin)
-		facts := filepath.Join(f.dir, "outcome.json")
-		tamper := map[string]any{
-			"name": "something rewrites this run's binary snapshot",
-			"ansible.builtin.shell": map[string]any{
-				"cmd": "for d in " + f.backups + "/apply-*; do printf tampered > \"$d/pilot-agent-controller.prev\"; done",
-			},
-		}
-		runACPlay(t, ansible, f, acFailingPlay(reset, steps, restore, facts, []any{tamper}, nil))
-		o := readACOutcome(t, facts)
-		if o.Restored || !o.Failed {
-			t.Fatalf("restored=%v failed=%v, want the restore refused", o.Restored, o.Failed)
-		}
-		if got := acRead(t, f.bin); got != acNewBin {
-			t.Errorf("binary was overwritten from a tampered snapshot: %q", got)
-		}
-	})
+	for _, tc := range []struct{ name, file string }{
+		{"a binary snapshot changed after validation is refused", "pilot-agent-controller.prev"},
+		{"a database snapshot changed after validation is refused", "pre-upgrade.db"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newACFixture(t, acOldBin, acNewBin)
+			tamper := acTask("something rewrites this run's snapshot", "ansible.builtin.shell", map[string]any{
+				"cmd": "for d in " + f.backups + "/apply-*; do printf tampered > \"$d/" + tc.file + "\"; done",
+			})
+			o := run(t, f, nil, []any{tamper}, nil)
+			if o.Restored || !o.Failed {
+				t.Fatalf("restored=%v failed=%v, want the restore refused", o.Restored, o.Failed)
+			}
+			if got := acRead(t, f.bin); got != acNewBin {
+				t.Errorf("binary was overwritten from a tampered snapshot set: %q", got)
+			}
+			if active, _, _ := f.serviceState(t); active {
+				t.Errorf("service restarted after a refused restore")
+			}
+		})
+	}
+}
+
+// TestAgentControllerBackupInCheckMode: --check on an upgrade host takes no
+// snapshot, replaces nothing and does not fail.
+func TestAgentControllerBackupInCheckMode(t *testing.T) {
+	ansible, err := exec.LookPath("ansible-playbook")
+	if err != nil {
+		t.Skip("ansible-playbook not installed")
+	}
+	reset, steps, _ := agentControllerTasks(t)
+	f := newACFixture(t, acOldBin, acNewBin)
+	runACPlay(t, ansible, f, append(append([]any{}, reset...), steps...), "--check")
+	if got := acRead(t, f.bin); got != acOldBin {
+		t.Errorf("--check replaced the binary")
+	}
+	if snaps, _ := filepath.Glob(filepath.Join(f.backups, "apply-*")); len(snaps) != 0 {
+		t.Errorf("--check created snapshot directories: %v", snaps)
+	}
 }
 
 // TestAgentControllerBackupStepsAreNotAlways locks the tag shape statically, so

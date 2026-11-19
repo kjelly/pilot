@@ -551,7 +551,7 @@
         - name: "Step 12: reload systemd if the unit file changed"
           ansible.builtin.systemd:
             daemon_reload: true
-          when: agent_controller_unit_result is changed
+          when: (agent_controller_unit_result | default({})) is changed
 
         - name: "Step 13: ensure pilot-agent-controller.service enabled+started"
           tags: [agent-controller-C1]
@@ -567,10 +567,10 @@
             state: restarted
           when: >-
             not ansible_check_mode
-            and (agent_controller_binary_result is changed
-            or agent_controller_secret_env_result is changed
-            or agent_controller_config_result is changed
-            or agent_controller_unit_result is changed)
+            and ((agent_controller_binary_result | default({})) is changed
+            or (agent_controller_secret_env_result | default({})) is changed
+            or (agent_controller_config_result | default({})) is changed
+            or (agent_controller_unit_result | default({})) is changed)
 
         - name: "Step 15: wait for the service to report active"
           ansible.builtin.command:
@@ -623,6 +623,12 @@
           when: not ansible_check_mode
 
       rescue:
+        # Only a run that reached Step 6 (install_started) may have left a new binary
+        # behind, so only that run stops the service. A failure earlier (a snapshot or
+        # validation step refused, or a run that did not select Step 6) changed no binary
+        # and leaves the service exactly as it was: stopping and disabling a healthy
+        # service there was an availability regression (#195 review; before #195 the
+        # stale-restore path restarted it).
         - name: "ROLLBACK — stop the newly (mis)configured service"
           tags: [always]
           ansible.builtin.systemd:
@@ -631,6 +637,7 @@
             enabled: false
           register: agent_controller_rescue_stop
           ignore_errors: true
+          when: agent_controller_rollback is defined and agent_controller_rollback.install_started
 
         # Restore only what this invocation snapshotted and validated (Steps 4f/5d/5e).
         # No fallback to shared historical backup names: when this run took no snapshot
@@ -754,23 +761,33 @@
             state: restarted
             enabled: true
           when: agent_controller_rollback_restored
-          failed_when: false
+          register: agent_controller_rescue_restart
+          ignore_errors: true
 
         - name: "ROLLBACK — surface the original failure (evidence preserved)"
           tags: [always]
           ansible.builtin.fail:
             msg: >-
               agent-controller apply FAILED (see task output above).
-              {% if agent_controller_rollback_restored %}This run had replaced the binary;
-              the previous binary (and state.db, when one existed) were restored from this
-              run's apply-* snapshot directory under {{ agent_controller_backup_dir }} and the
-              service was restarted with them.
+              {% if agent_controller_rescue_stop is skipped %}It failed before Step 6 replaced
+              the binary (or this run did not select Step 6): no binary was replaced and the
+              service was left as it was.
+              {% elif agent_controller_rescue_stop is failed %}The service could NOT be stopped;
+              it may still be running the binary this run installed. Nothing was restored.
+              {% elif agent_controller_rollback_restored and agent_controller_rescue_restart is succeeded %}This
+              run had replaced the binary; the previous binary (and state.db, when one existed)
+              were restored from this run's apply-* snapshot directory under
+              {{ agent_controller_backup_dir }} and the service was restarted with them.
+              {% elif agent_controller_rollback_restored %}The previous binary (and state.db, when
+              one existed) were restored from this run's apply-* snapshot directory under
+              {{ agent_controller_backup_dir }}, but restarting the service FAILED; check
+              `journalctl -u pilot-agent-controller`.
               {% elif agent_controller_rollback_failed %}Restoring this run's snapshots from its
               apply-* directory under {{ agent_controller_backup_dir }} FAILED; the service is
               stopped and disabled. Restore it by hand before restarting.
-              {% else %}This run took no rollback snapshot (first install, no binary change,
-              or it failed before Step 6), so nothing was restored; the service was stopped
-              and disabled and left in place for inspection.{% endif %}
+              {% else %}This run took no rollback snapshot (first install, or the binary did not
+              change), so nothing was restored; the service was stopped and disabled and left
+              in place for inspection.{% endif %}
 
     - name: "Publish agent-controller health metrics via the textfile collector"
       ansible.builtin.wait_for:

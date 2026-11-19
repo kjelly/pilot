@@ -171,7 +171,14 @@ failed=0`。升級路徑(重建 binary 後帶新 sha256 重跑)也真的跑過�
 建一個自己的 `apply-*` 目錄放 `pre-upgrade.db` 與 `pilot-agent-controller.prev`,
 兩者都驗證過(SQLite `db check`、checksum)才授權 rescue 還原;rescue 只用這次
 run 的目錄,不會拿舊 run 留下的檔案(包括舊版放在備份目錄最上層的
-`pre-upgrade.db`/`pilot-agent-controller.prev`)。`apply-*` 目錄不會自動清除。
+`pre-upgrade.db`/`pilot-agent-controller.prev`)。`apply-*` 目錄不會自動清除
+(每次升級、包括失敗的升級都會留一個,而且在 restic 備份範圍內)。
+
+失敗時 rescue 的行為:在 Step 6 開始換 binary 之前失敗(快照或驗證步驟拒絕、或這次 run
+沒選到 Step 6),服務維持原狀,不停止;換過 binary 之後失敗,先停止服務,還原這次的
+binary 與 state.db,還原成功才重啟;還原失敗、或這次沒有快照可還原(第一次安裝、binary
+沒變)時,服務維持停止且停用,最後的錯誤訊息會說明是哪一種。config.yaml、unit 與
+`webhook-secret.env` 不會還原(detection-engine 有,這裡尚未移植)。
 這段行為只有 real-ansible 測試(`cmd/pilot/cmd/agent_controller_backup_tags_test.go`),
 還沒有 vm-target 實跑。
 
