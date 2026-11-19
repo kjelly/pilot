@@ -538,10 +538,42 @@ func TestDeployCatalog_PlaybooksExistAndAreWellFormed(t *testing.T) {
 			t.Fatalf("%s: playbook %s does not exist: %v", p.Key, p.Playbook, err)
 		}
 	}
-	// AGENTS.md §4.3 tracks this count; keep the two in sync deliberately
-	// rather than silently drifting.
-	if len(deployCatalog) != 41 {
-		t.Fatalf("expected 41 apply playbooks in the catalog (see AGENTS.md §4.3), got %d", len(deployCatalog))
+	// The catalog and the component playbooks on disk are two lists of the
+	// same set: every playbooks/apply/<component>-apply.yml is a catalog item
+	// and the other way round. The internal entries (<component>-<purpose>.yml,
+	// AGENTS.md §4.0) are not components and have no catalog item, so the glob
+	// is on "-apply.yml". A bare count here let a playbook be added or dropped
+	// on one side; AGENTS.md §4.3 no longer states a count (kjelly/pilot#315).
+	onDisk, err := filepath.Glob(filepath.Join(root, "playbooks", "apply", "*-apply.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want, got []string
+	for _, p := range onDisk {
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, filepath.ToSlash(rel))
+	}
+	for _, p := range deployCatalog {
+		got = append(got, filepath.ToSlash(p.Playbook))
+	}
+	slices.Sort(want)
+	slices.Sort(got)
+	got = slices.Compact(got)
+	if len(want) < 40 {
+		t.Fatalf("only %d playbooks/apply/*-apply.yml found; the glob is broken", len(want))
+	}
+	for _, p := range want {
+		if !slices.Contains(got, p) {
+			t.Errorf("%s has no deployCatalog item: add one, or rename it <component>-<purpose>.yml if it is an internal entry (AGENTS.md §4.0)", p)
+		}
+	}
+	for _, p := range got {
+		if !slices.Contains(want, p) {
+			t.Errorf("deployCatalog names %s, which is not a playbooks/apply/*-apply.yml file", p)
+		}
 	}
 }
 

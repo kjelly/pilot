@@ -741,7 +741,7 @@ docker run --rm -it -v "$HOME/.ssh:/root/.ssh:ro" -v "$(pwd)/inventory.yml:/pilo
 > 換句話說:**「指定 stage」不是永遠的必要條件,只有在機器已經被歸進 `staging`/
 > `prod` 時才變成必填**;「服務角色 group 有填這台機器」則永遠必要。
 
-**`playbooks/apply/*.yml` 全部 20 支都有這個 gate,規則一致,沒有例外**
+**`playbooks/apply/*.yml` 的每一個 play 都有這個 gate,規則一致**(規則與檢查見 AGENTS.md §4.3)
 （`os-patch-sla-apply.yml` 的旗標名稱不同,是 `-e patch_stage=`，不是
 `-e stage=`,其餘用法一致,詳見該檔頭部註解）:
 
