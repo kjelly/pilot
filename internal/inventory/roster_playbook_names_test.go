@@ -169,3 +169,134 @@ func TestRosterRenderSitesAreStillInThePlaybooks(t *testing.T) {
 		t.Errorf("the NFS gate no longer renders freeipa.admin.password first:\n%s", gate)
 	}
 }
+
+// The names that are not the inventory's when a user's password is CAPTURED
+// (passwordCaptureNames) are read from the real playbook, as the first-render
+// names are: the play's vars and what the pre_tasks before the "Normalize
+// canonical users and groups" include define, plus the names that exist only
+// inside that include's tasks. A new set_fact before the include, a new task var
+// or a renamed include fails this test until the lists, and through the oracle
+// test (TestRosterUserPasswordValuesMatchAnsible) Ansible's behaviour, are
+// brought along; a stale list would send a silently wrong password (issue #394).
+func TestPasswordCaptureNamesMatchThePlaybook(t *testing.T) {
+	const include = "Normalize canonical users and groups (shared with drift)"
+	identity := loadFirstPlay(t, "freeipa-identity-apply.yml")
+	pre := yamlKey(identity, "pre_tasks")
+	index := preTaskIndex(t, pre, include)
+
+	// 1. What is defined by the time the include runs: the play's vars, the early
+	// pre_tasks and the settings task.
+	got := definedBefore(identity, pre, index)
+	want := nameSet(identityPlayVars, identityEarlyNames, identitySettingsNames)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the playbook defines %v before %q; roster_playbook_names.go lists %v (identityPlayVars, identityEarlyNames, identitySettingsNames)",
+			sortedNameSet(got), include, sortedNameSet(want))
+	}
+	// The first-render set the facts use is a subset: nothing defined at the first
+	// render is missing from the capture set.
+	for name := range playbookDefinedNames(RosterConsumerFreeIPAIdentity) {
+		if !passwordCaptureNames(RosterConsumerFreeIPAIdentity)[name] {
+			t.Errorf("%s is defined at the first render and not at the capture", name)
+		}
+	}
+
+	// 2. The include is the one file the check reads, and it is included once: a
+	// second include would capture the passwords a second time, later.
+	task := pre.Content[index]
+	includeFile := ""
+	if body := yamlKey(task, "ansible.builtin.include_tasks"); body != nil {
+		if f := yamlKey(body, "file"); f != nil {
+			includeFile = f.Value
+		}
+	}
+	if includeFile != "tasks/freeipa-identity-normalize-users-groups.yml" {
+		t.Fatalf("the normalize include is %q: update the capture-site names and the oracle with it", includeFile)
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "playbooks", "apply", "freeipa-identity-apply.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(raw), "freeipa-identity-normalize-users-groups.yml"); n != 1 {
+		t.Errorf("the identity playbook names the normalize file %d times; a second include captures the passwords again at another point", n)
+	}
+
+	// 3. The names that exist only inside the include's tasks: every `vars:` key and
+	// every loop variable (`item` unless loop_control renames it).
+	data, err := os.ReadFile(filepath.Join("..", "..", "playbooks", "apply", includeFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	taskVars := map[string]bool{}
+	capture := ""
+	for _, task := range doc.Content[0].Content {
+		for _, name := range scalarList(yamlKey(task, "vars")) {
+			taskVars[name] = true
+		}
+		if yamlKey(task, "loop") != nil {
+			loopVar := "item"
+			if control := yamlKey(task, "loop_control"); control != nil {
+				if v := yamlKey(control, "loop_var"); v != nil {
+					loopVar = v.Value
+				}
+			}
+			taskVars[loopVar] = true
+		}
+		if n := yamlKey(task, "name"); n != nil && n.Value == "Normalize canonical users for the compatibility reconciler" {
+			out, _ := yaml.Marshal(task)
+			capture = string(out)
+		}
+	}
+	if wantVars := nameSet(identityNormalizeTaskVars); !reflect.DeepEqual(taskVars, wantVars) {
+		t.Errorf("the tasks of %s define %v; roster_playbook_names.go lists %v (identityNormalizeTaskVars)", includeFile, sortedNameSet(taskVars), sortedNameSet(wantVars))
+	}
+
+	// 4. The capture itself: password.initial is rendered into ipa_users by that
+	// task, and ipa_users reaches the passwd call through ipa_active_users and
+	// nowhere else sets it again.
+	if !strings.Contains(capture, "'password': (pilot_identity_roster_user.password | default({})).initial | default(none)") {
+		t.Errorf("the normalize task no longer captures password.initial the way the check assumes:\n%s", capture)
+	}
+	setters := func(key string) []string {
+		var names []string
+		var walk func(tasks *yaml.Node)
+		walk = func(tasks *yaml.Node) {
+			if tasks == nil {
+				return
+			}
+			for _, task := range tasks.Content {
+				for _, facts := range []string{"set_fact", "ansible.builtin.set_fact"} {
+					if body := yamlKey(task, facts); body != nil && slicesContains(scalarList(body), key) {
+						names = append(names, yamlKey(task, "name").Value)
+					}
+				}
+				for _, nested := range []string{"block", "rescue", "always"} {
+					walk(yamlKey(task, nested))
+				}
+			}
+		}
+		walk(pre)
+		walk(yamlKey(identity, "tasks"))
+		walk(yamlKey(identity, "post_tasks"))
+		return names
+	}
+	if got := setters("ipa_users"); !reflect.DeepEqual(got, []string{"Normalize canonical FreeIPA settings"}) {
+		t.Errorf("tasks of the identity play that set ipa_users with set_fact: %v; the include's tasks are the capture, and this one only resets it before", got)
+	}
+	if got := setters("ipa_active_users"); !reflect.DeepEqual(got, []string{"Select active identity objects"}) {
+		t.Errorf("tasks that set ipa_active_users with set_fact: %v", got)
+	}
+	playbook := string(raw)
+	for _, want := range []string{
+		"{{ (ipa_users | rejectattr('state', 'defined') | list)",
+		"stdin: \"{{ {'principal': item.name, 'password': item.password} | to_json }}\"",
+		`loop: "{{ ipa_active_users | selectattr('password', 'defined') | rejectattr('password', 'none') | list }}"`,
+	} {
+		if !strings.Contains(playbook, want) {
+			t.Errorf("the playbook no longer holds %q: the password the passwd call sends is not the one the check resolves", want)
+		}
+	}
+}

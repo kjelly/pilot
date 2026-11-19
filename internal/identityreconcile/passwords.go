@@ -27,7 +27,7 @@ type rosterPasswords struct {
 // refused: the plan blocks them (case_collision), and a password must never be
 // picked between them.
 func NewRosterPasswords(rosterData []byte) (PasswordSource, error) {
-	all, err := inventory.RosterUserPasswords(rosterData)
+	all, err := inventory.RosterUserPasswords(rosterData, nil)
 	if err != nil {
 		return nil, err
 	}

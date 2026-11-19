@@ -226,7 +226,7 @@ func FromRosterWithForms(root map[string]any, rosterData []byte) (Desired, error
 // from the bytes is an error: no user is then trusted to have a password the
 // engine can set.
 func (d Desired) WithPasswordForms(rosterData []byte) (Desired, error) {
-	forms, err := inventory.RosterUserPasswords(rosterData)
+	forms, err := inventory.RosterUserPasswords(rosterData, nil)
 	if err != nil {
 		return d, err
 	}
