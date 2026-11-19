@@ -1163,6 +1163,12 @@ confirmed live via `dig`/`getent hosts` from all three nodes. See
 > list; `reverse-proxy` is still a single-component deploy but `site.yml` already applies it on hosts that carry the
 > role (a rerun is `changed=0`). See §3.10.
 
+> **Correction (kjelly/pilot#362, 2026-11-17):** `site.yml` now also applies `freeipa-dns-client` (right after
+> `freeipa-client`) and `freeipa-server-replica` (right after `freeipa-server`, one replica at a time) on hosts that
+> carry those roles. The separate `freeipa-dns-client` step below is therefore a rerun of what the site-wide deploy
+> already did, and the "None of these … are in `site.yml`" paragraph describes the state when round 25 ran. This
+> procedure has not been rerun on the five-node topology since that change.
+
 > Merged in from the retired `delivery-test` skill, 2026-08-14. **Executed against this exact
 > topology in round 25 (2026-08-15)** — all three single-component deploys passed `failed=0` on
 > every targeted host, with a clean idempotent rerun for each. See
@@ -1378,6 +1384,9 @@ which needs the FreeIPA server the same deploy creates. So:
 `reverse-proxy` (already applied by `site.yml`, `changed=0`); `pilot reconcile` → `internal-endpoint`;
 `pilot deploy --show-experimental` → `agent-controller`; `pilot deploy` → `detection-engine` (already applied by
 `site.yml`, `changed=0`).
+*(Dated 2026-11-17: since kjelly/pilot#362 `site.yml` also applies `freeipa-server-replica` and `freeipa-dns-client`,
+so those two steps are now reruns of the site-wide deploy; this order has not been rerun on the five-node topology
+since.)*
 
 **Prompt chains that differ from §3.4/§3.5 (re-derive from the live screen, do not copy blindly).**
 

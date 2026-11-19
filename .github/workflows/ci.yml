@@ -219,7 +219,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [alert-rules-test, identity-noop-test, identity-ssh-cache-test, identity-secret-test, freeipa-server-pool-test]
+        target: [alert-rules-test, identity-noop-test, identity-ssh-cache-test, identity-secret-test, freeipa-server-pool-test, site-day2-roles-test]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -43,4 +43,4 @@ traceability:
   exemptions:
     "docs/verification/freeipa-dns-client.md#C2": {kind: verifyOnly, reason: "resolver-managing service health (Debian systemd-resolved / EL NetworkManager already active) is a precondition this playbook consumes, not a service it starts/stops itself"}
 verification: {autoDeploy: false}
-site: {include: false, order: 0, vars: {}, tags: [], optIn: true}
+site: {include: false, order: 0, vars: {}, tags: [freeipa, freeipa-dns-client], optIn: true}
