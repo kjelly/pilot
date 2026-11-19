@@ -530,8 +530,13 @@ func TestP3aCaptureFilesAreTheHarnessList(t *testing.T) {
 			}
 		}
 	}
-	if problems := headerProblems("testdata", p3aFixtures); len(problems) != 0 {
-		t.Fatalf("%d fixtures differ:\n%s", len(problems), strings.Join(problems, "\n"))
+	// The harness writes the constant .headers file next to each fixture, as the earlier
+	// captures have; the P3a ones are not committed (the pull request would pass GitHub's
+	// 300-file compare limit, kjelly/pilot#314), and nothing here reads them.
+	for _, n := range p3aFixtures {
+		if _, err := os.Stat(filepath.Join("testdata", n+".headers")); err == nil {
+			t.Errorf("%s.headers is committed; the P3a fixtures keep only .json and .status", n)
+		}
 	}
 }
 

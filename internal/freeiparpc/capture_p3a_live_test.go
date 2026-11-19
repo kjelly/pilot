@@ -30,6 +30,11 @@ import (
 // thing it changes that is not its own is the built-in allow_all rule (K6): it is
 // disabled and enabled again, and the harness checks it ended enabled.
 //
+// The harness writes the constant .headers file next to each fixture, as the earlier
+// captures have; the P3a captures commit only .json and .status (the pull request would
+// pass GitHub's 300-file compare limit, kjelly/pilot#314), so delete the .headers files
+// before committing a new capture.
+//
 // No password is sent except the ones the user_add setup does not need: the
 // harness creates its users without one.
 
