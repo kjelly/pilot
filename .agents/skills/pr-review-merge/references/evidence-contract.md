@@ -46,7 +46,7 @@ A blocking finding that repeats a claim already disputed on this PR (usually by 
 
 `dependencies.resolved` must be `true` with a nonempty, checked explanation. This is an agent-authored assertion; code cannot independently prove an undocumented dependency.
 
-An unresolved dependency (`"resolved": false`, still with its `evidence`) is `WAITING` for a person, unless `pr-ready` can resolve it on this PR's branch. Then add `branch_repair` and the gate decides `DRAFT` with those steps, so the PR has an owner instead of staying Ready:
+An unresolved dependency (`"resolved": false`, still with its `evidence`) is `WAITING` for a person (the actor labels it `needs-person`), unless `pr-ready` can resolve it on this PR's branch. Then add `branch_repair` and the gate decides `DRAFT` with those steps, so the PR has an owner instead of staying Ready:
 
 ```json
 "dependencies": {"resolved": false,

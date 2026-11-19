@@ -269,6 +269,12 @@ A merge state that is not clean is `derived`: it says only that something else i
 a PR enqueued when another transient reason (a pending check) explains it, and needs a person alone.
 A transient reason next to a reason that needs a person needs a person.
 
+The train's `person` is a catch-all, not a statement that only a person can act: stale or missing
+review evidence is `person` here because the train cannot fix it, yet the next `pr-review-merge`
+run can. The `needs-person` label (`apply_decision.py`) therefore does not follow `wait_kind`; it
+follows `person_handoff`, which is true only for reasons registered as person-owned
+(`WaitKinds.person`; `references/quality-gate.md`).
+
 The run stops at the first WAITING or ERROR, so later PRs keep their place; a PR that leaves the
 queue (`MERGED`, `DRAFTED`, `DEQUEUED`, `SKIP`) does not stop it. Outcomes are `MERGED`, `DRAFTED`,
 `DEQUEUED`, `WAITING`, `SKIP` and `ERROR`. `ERROR` is only what the PR itself caused: a merge or a

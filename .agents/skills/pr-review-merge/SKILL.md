@@ -165,9 +165,17 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   `pr-review-merge` run costs a fresh review to reach the same answer). Work `pr-ready` can do
   on the branch is a `DRAFT` with the steps: the train-import case above, and an unresolved
   dependency the reviewer marks `branch_repair` (`references/evidence-contract.md`). A `WAITING`
-  whose `wait_kind` is `person` stays Ready, and the actor (`--execute`) comments the reasons with
-  the judged HEAD and adds the `needs-person` label, once per HEAD and set of reasons (`scripts/needs_person.py`);
-  `DRAFT`, `ENQUEUED` and a `transient` `WAITING` remove it. `list_ready.py` leaves a labelled PR out
+  that only a person can resolve (`person_handoff: true`: requested changes, a required approval,
+  a finding disputed without new evidence, a failure the reviewer confirmed unrelated, a base merge
+  queue or required checks without results or auto-merge already set, a comparison GitHub cut, an
+  unresolved dependency the reviewer stated, an actual-run record whose committed state at HEAD
+  is wrong or that the reviewer marked blocked) stays Ready, and the actor (`--execute`) comments
+  the reasons with the judged HEAD and adds the `needs-person` label, once per HEAD and set of
+  reasons (`scripts/needs_person.py`). A `WAITING` that the next `pr-review-merge` run can settle
+  (stale or missing review evidence, an incomplete review, `NEEDS_MORE_EVIDENCE`, a
+  `target_validation` that is missing or shaped wrongly, a dependency explanation that is missing)
+  stays listable with no label, even though its `wait_kind` is `person` for the merge train.
+  `DRAFT`, `ENQUEUED` and any `WAITING` without that hand-off remove a stale label. `list_ready.py` leaves a labelled PR out
   while its HEAD is the one the actor's comment names and lists it again once the HEAD moves. The
   label must exist in the repository. A failure to comment or label is a warning, never a
   different outcome.
@@ -199,7 +207,7 @@ definitions shipped beside it; there is no personal installation. Codex invocati
 |---|---|---|
 | `MERGE` | Valid independent review covering HEAD (the reviewed HEAD, or every change since a pure base import); zero P0–P2 blockers; relevant tests at the reviewed HEAD succeed; the base manifest's required record covers HEAD (or is reasoned `not-needed`); CI all passed (or narrowly justified no-CI policy); required approvals and rules satisfied; no unresolved threads/dependencies; current mergeable and safe | Queue for the merge train (`merge-queue` label, saved evidence; `ENQUEUED`); the train integrates the base when needed, reruns this gate, `gh pr merge --match-head-commit <SHA>` and verifies `MERGED` |
 | `DRAFT` | Confirmed live base tip absent from HEAD with a merge conflict or a file changed on both sides (independent of semantic review), confirmed blocking defect, failed CI not confirmed unrelated, failing tests, substantive review finding (a repeated disputed one only with new evidence), merge conflict, unresolved review thread, a secret in any commit of the PR (the local scan), a base the merge train would integrate that brings runtime files the target record cannot cover afterwards (the train's step-5 Draft, decided before the queue), or an unresolved dependency the reviewer marks `branch_repair` | Post actionable reasons (with the steps for the last two) and HEAD/Base/live-base SHAs for alignment failures, then `gh pr ready --undo`; hand repair to `pr-ready` |
-| `WAITING` | Pending CI, HEAD behind the live base with mergeability or the changed files not known yet, pending required approval, `CHANGES_REQUESTED` awaiting re-review, a failing check the reviewer confirmed unrelated to the PR, a disputed finding repeated without new evidence, the mandated actual-run record missing or not covering HEAD (no reviewer finding), unknown GitHub status, evidence incomplete, stale review HEAD/Base without a confirmed live-base mismatch, movement during live confirmation, merge queue, missing access, unmet dependency (without `branch_repair`) or a secret scan that could not run | Leave Ready. `wait_kind: transient`: **unchanged** (a stale `needs-person` label is removed). `wait_kind: person`: comment the reasons with the judged HEAD and add the `needs-person` label. Report blocker and recommended next action |
+| `WAITING` | Pending CI, HEAD behind the live base with mergeability or the changed files not known yet, pending required approval, `CHANGES_REQUESTED` awaiting re-review, a failing check the reviewer confirmed unrelated to the PR, a disputed finding repeated without new evidence, the mandated actual-run record missing or not covering HEAD (no reviewer finding), unknown GitHub status, evidence incomplete, stale review HEAD/Base without a confirmed live-base mismatch, movement during live confirmation, merge queue, missing access, unmet dependency (without `branch_repair`) or a secret scan that could not run | Leave Ready. `wait_kind: transient`, or `person` without `person_handoff` (evidence and review gaps the next `pr-review-merge` run can supply): **unchanged** (a stale `needs-person` label is removed). `person_handoff: true` (only a person can resolve it: the classes in "Every result has an owner"): comment the reasons with the judged HEAD and add the `needs-person` label. Report blocker and recommended next action |
 | `SKIP` | Already Draft, closed or merged | No action |
 
 `WAITING` is intentional: lack of evidence or a transient pending check is not proof the code is defective. **Do not automatically downgrade in these situations**. If the PR has *any confirmed* blocking defect, classify `DRAFT` even if some checks are pending.

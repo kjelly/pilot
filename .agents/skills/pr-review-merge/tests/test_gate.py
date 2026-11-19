@@ -514,7 +514,7 @@ class WaitKindTests(unittest.TestCase):
         e = sample(); e['coverage']['security'] = False
         reasons['coverage incomplete'] = (Fake(), e, None)
         e = sample(); e['dependencies']['resolved'] = False
-        reasons['inter-PR dependencies'] = (Fake(), e, None)
+        reasons['Unresolved inter-PR dependency'] = (Fake(), e, None)
         f = Fake(); f.ancestor = False
         f.compares[(B, H)] = {'files': ['pkg/a.go'], 'merge_base': 'e' * 40, 'ancestor': False}
         def cut(repo, base, head):

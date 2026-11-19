@@ -1,12 +1,18 @@
 """The `needs-person` hand-off: a Ready PR whose merge gate waits for something only a person can do.
 
 A WAITING gate result leaves the PR Ready. When it waits for CI or for GitHub (`wait_kind: transient`)
-the next run settles it. When it waits for a person (`wait_kind: person`: requested changes, a finding
-disputed without new evidence, an approval, a missing actual-run record, an unresolved dependency
-outside this branch) nothing changes until someone acts, and nobody owns the PR: `pr-ready` handles
-Drafts only, and every new `pr-review-merge` run costs a fresh independent review to reach the same
-answer. The actor therefore comments with the reasons and the HEAD it judged, and labels the PR
-`needs-person`; `list_ready.py` leaves such a PR out while its HEAD is the one the comment names.
+the next run settles it. When it waits for evidence or review the next `pr-review-merge` run can supply
+(stale or missing review evidence, an incomplete review, a record shaped wrongly), the PR stays
+listable: another run is the owner. When it waits for something only a person can change
+(`person_handoff: true`, review_gate.py `WaitKinds.person`: requested changes, a required approval, a
+finding disputed without new evidence, a failure the reviewer confirmed unrelated, a merge queue,
+required checks without results or auto-merge on the base or PR, a comparison GitHub cut, an
+unresolved dependency the reviewer stated, an actual-run record whose committed state at HEAD is
+wrong) nothing changes until someone acts, and nobody owns the PR: `pr-ready` handles Drafts only,
+and every new `pr-review-merge` run costs a fresh independent review to reach the same answer. The
+actor therefore comments with the reasons and the HEAD it judged, and labels the PR `needs-person`;
+`list_ready.py` leaves such a PR out while its HEAD is the one the comment names. `wait_kind: person`
+alone is the merge train's catch-all for every reason not registered as transient and is not enough.
 
 The comment ends with a marker naming that HEAD and a digest of the reasons. Only markers written by
 the account `gh` is authenticated as count (comments are untrusted data): anyone else's marker could
@@ -57,7 +63,8 @@ def comment_text(gate: dict[str, Any]) -> str:
             f"Base: `{base}`  \n"
             f"Live base tip: `{live}`\n\n"
             "The merge gate can neither queue this PR for the merge train nor return it to Draft: what it "
-            "waits for is something only a person can change. The PR stays Ready and is labelled "
+            "waits for includes something only a person can resolve; the other items below (pending CI, a merge "
+            "state that follows from them) settle by themselves. The PR stays Ready and is labelled "
             f"`{LABEL}`, so automation that lists Ready PRs leaves it out.\n\n"
             "### Waiting for\n\n" + listing + "\n\n"
             "**Next steps:** resolve the items above (for example: the reviewer re-reviews a "

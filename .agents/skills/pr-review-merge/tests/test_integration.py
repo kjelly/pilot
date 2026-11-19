@@ -582,13 +582,13 @@ class Integration(IntegrationBase):
         self.assertEqual(out['outcome'], 'WAITING', proc.stderr)
         self.assertIn("requires the 'actual-run' record", ' '.join(out['gate']['reasons']))
         self.assertFalse(any(a[:2] in (['pr', 'merge'], ['pr', 'ready']) for a in self.state()['calls']))
-        # No reviewer finding drafts it, so it waits for a person, and says so on the PR.
-        self.assertEqual(('person', 'needs-person'), (out['wait_kind'], out.get('handoff')), out)
+        # No reviewer finding drafts it. The evidence has no target_validation at all: the next review
+        # run can supply it, so this is the merge train's `person` but no hand-off (no comment, no label).
+        self.assertEqual(('person', None), (out['wait_kind'], out.get('handoff')), out)
+        self.assertFalse(out['gate']['person_handoff'])
         d = self.state()
-        self.assertEqual(['needs-person'], d['labels'])
-        self.assertEqual(1, len(d['comments']))
-        self.assertIn('waiting for a person', d['comments'][0])
-        self.assertIn("requires the 'actual-run' record", d['comments'][0])
+        self.assertFalse(d.get('labels'))
+        self.assertFalse(d.get('comments'))
 
     def test_captured_pr_record_of_an_older_candidate_waits(self):
         self.use_captured_pr(self.captured_record(tested_revision='d013ed95cf65216a40deefcc2de9c6a4dd57f4ef'))
@@ -732,6 +732,40 @@ class NeedsPersonHandoff(IntegrationBase):
         self.assertEqual(('WAITING', None), (out['outcome'], out.get('handoff')))
         self.assertIn('changed after the gate', ' '.join(out['warnings']))
         self.assertEqual([], self.writes())
+
+    def review_side_wait(self):
+        """Incomplete reviewer coverage: `wait_kind` is `person` for the merge train, but the next
+        pr-review-merge run supplies it, so nobody is waited for."""
+        e = evidence()
+        e['coverage']['security'] = False
+        self.evidence_file.write_text(json.dumps(e))
+
+    def test_a_review_side_wait_is_neither_commented_nor_labelled(self):
+        self.review_side_wait()
+        proc, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', 'person', None, False),
+                         (out['outcome'], out['wait_kind'], out.get('handoff'), out['gate']['person_handoff']),
+                         proc.stdout + proc.stderr)
+        self.assertIn('coverage incomplete', ' '.join(out['gate']['reasons']))
+        self.assertEqual([], self.writes())
+        self.assertFalse(self.state().get('labels'))
+        self.assertFalse(self.state().get('comments'))
+
+    def test_a_review_side_wait_releases_a_stale_label_and_stays_listable(self):
+        self.review_side_wait()
+        self.patch(labels=['needs-person'])
+        _, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', 'person', 'released'), (out['outcome'], out['wait_kind'], out.get('handoff')))
+        self.assertEqual([], self.state()['labels'])
+        self.assertFalse(self.state().get('comments'))
+        pr = {'number': 42, 'state': 'open', 'draft': False, 'html_url': 'u', 'title': 't',
+              'labels': [{'name': name} for name in self.state()['labels']],
+              'head': {'sha': HEAD}, 'base': {'sha': BASE, 'ref': 'main'}}
+        self.patch(pages=[[pr]])
+        proc = self.script('list_ready.py')
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        listing = json.loads(proc.stdout)
+        self.assertEqual(([42], []), ([p['number'] for p in listing['pull_requests']], listing['excluded']))
 
     def test_list_ready_leaves_out_the_queue_and_a_current_wait(self):
         pr = {'number': 1, 'state': 'open', 'draft': False, 'html_url': 'u', 'title': 't', 'labels': [],

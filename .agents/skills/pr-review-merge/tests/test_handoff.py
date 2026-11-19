@@ -17,12 +17,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'scripts'))
 sys.path.insert(0, str(HERE))
-from gh_runtime import GitHubError, Repo  # noqa: E402
+from gh_runtime import CompareLimitError, GitHubError, Repo  # noqa: E402
 import needs_person  # noqa: E402
 import review_gate  # noqa: E402
 from review_gate import evaluate, train_import_invalidates_record  # noqa: E402
 from test_gate import B, H, Fake, sample  # noqa: E402
 from scan_stub import CleanScan  # noqa: E402
+import test_target_validation as tvt  # noqa: E402  (its fixtures only; no TestCase class is imported)
 
 setUpModule, tearDownModule = CleanScan.up, CleanScan.down
 
@@ -165,8 +166,9 @@ class BranchRepairDependencyTests(unittest.TestCase):
     def test_an_unresolved_dependency_without_a_repair_waits_for_a_person(self):
         result = gate(Fake(), tv={}, dependencies=self.deps())
         self.assertEqual('WAITING', result['decision'], result['reasons'])
-        self.assertEqual('person', result['wait_kind'])
-        self.assertIn('Unresolved/unverified inter-PR dependencies', result['reasons'])
+        self.assertEqual(('person', True), (result['wait_kind'], result['person_handoff']))
+        self.assertEqual(['Unresolved inter-PR dependency: Merging main brings contracts/log-server.yaml '
+                          'into the closure.'], result['reasons'])
 
     def test_a_malformed_repair_waits(self):
         for bad in (self.repair(steps=[]), self.repair(steps='merge main'), self.repair(reason='short'),
@@ -186,9 +188,224 @@ class BranchRepairDependencyTests(unittest.TestCase):
                                                    'branch_repair': self.repair()})
         self.assertEqual('WAITING', result['decision'], result['reasons'])
         self.assertIn('Unresolved/unverified inter-PR dependencies', result['reasons'])
+        self.assertFalse(result['person_handoff'], 'the reviewer can still supply the explanation')
 
     def test_a_resolved_dependency_still_merges(self):
         self.assertEqual('MERGE', gate(Fake(), tv={})['decision'])
+
+
+class PersonHandoffTests(unittest.TestCase):
+    """`wait_kind: person` is the merge train's catch-all for every reason nobody registered as transient.
+    The `needs-person` label hides the PR from `list_ready.py` until a person acts, so it follows
+    `person_handoff` instead: true only when a reason is registered as person-owned where the gate emits
+    it, and no reason is an unregistered one (stale or missing evidence, an incomplete review, a record
+    shaped wrongly: the next pr-review-merge run settles those)."""
+
+    def waiting(self, gh=None, data=None):
+        result = evaluate(REPO, 42, sample() if data is None else data, client=Fake() if gh is None else gh)
+        self.assertEqual('WAITING', result['decision'], result['reasons'])
+        return result
+
+    def tv_gh(self, manifest=None, artifact=tvt.RECORD):
+        f = Fake()
+        f.files[(tvt.MANIFEST, B)] = tvt.captured_manifest() if manifest is None else manifest
+        if artifact is not None:
+            f.files[(tvt.ART, H)] = artifact
+        f.compares[(tvt.R, H)] = {'status': 'ahead', 'ancestor': True, 'files': [tvt.ART]}
+        f.compares[(B, H)] = {'status': 'ahead', 'ancestor': True, 'files': ['README.md', tvt.ART]}
+        return f
+
+    def with_tv(self, tv):
+        e = sample()
+        if tv is not None:
+            e['target_validation'] = tv
+        return e
+
+    def person_cases(self):
+        """family -> (client, evidence): each is a WAITING only a person can resolve."""
+        cases = {}
+
+        def vary(**view):
+            f = Fake(); f.v.update(view)
+            return f
+        cases['CHANGES_REQUESTED'] = (vary(reviewDecision='CHANGES_REQUESTED'), None)
+        cases['REVIEW_REQUIRED'] = (vary(reviewDecision='REVIEW_REQUIRED'), None)
+        f = vary(reviewDecision=None)
+        f.r = [{'type': 'pull_request', 'parameters': {'required_approving_review_count': 1}}]
+        cases['branch rules require approval'] = (f, None)
+        e = sample(); e['verdict'] = 'BLOCK'
+        e['findings'] = [{'severity': 'P2', 'path': 'pkg/a.go', 'line': 21, 'reason': 'Rescue skips rollback',
+                          'recommendation': 'Tag the rescue always', 'blocking': True,
+                          'disputed_reply_url': 'https://github.com/acme/demo/pull/42#issuecomment-6501033173'}]
+        cases['repeated dispute without new evidence'] = (Fake(), e)
+        f = Fake(); f.c[0]['bucket'] = 'fail'
+        e = sample()
+        e['unrelated_failing_checks'] = [{'name': 'test', 'reviewer_confirmed': True,
+                                          'reason': 'Same timeout fails on main at the base SHA, run 40802511042'}]
+        cases['unrelated failing check'] = (f, e)
+        f = Fake(); f.r = [{'type': 'merge_queue'}]
+        cases['merge queue'] = (f, None)
+        f = Fake(); f.c = []; f.r = [{'type': 'required_status_checks'}]
+        e = sample(); e['no_ci_rationale'] = 'The repository has no CI workflow for this docs-only change'
+        cases['required checks without results'] = (f, e)
+        cases['auto-merge configured'] = (vary(autoMergeRequest={'enabledAt': '2026-11-19T00:00:00Z'}), None)
+        f = Fake(); f.ancestor = False
+        f.compares[(B, H)] = {'files': ['pkg/a.go'], 'merge_base': 'e' * 40, 'ancestor': False}
+
+        def cut(repo, base, head):
+            raise CompareLimitError('GitHub lists at most 300 changed files')
+        f.compare = cut
+        cases['comparison cut by GitHub'] = (f, None)
+        e = sample(); e['dependencies']['resolved'] = False
+        cases['stated unresolved dependency'] = (Fake(), e)
+        f = self.tv_gh()
+        f.compares[(tvt.R, H)] = {'status': 'ahead', 'ancestor': True,
+                                  'files': [tvt.ART, 'playbooks/apply/os-patch-sla-apply.yml']}
+        cases['target run does not cover HEAD'] = (f, self.with_tv(tvt.record()))
+        cases['target artifact not committed at HEAD'] = (
+            self.tv_gh(), self.with_tv(tvt.record(artifact='docs/evidence/feature/missing.md')))
+        cases['target artifact does not name the revision'] = (self.tv_gh(artifact=b'no revision at all'),
+                                                               self.with_tv(tvt.record()))
+        cases['target blocked'] = (self.tv_gh(), self.with_tv(
+            tvt.record('blocked', reason='vm-target host has no free KVM capacity this week')))
+        two = json.loads(tvt.captured_manifest())
+        two['required_evidence'].append(dict(two['required_evidence'][0], id='second'))
+        cases['manifest requires two records'] = (self.tv_gh(manifest=json.dumps(two).encode()),
+                                                  self.with_tv(tvt.record()))
+        return cases
+
+    def review_side_cases(self):
+        """family -> (client, evidence): the next pr-review-merge run can supply what is missing."""
+        cases = {}
+        e = sample(); e['head_sha'] = B
+        cases['stale review HEAD'] = (Fake(), e)
+        e = sample(); e['verdict'] = 'NEEDS_MORE_EVIDENCE'
+        cases['NEEDS_MORE_EVIDENCE'] = (Fake(), e)
+        e = sample(); e['coverage']['security'] = False
+        cases['coverage incomplete'] = (Fake(), e)
+        e = sample(); e['independent'] = False
+        cases['independent is not true'] = (Fake(), e)
+        e = sample(); e['summary'] = 'too short'
+        cases['summary too short'] = (Fake(), e)
+        e = sample(); e['tests'][0]['sha'] = B
+        cases['tests bound to another SHA'] = (Fake(), e)
+        e = sample(); e['dependencies'] = {'resolved': False, 'evidence': 'Needs main merged first for the record',
+                                           'branch_repair': 'merge main'}
+        cases['malformed branch_repair'] = (Fake(), e)
+        e = sample(); e['dependencies'] = {'resolved': False, 'evidence': 'x'}
+        cases['unverified dependency'] = (Fake(), e)
+        cases['target_validation missing'] = (self.tv_gh(), self.with_tv(None))
+        cases['target decision invalid'] = (self.tv_gh(), self.with_tv(tvt.record('skip')))
+        cases['target reason too short'] = (self.tv_gh(), self.with_tv(tvt.record(reason='docs only')))
+        cases['target revision not a full SHA'] = (self.tv_gh(), self.with_tv(tvt.record(tested_revision='ccccccc')))
+        cases['target artifact outside the glob'] = (
+            self.tv_gh(), self.with_tv(tvt.record(artifact='docs/runbooks/os-patch-sla.md')))
+        tv = tvt.record('not-needed', reason='Docs-only change; no playbook, spec or contract touched.')
+        f = self.tv_gh(manifest=tvt.repo_manifest())
+        f.compares[(B, H)] = {'status': 'diverged', 'ancestor': False,
+                              'files': ['README.md', 'playbooks/apply/os-patch-sla-apply.yml']}
+        cases['target not-needed refused for required_paths'] = (f, self.with_tv(tv))
+        cases['no CI without a rationale'] = (self.checks_none(), None)
+        f = Fake(); f.c[0]['bucket'] = 'weird'
+        cases['unknown CI bucket'] = (f, None)
+        return cases
+
+    def checks_none(self):
+        f = Fake(); f.c = []
+        return f
+
+    def test_every_person_owned_family_is_a_hand_off(self):
+        for family, (gh, data) in self.person_cases().items():
+            with self.subTest(family=family):
+                result = self.waiting(gh, data)
+                self.assertEqual('person', result['wait_kind'], result['reasons'])
+                self.assertIs(True, result['person_handoff'], result['reasons'])
+
+    def test_every_review_side_family_is_left_listable(self):
+        for family, (gh, data) in self.review_side_cases().items():
+            with self.subTest(family=family):
+                result = self.waiting(gh, data)
+                # The merge train still dequeues these (its catch-all), but nobody is waited for.
+                self.assertEqual('person', result['wait_kind'], result['reasons'])
+                self.assertIs(False, result['person_handoff'], result['reasons'])
+
+    def test_one_review_side_reason_keeps_a_person_owned_wait_listable(self):
+        persons = self.person_cases()
+        for family, (gh, data) in self.review_side_cases().items():
+            if family.startswith('target') or family.startswith('no CI') or family.startswith('unknown CI'):
+                continue
+            with self.subTest(family=family):
+                data = sample() if data is None else data
+                gh = Fake() if gh is None else gh
+                gh.v['reviewDecision'] = 'CHANGES_REQUESTED'
+                result = self.waiting(gh, data)
+                if family not in ('stale review HEAD', 'independent is not true'):   # these stop the gate early
+                    self.assertIn('CHANGES_REQUESTED', ' '.join(result['reasons']))
+                self.assertIs(False, result['person_handoff'], result['reasons'])
+        # The same pair, reached through different families.
+        gh, data = persons['target blocked']
+        gh.v['reviewDecision'] = 'CHANGES_REQUESTED'
+        self.assertIs(True, self.waiting(gh, data)['person_handoff'])
+        gh, data = persons['target blocked']
+        gh.v['reviewDecision'] = 'CHANGES_REQUESTED'
+        data['coverage']['security'] = False
+        self.assertIs(False, self.waiting(gh, data)['person_handoff'])
+
+    def test_transient_and_derived_reasons_do_not_cancel_a_person_owned_one(self):
+        f = Fake(); f.c[0]['bucket'] = 'pending'; f.v['reviewDecision'] = 'CHANGES_REQUESTED'
+        result = self.waiting(f)
+        self.assertEqual(('person', True), (result['wait_kind'], result['person_handoff']), result['reasons'])
+        f = Fake(); f.v['reviewDecision'] = 'CHANGES_REQUESTED'; f.v['mergeStateStatus'] = 'BLOCKED'
+        result = self.waiting(f)
+        self.assertIn("Merge state is not CLEAN: 'BLOCKED'", ' '.join(result['reasons']))
+        self.assertIs(True, result['person_handoff'])
+
+    def test_waits_without_a_person_owned_reason_are_not_hand_offs(self):
+        f = Fake(); f.c[0]['bucket'] = 'pending'
+        result = self.waiting(f)
+        self.assertEqual(('transient', False), (result['wait_kind'], result['person_handoff']))
+        f = Fake(); f.v['mergeStateStatus'] = 'UNSTABLE'
+        result = self.waiting(f)
+        self.assertEqual(('person', False), (result['wait_kind'], result['person_handoff']),
+                         'a derived reason alone says only that something else is wrong')
+        f = Fake(); f.v['mergeable'] = 'SOMETHING_NEW'
+        self.assertIs(False, self.waiting(f)['person_handoff'])
+        f = Fake(); f.v['reviewDecision'] = 'SOMETHING_NEW'
+        self.assertIs(False, self.waiting(f)['person_handoff'])
+
+    def test_a_gate_that_decides_has_no_person_handoff(self):
+        self.assertNotIn('person_handoff', evaluate(REPO, 42, sample(), client=Fake()))
+
+    def test_the_registry_holds_only_what_was_registered(self):
+        kinds = review_gate.WaitKinds()
+        owned, later, derived = kinds.person('a person decides'), kinds.later('GitHub is down'), kinds.secondary('state')
+        self.assertTrue(kinds.handoff([owned]))
+        self.assertTrue(kinds.handoff([owned, later, derived]))
+        self.assertFalse(kinds.handoff([owned, 'a reason nobody registered']))
+        self.assertFalse(kinds.handoff(['a reason nobody registered']))
+        self.assertFalse(kinds.handoff([later, derived]))
+        self.assertFalse(kinds.handoff([]))
+        self.assertEqual('person', kinds.kind(['a reason nobody registered']), 'the train is unchanged')
+
+    def test_the_actor_needs_both_the_kind_and_the_flag(self):
+        import apply_decision
+        from unittest import mock
+        gate = {'decision': 'WAITING', 'wait_kind': 'person', 'head_sha': H, 'base_sha': B, 'live_base_sha': B,
+                'base_name': 'main', 'reasons': ['GitHub reviewDecision is CHANGES_REQUESTED: waiting']}
+        shown = {'state': 'OPEN', 'isDraft': False, 'headRefOid': H, 'baseRefOid': B, 'baseRefName': 'main',
+                 'labels': []}
+        for extra, labelled in (({'person_handoff': True}, True), ({'person_handoff': False}, False), ({}, False),
+                                ({'person_handoff': 'yes'}, False)):
+            with self.subTest(extra=extra), mock.patch.object(apply_decision, 'pr_view', return_value=shown), \
+                    mock.patch.object(apply_decision, 'branch_head', return_value=B), \
+                    mock.patch.object(apply_decision, 'issue_comments', return_value=[]), \
+                    mock.patch.object(apply_decision, 'viewer_login', return_value='bot'), \
+                    mock.patch.object(apply_decision, 'post_comment') as comment, \
+                    mock.patch.object(apply_decision, 'edit_label') as label, \
+                    mock.patch.object(apply_decision, '_read_until', return_value=(True, shown, None)):
+                apply_decision._waiting_handoff(REPO, 42, dict(gate, **extra), {}, sleep=lambda s: None)
+            self.assertEqual(labelled, label.called)
+            self.assertEqual(labelled, comment.called)
 
 
 class MarkerTests(unittest.TestCase):

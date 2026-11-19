@@ -3,9 +3,11 @@
 
 DRAFT posts the reasons and converts the PR to Draft. MERGE queues the PR for the merge train
 (`merge_train.py`, kjelly/pilot#307): the train is the only merger, so a merge never races another
-PR's CI on an aligned HEAD. WAITING keeps the PR Ready; one that waits for a person (`wait_kind:
-person`) is commented and labelled `needs-person` (`needs_person.py`), which DRAFT, ENQUEUED and a
-transient WAITING remove again.
+PR's CI on an aligned HEAD. WAITING keeps the PR Ready; one that only a person can resolve
+(`wait_kind: person` and `person_handoff: true`: the gate registers those reasons, review_gate.py
+`WaitKinds.person`) is commented and labelled `needs-person` (`needs_person.py`). Any other WAITING
+(CI or GitHub still settling, or evidence and review gaps the next `pr-review-merge` run can supply)
+stays listable, and DRAFT, ENQUEUED and such a WAITING remove a stale label again.
 
 A write is reported as done only when the PR itself shows it (`gh pr view`), read again a bounded number
 of times: GitHub's reads lag its writes by a few seconds, and a PR that was enqueued must not be reported
@@ -162,15 +164,17 @@ def _release_needs_person(repo: Repo, number: int, view: dict[str, Any], out: di
 
 def _waiting_handoff(repo: Repo, number: int, gate: dict[str, Any], out: dict[str, Any], *,
                      sleep: Callable[[float], None]) -> None:
-    """A WAITING gate leaves the PR Ready. One that waits for a person (`wait_kind: person`) gets a comment
-    with the reasons and the judged HEAD (once per HEAD and set of reasons) and the `needs-person` label, so
-    the PR has a visible owner instead of being picked up and reviewed again for the same answer. One that
-    settles by itself (`transient`) removes such a label: no person is waited for any more.
+    """A WAITING gate leaves the PR Ready. One that only a person can resolve (`wait_kind: person` and
+    `person_handoff: true`) gets a comment with the reasons and the judged HEAD (once per HEAD and set of
+    reasons) and the `needs-person` label, so the PR has a visible owner instead of being picked up and
+    reviewed again for the same answer. Any other WAITING (it settles by itself, or the next review run can
+    supply what is missing: `wait_kind: person` alone is the merge train's catch-all, not a hand-off) gets
+    no comment and removes such a label from an earlier run: no person is waited for.
 
     Nothing here changes the outcome, which stays WAITING: a failure is a warning in `warnings`."""
     try:
         view = pr_view(repo, number)
-        if gate.get("wait_kind") != "person":
+        if gate.get("wait_kind") != "person" or gate.get("person_handoff") is not True:
             _release_needs_person(repo, number, view, out)
             return
         head, base, live, base_name = (gate.get("head_sha"), gate.get("base_sha"), gate.get("live_base_sha"),
