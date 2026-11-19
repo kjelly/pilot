@@ -391,7 +391,8 @@ Site-wide deploy 應只選一次 `全站部署(site.yml)`。不要以單一 comp
 自 kjelly/pilot#362 起，`site.yml` 會在帶有該 role 的 host 上套用 `freeipa-server-replica`（緊接在
 `freeipa-server` 之後，一次一台）與 `freeipa-dns-client`（緊接在 `freeipa-client` 之後）；沒有這些 role
 的 host 不受影響，單獨重跑仍可用 `pilot reconcile`。`agent-controller` 仍不在 `site.yml`
-（kjelly/pilot#195），也不在 `pilot reconcile` 的 day-2 清單裡，要在 `freeipa-server` 部署完成後、驗收前
+（它的備份步驟問題 kjelly/pilot#195 已修，但是否放進 `site.yml`、以及全站部署的實跑證據，是 kjelly/pilot#362
+剩下的範圍），也不在 `pilot reconcile` 的 day-2 清單裡，要在 `freeipa-server` 部署完成後、驗收前
 用 `pilot deploy --show-experimental` 選它。
 `detection-engine` 雖然在 contract 標為 opt-in，`site.yml` 有 import 它，site-wide deployment 已經套用
 （它依賴 `thanos-query`、`alertmanager`，順序由 `site.yml` 決定）；要單獨重跑時用 `pilot deploy`。

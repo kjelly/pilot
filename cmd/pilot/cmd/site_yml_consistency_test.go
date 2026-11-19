@@ -134,7 +134,7 @@ func readSiteYMLImports(t *testing.T, root string) []siteYMLImport {
 // host-role ones: agent-controller, pilot-access-target-policy); that
 // reporting gap is kjelly/pilot#367.
 var siteYMLStandaloneComponents = map[string]string{
-	"agent-controller":           "criterion 2: its always-tagged backup Steps 3-5 report changed on every run, so a site-wide second apply would never be changed=0 (#195); experimental Phase 1. Import it once #195 is fixed",
+	"agent-controller":           "not imported yet: its criterion-2 blocker (always-tagged backup Steps 3-5 reported changed on every run) was fixed by #195, but the import decision and the site-wide deploy run AGENTS.md section 5.7 point 5 requires are the remaining scope of #362; experimental Phase 1",
 	"freeipa-dns":                "criterion 1: a manifest-driven day-2 reconciler, not a host role; its role (freeipa-server) is shared with freeipa-server, so importing it would sweep it into every deploy that has a FreeIPA server host (the 2026-09-14 incident)",
 	"freeipa-identity":           "criterion 1/4: roster-driven, not a host role, affects every user, has its own lock and execution engine; role (freeipa-server) is shared with the server contract",
 	"freeipa-realm-replacement":  "criterion 2/3/4: one-time irreversible migration; a prior-state file makes it refuse a second run",

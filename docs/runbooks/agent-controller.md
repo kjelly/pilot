@@ -22,6 +22,9 @@ SSH 憑證。
 - `pilot verify docs/verification/agent-controller.md`:**13/13 PASS**(見 §5)。
 - 冪等重跑:`changed=0`(見 §3.2)。
 - 真實 Alertmanager v0.27 → agent-controller 的 webhook 全鏈路成功遞送(見 §4)。
+- #195(升級備份與 rollback)另在 vm-target 上以拋棄式單機實跑:全新主機的 L1–L6、升級、不選 Step 6 的
+  tag 選擇、check mode、Step 6 前後的失敗、空快照、沒有 `state.db` 的升級,以及 main 的對照組;tested
+  revision、verdict、各情境結果與未涵蓋範圍見[最新 evidence](../evidence/agent-controller/LATEST.md)。
 
 ## 2. 部署鏈(實際指令 + 真實輸出摘要)
 
@@ -163,6 +166,32 @@ C3、C7-C11、C13 是 `verifyOnly`(contract 的 exemption 表有列原因)——
 冪等重跑(§3.2 用同樣的 `-e` 值再跑一次):`PLAY RECAP: ok=34 changed=0
 failed=0`。升級路徑(重建 binary 後帶新 sha256 重跑)也真的跑過一次——
 `agent_controller_is_upgrade` 判斷正確觸發、backup/rollback 素材有寫入。
+(以上是 #195 之前的實跑。)
+
+#195 之後的升級備份與 rollback:備份只在這次 run 真的會換 binary(Step 6,
+`agent-controller-C4`)時才做,不選到 Step 6 的 run(例如 `--tags` 只選別的 row)
+不備份、也不回報 changed。每次升級在 `/var/backups/pilot-agent-controller/` 底下
+建一個自己的 `apply-*` 目錄放 `pre-upgrade.db` 與 `pilot-agent-controller.prev`,
+兩者都驗證過(SQLite `db check`、checksum)才授權 rescue 還原;rescue 只用這次
+run 的目錄,不會拿舊 run 留下的檔案(包括舊版放在備份目錄最上層的
+`pre-upgrade.db`/`pilot-agent-controller.prev`)。`apply-*` 目錄不會自動清除
+(每次升級、包括失敗的升級都會留一個,而且在 restic 備份範圍內)。
+
+失敗時 rescue 的行為:rescue 只在這次 run 已經開始換 binary(Step 5e 之後,選到 Step 6)時才停止服務。
+在 Step 6 之前失敗(快照或驗證步驟拒絕)的 run 沒有改過 binary、config.yaml、unit 或
+`webhook-secret.env`,也沒有啟動或重啟服務,服務維持原狀。沒選到 Step 6 的 run(例如
+`--skip-tags agent-controller-C4`)rescue 同樣不停止服務,但這種 run 在失敗之前可能已經改寫了
+config.yaml、unit 或 `webhook-secret.env`、重啟過服務;這些不會還原,最後的錯誤訊息會列出這次改了什麼。
+換過 binary 之後失敗:先停止服務,還原這次的 binary 與 state.db,還原成功才重啟;還原失敗、或這次沒有快照
+可還原(第一次安裝、binary 沒變)時,服務維持停止且停用。第一次安裝在 unit 建立之前失敗時,systemd 沒有這個
+unit(`LoadState=not-found`),沒有服務可停,訊息會這樣說,不會寫成「無法停止」。最後的錯誤訊息只描述實際發生的事。
+
+已知限制(kjelly/pilot#395,尚未修):run 選到 Step 6 但沒有真的換掉 binary(例如 binary 已是這個版本),
+Step 6 之後才失敗時,rescue 仍會停止並停用一個健康的服務,沒有快照可還原就不會重啟;升級的 run 會還原
+binary 與 state.db 並重啟,但 rescue 從不還原 config.yaml、unit 與 `webhook-secret.env`(detection-engine
+有,這裡尚未移植),也不在重啟後檢查服務是否可用。細節見 #395。
+這段行為由 real-ansible 測試(`cmd/pilot/cmd/agent_controller_backup_tags_test.go`)鎖住,並在 vm-target 上
+實跑過(見 §1 與[最新 evidence](../evidence/agent-controller/LATEST.md))。
 
 ## 6. 已知限制 / 尚未完成
 
@@ -191,3 +220,4 @@ pilot vm-target down --name agentctl
 | 日期 | 版本 | 變更 |
 |---|---|---|
 | 2026-09-01 | v1.0 | Phase 1 初次實跑:vm-target 四層部署鏈全綠、13/13 Spec v2 PASS、冪等 changed=0、真實 Alertmanager v0.27 webhook 遞送鏈驗證通過;實跑中發現並修好 3 個真 bug(HMAC→bearer token、C3 探針位址、C8 探針期望值反了)。tested revision: `38d7ed7`(`feat(agent-monitoring): implement Phase 1 observe-only Incident Controller`)。 |
+| 2026-11-19 | v1.1 | kjelly/pilot#195:升級備份與 rollback 改成只在 Step 6 會換 binary 時才備份,每次升級用自己的 `apply-*` 目錄,rescue 只還原這次驗證過的快照,Step 6 之前失敗不動服務(§5);已知限制見 #395。vm-target 實跑結果見 §1 的 evidence 連結。 |

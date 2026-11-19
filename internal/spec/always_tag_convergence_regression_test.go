@@ -17,17 +17,11 @@ import (
 // alwaysTagConvergenceAllowlist lists the always-tagged command/shell/raw/
 // script/tempfile tasks that still report changed on every run, keyed
 // `<playbook under playbooks/apply>::<task name>` (a task reached through an
-// include is `<playbook>::<include name> -> <task name>`). It holds two
-// entries. An entry needs a reason, and fails the test once its task no
-// longer violates the invariant, so a fix cannot leave a stale exemption
-// behind.
+// include is `<playbook>::<include name> -> <task name>`). It holds one
+// entry; agent-controller's Step 4 left it with kjelly/pilot#195. An entry
+// needs a reason, and fails the test once its task no longer violates the
+// invariant, so a fix cannot leave a stale exemption behind.
 var alwaysTagConvergenceAllowlist = map[string]string{
-	"agent-controller-apply.yml::Step 4: back up state.db before an upgrade (SQLite consistent snapshot via VACUUM INTO)": "" +
-		"same shape detection-engine had before kjelly/pilot#190: Steps 3-5 are `always` and Step 4 is changed_when: true. " +
-		"agent-controller is not imported by site.yml (contract site.include: false), so a pilot deploy --limit dependency " +
-		"expansion cannot reach it; the reachable trigger is a tag-scoped single-component deploy that does not select Step 6, " +
-		"which still takes the backup on a stale binary and changes it on every apply; " +
-		"tracked by https://github.com/kjelly/pilot/issues/195, remove this entry when #195 lands",
 	"freeipa-realm-replacement-apply.yml::Realm replacement — snapshot old client trust before mutation": "" +
 		"one-off migration: it refuses to run again once its prior-state file exists (the `Gate: prior migration state " +
 		"must be absent` assert), so there is no second apply to keep at changed=0, and it is not imported by site.yml",
@@ -93,8 +87,8 @@ type convergenceScan struct {
 // instance.
 //
 // A `rescue:` only runs after a failure, so it cannot break the second
-// apply. agent-controller's Step 4 has the same shape detection-engine had
-// and is tracked by #195; it is the first of two allowlist entries.
+// apply. agent-controller's Step 4 had the same shape detection-engine had
+// and was the first allowlist entry until #195 gave Steps 3-5 Step 6's tag.
 func TestRegression_AlwaysTaggedTasksConverge(t *testing.T) {
 	files, err := filepath.Glob("../../playbooks/apply/*.yml")
 	if err != nil {
