@@ -200,6 +200,7 @@ func (d *applyDriver) runAll() {
 	d.runA20(base)
 	d.runA21(base)
 	d.runA22(base)
+	d.runA23(base)
 	d.runMixed(base, oneUser)
 }
 
