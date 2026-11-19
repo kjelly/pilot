@@ -36,7 +36,13 @@ Exception: the operational base-alignment gate runs before semantic evidence che
 }
 ```
 
-Allowed `verdict`: `PASS`, `BLOCK`, `NEEDS_MORE_EVIDENCE`.
+Allowed `verdict`: `PASS`, `BLOCK`, `NEEDS_MORE_EVIDENCE`. The verdict judges the diff, not the state around it:
+
+- `BLOCK`: the reviewer has a concrete blocking finding or a failed test (below); a disputed finding repeated without new evidence is `BLOCK` too.
+- `PASS`: no blocking finding. A state recorded in a field only a person can change, `dependencies.resolved: false` without `branch_repair` or `target_validation.decision: blocked`, is `PASS` when there is no blocking finding. The gate never merges it: it waits and hands the PR to a person (`needs-person`). This is the prm-reviewer's form of the "Needs Discussion / 未完成驗證" report.
+- `NEEDS_MORE_EVIDENCE`: only for evidence a later review run can obtain (a test not yet run, a file not yet read). It is never the answer for a state a person decides; the gate leaves such a PR listable, so the same review is requested again.
+
+A `BLOCK` that names no finding is reported as unexplained (`BLOCK verdict needs a specific finding or failed test`), except when the evidence states one of those two person-owned states (a stated unresolved dependency, a `blocked` target record) or repeats a disputed finding: the gate then hands the PR to a person instead.
 Allowed finding `severity`: `P0`, `P1`, `P2`, `P3`, `P4` ([shared rubric](../../issue-to-pr/references/severity.md)).
 Finding shape: `{"severity":"P1","path":"pkg/x.go","line":42,"reason":"...","recommendation":"...","blocking":true}`. Any P0–P2 is blocking regardless of the `blocking` flag.
 
@@ -62,7 +68,7 @@ An unresolved dependency (`"resolved": false`, still with its `evidence`) is `WA
 
 `unrelated_failing_checks`: `[{"name": "exact check name", "reason": "evidence it fails the same way without this diff (at least 30 characters)", "reviewer_confirmed": true}]`. A listed `fail`/`cancel` check makes the decision `WAITING` (rerun once the cause is fixed) instead of `DRAFT`; it never allows `MERGE`. Same shape as `pr-ready`'s field, so a PR it marked Ready with that exemption is not returned to Draft.
 
-When there are no check runs, use `no_ci_rationale` only if no CI truly applies and there is positive test evidence (and the branch has no required checks). The runtime rechecks mergeability and rules; it does not pretend that absence of checks is success.
+When there are no check runs, use `no_ci_rationale` only if no CI truly applies and there is positive test evidence (and the branch has no required checks). On a branch whose rules require status checks, GitHub returning none is `WAITING` for a person (`needs-person`) with or without a rationale and never `MERGE`: leave `no_ci_rationale` empty there. If the rules cannot be read, the rationale gap stays. The runtime rechecks mergeability and rules; it does not pretend that absence of checks is success.
 
 `target_validation`: `{"decision": "required|not-needed|blocked", "reason": "...", "artifact": "docs/evidence/<feature>/<date>-<rev>.md", "tested_revision": "<40-hex sha>"}`. The gate reads `.github/pr-evidence.json` at the PR's **base SHA** (GitHub contents API, never the head, so a PR cannot weaken its own requirement) and checks this object when the manifest has `required_evidence`; with no manifest, or one without `required_evidence`, it ignores the field. Rules, each failure `WAITING` (never `MERGE`):
 

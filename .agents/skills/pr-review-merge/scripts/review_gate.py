@@ -19,6 +19,7 @@ COVERAGE = ("requirements", "correctness", "architecture", "security", "concurre
 SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 SEVERITIES = ("P0", "P1", "P2", "P3", "P4")
 TARGET_DECISIONS = ("required", "not-needed", "blocked")
+TARGET_BLOCKED = "target validation is blocked"
 # Same floor as issue-to-pr's `not-applicable` reason and `unrelated_failing_checks`.
 TARGET_REASON_MIN = 30
 REPO_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "issue-to-pr" / "scripts" / "repo_evidence.py"
@@ -258,7 +259,7 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
     if not isinstance(reason, str) or len(reason.strip()) < TARGET_REASON_MIN:
         return [f"target_validation.reason must state why it is {decision} ({TARGET_REASON_MIN}+ characters)"]
     if decision == "blocked":
-        return [owned(f"{need}; target validation is blocked: {reason.strip()[:300]}")]
+        return [owned(f"{need}; {TARGET_BLOCKED}: {reason.strip()[:300]}")]
     if decision == "not-needed":
         patterns = [repo_evidence.glob_regex(p) for p in item.get("required_paths", [])]
         if not patterns:
@@ -717,9 +718,14 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
     test_defects, test_gaps, tested = _test_assessment(evidence.get("tests"), reviewed_head)
     defects.extend(test_defects)
     missing.extend(test_gaps)
-    if evidence.get("verdict") == "BLOCK" and not defects and not repeated_disputes:
-        missing.append("BLOCK verdict needs a specific finding or failed test")
-    elif evidence.get("verdict") not in ("PASS", "BLOCK", "NEEDS_MORE_EVIDENCE"):
+    # A BLOCK verdict judges the diff and needs a finding or failed test behind it. The exceptions are a
+    # disputed finding a person decides, and a state a person alone can change (a stated unresolved
+    # dependency, a blocked target record): the reviewer's contract says to give PASS for those, and a
+    # BLOCK that names one is still handed to that person instead of being reported as a malformed
+    # review. Those two are only known after the dependency and target checks below, which place the
+    # message at this position when neither holds.
+    block_at = len(missing) if evidence.get("verdict") == "BLOCK" and not defects and not repeated_disputes else None
+    if block_at is None and evidence.get("verdict") not in ("PASS", "BLOCK", "NEEDS_MORE_EVIDENCE"):
         missing.append("Invalid reviewer verdict")
     if evidence.get("verdict") == "NEEDS_MORE_EVIDENCE":
         missing.append("Reviewer requested further evidence")
@@ -760,6 +766,9 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
         client, repo, result["head_sha"], live_base, evidence, base_name=view.get("baseRefName"),
         integrated_base=True, infra=target_infra, person=target_person)
     missing.extend(kinds.person(gap) if gap in target_person else gap for gap in target_gaps)
+    if block_at is not None and not (any(g.startswith(UNRESOLVED_DEPENDENCY + ":") for g in dep_gaps)
+                                     or any(TARGET_BLOCKED in g for g in target_person)):
+        missing.insert(block_at, "BLOCK verdict needs a specific finding or failed test")
     missing.extend(kinds.later(message) for message in target_infra)
     if result.get("alignment") == "train" and not target_infra:
         # The train's integration would bring files the saved record cannot cover: its step 5 would
@@ -788,11 +797,13 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
     except (GitHubError, ValueError, KeyError) as exc:
         missing.append(kinds.later(f"CI state unavailable: {exc}"))
         checks = None
+    # GitHub returned no checks. Whether that needs a no-CI rationale depends on the branch rules, which are
+    # read below: a branch that requires status checks is a person's to resolve, and the rationale gap would
+    # only hide that (it is unregistered, so the hand-off would never fire). The gap goes back at this
+    # position once the rules are known.
+    no_ci_at = len(missing) if checks is not None and not checks else None
+    required_checks = False
     if checks is not None:
-        if not checks:
-            rationale = evidence.get("no_ci_rationale")
-            if not isinstance(rationale, str) or len(rationale.strip()) < 20 or not tested:
-                missing.append("No GitHub CI: requires a concrete no-CI rationale and passing test evidence")
         for check in checks:
             bucket = check.get("bucket")
             name = check.get("name") or "unnamed check"
@@ -830,7 +841,9 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
         result["merge_queue"] = any(rule["type"] == "merge_queue" for rule in rules)
         if result["merge_queue"]:
             missing.append(kinds.person("Base branch requires merge queue; no unattended queue/auto-merge"))
-        if checks is not None and not checks and any(rule["type"] == "required_status_checks" for rule in rules):
+        if no_ci_at is not None and any(rule["type"] == "required_status_checks" for rule in rules):
+            # Never a MERGE, with or without a rationale: the branch protection wants checks that did not run.
+            required_checks = True
             missing.append(kinds.person("Branch requires status checks, but GitHub returned no completed checks"))
         for rule in rules:
             if rule["type"] == "pull_request":
@@ -840,6 +853,12 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
                     missing.append(kinds.person("Branch rules require reviewer approval"))
     except (GitHubError, ValueError, KeyError) as exc:
         missing.append(kinds.later(f"Unable to verify active branch rules: {exc}"))
+
+    if no_ci_at is not None and not required_checks:
+        # The branch rules do not require checks, or could not be read (fail closed).
+        rationale = evidence.get("no_ci_rationale")
+        if not isinstance(rationale, str) or len(rationale.strip()) < 20 or not tested:
+            missing.insert(no_ci_at, "No GitHub CI: requires a concrete no-CI rationale and passing test evidence")
 
     decision = view.get("reviewDecision")
     if decision == "CHANGES_REQUESTED":

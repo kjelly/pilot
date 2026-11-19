@@ -767,6 +767,41 @@ class NeedsPersonHandoff(IntegrationBase):
         listing = json.loads(proc.stdout)
         self.assertEqual(([42], []), ([p['number'] for p in listing['pull_requests']], listing['excluded']))
 
+    def listed(self, labels):
+        pr = {'number': 42, 'state': 'open', 'draft': False, 'html_url': 'u', 'title': 't',
+              'labels': [{'name': name} for name in labels], 'head': {'sha': HEAD}, 'base': {'sha': BASE, 'ref': 'main'}}
+        self.patch(pages=[[pr]])
+        proc = self.script('list_ready.py')
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        out = json.loads(proc.stdout)
+        return [p['number'] for p in out['pull_requests']], [e['number'] for e in out['excluded']]
+
+    def test_required_checks_without_results_hand_off_with_contract_evidence(self):
+        # The branch requires status checks and GitHub returned none; the evidence is what the contract asks
+        # for (no no_ci_rationale: that field is for a branch without required checks). A rationale gap that
+        # hid this reason made the actor leave the PR unlabelled and list_ready select it every run.
+        self.patch(checks=[], rules=[{'type': 'required_status_checks'}])
+        proc, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', 'person', 'needs-person', True),
+                         (out['outcome'], out['wait_kind'], out.get('handoff'), out['gate']['person_handoff']),
+                         proc.stdout + proc.stderr)
+        d = self.state()
+        self.assertEqual(['needs-person'], d['labels'])
+        self.assertIn('Branch requires status checks, but GitHub returned no completed checks', d['comments'][0])
+        self.assertNotIn('No GitHub CI', d['comments'][0])
+        self.assertEqual(([], [42]), self.listed(d['labels']))
+
+    def test_no_checks_without_a_required_checks_rule_is_not_a_hand_off(self):
+        self.patch(checks=[], rules=[])
+        proc, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', False, None), (out['outcome'], out['gate']['person_handoff'], out.get('handoff')),
+                         proc.stdout + proc.stderr)
+        self.assertIn('No GitHub CI', ' '.join(out['gate']['reasons']))
+        d = self.state()
+        self.assertFalse(d.get('labels'))
+        self.assertFalse(d.get('comments'))
+        self.assertEqual(([42], []), self.listed([]))
+
     def test_list_ready_leaves_out_the_queue_and_a_current_wait(self):
         pr = {'number': 1, 'state': 'open', 'draft': False, 'html_url': 'u', 'title': 't', 'labels': [],
               'head': {'sha': HEAD}, 'base': {'sha': BASE, 'ref': 'main'}}
