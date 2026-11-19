@@ -130,7 +130,8 @@ definitions shipped beside it; there is no personal installation. Codex invocati
   saves the evidence and adds the `merge-queue` label (`ENQUEUED`); `scripts/merge_train.py`,
   the one consumer per repository and host, takes the oldest-labelled PR, merges the
   live base tip into its branch when HEAD lacks it (only a clean merge that changes no
-  file the PR changed), waits for CI on that HEAD, reruns this gate and merges. A PR
+  file the PR changed), waits for CI on that HEAD (no check after 5 minutes on a PR
+  enqueued with checks is CI that has not started: it stays enqueued), reruns this gate and merges. A PR
   behind main is therefore not sent back to `pr-ready` unless the merge conflicts or a
   file changed on both sides. The consumer runs from a user timer or by hand: after a
   `ENQUEUED` report with no timer on this host, run

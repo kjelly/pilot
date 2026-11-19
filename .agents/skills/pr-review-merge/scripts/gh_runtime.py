@@ -95,9 +95,18 @@ def pr_view(repo: Repo, number: int) -> dict[str, Any]:
     return data
 
 
+# `gh pr checks` for a PR whose head commit has no check run and no status at all exits 1, prints nothing on
+# stdout and, on stderr, exactly this line (gh 2.104.0, kjelly/pilot#106: tests/fixtures/github_api.json
+# `pr_checks.zero_checks`). gh answers before its JSON exporter, so `--json` never prints `[]`.
+# Case-sensitive and anchored to the whole of stderr: anything else stays a GitHubError.
+NO_CHECKS = re.compile(r"no checks reported on the '[^\n]+' branch\n?")
+
+
 def pr_checks(repo: Repo, number: int) -> list[dict[str, Any]]:
     cp = run_gh(["pr", "checks", str(number), "-R", repo.raw,
                  "--json", "name,state,bucket,link,workflow"], check=False)
+    if cp.returncode == 1 and not cp.stdout.strip() and NO_CHECKS.fullmatch(cp.stderr):
+        return []
     # gh checks may exit nonzero for failing or pending checks; valid JSON still describes them.
     # Empty stdout with a nonzero rc is *not* proof there is no CI.
     if not cp.stdout.strip():

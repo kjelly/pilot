@@ -1217,5 +1217,135 @@ class HeadOfLineTests(DeliveryTests):
         self.assertIn(42, self.gh.labels)
 
 
+WITH_CHECKS = {'passed': 1, 'failed': 0, 'pending': 0, 'skipped': 0}
+NO_CHECKS_AT_ALL = {'passed': 0, 'failed': 0, 'pending': 0, 'skipped': 0}
+NO_CI_RATIONALE = 'This repository has no configured CI jobs; the unit test receipt is in the review evidence.'
+
+
+class ZeroChecksTests(TrainHarness):
+    """GitHub reports no check for HEAD (kjelly/pilot#389): real gh answers that with rc 1 and a stderr
+    line, which the adapter reads as an empty CI. For a PR enqueued with checks that is CI that has not
+    started on HEAD (the train just pushed it, or Actions is late), never a missing CI: the gate would
+    dequeue it for that. Only a PR enqueued with no checks at all, with the rationale, goes on to the gate."""
+
+    def queue_with(self, checks, **evidence_changes):
+        gate = {'decision': 'MERGE', 'head_sha': self.reviewed, 'base_sha': self.fork,
+                'live_base_sha': self.gh.branch_head(REPO, 'main')}
+        if checks is not None:
+            gate['checks'] = checks
+        return merge_train.enqueue(REPO, 42, dict(self.evidence(), **evidence_changes), gate, client=self.gh)
+
+    def assertStillQueued(self, number=42):
+        """Enqueued with its saved review, and the train wrote nothing about it but the enqueue's own comment."""
+        self.assertIn(number, self.gh.labels)
+        self.assertIsNotNone(merge_train.load_entry(REPO, number))
+        self.assertEqual([], [w for w in self.gh.writes if w[0] in ('merge', 'draft', 'label-')], self.gh.writes)
+        self.assertEqual(1, len([c for c in self.gh.comments if c[0] == number]), self.gh.comments)
+
+    def run_waiting(self, **kw):
+        out = self.train(registration_grace=300, **kw).run()
+        self.assertEqual('DONE', out['status'], out)
+        self.assertEqual([(42, 'WAITING')], [(r['pr'], r['outcome']) for r in out['results']], out)
+        return out['results'][0]
+
+    def test_enqueue_records_how_many_checks_the_gate_saw(self):
+        for checks, expected in ((WITH_CHECKS, 1), (NO_CHECKS_AT_ALL, 0),
+                                 ({'passed': 2, 'failed': 0, 'pending': 0, 'skipped': 1}, 3),
+                                 (None, None), ({'passed': 'many'}, None), ({}, None), ([], None)):
+            with self.subTest(checks=checks):
+                self.setUp()
+                self.queue_with(checks)
+                self.assertEqual(expected, merge_train.load_entry(REPO, 42)['checks_at_enqueue'])
+
+    def test_zero_checks_after_the_grace_keep_a_pr_enqueued_with_checks_queued(self):
+        # Behind main: the train pushes the merge of the live base, and GitHub shows no check for the new HEAD.
+        self.queue_with(WITH_CHECKS)
+        self.advance_main()
+        self.second_pr()
+        self.gh.checks[42] = [[]]
+        reason = self.run_waiting()
+        self.assertIn('no checks', reason['reason'])
+        self.assertIn('CI has not started', reason['reason'])
+        self.assertStillQueued()
+        self.assertIsNotNone(merge_train.load_entry(REPO, 43), 'the PR behind it was not touched')
+        self.assertIn(43, self.gh.labels)
+
+    def test_an_aligned_pr_is_kept_too(self):
+        self.queue_with(WITH_CHECKS)
+        self.gh.checks[42] = [[]]
+        self.run_waiting()
+        self.assertStillQueued()
+
+    def test_an_entry_saved_before_the_count_existed_counts_as_expecting_ci(self):
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        entry = merge_train.load_entry(REPO, 42)
+        del entry['checks_at_enqueue']
+        merge_train.save_entry(REPO, 42, entry)
+        self.gh.checks[42] = [[]]
+        self.run_waiting()
+        self.assertStillQueued()
+        # An enqueue that recorded nothing (the gate result had no counts) is the same.
+        self.setUp()
+        self.queue_with(None, no_ci_rationale=NO_CI_RATIONALE)
+        self.gh.checks[42] = [[]]
+        self.run_waiting()
+        self.assertStillQueued()
+
+    def test_zero_checks_inside_the_grace_are_pending_and_a_late_check_is_the_ci(self):
+        self.queue_with(WITH_CHECKS)
+        self.gh.checks[42] = [[], [], [PENDING], [PASS]]
+        out = self.train(registration_grace=300).run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        self.assertGreaterEqual(self.gh.polls[42], 4, 'the late check was waited for')
+        self.assertIn(('merge', 42, self.reviewed), self.gh.writes)
+
+    def test_a_pr_enqueued_with_no_checks_and_the_rationale_goes_on_to_the_gate(self):
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        self.gh.checks[42] = [[]]
+        out = self.train(registration_grace=300).run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        self.assertIn(('merge', 42, self.reviewed), self.gh.writes)
+        self.assertGreaterEqual(self.gh.polls[42], 2, 'the grace was waited out first')
+
+    def test_a_pr_enqueued_with_no_checks_and_no_rationale_is_the_gates_decision(self):
+        self.queue_with(NO_CHECKS_AT_ALL)
+        self.gh.checks[42] = [[]]
+        out = self.train(registration_grace=300).run()
+        self.assertEqual(1, len(out['results']), out)
+        self.assertNotEqual('MERGED', out['results'][0]['outcome'])
+        self.assertFalse(any(w[0] == 'merge' for w in self.gh.writes))
+
+    def test_the_real_gh_answer_for_no_checks_goes_through_the_adapter_and_the_train(self):
+        # No fake in between: the train's client reads checks with gh_runtime.pr_checks over the recorded
+        # capture. A failure capture instead of the zero capture is an infrastructure failure (#310).
+        import gh_runtime
+        from test_gh_reads import API
+
+        def run_gh_with(capture):
+            return mock.patch.object(gh_runtime, 'run_gh', lambda args, input_text=None, check=True:
+                                     subprocess.CompletedProcess(['gh', *args], capture['rc'], capture['stdout'],
+                                                                 capture['stderr']))
+        self.gh.pr_checks = lambda repo, number: gh_runtime.pr_checks(repo, number)
+        self.queue_with(WITH_CHECKS)
+        with run_gh_with(API['pr_checks']['zero_checks']):
+            self.run_waiting()
+        self.assertStillQueued()
+        self.setUp()
+        self.gh.pr_checks = lambda repo, number: gh_runtime.pr_checks(repo, number)
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        with run_gh_with(API['pr_checks']['zero_checks']):
+            out = self.train(registration_grace=300).run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        for key in ('auth_failure', 'no_such_pr', 'network_failure'):
+            with self.subTest(key):
+                self.setUp()
+                self.gh.pr_checks = lambda repo, number: gh_runtime.pr_checks(repo, number)
+                self.queue_with(WITH_CHECKS)
+                with run_gh_with(API['pr_checks'][key]):
+                    out = self.train(registration_grace=300).run()
+                self.assertEqual(('INFRA', 'GitHubError', []), (out['status'], out['error_kind'], out['results']), out)
+                self.assertStillQueued()
+
+
 if __name__ == '__main__':
     unittest.main()

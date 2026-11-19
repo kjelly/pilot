@@ -78,7 +78,9 @@ Notes on the table:
 - **What the entry holds.** The evidence, `entry_id` (a random id, new for every enqueue),
   `reviewed_head` (the HEAD the evidence names), `enqueued_head` (the HEAD the gate decided MERGE
   for), `train_commits` (every commit the train pushed to the PR branch) and `errors` (consecutive
-  ERROR runs). An entry without an `entry_id`, written by a version before this one, is not trusted:
+  ERROR runs), `checks_at_enqueue` (how many checks the gate saw when it decided MERGE, 0 for a PR
+  with none, null when the gate result had no counts; an entry from before the field existed has none
+  and counts as a PR whose CI is expected). An entry without an `entry_id`, written by a version before this one, is not trusted:
   the PR leaves the queue with "no saved review evidence" and `pr-review-merge` enqueues it again.
 - **Binding.** The train works only on a PR whose HEAD is `enqueued_head` or one of `train_commits`.
   It checks this before it integrates, and again in the final step with a fresh read of the HEAD.
@@ -233,7 +235,14 @@ The consumer takes the oldest PR in the queue and:
         landed and the run goes on; at the old HEAD, nothing was pushed (INFRA); anywhere else, the PR
         branch moved and the next look decides.
      4. Repeat at most `--max-align` times when the base keeps moving, then WAITING.
-4. Wait for CI on HEAD. Checks that have not registered count as pending for 5 minutes.
+4. Wait for CI on HEAD. Checks that have not registered count as pending for 5 minutes
+   (`gh pr checks` answers "no checks reported" while nothing is registered; the adapter reads that
+   exact answer as an empty CI, see `quality-gate.md`). After the 5 minutes, zero checks on HEAD:
+   - a PR enqueued with checks (`checks_at_enqueue` above zero, or an entry that does not record it):
+     WAITING. CI has not started on HEAD (the train just pushed it, or Actions is late); the PR stays
+     enqueued, nothing is counted, commented or dequeued, and the run stops. The next run looks again.
+   - a PR enqueued with no checks at all (`checks_at_enqueue` is 0): step 5, where the gate decides
+     (the no-CI rationale, or the required-checks hand-off).
    - The base moved: back to step 3.
    - HEAD changed outside the train: leave the queue, so a new review is needed.
    - Label removed, PR closed or made Draft: back to step 1.
@@ -262,7 +271,7 @@ emits it (`WaitKinds`); a reason nobody registered needs a person.
 
 | `wait_kind` | Which reasons | The train |
 |---|---|---|
-| `transient` | CI pending; the PR or base moved during the gate; mergeability or merge state (`UNKNOWN`, `BEHIND`) GitHub has not computed; an API or infrastructure failure (PR, base, ancestry, checks, threads, rules, review coverage, target record, base manifest); a secret scan that could not run; the mutation lock held by another actor | stays enqueued; the run stops (nothing the train does changes the answer, so the PRs behind it keep their place) |
+| `transient` | CI pending; the PR or base moved during the gate; mergeability or merge state (`UNKNOWN`, `BEHIND`) GitHub has not computed; no check on HEAD after the registration grace for a PR that was enqueued with checks (CI has not started); an API or infrastructure failure (PR, base, ancestry, checks, threads, rules, review coverage, target record, base manifest); a secret scan that could not run; the mutation lock held by another actor | stays enqueued; the run stops (nothing the train does changes the answer, so the PRs behind it keep their place) |
 | `person` | requested changes; approval required (by decision or by rule); a failing check the reviewer confirmed unrelated; a finding disputed without new evidence; a merge state that is not clean for another reason (`BLOCKED`, `UNSTABLE`, ...); stale or invalid review evidence; no CI without a rationale; a branch with a GitHub merge queue; auto-merge already set; a comparison GitHub cut | leaves the queue with a comment that lists the reasons; the PR stays Ready; **the PRs behind it keep going** |
 
 A merge state that is not clean is `derived`: it says only that something else is wrong, so it keeps

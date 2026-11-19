@@ -38,6 +38,12 @@ if a[:2] == ['pr', 'view']:
     emit(dict(d['view'], labels=[{'name': n} for n in d.get('labels', [])]))
 if a[:2] == ['pr', 'checks']:
     persist()
+    # Answers recorded from real `gh pr checks` calls (fixtures/github_api.json, `pr_checks`): a PR with no
+    # check at all is answered with rc 1, empty stdout and a stderr line, never with `[]`; `checks_capture`
+    # replays any other recorded answer (an authentication, unknown-PR or network failure).
+    answer = d.get('checks_capture') or (d['checks_zero'] if not d['checks'] else None)
+    if answer:
+        sys.stdout.write(answer['stdout']); sys.stderr.write(answer['stderr']); sys.exit(answer['rc'])
     print(json.dumps(d['checks']))
     sys.exit(d.get('checks_rc', 0))
 if a[:2] == ['api', 'graphql'] or ('graphql' in a and a[0] == 'api'):
@@ -142,6 +148,7 @@ def fixture():
                      'baseRefName':'main', 'mergeable':'MERGEABLE', 'mergeStateStatus':'CLEAN',
                      'reviewDecision':'APPROVED', 'autoMergeRequest':None},
             'checks':[{'name':'unit','bucket':'pass','state':'SUCCESS','link':'https://example.com'}],
+            'checks_zero': GITHUB_API['pr_checks']['zero_checks'],
             'rules':[], 'threads':0, 'api': {},
             'not_found': GITHUB_API['contents']['manifest_absent_at_d013ed95']}
 
@@ -790,6 +797,42 @@ class NeedsPersonHandoff(IntegrationBase):
         self.assertIn('Branch requires status checks, but GitHub returned no completed checks', d['comments'][0])
         self.assertNotIn('No GitHub CI', d['comments'][0])
         self.assertEqual(([], [42]), self.listed(d['labels']))
+
+    def gh(self, *args):
+        return subprocess.run(['gh', *args], env=self.env, capture_output=True, text=True)
+
+    def test_the_fake_gh_answers_zero_checks_as_the_recorded_gh_does(self):
+        # The fake used to print `[]`, which real gh never does for a PR without checks; the empty-CI tests
+        # passed on that and the production adapter raised. Pin the fake to the recorded capture.
+        real = GITHUB_API['pr_checks']['zero_checks']
+        self.patch(checks=[])
+        proc = self.gh('pr', 'checks', '42', '-R', 'acme/demo', '--json', 'name,state,bucket,link,workflow')
+        self.assertEqual((real['rc'], real['stdout'], real['stderr']), (proc.returncode, proc.stdout, proc.stderr))
+        self.assertNotIn('[]', proc.stdout)
+        # With checks it prints what the recorded answer looks like: a JSON list of check objects.
+        recorded = json.loads(GITHUB_API['pr_checks']['with_checks']['stdout'])
+        self.assertTrue(recorded and all({'name', 'state', 'bucket', 'link', 'workflow'} == set(c) for c in recorded))
+        self.patch(checks=[{'name': 'unit', 'bucket': 'pass', 'state': 'SUCCESS', 'link': 'u', 'workflow': 'CI'}])
+        proc = self.gh('pr', 'checks', '42', '-R', 'acme/demo')
+        self.assertEqual((0, ''), (proc.returncode, proc.stderr))
+        self.assertEqual('unit', json.loads(proc.stdout)[0]['name'])
+
+    def test_a_failed_checks_read_on_a_required_checks_branch_is_transient_not_a_hand_off(self):
+        # Negative control of the test above: the same branch, but GitHub answered with a real 401 instead of
+        # "no checks reported". That is an infrastructure failure: no comment, no label, still listable.
+        for key in ('auth_failure', 'no_such_pr', 'network_failure'):
+            with self.subTest(key):
+                self.fixture_file.write_text(json.dumps(fixture()))
+                self.patch(checks=[], rules=[{'type': 'required_status_checks'}],
+                           checks_capture=GITHUB_API['pr_checks'][key])
+                proc, out = self.actor(execute=True)
+                self.assertEqual(('WAITING', 'transient', None, False),
+                                 (out['outcome'], out['wait_kind'], out.get('handoff'), out['gate']['person_handoff']),
+                                 proc.stdout + proc.stderr)
+                d = self.state()
+                self.assertFalse(d.get('labels'))
+                self.assertFalse(d.get('comments'))
+                self.assertEqual(([42], []), self.listed([]))
 
     def test_no_checks_without_a_required_checks_rule_is_not_a_hand_off(self):
         self.patch(checks=[], rules=[])
