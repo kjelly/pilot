@@ -23,11 +23,14 @@ import (
 // the new one twice) it succeeds exactly when the password is the user's and the new one is
 // accepted. A wrong password is the control that makes the oracle meaningful: it must fail.
 //
-// TODO(Root, live capture; AGENTS.md section 5.6): nothing here parses kinit's text, but the oracle
-// rests on kinit reading those three answers from a non-terminal stdin when the password is
-// expired. The first live run confirms it on the real server (the wrong-password control failing
-// and the right one succeeding in the same run is the evidence); if kinit needs a terminal there,
-// the oracle must change to a captured exchange, not to a guess at its output.
+// Assumption (AGENTS.md section 5.6): nothing here parses kinit's text, but the oracle rests on
+// kinit reading those three answers from a non-terminal stdin when the password is expired. The
+// wrong-password control failing and the right one succeeding in the same run is the evidence for
+// it; if kinit needed a terminal on some server, the oracle would have to change to a captured
+// exchange, not to a guess at its output.
+//
+// A23(a) is the Go engine and A23(f) the Ansible engine, each creating a new user from the same
+// kind of template and vault value; each arm proves the user's initial password with the same oracle.
 
 const a23Var = "ipa_default_initial_password"
 
@@ -160,7 +163,10 @@ func (d *applyDriver) runA23(base func() rosterDoc) {
 
 	// (c) continues (a): the Ansible engine's full run afterwards changes nothing in the users and
 	// groups sections and the server logs no passwd (H2's oracle): the Go engine left the user
-	// as the playbook would have, and the playbook agrees on the value (no reset of the password).
+	// in the state the playbook's own users and groups tasks converge to. It does NOT show that the
+	// two engines pick the same password: preserve_existing defaults to true, so a legacy rerun
+	// never resets an existing password, and "changed=0, no passwd" holds whatever value was set.
+	// A23(f) is the arm that compares the values.
 	d.arm("A23(c) the legacy full run after a templated Go run changes nothing in users and groups", func(a *armCtx) {
 		if ws23 == "" {
 			a.fail("A23(a) did not run")
@@ -188,7 +194,9 @@ func (d *applyDriver) runA23(base func() rosterDoc) {
 			return
 		}
 		value := a23Hostile()
-		ws := lv.copyWorkspace(withTemplated("p26-tpl", yamlText(value)), "", nil)
+		// The value itself, not yamlText(value): the roster is marshalled from Go strings
+		// (rosterDoc.yaml), which quotes it; yamlText is for the raw YAML of vaultWith.
+		ws := lv.copyWorkspace(withTemplated("p26-tpl", value), "", nil)
 		r := a.apply(ws)
 		a.exit(r, 4)
 		a.opsAre(r, "user.create p26-tpl", "user.password.initialize p26-tpl")
@@ -229,6 +237,34 @@ func (d *applyDriver) runA23(base func() rosterDoc) {
 		a.ok(seen >= 30 && len(changed) == 0, "the legacy run after the mixed run changed tasks of the users and groups sections: %v (saw %d)", changed, seen)
 		w, _ := lv.writesSince(logAt)
 		a.ok(w["passwd"] == 0, "the legacy run logged a passwd: %v", w)
+	})
+
+	// (f) the Ansible engine on the same template: from the acked baseline its full run creates a
+	// new user whose password.initial is the same bare reference to a vault value, and the user's
+	// initial password on the server is that value. Together with (a) (the Go engine, same kind of
+	// workspace) this is the live evidence that both engines set the same password from the same
+	// template; (c) cannot show it. The wrong-value control must fail here too, and the value is
+	// in none of the run's output or data-directory files.
+	d.arm("A23(f) the Ansible engine sets the vault's value from the same template", func(a *armCtx) {
+		if !a.fresh() {
+			return
+		}
+		value := a23Hostile()
+		ws := lv.copyWorkspace(withTemplated("p26-tpl2", ref), "", nil)
+		if err := lv.vaultWith(ws, map[string]string{a23Var: yamlText(value)}, true); err != nil {
+			a.fail("the vault: %v", err)
+			return
+		}
+		logAt, _ := serverLogSize(lv.srv)
+		r := lv.runPilot(lv.pilot, a.data, []string{"reconcile", "--dir", ws, "--component", "freeipa-identity", "--force"})
+		a.exit(applyRun{pilotResult: r}, 0)
+		w, _ := lv.writesSince(logAt)
+		a.ok(w["passwd"] == 1, "the server logged %d passwd writes, want exactly the new user's: %v", w["passwd"], w)
+		a.ok(strings.Contains(a.serverHas("ipa user-show p26-tpl2 2>&1"), "User login: p26-tpl2"), "the Ansible engine did not create the user")
+		a.noValue(applyRun{pilotResult: r}, value)
+		newPW := randomPassword()
+		a.ok(!lv.kinitInitial("p26-tpl2", value+"x", newPW), "a wrong initial password logged in: the oracle accepts anything")
+		a.ok(lv.kinitInitial("p26-tpl2", value, newPW), "the Ansible engine did not set the vault's value as the initial password")
 	})
 
 	// (e) what cannot be proved is refused before any write: exit 3, nothing written, no entry, the
