@@ -112,16 +112,6 @@ func renderResticEnvVars(t *testing.T, dir string, vars map[string]any) string {
 	return envPath
 }
 
-func requireAnsiblePlaybook(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("ansible-playbook"); err != nil {
-		if os.Getenv("PILOT_REQUIRE_CONTAINER_TESTS") == "1" {
-			t.Fatalf("required ansible-playbook not installed: %v", err)
-		}
-		t.Skipf("ansible-playbook not installed: %v", err)
-	}
-}
-
 // TestRegression_ResticEnvFileReadsBackEveryValueUnchanged renders the real
 // Step 4 with hostile values and sources the result with each POSIX shell on
 // this host, the way the backup script and the spec rows do.
