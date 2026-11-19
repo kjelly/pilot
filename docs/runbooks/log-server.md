@@ -1,6 +1,6 @@
 # Runbook — log-server
 
-對齊 [verification spec v2.1](../verification/log-server.md) 與
+對齊 [verification spec v2.2](../verification/log-server.md) 與
 [apply playbook](../../playbooks/apply/log-server-apply.yml)。
 
 ## 0. 目標與範圍
@@ -62,13 +62,17 @@ postrotate 腳本仍以 root 執行，`systemctl kill -s HUP rsyslog.service` �
 check mode → apply → verify → 第二次 apply。上游套件前置只限測試 VM，
 正式主機由部署方先提供具有必要能力的套件與 PKI。
 
-spec 共 C1–C12。C4 檢查實際載入的 transport、有效材料、daemon listener 與 TCP loopback 限制。
+spec 共 C1–C13。C4 檢查實際載入的 transport、有效材料、daemon listener 與 TCP loopback 限制。
 C7/C8 每次注入新的 local6/authpriv nonce，等待它寫入目前設定的根目錄，不能用舊 selftest PASS。
 它們是同機 selftest；跨主機訊息與故障補送的證明由
 [audit forwarding 流程](./audit-log-forwarding.md) 提供。
 C12 對 logrotate 策略跑 `logrotate -d`，確認它列出的 euid/egid 切換是落地根目錄擁有者的身分
 （根目錄屬於 root 時直接通過）。Ubuntu 24.04（logrotate 3.21.0）上，即使還沒有任何落地檔，
 logrotate 也會印出這一行（2026-11-17 實測），所以 C12 不必等 C7/C8 先建出落地檔。
+C13 送一則 hostname 為 `..` 的 RFC 5424 `local6` 訊息，要求它落在落地根目錄底下恰好一層（`<根目錄>/_./audit.log`），
+而不是根目錄的上一層；rsyslog 什麼都沒收到時也算 FAIL。每次驗證會在 `<根目錄>/_./audit.log` 留一行 selftest，
+與各來源目錄的檔案一樣輪替；在還沒套用修正的主機上 C13 FAIL，並在根目錄上一層的 `audit.log` 留一行。
+套用修正不會移除先前已經寫到根目錄外的檔案，操作者要自己檢查（判讀與實測見 spec 的「C13 的由來與判讀」）。
 
 ## 3. 自我轉送與來源身分
 
@@ -78,6 +82,10 @@ logrotate 也會印出這一行（2026-11-17 實測），所以 C12 不必等 C7
 
 mTLS 驗證的是 peer。檔案路徑的 HOSTNAME 仍來自訊息 payload，沒有與憑證身分綁定；
 不能把每個目錄的名稱當成已驗證的來源主機。
+
+路徑 template 寫 `%HOSTNAME:::secpath-replace%`：`/` 換成 `_`，`.` 與 `..` 換成 `_` 與 `_.`，
+所以來源名稱只能決定根目錄底下自己的那一層目錄，走不出根目錄（C13）。名稱仍可以偽造成別台主機的名字。
+只准用這一個 option，不要與 `lowercase` 等併用（rsyslog 8.2312 併用時 `a//b` 會變成兩層）。
 
 ## 4. 根目錄權限與復原
 

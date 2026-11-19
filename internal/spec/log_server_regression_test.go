@@ -193,7 +193,9 @@ func TestRegression_LogServerC12ReadsTheEffectiveRotationIdentity(t *testing.T) 
 	policy := filepath.Join(dir, "siem-incoming")
 	writeConf := func(root string) {
 		t.Helper()
-		body := `template(name="SiemAuditPath" type="string" string="` + root + `/%HOSTNAME%/audit.log")` + "\n"
+		// The line production renders, not a copy of it: C12 has to read
+		// whichever %HOSTNAME% spelling the playbook uses.
+		body := siemReceiverTemplate(t, "SiemAuditPath", root) + "\n"
 		if err := os.WriteFile(conf, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -242,8 +244,12 @@ esac
 		name, uid, gid, out string
 		rc                  string
 		root                string // landing root written into the receiver config; "" = landing
-		want                string
-		logrotateRuns       bool
+		// body, when set, is the whole receiver config ({ROOT} = the landing
+		// directory) instead of the template line the playbook renders: a
+		// spelling the row does not recognize.
+		body          string
+		want          string
+		logrotateRuns bool
 	}{
 		{name: "su in effect (real Ubuntu 24.04 / logrotate 3.21.0 output)", uid: uid, gid: gid, out: su, want: "0", logrotateRuns: true},
 		{name: "no landing files yet, logrotate 3.21 still reports the switch (real capture)", uid: uid, gid: gid, out: logrotateDebugUbuntuSuNoLogs, want: "0", logrotateRuns: true},
@@ -272,6 +278,20 @@ esac
 		{name: "root-owned user, other group", uid: "0", gid: gid, out: logrotateDebugUbuntuBase, want: "1", logrotateRuns: true},
 		{name: "landing root missing", uid: uid, gid: gid, out: su, root: filepath.Join(dir, "absent"), want: "1"},
 		{name: "receiver config names no landing root", uid: uid, gid: gid, out: su, root: "-", want: "1"},
+		// The row reads the root out of the SiemAuditPath line, and it has to
+		// know the line's spelling: a %HOSTNAME% with a property option
+		// (secpath-replace since #363) or without one. Any other layout gives no
+		// root, so the row says 1 instead of checking some other directory.
+		{name: "bare %HOSTNAME%, as before #363", uid: uid, gid: gid, out: su, want: "0", logrotateRuns: true,
+			body: `template(name="SiemAuditPath" type="string" string="{ROOT}/%HOSTNAME%/audit.log")` + "\n"},
+		{name: "unknown property in the host position", uid: uid, gid: gid, out: su, want: "1",
+			body: `template(name="SiemAuditPath" type="string" string="{ROOT}/%FROMHOST:::secpath-replace%/audit.log")` + "\n"},
+		{name: "option list that never closes", uid: uid, gid: gid, out: su, want: "1",
+			body: `template(name="SiemAuditPath" type="string" string="{ROOT}/%HOSTNAME:::secpath-replace/audit.log")` + "\n"},
+		{name: "no host component in the path", uid: uid, gid: gid, out: su, want: "1",
+			body: `template(name="SiemAuditPath" type="string" string="{ROOT}/audit.log")` + "\n"},
+		{name: "wrong leaf", uid: uid, gid: gid, out: su, want: "1",
+			body: `template(name="SiemAuditPath" type="string" string="{ROOT}/%HOSTNAME:::secpath-replace%/auth.log")` + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := landing
@@ -282,7 +302,11 @@ esac
 			default:
 				root = tc.root
 			}
-			if root == "" {
+			if tc.body != "" {
+				if err := os.WriteFile(conf, []byte(strings.ReplaceAll(tc.body, "{ROOT}", landing)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if root == "" {
 				if err := os.WriteFile(conf, []byte("module(load=\"imtcp\")\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -382,6 +406,10 @@ esac
 //	C12 logrotate rotates the landing files as the owner of the landing root
 //	    (v2.1 — the policy's `su`; read from `logrotate -d`, which prints the
 //	    euid/egid switch it will make, rather than from the policy text)
+//	C13 a message whose source hostname is ".." lands exactly one level below
+//	    the landing root, not above it (v2.2, kjelly/pilot#363 — the hostname
+//	    is sender-controlled input to the file path; measured against the real
+//	    rsyslogd by TestRegression_LogServerReceiverKeepsHostnamePathsUnderTheRoot)
 //
 // v1.0/v1.1 also had a UDP receiver (imudp) and its own C4/C6 rows; v1.2
 // removed UDP entirely (nothing in this repo ever forwards over UDP — see
@@ -414,7 +442,7 @@ func TestRegression_LogServerSpec(t *testing.T) {
 		t.Fatalf("parse %s: %v", specPath, err)
 	}
 
-	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12"}
+	wantIDs := []string{"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C12", "C13"}
 	if len(s.Rows) != len(wantIDs) {
 		t.Fatalf("rows=%d want=%d", len(s.Rows), len(wantIDs))
 	}
@@ -436,7 +464,7 @@ func TestRegression_LogServerSpec(t *testing.T) {
 
 	// Positive-logic rc rows: rc-based numeric expected, never a bare
 	// reverse-logic grep feeding a "1 means healthy" expected.
-	for _, id := range []string{"C1", "C2", "C4", "C10", "C11", "C12"} {
+	for _, id := range []string{"C1", "C2", "C4", "C10", "C11", "C12", "C13"} {
 		if exp[id] != "0" {
 			t.Errorf("%s expected must be rc-based `0`, got %q", id, exp[id])
 		}
@@ -509,6 +537,29 @@ func TestRegression_LogServerSpec(t *testing.T) {
 	for _, r := range s.Rows {
 		if r.ID == "C12" && !NeedsBecome(r) {
 			t.Errorf("C12 must run as root (logrotate -d switches from euid 0): NeedsBecome(C12) = false")
+		}
+	}
+
+	// C13 (v2.2): the self-test has to send a ".." hostname to the receiver's
+	// own port, look for it one level below the root AND one level above it,
+	// and print a lone integer whatever happens (#332: anything else makes
+	// pilot verify fall back to the process rc, which is 0). /dev/tcp is a
+	// bash feature, so the row names bash; under dash the redirection fails.
+	for _, want := range []string{
+		"bash -c '", "10-siem-receiver.conf", "SiemAuditPath", `imtcp\" port=`,
+		"/dev/tcp/127.0.0.1/", `<182>1 - .. `, "PILOT-SIEM-SELFTEST-PATH-$$-$(date +%s%N)",
+		`readlink -f "$r/.."`, `"$r"/*/audit.log`, `grep -qsF "$n"`, "{ echo 1; exit 0; }", "{ echo 0; exit 0; }",
+	} {
+		if !strings.Contains(cmd["C13"], want) {
+			t.Errorf("C13 must contain %q, got %q", want, cmd["C13"])
+		}
+	}
+	if strings.Contains(cmd["C13"], "/var/log/siem") {
+		t.Errorf("C13 must not hard-code /var/log/siem, got %q", cmd["C13"])
+	}
+	for _, r := range s.Rows {
+		if r.ID == "C13" && !NeedsBecome(r) {
+			t.Errorf("C13 must run as root (the landing files are syslog:adm 640): NeedsBecome(C13) = false")
 		}
 	}
 

@@ -1,6 +1,6 @@
 # Verification Spec — log-shipping (Promtail：log-server → dashboard Loki)
 
-> 版本：v1.6
+> 版本：v1.7
 > 對齊規範：pilot 通用 container-backed 服務規範（比照 `audit-log-forwarding.md`
 > 的「client 端疊一個轉送 agent、central 端固定變數」模式）
 > 維護者：sre
@@ -102,7 +102,7 @@
 |-----|----------|----------------------------------------------------------------------|----------|---------|
 | C1  | docker   | `pilot-promtail` container 存在且 running                             | ~pilot-promtail | docker ps --no-trunc 2>/dev/null | grep -m1 -oE 'pilot-promtail' | head -n1 |
 | C2  | http     | Promtail `/ready`（9080）回 200                                       | ~200 | curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:9080/ready |
-| C3  | config   | Promtail 設定檔含 `siem_log_root` 的 scrape glob                       | 0 | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"]*\)/%HOSTNAME%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] && grep -qF "__path__: $r/**/*.log" /etc/pilot/promtail/promtail-config.yml && echo 0 || echo 1' |
+| C3  | config   | Promtail 設定檔含 `siem_log_root` 的 scrape glob                       | 0 | sh -c 'r=$(sed -n "s#.*\"SiemAuditPath\".*string=\"\(/[^\"%]*\)/%HOSTNAME[^%]*%/audit\.log\".*#\1#p" /etc/rsyslog.d/10-siem-receiver.conf 2>/dev/null); [ -n "$r" ] && grep -qF "__path__: $r/**/*.log" /etc/pilot/promtail/promtail-config.yml && echo 0 || echo 1' |
 | C4  | config   | Promtail 設定檔的 push 目標指向 `pilot-loki-backend` 別名                | 0 | grep -qE 'url:\s*"http://pilot-loki-backend:3100/loki/api/v1/push"' /etc/pilot/promtail/promtail-config.yml; echo $? |
 | C5  | network  | `/etc/hosts` 已 pin `pilot-loki-backend` 別名                          | 0 | grep -qE '\spilot-loki-backend$' /etc/hosts; echo $? |
 | C6  | functional | 本機注入唯一測試訊息，透過 Promtail 轉送後，向中央 Loki 查詢確實查到    | 0 | sh -c 'n="PILOT-LOGSHIP-SELFTEST-$$-$(date +%s%N)"; logger -p local6.info "$n"; sleep 6; curl -fsS -G http://pilot-loki-backend:3100/loki/api/v1/query --data-urlencode "query={job=\"pilot-siem\"} |= \"$n\"" | grep -qF "$n" && echo 0 || echo 1' |
@@ -111,7 +111,9 @@
 | C9  | functional | 本機注入唯一測試訊息，向中央 Loki 用「本機 hostname」當 `host` label 篩選查詢確實查到——證明的不只是「資料有沒有進 Loki」（C6 已驗），而是「這筆資料能不能用 `host` label 篩出**這一台**」| 0 | sh -c 'n="PILOT-LOGSHIP-HOSTLABEL-$$-$(date +%s%N)"; logger -p local6.info "$n"; sleep 6; curl -fsS -G http://pilot-loki-backend:3100/loki/api/v1/query --data-urlencode "query={job=\"pilot-siem\", host=\"$(hostname -s)\"} |= \"$n\"" | grep -qF "$n" && echo 0 || echo 1' |
 
 > C3 從同機 log-server 的接收設定（`10-siem-receiver.conf` 的 `SiemAuditPath`）讀出實際生效的
-> `siem_log_root`，再比對 Promtail 的 `__path__`，所以非預設根目錄也驗得到。C4 的
+> `siem_log_root`，再比對 Promtail 的 `__path__`，所以非預設根目錄也驗得到。讀法同時接受
+> `%HOSTNAME%` 與 `%HOSTNAME:::secpath-replace%`（`log-server.md` v2.2 起接收設定寫後者，與該 spec 的
+> C6–C8、C12 用同一個 sed）。C4 的
 > `loki_alias` 仍是固定字串，覆寫成非預設值時屬已知偏差（見 §5，比照 `prometheus.md` C8
 > 只驗預設情境的既有慣例）。
 > C6/C9 送出這次唯一的 nonce 訊息（`$$` 加 `date +%s%N`），只認這則訊息
@@ -171,3 +173,4 @@
 | 2026-10-15 | v1.4 | C3 改成從 log-server 接收設定的 `SiemAuditPath` 讀出實際生效的 `siem_log_root`，再確認 Promtail 的 `__path__` 是 `<root>/**/*.log`，不再寫死 `/var/log/siem`（PR #79 讓 inventory 的 `siem_log_root` 生效，非預設根目錄不再是已知偏差）。C6/C9 改送這次唯一的 nonce 訊息並只認這則訊息（`grep -qF`，expected `0`）；v1.3 的 `grep -o "PILOT-LOGSHIP-SELFTEST-[0-9]*"` 會把先前留在 Loki 的舊訊息當成這次的結果（PR #79 review） | pilot |
 | 2026-10-15 | v1.5 | C6/C9 的 LogQL 加上 `\|= "$n"`，只取含這次 nonce 的行：Loki instant query 預設最多回 100 行，日誌量大時這則訊息可能不在其中而假 FAIL（PR #79 review）。§2 說明改成現在的 `grep -qF "$n"` 比對（拿掉舊的 `grep -o` 說法）；§4 補上 C3 fail 的成因（log-server 與 log-shipping 的 `siem_log_root` 不一致、這台沒有接收設定） | pilot |
 | 2026-11-13 | v1.6 | minimal-PoC 五節點實跑發現（F4）：C9 用 `$(hostname)`（加入 FreeIPA 後是 FQDN）查 `host` label，但 `pilot-siem` job 的 label 是 rsyslog `%HOSTNAME%`（預設去掉網域的短名稱），已 enroll 的主機永遠查不到自己。改用 `$(hostname -s)`。Expected 不變（仍要求用本機自己的名字篩出自己剛注入的訊息）；regression test 同步 | sre |
+| 2026-11-20 | v1.7 | C3 讀 log-server 接收設定根目錄的 sed 改成同時接受 `%HOSTNAME%` 與 `%HOSTNAME:::secpath-replace%`；`log-server.md` v2.2 把 `SiemAuditPath` template 改成後者（來源 hostname 轉成落地根目錄底下的單一層目錄名，kjelly/pilot#363），舊 sed 讀不出根目錄，C3 會 FAIL。Expected 不變，其餘 row 不變。附帶：`log-server.md` C13 每次驗證會在 `<根目錄>/_./audit.log` 留一行 selftest，Promtail 會把它以 `host=_.` 送進 Loki | pilot |
