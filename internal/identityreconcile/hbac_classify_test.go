@@ -211,7 +211,7 @@ func TestHBACCommandsAreTheCapturedOnes(t *testing.T) {
 		wantOpts, _ := json.Marshal(c.opts)
 		gotArgs, _ := json.Marshal(cmd.Args)
 		wantArgs, _ := json.Marshal(c.args)
-		if cmd.Method != c.method || string(gotArgs) != string(wantArgs) || (string(gotOpts) != string(wantOpts) && !(len(cmd.Options) == 0 && len(c.opts) == 0)) {
+		if cmd.Method != c.method || string(gotArgs) != string(wantArgs) || (string(gotOpts) != string(wantOpts) && (len(cmd.Options) != 0 || len(c.opts) != 0)) {
 			t.Errorf("%s: %s %s %s, want %s %s %s", c.op.Kind, cmd.Method, gotArgs, gotOpts, c.method, wantArgs, wantOpts)
 		}
 	}
