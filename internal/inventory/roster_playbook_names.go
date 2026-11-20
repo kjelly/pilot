@@ -82,6 +82,63 @@ func playbookDefinedNames(consumer RosterVarConsumer) map[string]bool {
 	return nil
 }
 
+// A user's password is not captured where it is first rendered. The value the
+// identity playbook SENDS for it is the one "Normalize canonical users and groups
+// (shared with drift)" (pre_task 19) renders into ipa_users, and that is later
+// than "Normalize canonical FreeIPA settings" (pre_task 18), whose set_fact
+// defines names that outrank an inventory value (set_fact beats inventory vars;
+// experiment E3 of issue #394: an inventory host variable identity_admin_password
+// was reported by `ansible-inventory --list` as one value while the playbook sent
+// the vault's admin password). So the names that are NOT the inventory's when a
+// user's password is captured are the first-render set plus the settings names,
+// the names of the normalize tasks themselves, and the names pilot puts on the
+// Ansible engine's -e line, which a Go-engine run does not pass. Using the
+// first-render set alone would send a silently wrong password.
+// TestPasswordCaptureNamesMatchThePlaybook reads all but the last group from the
+// real playbook and its include.
+
+// identitySettingsNames are what "Normalize canonical FreeIPA settings"
+// (pre_task 18) sets with set_fact beyond the play's own vars: defined by the time
+// the normalize include captures the users' passwords.
+var identitySettingsNames = []string{
+	"identity_admin_principal", "identity_admin_password", "ipa_hbac_services", "ipa_sudo_command_groups",
+}
+
+// identityNormalizeTaskVars are the names that exist only inside the tasks of
+// tasks/freeipa-identity-normalize-users-groups.yml: the loop variable of its
+// tasks and the `vars:` of "Normalize canonical users for the compatibility
+// reconciler", which renders password.initial.
+var identityNormalizeTaskVars = []string{
+	"item", "pilot_identity_with_credentials", "pilot_identity_roster_user",
+}
+
+// pilotExtraNames are the names pilot itself puts on an Ansible-engine run's -e
+// line for freeipa-identity: the roster path, the target group, the hosts an
+// optional-client check deferred, and the mixed run's engine and observation
+// variables. Their values in an Ansible-engine run need not be what the
+// inventory lists, and a Go-engine run does not know them, so a roster that refers
+// to one is not resolved here.
+var pilotExtraNames = []string{
+	"freeipa_roster_file", "target_group", "pilot_deferred_hosts",
+	"pilot_identity_users_groups_engine", "pilot_identity_auth_cache_output",
+}
+
+// passwordCaptureNames is the names whose value, when the identity playbook
+// captures a user's password.initial, is not the inventory's (see above). Only the
+// identity playbook renders a user's password: any other consumer has none.
+func passwordCaptureNames(consumer RosterVarConsumer) map[string]bool {
+	if consumer != RosterConsumerFreeIPAIdentity {
+		return nil
+	}
+	return nameSet(identityPlayVars, identityEarlyNames, identitySettingsNames, identityNormalizeTaskVars, pilotExtraNames)
+}
+
+// PasswordCaptureNames is passwordCaptureNames as a fresh set, for the tests that
+// pin it to what pilot passes and to the playbook.
+func PasswordCaptureNames(consumer RosterVarConsumer) map[string]bool {
+	return passwordCaptureNames(consumer)
+}
+
 // RosterPlaybookKnownNames is every name either consuming playbook defines
 // for itself before it renders a roster string: what a lint that does not
 // know the consumer takes as defined, so it never reports a reference the run

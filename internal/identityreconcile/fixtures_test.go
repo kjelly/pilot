@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // captured reads result.result of a real FreeIPA answer captured for
@@ -93,9 +95,12 @@ func desired(t *testing.T, doc string) Desired {
 
 // desiredForPlan is desired with the password forms read from the roster's
 // bytes, as the preview and the writer do it: what a plan needs.
-func desiredForPlan(t *testing.T, doc string) Desired {
+func desiredForPlan(t *testing.T, doc string) Desired { return desiredForPlanWith(t, doc, nil) }
+
+// desiredForPlanWith is desiredForPlan for a run whose variables are run.
+func desiredForPlanWith(t *testing.T, doc string, run *inventory.RosterRunVars) Desired {
 	t.Helper()
-	d, err := desired(t, doc).WithPasswordForms([]byte(doc))
+	d, err := desired(t, doc).WithPasswordForms([]byte(doc), run)
 	if err != nil {
 		t.Fatal(err)
 	}

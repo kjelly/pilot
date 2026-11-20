@@ -98,7 +98,7 @@ func TestPasswordFormsThatWereNeverReadBlockTheOperation(t *testing.T) {
 	if len(p.Blocked) != 1 || p.Blocked[0].Object != "bob" || !strings.Contains(p.Blocked[0].Detail, "password forms were not read") {
 		t.Fatalf("blocked = %+v, want bob blocked for forms not read", p.Blocked)
 	}
-	d, err := d.WithPasswordForms([]byte(passwordRoster(`"` + pwSecret + `"`)))
+	d, err := d.WithPasswordForms([]byte(passwordRoster(`"`+pwSecret+`"`)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestPasswordFormsThatWereNeverReadBlockTheOperation(t *testing.T) {
 func TestWithPasswordFormsLeavesTheOriginalAndRefusesWhatItCannotRead(t *testing.T) {
 	doc := passwordRoster(`"{{ x }}"`)
 	d := desired(t, doc)
-	read, err := d.WithPasswordForms([]byte(doc))
+	read, err := d.WithPasswordForms([]byte(doc), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,17 +122,17 @@ func TestWithPasswordFormsLeavesTheOriginalAndRefusesWhatItCannotRead(t *testing
 		"another roster":  "schema_version: 3\nusers: [{name: carol}]\n",
 		"not a user list": "users: nope\n",
 	} {
-		if _, err := d.WithPasswordForms([]byte(data)); err == nil {
+		if _, err := d.WithPasswordForms([]byte(data), nil); err == nil {
 			t.Errorf("%s: the forms were read from bytes that are not the roster", name)
 		} else if strings.Contains(err.Error(), pwSecret) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
 	// FromRosterWithForms is the two together, and refuses what FromRoster refuses.
-	if _, err := FromRosterWithForms(roster(t, doc), []byte(doc)); err != nil {
+	if _, err := FromRosterWithForms(roster(t, doc), []byte(doc), nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := FromRosterWithForms(roster(t, "schema_version: 3\nusers: [{name: bob, password: {initial: 5}}]\n"), []byte("schema_version: 3\n")); err == nil {
+	if _, err := FromRosterWithForms(roster(t, "schema_version: 3\nusers: [{name: bob, password: {initial: 5}}]\n"), []byte("schema_version: 3\n"), nil); err == nil {
 		t.Fatal("FromRosterWithForms accepted a roster the adapter refuses")
 	}
 }
