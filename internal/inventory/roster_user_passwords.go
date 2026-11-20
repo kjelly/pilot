@@ -130,7 +130,19 @@ const (
 	// before the password is read, but that they are not the inventory's to give.
 	// Added after the others so the codes of the earlier reasons do not move.
 	PasswordReasonReserved
+	// PasswordReasonUnsafeMarker: the variable, or the end of its chain, is the
+	// single-key mapping {"__ansible_unsafe": x}. ansible-inventory --list prints
+	// a genuine !unsafe string and a literal YAML mapping of that shape the same
+	// way, but Ansible sends the first as text and the second as the JSON of a
+	// dict, so the listing cannot prove which password the playbook sends.
+	// Added after PasswordReasonReserved, so no earlier code moves.
+	PasswordReasonUnsafeMarker
 )
+
+// passwordReasonLast is the highest defined PasswordValueReason: a test walks
+// every reason up to it, so a reason added without a String case, a description
+// or a row fails there.
+const passwordReasonLast = PasswordReasonUnsafeMarker
 
 func (r PasswordValueReason) String() string {
 	switch r {
@@ -158,6 +170,8 @@ func (r PasswordValueReason) String() string {
 		return "invalid-text"
 	case PasswordReasonReserved:
 		return "reserved"
+	case PasswordReasonUnsafeMarker:
+		return "unsafe-marker"
 	}
 	return fmt.Sprintf("PasswordValueReason(%d)", int(r))
 }
@@ -201,6 +215,8 @@ func DescribePasswordValue(form PasswordForm, reason PasswordValueReason, varNam
 			return ref + ", a name the identity playbook or pilot's own -e defines before the playbook reads the password, so the inventory's value is not what the playbook would send: use the Ansible engine for it"
 		case PasswordReasonReserved:
 			return ref + ", a name Ansible reserves for its own variables (magic variables, facts, role variables, Jinja globals), which pilot does not resolve: use the Ansible engine for it"
+		case PasswordReasonUnsafeMarker:
+			return ref + ", whose value is (or ends in) the mapping {__ansible_unsafe: ...}: ansible-inventory lists an !unsafe string and a literal single-key mapping of that name the same way, and Ansible sends them differently, so pilot cannot tell which password the playbook would send; write the password in the roster itself (quoted, or !unsafe there), or use the Ansible engine"
 		case PasswordReasonInlineVault:
 			return ref + ", whose value is an inline !vault value (or reaches one): only Ansible can decrypt it; encrypt the whole vars file instead, or use the Ansible engine"
 		case PasswordReasonNestedTemplate:

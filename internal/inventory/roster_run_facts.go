@@ -24,7 +24,12 @@ import (
 // (UserInitialPassword), where the name set that shadows the inventory is the
 // one in force when the playbook captures the password, not when it first
 // renders a roster string (passwordCaptureNames), and where a value that is not
-// provably what the playbook sends is refused, never guessed.
+// provably what the playbook sends is refused, never guessed. That includes a
+// value that came through the {"__ansible_unsafe": x} marker: a genuine !unsafe
+// string and a literal mapping of that shape list identically, so it is refused
+// (PasswordReasonUnsafeMarker). ServerDeclared and AdminPasswordProvided still
+// read through the marker, as they always have: the text decides nothing there
+// that the mapping would decide differently.
 
 // maxRunVarHops bounds the chain of bare references one lookup follows.
 const maxRunVarHops = 8
@@ -69,6 +74,12 @@ type runValue struct {
 	state  runValueState
 	value  any
 	reason PasswordValueReason
+	// unsafeMarker is set where a single-key mapping {"__ansible_unsafe": text}
+	// was unwrapped to its text. ansible-inventory --list prints a genuine
+	// !unsafe string and a literal YAML mapping {__ansible_unsafe: text}
+	// identically, but Ansible holds the first as an unsafe string and the
+	// second as a dict, so the text cannot tell which one the run sends.
+	unsafeMarker bool
 }
 
 // lookup follows name through chains of bare references. shadow is the set of
@@ -103,7 +114,7 @@ func (r RosterRunVars) lookup(name string, shadow map[string]bool, visited map[s
 	case map[string]any:
 		if len(x) == 1 {
 			if text, ok := x["__ansible_unsafe"].(string); ok {
-				return runValue{state: runKnown, value: text}
+				return runValue{state: runKnown, value: text, unsafeMarker: true}
 			}
 			if _, ok := x["__ansible_vault"]; ok {
 				return runValue{state: runUnknown, reason: PasswordReasonInlineVault}
@@ -125,7 +136,9 @@ func (r RosterRunVars) lookup(name string, shadow map[string]bool, visited map[s
 // pilot's own -e is not the inventory's (passwordCaptureNames) and is refused,
 // as is anything that is not a string the run decides: null, a number, a list, an
 // inline !vault value, an empty string, a chain that loops or is longer than
-// maxRunVarHops. A whitespace-only string is a password, as a literal one is.
+// maxRunVarHops, and a value that is, or a chain that ends in, the
+// {"__ansible_unsafe": x} marker (an !unsafe string or a literal mapping, which
+// the listing cannot tell apart). A whitespace-only string is a password, as a literal one is.
 // Only the identity consumer renders a user's password.
 func (r RosterRunVars) UserInitialPassword(template string) (string, PasswordValueReason) {
 	name := bareTemplateName(template)
@@ -138,6 +151,12 @@ func (r RosterRunVars) UserInitialPassword(template string) (string, PasswordVal
 	got := r.lookup(name, passwordCaptureNames(r.Consumer), map[string]bool{}, 0)
 	if got.state != runKnown {
 		return "", got.reason
+	}
+	if got.unsafeMarker {
+		// {"__ansible_unsafe": x} is what a genuine !unsafe string and a literal
+		// mapping both list as; Ansible sends the first as text and the second as
+		// the JSON of a dict, and nothing in the listing says which it is.
+		return "", PasswordReasonUnsafeMarker
 	}
 	text, ok := got.value.(string)
 	switch {

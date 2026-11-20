@@ -119,7 +119,9 @@ func pwOracleRows(s oracleSecrets, encryptedVaultVar, encryptedRosterScalar, cap
 		resolved("a chain with whitespace control", ref("w1"), s.c2, map[string]string{"vault": "w1: \"{{- w2 -}}\"\nw2: " + q(s.c2) + "\n"}),
 		resolved("a chain across sources", ref("x1"), s.group, map[string]string{"group": "x1: \"{{ x2 }}\"\n", "vault": "x2: " + q(s.group) + "\n"}),
 		resolved(fmt.Sprintf("a chain of %d names, the bound", maxRunVarHops+1), ref(first9), s.chain, map[string]string{"vault": chain9}),
-		resolved("an !unsafe value holding {{", ref("v_unsafe"), "a{{ not_a_reference }}c", map[string]string{"vault": "v_unsafe: !unsafe \"a{{ not_a_reference }}c\"\n"}),
+		// A date in vars: ansible-inventory lists it as its ISO text and Ansible's to_json sends the
+		// same text, so Go's resolved value is what Ansible sends.
+		resolved("a YAML date in the vars file", ref("v_date"), "2024-01-02", map[string]string{"vault": "v_date: 2024-01-02\n"}),
 		// !unsafe in the roster: the text Ansible sends is the template itself.
 		resolved("the initial tagged !unsafe", `!unsafe "{{ v_vault }}"`, "{{ v_vault }}", nil),
 		{name: "the password mapping tagged !unsafe", scalar: ref("v_vault"), passwordTag: "!unsafe ", goValue: "{{ v_vault }}", ansible: sends("{{ v_vault }}")},
@@ -191,6 +193,32 @@ func pwOracleRows(s oracleSecrets, encryptedVaultVar, encryptedRosterScalar, cap
 		refused("a boolean", ref("v_bool"), "not-a-string", sendsJSON("true"), map[string]string{"vault": "v_bool: true\n"}),
 		refused("a list", ref("v_lst"), "not-a-string", sendsJSON(`["a"]`), map[string]string{"vault": "v_lst: [a]\n"}),
 		refused("a mapping", ref("v_map"), "not-a-string", sendsJSON(`{"a":"b"}`), map[string]string{"vault": "v_map: {a: b}\n"}),
+
+		// ---- the __ansible_unsafe marker (the merge-gate finding of #394, F1) ----
+		// ansible-inventory --list prints a genuine !unsafe string and a literal YAML mapping
+		// {__ansible_unsafe: x} identically, as {"__ansible_unsafe": "x"}. Ansible holds the first as
+		// text and sends it as written, the second as a dict and sends its JSON. Go cannot tell
+		// them apart from the listing, so it refuses all of them (Ansible's behaviour, which differs
+		// by row, is recorded per row; Go never sends what Ansible does not).
+		refused("an !unsafe value holding {{", ref("v_unsafe"), "unsafe-marker", sends("a{{ not_a_reference }}c"),
+			map[string]string{"vault": "v_unsafe: !unsafe \"a{{ not_a_reference }}c\"\n"}),
+		refused("an !unsafe value holding plain text", ref("v_unsafe_plain"), "unsafe-marker", sends("unsafe-plain-text"),
+			map[string]string{"vault": "v_unsafe_plain: !unsafe \"unsafe-plain-text\"\n"}),
+		refused("a literal {__ansible_unsafe: x} mapping in the vars file", ref("v_lit_vault"), "unsafe-marker",
+			sendsJSON(`{"__ansible_unsafe":"lit-vault-text"}`), map[string]string{"vault": "v_lit_vault: {__ansible_unsafe: lit-vault-text}\n"}),
+		refused("a literal {__ansible_unsafe: x} mapping in group_vars next to the inventory", ref("v_lit_group"), "unsafe-marker",
+			sendsJSON(`{"__ansible_unsafe":"lit-group-text"}`), map[string]string{"group": "v_lit_group: {__ansible_unsafe: lit-group-text}\n"}),
+		refused("a literal {__ansible_unsafe: \"\"} mapping", ref("v_lit_empty"), "unsafe-marker",
+			sendsJSON(`{"__ansible_unsafe":""}`), map[string]string{"vault": "v_lit_empty: {__ansible_unsafe: \"\"}\n"}),
+		refused("a chain that ends in an !unsafe value", ref("ue1"), "unsafe-marker", sends("chain-unsafe-text"),
+			map[string]string{"vault": "ue1: \"{{ ue2 }}\"\nue2: !unsafe \"chain-unsafe-text\"\n"}),
+		refused("a chain that ends in a literal {__ansible_unsafe: x} mapping", ref("le1"), "unsafe-marker",
+			sendsJSON(`{"__ansible_unsafe":"chain-lit-text"}`), map[string]string{"vault": "le1: \"{{ le2 }}\"\nle2: {__ansible_unsafe: chain-lit-text}\n"}),
+		// Not the marker: a number under the key, or a second key, is a mapping like any other.
+		refused("a mapping with __ansible_unsafe holding a number", ref("v_lit_num"), "not-a-string",
+			sendsJSON(`{"__ansible_unsafe":5}`), map[string]string{"vault": "v_lit_num: {__ansible_unsafe: 5}\n"}),
+		refused("a mapping with __ansible_unsafe and another key", ref("v_lit_two"), "not-a-string",
+			sendsJSON(`{"__ansible_unsafe":"x","other":"y"}`), map[string]string{"vault": "v_lit_two: {__ansible_unsafe: x, other: y}\n"}),
 
 		// ---- what is not one bare reference ----
 		refused("a filter", `"{{ v_vault | upper }}"`, "not-bare", sends(strings.ToUpper(s.vault)), nil),

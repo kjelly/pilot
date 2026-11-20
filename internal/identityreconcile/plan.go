@@ -54,8 +54,9 @@ const (
 	// the password is not a string the engine can prove the playbook would send:
 	// a template that is not one bare {{ name }} reference, or a reference whose
 	// value the run's variables do not decide (undefined, a name the playbook
-	// defines for itself, an inline !vault value, empty, not a string, no run
-	// variables read), an inline !vault value in the roster, a value YAML may read
+	// defines for itself, an inline !vault value, empty, not a string, the
+	// {__ansible_unsafe: x} mapping an !unsafe string and a literal mapping both
+	// list as, no run variables read), an inline !vault value in the roster, a value YAML may read
 	// as a number, an empty string, a value shared between !unsafe and normal
 	// YAML, or a roster whose password forms were not read. Only an operation that
 	// is planned is blocked on it; a user whose password needs no change is not.

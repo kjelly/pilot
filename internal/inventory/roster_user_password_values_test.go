@@ -46,7 +46,14 @@ func TestUserInitialPasswordResolvesOnlyWhatTheRunDecides(t *testing.T) {
 		{"a whitespace-only string is a password too", `{{ v }}`, `{"v": "   "}`, nil, "   ", ok},
 		{"a chain of two", `{{ a }}`, `{"a": "{{ b }}", "b": "pw-1"}`, nil, "pw-1", ok},
 		{"a chain with whitespace control", `{{ a }}`, `{"a": "{{- b -}}", "b": "pw-1"}`, nil, "pw-1", ok},
-		{"a value that is !unsafe text holding {{", `{{ v }}`, `{"v": {"__ansible_unsafe": "a{{ b }}c"}}`, nil, "a{{ b }}c", ok},
+		// {"__ansible_unsafe": x} is what a genuine !unsafe string and a literal YAML mapping both list as
+		// (ansible-core 2.19.2), and Ansible sends the first as text and the second as the JSON of a dict:
+		// refused, with or without {{ in the text, at the end of a chain too.
+		{"a value that is the __ansible_unsafe marker holding {{", `{{ v }}`, `{"v": {"__ansible_unsafe": "a{{ b }}c"}}`, nil, "", PasswordReasonUnsafeMarker},
+		{"a value that is the __ansible_unsafe marker holding plain text", `{{ v }}`, `{"v": {"__ansible_unsafe": "pw-1"}}`, nil, "", PasswordReasonUnsafeMarker},
+		{"the __ansible_unsafe marker at the end of a chain", `{{ a }}`, `{"a": "{{ b }}", "b": {"__ansible_unsafe": "pw-1"}}`, nil, "", PasswordReasonUnsafeMarker},
+		{"the __ansible_unsafe marker holding a number is not a string", `{{ v }}`, `{"v": {"__ansible_unsafe": 5}}`, nil, "", PasswordReasonNotString},
+		{"a mapping with two keys, one of them __ansible_unsafe, is not a string", `{{ v }}`, `{"v": {"__ansible_unsafe": "x", "other": "y"}}`, nil, "", PasswordReasonNotString},
 		{"an undefined variable", `{{ v }}`, `{}`, nil, "", PasswordReasonUndefined},
 		{"undefined at the end of a chain", `{{ a }}`, `{"a": "{{ b }}"}`, nil, "", PasswordReasonUndefined},
 		{"a play var of the identity playbook", `{{ ipa_domain }}`, `{"ipa_domain": "ipa.test"}`, nil, "", PasswordReasonShadowed},
@@ -82,7 +89,7 @@ func TestUserInitialPasswordResolvesOnlyWhatTheRunDecides(t *testing.T) {
 
 		// ---- G6: what the value must be ----
 		{"an empty string", `{{ v }}`, `{"v": ""}`, nil, "", PasswordReasonEmpty},
-		{"an !unsafe empty string", `{{ v }}`, `{"v": {"__ansible_unsafe": ""}}`, nil, "", PasswordReasonEmpty},
+		{"a literal mapping {__ansible_unsafe: \"\"} is the marker, not an empty string", `{{ v }}`, `{"v": {"__ansible_unsafe": ""}}`, nil, "", PasswordReasonUnsafeMarker},
 		{"null", `{{ v }}`, `{"v": null}`, nil, "", PasswordReasonNotString},
 		{"a number", `{{ v }}`, `{"v": 12345678}`, nil, "", PasswordReasonNotString},
 		{"a boolean", `{{ v }}`, `{"v": true}`, nil, "", PasswordReasonNotString},
@@ -303,7 +310,7 @@ func TestPasswordSendableIsExactlyHavingAValue(t *testing.T) {
 func TestDescribePasswordValueNamesTheReasonAndNeverAValue(t *testing.T) {
 	secret := sentinelSecret(t)
 	seen := map[string]PasswordValueReason{}
-	for reason := PasswordReasonNotBare; reason <= PasswordReasonReserved; reason++ {
+	for reason := PasswordReasonNotBare; reason <= passwordReasonLast; reason++ {
 		text := DescribePasswordValue(PasswordTemplate, reason, "the_var")
 		if text == "" {
 			t.Fatalf("%s has no text", reason)
@@ -321,6 +328,14 @@ func TestDescribePasswordValueNamesTheReasonAndNeverAValue(t *testing.T) {
 		if reason == PasswordReasonNotBare && strings.Contains(text, "the_var") {
 			t.Errorf("a template that is not bare names a variable: %q", text)
 		}
+	}
+	// A reason added past passwordReasonLast stringifies to the fallback: the loop above is the
+	// only place that would catch one added without a String case, a text and a row.
+	if got := (passwordReasonLast + 1).String(); !strings.HasPrefix(got, "PasswordValueReason(") {
+		t.Errorf("a reason past passwordReasonLast stringifies as %q: add it to the loop's range", got)
+	}
+	if text := DescribePasswordValue(PasswordTemplate, PasswordReasonUnsafeMarker, "the_var"); !strings.Contains(text, "__ansible_unsafe") || !strings.Contains(text, "the_var") {
+		t.Errorf("the text for the marker names neither the variable nor __ansible_unsafe: %q", text)
 	}
 	// A name refused for its prefix (ansible_, role_) or for being a magic variable is not one that
 	// anything "defines" before the password is read: the text must not say it is.

@@ -54,7 +54,7 @@ func TestABareReferenceThatTheRunResolvesIsPlannedAndNotOtherwise(t *testing.T) 
 		{"a vault string", `"{{ v }}"`, map[string]any{"v": secret}, ""},
 		{"no spaces, whitespace control", `"{{- v -}}"`, map[string]any{"v": secret}, ""},
 		{"a chain of two", `"{{ a }}"`, map[string]any{"a": "{{ v }}", "v": secret}, ""},
-		{"a value that is !unsafe text", `"{{ v }}"`, map[string]any{"v": map[string]any{"__ansible_unsafe": "a{{ b }}-" + secret}}, ""},
+		{"a value that is the __ansible_unsafe marker", `"{{ v }}"`, map[string]any{"v": map[string]any{"__ansible_unsafe": "a{{ b }}-" + secret}}, "refers to v, whose value is (or ends in) the mapping {__ansible_unsafe"},
 		{"undefined", `"{{ missing_var }}"`, map[string]any{"v": secret}, "refers to missing_var, which nothing in the run defines"},
 		{"a name the settings task sets", `"{{ identity_admin_password }}"`, map[string]any{"identity_admin_password": secret}, "refers to identity_admin_password, a name the identity playbook"},
 		{"a role_ name, refused for its prefix", `"{{ role_default_password }}"`, map[string]any{"role_default_password": secret}, "refers to role_default_password, a name Ansible reserves for its own variables"},

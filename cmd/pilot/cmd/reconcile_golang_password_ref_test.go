@@ -309,6 +309,56 @@ func TestRosterPasswordReferenceThatCannotBeSentBlocksTheRun(t *testing.T) {
 	}
 }
 
+// The __ansible_unsafe marker (merge-gate finding of #394, F1): ansible-inventory lists a genuine
+// !unsafe string and a literal YAML mapping {__ansible_unsafe: x} the same way, and Ansible sends
+// them differently (text, and the JSON of a dict). The Go engine cannot tell which a run holds, so
+// a reference that reaches either is blocked, whatever the vault file is (plain or encrypted), with
+// the real ansible-inventory in the loop and no write, no playbook call and no value anywhere.
+func TestRosterPasswordReferenceThroughTheUnsafeMarkerBlocksTheRun(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		vault   func(quotedSecret string) string
+		encrypt bool
+	}{
+		{"a literal mapping in a plain vault file", func(q string) string { return "ipa_default_initial_password: {__ansible_unsafe: " + q + "}\n" }, false},
+		{"a literal mapping in an encrypted vault file", func(q string) string { return "ipa_default_initial_password: {__ansible_unsafe: " + q + "}\n" }, true},
+		{"a genuine !unsafe string in a plain vault file", func(q string) string { return "ipa_default_initial_password: !unsafe " + q + "\n" }, false},
+		{"a genuine !unsafe string in an encrypted vault file", func(q string) string { return "ipa_default_initial_password: !unsafe " + q + "\n" }, true},
+		{"a chain that ends in a literal mapping", func(q string) string {
+			return "ipa_default_initial_password: \"{{ other_password_var }}\"\nother_password_var: {__ansible_unsafe: " + q + "}\n"
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			secret := pwRefSecret(t)
+			quoted, _ := json.Marshal(secret) // a JSON string is a YAML double-quoted scalar
+			e := pwRefApplyEnv(t, pwRefRoster(`"{{ ipa_default_initial_password }}"`), tc.vault(string(quoted)), tc.encrypt)
+			result := filepath.Join(e.dir, "result.json")
+			out, err := runReconcileCLI(t, applyArgs("--result-out", result)...)
+			if got := processExitCode(err); got != 3 {
+				t.Fatalf("exit %d (err %v), want 3 (blocked)\n%s", got, err, out)
+			}
+			if got := e.a.writeMethods(); len(got) != 0 {
+				t.Fatalf("the server received writes %v, want none", got)
+			}
+			if calls := e.playbookCalls(); len(calls) != 0 {
+				t.Fatalf("the entry ran: %v", calls)
+			}
+			doc := readApplyDoc(t, result)
+			if len(doc.Plan1.Blocked) != 1 || doc.Plan1.Blocked[0].Object != "p26-new" || doc.Plan1.Blocked[0].Reason != identityreconcile.BlockedPasswordValue {
+				t.Fatalf("blocked = %+v", doc.Plan1.Blocked)
+			}
+			detail := doc.Plan1.Blocked[0].Detail
+			for _, want := range []string{"password.initial", "ipa_default_initial_password", "__ansible_unsafe"} {
+				if !strings.Contains(detail, want) {
+					t.Errorf("the blocked detail does not say %q: %s", want, detail)
+				}
+			}
+			raw, _ := json.Marshal(doc)
+			assertNoValueAnywhere(t, []string{secret, golangTestPassword}, err, out+string(raw), result)
+		})
+	}
+}
+
 // G4: ansible-inventory fails when asked for the run's variables (the vault's -e): the text on its
 // stderr, which can quote the plaintext of a vars file, is shown nowhere; the templated user is
 // refused as "the run's variables were not read" (exit 3, zero writes), and the same failure does
