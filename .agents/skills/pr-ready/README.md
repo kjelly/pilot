@@ -55,8 +55,8 @@ $pr-ready 處理目前 branch 對應的單一 Draft PR
 2. 每則 review 意見（人、bot 或之前的自動審查）都先當成待驗證的主張分類（`valid`/`invalid`/`needs_evidence`/`nonblocking`），只有成立的才交給 Coder。不成立的意見不改 code：獨立 Reviewer 在看不到主 Agent 結論的情況下確認後，主 Agent 在 GitHub 回覆反證，記錄在 evidence 的 `disputed_review_comments`（見 `references/review-comments.md`）。同一主張沒有新證據又被提出時交給人決定，不再來回修改或回覆。
 3. SA 判斷根因與架構；Coder 修復並測試；Reviewer 在**獨立 context** 進行審查。Coder 的本機測試只跑 diff 觸及的 package 與新增的 regression，全套 `go test ./...` 交給 CI 的 `Go test` job（SKILL.md「Pilot: cycle-time rules」）。
 4. 若 Reviewer 提出 P0/P1/P2，回交 Coder 修復；連續 3 次有效修正未收斂則 SA 再評估。Reviewer 只剩 P3/P4 時這一輪就結束：主 Agent 回覆並 resolve thread、記進 PR body 或 follow-up issue，不再派 Coder。
-5. push 與 evidence 準備好後，主 Agent 保持 session 執行 `pr_gate.py --wait --ready --restore-sha "$START_SHA" --restore-branch="$START_BRANCH"` 持續等待 CI；每次重新確認 HEAD、review/evidence 未變與所有 gate。CI 完成後自動 final PR-branch preflight → 復原起始 branch/SHA → 重查 remote/pins → Ready → post-action verification；復原失敗不改 PR 狀態，Ready 後不再切分支。START_SHA 使用起始 branch 當下 tip；若起始為 detached HEAD，使用記錄的 SHA 並省略 --restore-branch。pending 本身不結束 invocation；只有明確 timeout、取消、runtime 限制或真正 blocker 才 checkpoint。僅在同一個最新 commit SHA 上，確認 acceptance criteria、測試、lint、static analysis、required CI、review threads（每個都已 resolve，P3/P4 也一樣，否則 pr-review-merge 會再轉回 Draft）及衝突後，才執行 `gh pr ready`。
-6. 不可更新、無法修復或無法驗證的 PR 保持 Draft，輸出 DRAFT-BLOCKED 與 blocker。
+5. push 與 evidence 準備好後，主 Agent 保持 session 執行 `pr_gate.py --wait --ready --restore-sha "$START_SHA" --restore-branch="$START_BRANCH"` 持續等待 CI；每次重新確認 HEAD、review/evidence 未變與所有 gate。CI 完成後自動 final PR-branch preflight → 復原起始 branch/SHA → 重查 remote/pins → Ready → post-action verification；復原失敗不改 PR 狀態，Ready 後不再切分支。START_SHA 使用起始 branch 當下 tip；若起始為 detached HEAD，使用記錄的 SHA 並省略 --restore-branch。pending 本身不結束 invocation；只有明確 timeout、取消、runtime 限制或真正 blocker 才 checkpoint。僅在同一個最新 commit SHA 上，確認 acceptance criteria、測試、lint、static analysis、required CI、review threads（每個都已 resolve，P3/P4 也一樣，否則 pr-review-merge 會再轉回 Draft）及衝突後，才執行 `gh pr ready`；post-action verification 通過後 gate 再為這個 Ready PR 簽上 Ready signal（見下方「Ready signal」），讀回為有效才回報 `READY`。
+6. 不可更新、無法修復或無法驗證的 PR 保持 Draft，輸出 DRAFT-BLOCKED 與 blocker。Ready 之後 signal 沒寫成或讀不回來也是 DRAFT-BLOCKED，但這時 PR 已經是 Ready（沒有 signal，自動化不會處理它）：先由人把它轉回 Draft，再重跑 pr-ready。
 
 ## Quality Gate 腳本（可單獨使用）
 
@@ -77,11 +77,24 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
 - `WAIT-INTERRUPTED`：明確 `--wait-timeout` 或 SIGINT/SIGTERM 中斷；預設無 timeout。狀態保存在 `.pr-ready/N/wait-status.json`，不覆寫 Root checkpoint；`ready_invoked` 表示是否已嘗試 Ready，若為 true 必須重查遠端狀態。
 - `--worktree` 為必填：`pr_gate.py` 用 PR 的 `baseRefOid..headRefOid`（以 SHA 指定，不看目前 checkout 的 HEAD）掃描**每一個 commit** 的新增行、commit message 與路徑，是否含秘密（共用 `_shared/scripts/secret_scan.py`，規則見 `.agents/skills/_shared/committed-secrets.md`）。任何一個 commit 有發現就是 `DRAFT-BLOCKED`，沒有 override：後續 commit 把值換成 placeholder 也不能清除，必須停下來回報使用者。`--wait` 期間同一組 base/head 只掃一次。`--secret-file FILE`（須在 repo 之外，一行一個值，每個至少 8 bytes）可加入已知的秘密值；輸出只有類別、檔案與 commit，絕不含值。
 - `GATE-PASS`：門檻檢查通過，**尚未變更 PR 狀態**。
-- `READY`：GitHub 已確認從 Draft 改為 Ready、HEAD 未變。
-- `DRAFT-BLOCKED`：資料不足或至少一項品質門檻不合格（exit code 2）。
+- `READY`：GitHub 已確認從 Draft 改為 Ready、HEAD 未變，且 Ready signal 已寫入並讀回為有效（結果的 `ready_signal` 欄位：`label`、`head_sha`、`producer`）。
+- `DRAFT-BLOCKED`：資料不足或至少一項品質門檻不合格（exit code 2）。`--ready` 時 repo 沒有 `pr-ready-verified` label、Ready 前清不掉殘留的 label，也是這個狀態（尚未呼叫 Ready，PR 仍是 Draft）；Ready 與 post-action verification 都成功、但 signal 沒寫成或讀不回來時，錯誤訊息是 `Ready invoked and verified, but the pr-ready-verified signal was not confirmed`（`--wait` 時 `ready_invoked` 為 true），PR 已經是 Ready。
 - `receipt_reuse`：receipt 或獨立 review 的 SHA 是 HEAD 的祖先、且中間只改了 base branch `.github/pr-evidence.json` 的 `evidence_only_paths`（例如 `docs/evidence/**` 的 evidence commit）時，gate 自己跑 `git diff` 判斷後接受，並在這個欄位列出；base branch 從 `refs/remotes/<--base-remote>/<base>` 讀（預設 `origin`），本機沒有 fetch 到就回到嚴格的 HEAD 綁定。其他任何 delta 都要重跑。
 
 驗證命令可由 `scripts/run_check.py` 執行並產生 SHA-bound receipt；腳本不會自動編造 acceptance criteria / reviewer 結論。`gh pr checks --required` 和 GraphQL reviewThreads 資訊不可存取時採 **fail-closed**；branch 沒有 required checks 時 `--required` 以 exit 1、stdout 為空、stderr 恰為 `no required checks reported on the '<branch>' branch` 結束，gate 只在這個完全吻合的情況視為 0 個 required checks，其餘 checks 仍須全部通過；stdout 有 JSON 就一律照 JSON 判斷（名稱含這段文字的 required check 失敗仍然是失敗），訊息混在其他輸出、大小寫不同或其他 exit status 一律 fail-closed。wait 模式一律讀取完整 review/comment body 與 edit metadata，新增或修改就停下交給 Root triage；非 wait 模式 evidence 有 `disputed_review_comments` 時，gate 另外讀取 PR 的 conversation comments 與 reviews，確認被反駁的意見與回覆都在這個 PR 上、回覆在意見之後、inline 回覆在同一個 thread 且仍是最新一則、其他回覆內含原意見的 URL；反駁本身對不對由獨立 Reviewer 判斷，gate 判斷不了。
+
+## Ready signal
+
+`pr-review-merge` 與 `scripts/pr_loop.py` 只處理帶有 Ready signal（`.agents/skills/_shared/scripts/ready_signal.py`）的 Ready PR：label `pr-ready-verified`，加上一則以 marker 行結尾、寫明已驗證 HEAD 的留言，兩者都由 `gh` 登入的帳號在該 PR 最後一次 Draft → Ready 之後寫入。只有 `isDraft=false` 不夠：手動按 Ready、或繞過本 gate 直接 `gh pr ready` 的 PR 沒有 signal，會被忽略（`list_ready.py` 列在 `excluded`，actor 不寫入任何東西，runner 停在 `unverified`）。
+
+- **產生：**`pr_gate.py --ready`（以及 issue-to-pr 的 `mark_ready.py`）。流程與失敗行為見 SKILL.md「The Ready signal」：輪詢 CI 之前先確認 label 存在，`gh pr ready` 之前先移除殘留的舊 label，post-action verification 成功後才依序寫留言、加 label（commit point）並讀回。
+- **前置條件：**repo 必須先有 `pr-ready-verified` label，由 maintainer 建立一次；任何程式碼都不會建立、修改或刪除 label。
+- **同一個 GitHub 帳號：**產生 signal 的工具與讀它的工具（`pr-review-merge`、`pr_loop.py`）必須用同一個帳號登入 `gh`；label 或留言是別的帳號寫的一律不採信。
+- **綁定 HEAD：**marker 寫的是驗證當下的 HEAD。改到 PR 自己 commit 的 push 讓 signal 過期；只是把 base 併進來（merge train 的整合 commit，或人手動 merge base）時，`pr-review-merge` 的 actor 仍接受（與 review 跨 pure base import 的規則相同），`pr_loop.py` 不接受。轉回 Draft 會結束 signal（actor 與 merge train 轉 Draft 後會移除 label）。
+- **補救：**signal 缺少或過期一律是：由人把 PR 轉回 Draft，再跑 pr-ready。`pr_gate.py` 拒絕不是 Draft 的 PR，Ready 的 PR 無法原地補簽。
+- **一開始就是 Ready 的 PR：**`issue-to-pr` 的 `create_pr.py --ready`（只在使用者明確要求時）建立的 PR 沒有 Draft → Ready 事件，永遠不會有有效的 signal，自動化會忽略它；要處理就先轉成 Draft。
+- **`--wait` 的 pin：**固定 PR 的 title、body、HEAD、head/base branch 名稱與 review/留言內容，不包含 label；label 的檢查由 gate 自己做（上述三個步驟）。
+- **人工補簽（例如 signal 機制上線前就已經是 Ready 的 PR）：**用與自動化相同的帳號，先在 PR 留一則以 marker 結尾的留言（用 `ready_signal.marker_comment(head, "maintainer")` 產生內容，最後一行是 `<!-- pr-ready:verified head=<完整 40 字元 SHA，小寫> by=maintainer -->`，`head` 是你確認過的 PR HEAD），再加上 label。順序不能反：label 必須在留言之後加；PR 上若已有舊 label，先移除再加，讓它成為 Ready 之後的新事件。PR 必須是經過 Draft → Ready 的（有 `ready_for_review` 事件）。
 
 ## 本機測試
 

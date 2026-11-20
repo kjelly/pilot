@@ -76,15 +76,19 @@ python3 scripts/pr_loop.py 371 372 --repo kjelly/pilot
 
 The runner uses the Python 3 standard library. Install `git`, authenticated
 `gh`, `tmux`, and the coding agents, with `claude` and `codex` as defaults.
-The target repository's default branch must contain Pilot's PR skills and
-result helper, and the merge train consumer must be running.
+The target repository's default branch must contain Pilot's PR skills, the
+result helper (`.agents/skills/_shared/scripts/pr_loop_result.py`) and the Ready
+signal module (`.agents/skills/_shared/scripts/ready_signal.py`); the runner checks
+both and refuses a default branch that lacks either. The merge train consumer must
+be running.
 
 The runner starts agents automatically on the verified default branch. An
 agent process is reused for its role while the same PR moves between Draft
 and Ready. After GitHub confirms the merge, the runner closes that PR's agent
 panes and starts new processes for the next PR. A gate that reports a blocker,
-a current-HEAD `needs-person` hand-off, or a timeout stops the batch and retains
-the checkout and panes for inspection. The runner prints their locations.
+a current-HEAD `needs-person` hand-off, a Ready PR without a valid signal (below),
+or a timeout stops the batch and retains the checkout and panes for inspection.
+The runner prints their locations.
 
 Use `--draft-agent` and `--ready-agent` to choose executable paths. The prompts
 default to `/pr-ready {pr}` and `$pr-review-merge {pr}`; you can set them with
@@ -100,6 +104,30 @@ them. A newly started agent may ask whether to trust the new checkout
 directory; answer it in the printed tmux session within `--startup-timeout`.
 Agents run with the environment of the tmux server when one is already
 running, not with the environment of the shell that started the runner.
+
+The runner dispatches the Ready phase only for a PR that carries a valid Ready
+signal at its current HEAD: the label `pr-ready-verified` and a comment with a
+marker line for that HEAD, which `pr-ready` (or issue-to-pr's `mark_ready.py`)
+writes after it verified the Draft and made it Ready. The signal counts only when
+the account `gh` runs as wrote it, so the runner and the skills must run as the
+same GitHub account, and the label must exist in the repository (a one-time
+maintainer action; nothing here creates labels). A Ready PR without a valid
+signal is `unverified`, for example because it was made Ready by hand or by a
+script that skipped the gate, was created Ready, was pushed to after it was
+signed, or was signed by another account. The runner reads
+the phase twice like any other, dispatches nothing for it, writes nothing to
+GitHub and stops with `PR #N is Ready without a valid pr-ready-verified signal at
+HEAD <h12>: <reason>; ...`; `--dry-run` prints `PR #N: unverified (<reason>)`.
+Unlike the `pr-review-merge` actor, the runner does not carry a signal across a
+base import. While the Draft agent is still working, a Ready PR that is not signed
+yet counts as the Draft phase, because the gate marks the PR Ready before it
+verifies and signs it: a blocker it reports afterwards stops the run instead of
+sending the Ready agent in. A signal that never becomes valid (for example one
+written by another account) ends that phase with `timed out in draft (Ready
+without a valid pr-ready-verified signal: <reason>)`. To have an unverified PR processed, convert it to
+Draft and run pr-ready on it, then start the runner again (a person can also sign
+it by hand, see the "Ready signal" section of
+[`.agents/skills/pr-ready/README.md`](.agents/skills/pr-ready/README.md)).
 
 The runner acts on a state only after reading it twice in a row, and retries a
 failed GitHub read twice before it stops, so one lagging or failing read neither

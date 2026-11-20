@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Run Pilot's Draft/Ready PR skills in order using managed tmux panes."""
+"""Run Pilot's Draft/Ready PR skills in order using managed tmux panes.
+
+The runner dispatches the Ready skill (pr-review-merge) only for a PR that carries a valid Ready signal at its
+current HEAD (`ready_signal.assess`): proof that pr-ready (or issue-to-pr's mark_ready.py) verified and signed it. A
+Ready PR without one is `unverified` and is never acted on; the runner has no carry across a base import (the
+merge-train integration commit is the train's business) and writes nothing to GitHub.
+"""
 from __future__ import annotations
 
 import argparse
@@ -21,10 +27,11 @@ from urllib.parse import urlsplit
 sys.dont_write_bytecode = True
 SKILLS = Path(__file__).resolve().parents[1] / ".agents/skills"
 sys.path[:0] = [str(SKILLS / skill / "scripts") for skill in ("pr-review-merge", "_shared")]
-from gh_runtime import GitHubError, Repo, issue_comments, pr_view, viewer_login
+from gh_runtime import GitHubError, Repo, issue_comments, pr_view, timeline_events, viewer_login
 from list_ready import QUEUE_LABEL
 from needs_person import LABEL as PERSON_LABEL, latest_marker
 from pr_loop_result import OUTCOMES, SHA, TASK_DIR
+import ready_signal  # only LABEL, assess and SignalError: this runner reads the signal, it never writes one
 
 
 # A phase must be read this many times in a row before the runner acts on it, and a failed GitHub read is
@@ -77,18 +84,47 @@ def head_of(view):
     return head.lower()
 
 
-def observe(repo, number):
-    view = pr_view(repo, number)
+def signal_phase(repo, number, view, account):
+    """(phase, detail) of a PR `state_of` calls `ready`: `ready` only when its Ready signal is valid at this very
+    HEAD, otherwise `unverified` with the reason. Strict: a signal that names an earlier HEAD does not count here,
+    whatever changed since. The PR's timeline is read only when it carries the label; `account` is a callable that
+    returns the login `gh` runs as (the signal is trusted only when that account wrote it)."""
+    if not has_label(view, ready_signal.LABEL):
+        return "unverified", f"the PR does not carry the {ready_signal.LABEL} label"
+    head = head_of(view)
+    try:
+        found = ready_signal.assess(head, view["labels"], timeline_events(repo, number), account())
+    except ready_signal.SignalError as exc:
+        return "unverified", f"the signal cannot be read: {exc}"
+    if found.valid and found.marker_head == head:
+        return "ready", ""
+    return "unverified", f"{found.state}: {found.reason}"
+
+
+def phase_of(repo, number, view, account):
+    """(phase, detail) of one PR view: `state_of`, with a Ready PR sorted into `ready` or `unverified`."""
     phase = state_of(view)
+    if phase == "ready":
+        return signal_phase(repo, number, view, account)
+    return phase, ""
+
+
+def observe(repo, number, account=None):
+    """One observation of the PR: `(view, phase, detail)`. `account` returns the login `gh` runs as (a Batch passes a
+    callable that reads it once); without one it is read on demand. A PR waiting for a person stops the run."""
+    account = account or (lambda: viewer_login(repo))
+    view = pr_view(repo, number)
+    phase, detail = phase_of(repo, number, view, account)
     if phase == "ready" and has_label(view, PERSON_LABEL):
         head = head_of(view)
-        marker = latest_marker(issue_comments(repo, number), viewer_login(repo))
+        marker = latest_marker(issue_comments(repo, number), account())
         if marker and marker["head"] == head:
             fresh = pr_view(repo, number)
             if state_of(fresh) == "ready" and has_label(fresh, PERSON_LABEL) and head_of(fresh) == head:
                 raise Stop(f"PR #{number} needs a person at HEAD {head[:12]}; see the PR conversation")
-            return fresh
-    return view
+            view = fresh
+            phase, detail = phase_of(repo, number, fresh, account)
+    return view, phase, detail
 
 
 class Checkout:
@@ -111,7 +147,10 @@ class Checkout:
         self.branch = "refs/heads/" + remote_ref[len(prefix):]
         self.head = self.git("rev-parse", "--verify", remote_ref + "^{commit}")
         self.verify()
-        self.git("cat-file", "-e", "HEAD:.agents/skills/_shared/scripts/pr_loop_result.py")
+        # Both helpers are run from this checkout by the skills it hosts: a default branch that predates either
+        # would leave the agent unable to report or to sign, and the run would wait for its phase timeout.
+        for helper in ("pr_loop_result.py", "ready_signal.py"):
+            self.git("cat-file", "-e", f"HEAD:.agents/skills/_shared/scripts/{helper}")
         info = self.path / ".git/info"
         info.mkdir(parents=True, exist_ok=True)
         with (info / "exclude").open("a", encoding="utf-8") as stream:
@@ -245,6 +284,13 @@ class Batch:
     def __init__(self, repo, args):
         self.repo, self.args = repo, args
         self.checkout = None
+        self.login = None
+
+    def account(self):
+        """The login `gh` runs as: asked once per Batch, a login does not change while the runner works."""
+        if self.login is None:
+            self.login = viewer_login(self.repo)
+        return self.login
 
     def run(self):
         for number in self.args.pr:
@@ -256,11 +302,11 @@ class Batch:
             self.checkout.clean_up()
 
     def read(self, number):
-        """One observation of the PR. A failed GitHub read is retried; a Stop (a PR that cannot be driven)
-        is a verdict, never retried."""
+        """One observation of the PR, `(view, phase, detail)`. A failed GitHub read is retried; a Stop (a PR that
+        cannot be driven) is a verdict, never retried."""
         for attempt in range(1, READ_ATTEMPTS + 1):
             try:
-                return observe(self.repo, number)
+                return observe(self.repo, number, self.account)
             except GitHubError as exc:
                 if attempt == READ_ATTEMPTS:
                     raise Stop(f"GitHub read failed {READ_ATTEMPTS} consecutive times; no command sent: {exc}") from exc
@@ -275,11 +321,18 @@ class Batch:
         actions, exited = 0, 0
         deadline = time.monotonic() + self.args.phase_timeout
         while True:
-            view = self.read(number)
-            phase = state_of(view)
+            view, phase, detail = self.read(number)
             if self.args.dry_run:
-                tell(f"PR #{number}: {phase}")
+                tell(f"PR #{number}: {phase}" + (f" ({detail})" if phase == "unverified" else ""))
                 return
+            # What a timeout says about a PR that was Ready without a signal when it ran out (the signal's author may be
+            # another account than this runner's: the reason is in `detail`).
+            unsigned = f" (Ready without a valid {ready_signal.LABEL} signal: {detail})" if phase == "unverified" else ""
+            if phase == "unverified" and current == "draft":
+                # The Draft agent is still working: the gate marks the PR Ready BEFORE it verifies and signs it, and a
+                # blocker it reports afterwards leaves the PR Ready without a signal. Keep reading the Draft phase,
+                # so that the result it publishes (DRAFT-BLOCKED) is the one the run stops on.
+                phase = "draft"
             if phase == current:
                 candidate, seen = None, 0
                 if active is not None and phase != "queued":
@@ -287,13 +340,13 @@ class Batch:
                     dead, _, foreground = active[1].status()
                     exited = exited + 1 if dead or foreground in SHELLS else 0
                     if exited >= 2:
-                        raise Stop(f"{phase} agent exited before GitHub confirmed a state change")
+                        raise Stop(f"{phase} agent exited before GitHub confirmed a state change{unsigned}")
             else:
                 seen = seen + 1 if phase == candidate else 1
                 candidate = phase
             if phase != current and seen >= STABLE_POLLS:
                 candidate, seen = None, 0
-                if current == "queued" and phase == "ready":
+                if current == "queued" and phase in ("ready", "unverified"):
                     raise Stop("left the merge train while still Ready; inspect the PR conversation")
                 if phase != "queued" and active is not None:
                     role, agent = active
@@ -304,8 +357,12 @@ class Batch:
                     # The agent publishes its result before it returns to its prompt, and GitHub may already show
                     # the next phase (a gate can mark the PR Ready and then report a blocker): read the result
                     # against a fresh HEAD before another role starts or the PR is reported done.
-                    check_result(task_path, task, head_of(self.read(number)))
+                    check_result(task_path, task, head_of(self.read(number)[0]))
                     active = None
+                if phase == "unverified":
+                    raise Stop(f"PR #{number} is Ready without a valid {ready_signal.LABEL} signal at HEAD "
+                               f"{head_of(view)[:12]}: {detail}; nothing is dispatched for it: convert it to Draft and "
+                               "run pr-ready on it, then start the runner again")
                 if phase == "merged":
                     for agent in agents.values():
                         agent.close()
@@ -330,8 +387,8 @@ class Batch:
                         agents[phase] = agent
                     agent.wait_for_prompt(self.args.startup_timeout)
                     # An approval prompt at startup can take long enough for GitHub to change.
-                    view = self.read(number)
-                    if state_of(view) != phase:
+                    view, now, _ = self.read(number)
+                    if now != phase:
                         raise Stop("GitHub state changed before dispatch; retry against the current PR")
                     task_path, task = self.checkout.task(self.repo, number, phase, head_of(view))
                     prompt = getattr(self.args, phase + "_command").replace("{pr}", str(number))
@@ -340,7 +397,7 @@ class Batch:
                     active, exited = (phase, agent), 0
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise Stop(f"timed out in {phase}")
+                raise Stop(f"timed out in {phase}{unsigned}")
             time.sleep(min(self.args.poll_interval, remaining))
 
 

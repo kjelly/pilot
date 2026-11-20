@@ -98,6 +98,22 @@ Notes on the table:
   confirmed, and when it merges one, after the PR reads back as `MERGED` (the queue lists open PRs
   only, so a label left on a merged PR was harmless, but it no longer is).
 
+## The Ready signal: not required here
+
+The actor refuses a PR without a valid Ready signal (`review_gate.ready_signal_gate`, SKILL.md "Ready
+signal") before it saves the entry and adds the label, so what reaches the queue was signed. The train
+itself requires no signal and never reads one (`tests/test_merge_train.py`, `NoSignalRequirementTests`):
+
+- It trusts the saved entry, bound to `enqueued_head` and its own `train_commits` (Binding, above), as it
+  always did.
+- The integration commit it pushes is exactly what would make a signal bound to the enqueued HEAD stale.
+- A PR enqueued before the check existed is merged as it was enqueued. One that leaves the queue is an
+  ordinary Ready PR again: it follows the signal rules, and a PR without a valid signal needs Draft and
+  `pr-ready`.
+- `review_gate.evaluate()`, which the train calls on its own commits, reads no signal either: the check is
+  the separate top-level `ready_signal_gate`, called by the command line and by the actor.
+- The only thing the train does with the signal is take its label off a PR it returned to Draft (above).
+
 ## Every write is guarded
 
 The train decides on what it read, then waits for the repository mutation lock, and someone else may
@@ -137,8 +153,9 @@ steps then give the outcome that fits what changed:
 What each write does under the guard:
 
 - **Draft.** Guard, comment, read again under the same lock, mark Draft, confirm `isDraft`, remove the
-  label, drop the entry. Only a confirmed Draft takes the label off, so a conversion GitHub did not
-  perform leaves the PR enqueued (`ERROR`, counted).
+  label, drop the entry, then take the Ready-signal label (`pr-ready-verified`) off a PR that shows it
+  (housekeeping: a failure is logged, never an outcome and never `INFRA`). Only a confirmed Draft takes
+  a label off, so a conversion GitHub did not perform leaves the PR enqueued (`ERROR`, counted).
 - **A voided comment.** A comment cannot be taken back. When the PR changed after the Draft comment was
   posted, the train does not mark it Draft and does not touch the label. It posts a second comment,
   "Draft comment superseded", that names the HEAD the first one judged and says the train did not

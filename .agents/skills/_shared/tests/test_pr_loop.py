@@ -21,8 +21,10 @@ ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT / "scripts"))
 import pr_loop
+import ready_signal as rs
+import ready_signal_world as rw
 from pr_loop_result import load_task, write_result
-from pr_loop_fakes import FakeEnv, FakeTime, pr_view_json
+from pr_loop_fakes import HELPER_PATHS, LOGIN, FakeEnv, FakeTime, pr_view_json, ready_view, signal_world
 
 HEAD = "a" * 40
 NEW = "b" * 40
@@ -34,13 +36,13 @@ class PRLoopTests(unittest.TestCase):
         dispatched, started, closed = [], [], []
         head = "a" * 40
 
-        def view(_repo, number):
+        def view(_repo, number, _account=None):
             state = view_states[number]
             if state == "queued":
                 view_states[number] = "merged"
             return dict(number=number, state="MERGED" if state == "merged" else "OPEN",
                         isDraft=state == "draft", headRefOid=head,
-                        labels=[{"name": pr_loop.QUEUE_LABEL}] if state == "queued" else [])
+                        labels=[{"name": pr_loop.QUEUE_LABEL}] if state == "queued" else []), state, ""
 
         class Checkout:
             def __init__(self, *_):
@@ -116,18 +118,24 @@ class PRLoopTests(unittest.TestCase):
 
     def test_moved_head_is_not_held_by_old_person_marker(self):
         current, new = "a" * 40, "b" * 40
-        original = dict(number=7, state="OPEN", isDraft=False, labels=[{"name": "needs-person"}], headRefOid=current)
+        # A signed Ready PR that waits for a person: its signal and the person marker both name `current`.
+        world = signal_world(current)
+        original = ready_view(world, labels=world.view_labels() + [{"name": "needs-person"}])
         marker = f"<!-- pr-review-merge:needs-person head={current} live-base={'c' * 40} reasons={'d' * 16} -->"
         repo = pr_loop.Repo.parse("kjelly/pilot")
         for latest in (original, dict(original, headRefOid=new)):
             with patch.object(pr_loop, "pr_view", side_effect=[original, latest]), \
-                 patch.object(pr_loop, "viewer_login", return_value="reviewer"), \
-                 patch.object(pr_loop, "issue_comments", return_value=[{"login": "reviewer", "body": marker}]):
+                 patch.object(pr_loop, "viewer_login", return_value=LOGIN), \
+                 patch.object(pr_loop, "timeline_events", return_value=world.s["events"]), \
+                 patch.object(pr_loop, "issue_comments", return_value=[{"login": LOGIN, "body": marker}]):
                 if latest["headRefOid"] == current:
                     with self.assertRaisesRegex(pr_loop.Stop, "needs a person"):
                         pr_loop.observe(repo, 7)
                 else:
-                    self.assertEqual(latest, pr_loop.observe(repo, 7))
+                    # The fresh read is returned, and judged by its own signal: the one on the PR names the old HEAD.
+                    view, phase, detail = pr_loop.observe(repo, 7)
+                    self.assertEqual((latest, "unverified"), (view, phase))
+                    self.assertRegex(detail, r"^stale: the signal was written for HEAD a{12}, the PR HEAD is b{12}$")
 
 
 # ---- (A) the pure gates: each one is paired with the case that must pass and the case that must stop ----------
@@ -192,16 +200,22 @@ class HeadOfTests(unittest.TestCase):
 
 
 class ObserveTests(unittest.TestCase):
-    """`observe` is the one read of a PR. The existing test above covers a moved HEAD."""
+    """`observe` is the one read of a PR: `(view, phase, detail)`. The hand-off to a person applies to a PR whose
+    signal is valid. The existing test above covers a moved HEAD."""
     repo = pr_loop.Repo.parse("kjelly/pilot")
     marker = f"<!-- pr-review-merge:needs-person head={HEAD} live-base={'c' * 40} reasons={'d' * 16} -->"
 
+    def setUp(self):
+        self.world = signal_world(HEAD)  # a Ready PR signed by the fake gh account
+
     def labelled(self, **fields):
-        return dict(pr_view_json("ready", head=HEAD, labels=["needs-person"]), **fields)
+        """The signed Ready PR, waiting for a person too."""
+        return ready_view(self.world, labels=self.world.view_labels() + [{"name": "needs-person"}], **fields)
 
     def observe(self, views, comments, number=7):
         with patch.object(pr_loop, "pr_view", side_effect=views) as view, \
-             patch.object(pr_loop, "viewer_login", return_value="reviewer"), \
+             patch.object(pr_loop, "viewer_login", return_value=LOGIN), \
+             patch.object(pr_loop, "timeline_events", return_value=self.world.s["events"]), \
              patch.object(pr_loop, "issue_comments", return_value=comments):
             try:
                 return pr_loop.observe(self.repo, number), view.call_count
@@ -210,7 +224,7 @@ class ObserveTests(unittest.TestCase):
 
     def test_a_marker_of_the_viewer_at_the_current_head_stops(self):
         view = self.labelled()
-        result, reads = self.observe([view, view], [{"login": "reviewer", "body": self.marker}])
+        result, reads = self.observe([view, view], [{"login": LOGIN, "body": self.marker}])
         self.assertIsInstance(result, pr_loop.Stop)
         self.assertRegex(str(result), rf"PR #7 needs a person at HEAD {HEAD[:12]}; see the PR conversation")
         self.assertEqual(2, reads, "the label is confirmed by a second read before the PR is given up")
@@ -218,37 +232,169 @@ class ObserveTests(unittest.TestCase):
     def test_a_marker_by_another_login_is_ignored(self):
         view = self.labelled()
         result, reads = self.observe([view], [{"login": "someone-else", "body": self.marker}])
-        self.assertEqual((view, 1), (result, reads))
+        self.assertEqual(((view, "ready", ""), 1), (result, reads))
 
     def test_a_marker_for_another_head_is_ignored(self):
         view = self.labelled()
         old = self.marker.replace(HEAD, NEW)
-        result, reads = self.observe([view], [{"login": "reviewer", "body": old}])
-        self.assertEqual((view, 1), (result, reads))
+        result, reads = self.observe([view], [{"login": LOGIN, "body": old}])
+        self.assertEqual(((view, "ready", ""), 1), (result, reads))
 
     def test_no_marker_at_all_is_just_the_view(self):
         view = self.labelled()
-        self.assertEqual((view, 1), self.observe([view], [{"login": "reviewer", "body": "no marker here"}]))
-        self.assertEqual((view, 1), self.observe([view], []))
+        self.assertEqual(((view, "ready", ""), 1), self.observe([view], [{"login": LOGIN, "body": "no marker here"}]))
+        self.assertEqual(((view, "ready", ""), 1), self.observe([view], []))
 
     def test_a_label_that_is_gone_on_the_fresh_read_returns_the_fresh_view(self):
         view = self.labelled()
-        fresh = pr_view_json("ready", head=HEAD)
-        result, reads = self.observe([view, fresh], [{"login": "reviewer", "body": self.marker}])
-        self.assertEqual((fresh, 2), (result, reads))
+        fresh = ready_view(self.world)
+        result, reads = self.observe([view, fresh], [{"login": LOGIN, "body": self.marker}])
+        self.assertEqual(((fresh, "ready", ""), 2), (result, reads))
 
-    def test_the_hand_off_only_applies_to_a_ready_pr(self):
-        for phase in ("draft", "queued"):
+    def test_a_pr_that_is_not_ready_is_not_held_and_reads_no_signal(self):
+        for phase in ("draft", "queued", "merged"):
             with self.subTest(phase=phase):
                 view = pr_view_json(phase, head=HEAD, labels=["needs-person"])
                 with patch.object(pr_loop, "pr_view", return_value=view), \
                      patch.object(pr_loop, "viewer_login", side_effect=AssertionError("not asked")), \
+                     patch.object(pr_loop, "timeline_events", side_effect=AssertionError("not asked")), \
                      patch.object(pr_loop, "issue_comments", side_effect=AssertionError("not asked")):
-                    self.assertEqual(view, pr_loop.observe(self.repo, 7))
+                    self.assertEqual((view, phase, ""), pr_loop.observe(self.repo, 7))
+
+    def test_an_unverified_pr_is_not_held_for_a_person(self):
+        # The check stays on `ready`: a PR without a valid signal is the runner's refusal, not a person's.
+        view = pr_view_json("ready", head=HEAD, labels=["needs-person"])
+        with patch.object(pr_loop, "pr_view", return_value=view), \
+             patch.object(pr_loop, "viewer_login", return_value=LOGIN), \
+             patch.object(pr_loop, "timeline_events", side_effect=AssertionError("not asked: no signal label")), \
+             patch.object(pr_loop, "issue_comments", side_effect=AssertionError("not asked")):
+            self.assertEqual((view, "unverified", f"the PR does not carry the {rs.LABEL} label"),
+                             pr_loop.observe(self.repo, 7))
 
     def test_a_pr_that_cannot_be_driven_stops_in_the_same_read(self):
         result, reads = self.observe([dict(pr_view_json("ready"), state="CLOSED")], [])
         self.assertRegex(str(result), "is not open or merged")
+
+
+class SignalPhaseTests(unittest.TestCase):
+    """What `observe` makes of a Ready PR: `ready` only when `ready_signal.assess` says `valid` at this very HEAD,
+    otherwise `unverified` with the reason. The worlds are built by ready_signal_world in the shapes of real captures."""
+    repo = pr_loop.Repo.parse("kjelly/pilot")
+
+    def observe(self, view, events):
+        """(observation, times the account was asked, times the timeline was read)"""
+        with patch.object(pr_loop, "pr_view", return_value=view), \
+             patch.object(pr_loop, "viewer_login", return_value=LOGIN) as account, \
+             patch.object(pr_loop, "timeline_events", return_value=events) as timeline, \
+             patch.object(pr_loop, "issue_comments", return_value=[]):
+            return pr_loop.observe(self.repo, 7), account.call_count, timeline.call_count
+
+    def test_a_valid_signal_at_the_head_is_ready(self):
+        world = signal_world(HEAD)
+        view = ready_view(world)
+        self.assertEqual(((view, "ready", ""), 1, 1), self.observe(view, world.s["events"]))
+
+    def test_a_ready_pr_without_the_label_is_unverified_and_its_timeline_is_not_read(self):
+        world = signal_world(HEAD, signed=False)
+        view = ready_view(world)
+        self.assertEqual(((view, "unverified", f"the PR does not carry the {rs.LABEL} label"), 0, 0),
+                         self.observe(view, world.s["events"]))
+
+    def test_every_other_state_of_the_signal_is_unverified_with_its_reason(self):
+        def absent():  # the label is there, the marker comment is not
+            world = signal_world(HEAD, signed=False)
+            world.label()
+            return world
+
+        def stale_epoch():  # the label was left on the PR while it was a Draft
+            world = signal_world(HEAD)
+            world.to_draft()
+            world.ready()
+            return world
+
+        def untrusted():  # the label was added by another account
+            world = signal_world(HEAD, signed=False)
+            world.comment(rs.marker_comment(HEAD, rs.PR_READY))
+            world.label(rw.OTHER)
+            return world
+
+        def converted_back():  # Draft again after the Ready transition
+            world = signal_world(HEAD)
+            world.to_draft()
+            return world
+
+        def never_a_draft():  # created Ready: no Draft -> Ready transition
+            world = rw.World(head=HEAD, viewer=LOGIN)
+            world.signal()
+            return world
+
+        for name, build, reason in (
+                ("absent", absent, r"no signal comment by reviewer after the PR's last Ready transition"),
+                ("stale-epoch", stale_epoch, r"label was added before the PR's last Ready transition"),
+                ("untrusted", untrusted, r"label was added by someone-else, not by the authenticated account reviewer"),
+                ("inconsistent", converted_back, r"converted to Draft after its last Ready transition"),
+                ("absent", never_a_draft, r"no Ready transition from Draft")):
+            with self.subTest(case=build.__name__):
+                world = build()
+                view = ready_view(world)
+                (seen, phase, detail), _, timeline = self.observe(view, world.s["events"])
+                self.assertEqual((view, "unverified", 1), (seen, phase, timeline))
+                self.assertRegex(detail, rf"^{name}: .*{reason}")
+
+    def test_a_signal_for_an_earlier_head_does_not_count_whatever_changed_since(self):
+        # Strict, no carry: the merge-train integration commit moves the HEAD of a PR the runner never sees as Ready.
+        world = signal_world(NEW)
+        view = ready_view(world, headRefOid=HEAD)
+        (seen, phase, detail), _, _ = self.observe(view, world.s["events"])
+        self.assertEqual((view, "unverified"), (seen, phase))
+        self.assertRegex(detail, rf"^stale: the signal was written for HEAD {NEW[:12]}, the PR HEAD is {HEAD[:12]}$")
+
+    def test_a_timeline_that_cannot_be_read_is_unverified(self):
+        world = signal_world(HEAD)
+        view = ready_view(world)
+        (seen, phase, detail), _, _ = self.observe(view, [{"event": 5}])
+        self.assertEqual((view, "unverified"), (seen, phase))
+        self.assertEqual("the signal cannot be read: timeline entry 0 is not an event object", detail)
+
+    def test_a_failed_github_read_is_not_a_verdict(self):
+        # The retry belongs to Batch.read: observe lets a GitHubError through.
+        world = signal_world(HEAD)
+        for failing in ("timeline_events", "viewer_login"):
+            with self.subTest(failing=failing):
+                with patch.object(pr_loop, "pr_view", return_value=ready_view(world)), \
+                     patch.object(pr_loop, "viewer_login", return_value=LOGIN), \
+                     patch.object(pr_loop, "timeline_events", return_value=world.s["events"]), \
+                     patch.object(pr_loop, failing, side_effect=pr_loop.GitHubError("boom")):
+                    with self.assertRaisesRegex(pr_loop.GitHubError, "boom"):
+                        pr_loop.observe(self.repo, 7)
+
+
+class BatchAccountTests(unittest.TestCase):
+    """The account `gh` runs as is read once per Batch, and only when a Ready PR needs it."""
+    repo = pr_loop.Repo.parse("kjelly/pilot")
+
+    def test_the_account_is_read_once_per_batch(self):
+        world = signal_world(HEAD)
+        view = ready_view(world)
+        args = SimpleNamespace(poll_interval=0.01)
+        with patch.object(pr_loop, "pr_view", return_value=view), \
+             patch.object(pr_loop, "viewer_login", return_value=LOGIN) as account, \
+             patch.object(pr_loop, "timeline_events", return_value=world.s["events"]) as timeline:
+            batch = pr_loop.Batch(self.repo, args)
+            self.assertEqual(["ready"] * 3, [batch.read(7)[1] for _ in range(3)])
+            self.assertEqual((1, 3), (account.call_count, timeline.call_count), "the timeline is read every time")
+            pr_loop.Batch(self.repo, args).read(7)
+            self.assertEqual(2, account.call_count, "another Batch asks again")
+
+    def test_an_account_that_could_not_be_read_is_asked_again(self):
+        world = signal_world(HEAD)
+        args = SimpleNamespace(poll_interval=0.01)
+        with patch.object(pr_loop, "pr_view", return_value=ready_view(world)), \
+             patch.object(pr_loop, "viewer_login", side_effect=[pr_loop.GitHubError("boom"), LOGIN]) as account, \
+             patch.object(pr_loop, "timeline_events", return_value=world.s["events"]), \
+             patch.object(pr_loop, "tell"), patch.object(pr_loop.time, "sleep"):
+            self.assertEqual("ready", pr_loop.Batch(self.repo, args).read(7)[1])
+        self.assertEqual(2, account.call_count)
 
 
 class CheckResultTests(unittest.TestCase):
@@ -357,19 +503,27 @@ class CheckResultTests(unittest.TestCase):
 # ---- (B) Batch.run_pr: the state machine, on a fake clock with fake agents and a fake checkout -------------------
 
 class World:
-    """What GitHub answers, read by read. An item is a phase, a (phase, head) pair or an exception to raise; once
-    the scripted items are used up the PR stays in `phase`. Every read is counted."""
+    """What `observe` answers, read by read: `(view, phase, detail)`. An item is a phase (`draft`, `ready`,
+    `unverified`, `queued`, `merged`), a (phase, head) pair, an exception to raise, or a callable that runs before
+    the next item is read (an agent publishing its result at that moment); once the scripted items are used up the PR
+    stays in `phase`. `unverified` is a Ready PR whose signal is not valid. Every read is counted."""
+
+    DETAIL = "synthetic detail"
 
     def __init__(self, items=(), phase="merged"):
         self.items, self.phase, self.reads = list(items), phase, 0
 
-    def observe(self, _repo, number):
+    def observe(self, _repo, number, _account=None):
         self.reads += 1
         item = self.items.pop(0) if self.items else self.phase
+        while callable(item):
+            item()
+            item = self.items.pop(0) if self.items else self.phase
         if isinstance(item, BaseException):
             raise item
         phase, head = item if isinstance(item, tuple) else (item, HEAD)
-        return pr_view_json(phase, number=number, head=head)
+        view = pr_view_json("ready" if phase == "unverified" else phase, number=number, head=head)
+        return view, phase, self.DETAIL if phase == "unverified" else ""
 
 
 class Fleet:
@@ -542,6 +696,11 @@ class DebounceTests(RunPRCase):
         self.run_batch(["draft", "ready", "merged"], dry_run=True)
         self.assertEqual(1, self.world.reads)
         self.assertEqual(["PR #7: draft"], self.told)
+        self.assertEqual(([], [], []), (self.fleet.agents, self.fleet.checkouts, self.clock.sleeps))
+
+    def test_a_dry_run_names_why_a_ready_pr_is_unverified(self):
+        self.run_batch(["unverified", "ready"], dry_run=True)
+        self.assertEqual(["PR #7: unverified (synthetic detail)"], self.told)
         self.assertEqual(([], [], []), (self.fleet.agents, self.fleet.checkouts, self.clock.sleeps))
 
 
@@ -890,20 +1049,152 @@ class HandoffResultTests(RunPRCase):
                          "the failed read came before the next role was started, not at its confirming read")
 
 
-class ImportsTests(unittest.TestCase):
-    """The runner only reads GitHub: it must not import anything that changes it."""
-    SOURCE = (ROOT / "scripts" / "pr_loop.py").read_text()
+class UnverifiedTests(RunPRCase):
+    """A Ready PR without a valid signal at its HEAD (`unverified`) is never acted on: the runner dispatches nothing
+    for it and writes nothing to GitHub. While the Draft agent is still working it counts as the Draft phase, because
+    the gate marks the PR Ready before it verifies and signs it."""
 
-    def test_it_imports_only_the_read_functions_of_gh_runtime(self):
-        tree = ast.parse(self.SOURCE)
+    def refusal(self, head=HEAD):
+        return (f"PR #7 is Ready without a valid {rs.LABEL} signal at HEAD {head[:12]}: synthetic detail; "
+                "nothing is dispatched for it: convert it to Draft and run pr-ready on it, then start the runner again")
+
+    def publish(self, role, outcome, **fields):
+        """What the skill of `role` publishes for the task it was last given."""
+        record = [t for t in self.fleet.tasks if t.phase == role][-1]
+        write_result(record.path, record.task, outcome=outcome, head=HEAD, reason="synthetic reason", **fields)
+
+    # -- a PR that starts unverified ---------------------------------------------------------------------------
+    def test_a_pr_that_starts_unverified_is_refused_before_anything_is_started(self):
+        message = self.stops(re.escape(self.refusal()), ["unverified"] * 2)
+        self.assertEqual("PR #7: " + self.refusal(), message)
+        self.assertEqual(2, self.world.reads, "the phase is believed after two reads, like any other")
+        self.assertEqual(([], [], [], []), (self.fleet.agents, self.fleet.checkouts, self.fleet.submits, self.fleet.tasks))
+
+    def test_one_unverified_read_between_ready_reads_is_not_acted_on(self):
+        # The debounce, with the new phase: the same sequence that is refused above when it is stable.
+        self.run_batch(["unverified", "ready", "ready", "ready"] + ["merged"] * 2)
+        self.assertEqual(["ready"], self.roles())
+
+    def test_the_debounce_of_the_unverified_phase_is_the_module_constant(self):
+        with patch.object(pr_loop, "STABLE_POLLS", 3):
+            self.run_batch(["unverified", "unverified", "ready", "ready", "ready", "ready"] + ["merged"] * 3)
+        self.assertEqual(["ready"], self.roles())
+
+    def test_a_pr_that_turns_unverified_before_the_dispatch_is_not_dispatched(self):
+        self.stops("GitHub state changed before dispatch; retry against the current PR", ["ready", "ready", "unverified"])
+        self.assertEqual(([], []), (self.fleet.submits, self.fleet.tasks))
+
+    # -- a PR that leaves the Ready or the queued phase unverified -------------------------------------------------
+    def test_a_pr_that_leaves_the_merge_train_unverified_stops_like_one_that_returns_to_ready(self):
+        message = self.stops("left the merge train while still Ready; inspect the PR conversation",
+                             ["ready"] * 3 + ["queued"] * 2 + ["unverified"] * 2)
+        self.assertEqual("PR #7: left the merge train while still Ready; inspect the PR conversation", message)
+        self.assertEqual(["ready"], self.roles(), "no second dispatch")
+
+    def test_a_ready_agent_that_leaves_the_pr_unverified_hands_over_and_then_the_run_stops(self):
+        message = self.stops(re.escape(self.refusal()), ["ready"] * 3 + ["unverified"] * 4)
+        self.assertEqual("PR #7: " + self.refusal(), message)
+        self.assertEqual(["ready"], self.roles())
+        self.assertEqual([("ready", 60, False), ("ready", 100, True)], self.fleet.waits,
+                         "the agent is given the time to publish its own result first")
+        self.assertEqual(6, self.world.reads, "two reads to dispatch and confirm, two of the phase, one fresh")
+        self.assertEqual([], self.fleet.closed, "the pane is retained for inspection")
+
+    def test_the_result_the_ready_agent_publishes_is_what_the_run_stops_on(self):
+        self.fleet.on_handoff["ready"] = lambda: self.publish("ready", "WAITING", wait_kind="transient")
+        message = self.stops(re.escape(f"PR #7 WAITING (transient) at {HEAD[:12]}: synthetic reason"),
+                             ["ready"] * 3 + ["unverified"] * 4)
+        self.assertEqual(f"PR #7: PR #7 WAITING (transient) at {HEAD[:12]}: synthetic reason", message)
+
+    # -- while the Draft agent is working: the PR is still in the Draft phase ------------------------------------------
+    def test_a_blocker_that_arrives_while_the_pr_shows_unverified_stops_with_the_gates_reason(self):
+        # pr_gate marks the PR Ready, then fails its post-action check and publishes DRAFT-BLOCKED: GitHub shows a
+        # Ready PR without a signal when the result is not on disk yet. A runner that took that for the Ready phase
+        # handed the PR to the Ready agent (and reported it merged) before the blocker arrived.
+        # The result arrives after more reads than the debounce needs, so that a runner that took the PR for the Ready
+        # phase has already handed over, read nothing and stopped on its own reason when the blocker is written.
+        items = ["draft"] * 3 + ["unverified"] * 4 + [lambda: self.publish("draft", "DRAFT-BLOCKED")] + ["unverified"] * 3
+        message = self.stops(re.escape(f"PR #7 DRAFT-BLOCKED at {HEAD[:12]}: synthetic reason"), items)
+        self.assertEqual(f"PR #7: PR #7 DRAFT-BLOCKED at {HEAD[:12]}: synthetic reason", message)
+        self.assertEqual(["draft"], self.roles(), "the Ready phase was never dispatched")
+        self.assertEqual(["draft"], [agent.role for agent in self.fleet.agents])
+        self.assertEqual([("draft", 60, False)], self.fleet.waits, "the PR never left the Draft phase: no hand-over")
+        self.assertEqual([], self.fleet.closed, "the pane is retained for inspection")
+        self.assertNotIn("PR #7: merged", self.told)
+
+    def test_a_pr_that_is_signed_while_the_draft_agent_works_goes_on_to_the_ready_phase(self):
+        # The control of the test above: the signal arrives instead of a blocker.
+        self.run_batch(["draft"] * 3 + ["unverified"] * 3 + ["ready"] * 4 + ["merged"] * 2)
+        self.assertEqual(["draft", "ready"], self.roles())
+        self.assertIn("PR #7: merged", self.told)
+
+    def why(self):
+        """What a stop of the Draft phase adds when the PR is Ready without a valid signal: the reason."""
+        return f" (Ready without a valid {rs.LABEL} signal: synthetic detail)"
+
+    def test_without_a_result_a_draft_agent_that_is_gone_is_the_stop(self):
+        self.fleet.statuses["draft"] = [(True, False, "agent")]
+        message = self.stops("draft agent exited before GitHub confirmed a state change",
+                             ["draft"] * 3 + ["unverified"] * 4)
+        self.assertEqual("PR #7: draft agent exited before GitHub confirmed a state change" + self.why(), message)
+        self.assertEqual(["draft"], self.roles())
+
+    def test_without_a_result_a_draft_agent_that_is_still_there_runs_into_the_phase_timeout(self):
+        message = self.stops("timed out in draft", ["draft"] * 3, phase="unverified")
+        self.assertEqual("PR #7: timed out in draft" + self.why(), message,
+                         "the reason matters: the signal may have been written by another account")
+        self.assertEqual(["draft"], self.roles(), "the Ready phase was never dispatched")
+
+
+class ImportsTests(unittest.TestCase):
+    """The runner only reads GitHub: it must not import anything that changes it, and it reads the Ready signal
+    without ever writing one."""
+    SOURCE = (ROOT / "scripts" / "pr_loop.py").read_text()
+    GH_READS = {"GitHubError", "Repo", "issue_comments", "pr_view", "timeline_events", "viewer_login"}
+    SIGNAL_READS = {"LABEL", "assess", "SignalError"}  # not prepare, write, marker_comment or marker_line
+
+    @classmethod
+    def problems(cls, source):
+        """What in `source` could change GitHub: a name other than the read ones taken from gh_runtime, gh_runtime
+        itself (imported or used as a module), or a ready_signal name other than the read ones."""
+        tree = ast.parse(source)
         imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
                     and node.module == "gh_runtime" for alias in node.names}
-        self.assertEqual({"GitHubError", "Repo", "issue_comments", "pr_view", "viewer_login"}, imported)
+        found = [f"imports {name} from gh_runtime" for name in sorted(imported - cls.GH_READS)]
+        found += [f"no longer imports {name} from gh_runtime" for name in sorted(cls.GH_READS - imported)]
         plain = [alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names]
-        self.assertNotIn("gh_runtime", plain)
-        mentioned = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
-                     and isinstance(node.value, ast.Name) and node.value.id == "gh_runtime"}
-        self.assertEqual(set(), mentioned)
+        found += ["imports the gh_runtime module"] * ("gh_runtime" in plain)
+        found += [f"uses gh_runtime.{node.attr}" for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                  and isinstance(node.value, ast.Name) and node.value.id == "gh_runtime"]
+        found += [f"imports {alias.name} from ready_signal: use the module's attributes, which are checked here"
+                  for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module == "ready_signal"
+                  for alias in node.names]
+        found += [f"uses ready_signal.{name}" for name in sorted({
+            node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name) and node.value.id == "ready_signal"} - cls.SIGNAL_READS)]
+        return found
+
+    def test_it_imports_only_the_read_functions_of_gh_runtime_and_of_ready_signal(self):
+        self.assertEqual([], self.problems(self.SOURCE))
+        plain = [alias.name for node in ast.walk(ast.parse(self.SOURCE)) if isinstance(node, ast.Import)
+                 for alias in node.names]
+        self.assertIn("ready_signal", plain, "the signal is read through the shared module")
+
+    def test_the_guard_rejects_every_way_to_write(self):
+        good = "from gh_runtime import " + ", ".join(sorted(self.GH_READS)) + "\nimport ready_signal\nready_signal.assess\n"
+        self.assertEqual([], self.problems(good), "control: the read names pass")
+        for case, source, expected in (
+                ("a write helper", good.replace("GitHubError", "GitHubError, edit_label"), "imports edit_label from gh_runtime"),
+                ("the module itself", good + "import gh_runtime\n", "imports the gh_runtime module"),
+                ("an attribute of it", good + "gh_runtime.post_comment\n", "uses gh_runtime.post_comment"),
+                ("a read dropped", good.replace(", timeline_events", ""), "no longer imports timeline_events"),
+                ("the signal writer", good + "ready_signal.write\n", "uses ready_signal.write"),
+                ("the preparer", good + "ready_signal.prepare\n", "uses ready_signal.prepare"),
+                ("the marker renderer", good + "ready_signal.marker_comment\n", "uses ready_signal.marker_comment"),
+                ("a name from the signal module", good + "from ready_signal import write\n",
+                 "imports write from ready_signal")):
+            with self.subTest(case=case):
+                self.assertIn(expected, "; ".join(self.problems(source)))
 
     def test_the_task_directory_is_named_once_in_the_shared_module(self):
         tree = ast.parse(self.SOURCE)
@@ -1217,20 +1508,36 @@ class CheckoutIgnoreTests(CheckoutCase):
 
     def test_a_checkout_that_does_not_ignore_the_task_directory_is_refused(self):
         # A tracked .gitignore beats .git/info/exclude, so the exclude written by the runner can be neutralised.
-        self.env.make_remote({".agents/skills/_shared/scripts/pr_loop_result.py": "x = 1\n", ".gitignore": "!/.pr-loop/\n"})
+        self.env.make_remote({**self.helpers(), ".gitignore": "!/.pr-loop/\n"})
         with self.assertRaisesRegex(pr_loop.Stop, r"managed checkout does not ignore \.pr-loop/ and \.pr-ready/"):
             self.checkout()
 
     def test_a_checkout_that_does_not_ignore_the_evidence_directory_is_refused(self):
         # Each directory is probed by itself: ignoring only one of them is not enough.
-        self.env.make_remote({".agents/skills/_shared/scripts/pr_loop_result.py": "x = 1\n", ".gitignore": "!/.pr-ready/\n"})
+        self.env.make_remote({**self.helpers(), ".gitignore": "!/.pr-ready/\n"})
         with self.assertRaisesRegex(pr_loop.Stop, r"managed checkout does not ignore \.pr-loop/ and \.pr-ready/"):
             self.checkout()
+
+    @staticmethod
+    def helpers(*, leave_out=()):
+        """The two helper files of a default branch the runner accepts (stubs: only their presence is checked)."""
+        return {path: "x = 1\n" for path in HELPER_PATHS if path not in leave_out}
 
     def test_a_default_branch_without_the_result_helper_is_refused(self):
         self.env.make_remote({"other.txt": "x\n"})
         with self.assertRaisesRegex(pr_loop.Stop, r"git cat-file failed"):
             self.checkout()
+
+    def test_a_default_branch_needs_each_of_the_two_helpers(self):
+        # An old default branch has no ready_signal.py: the skills that run from this checkout could not sign a PR
+        # and the run would wait for its phase timeout. Each helper is required by itself.
+        for missing in HELPER_PATHS:
+            with self.subTest(missing=missing):
+                self.env.make_remote(self.helpers(leave_out=(missing,)))
+                with self.assertRaisesRegex(pr_loop.Stop, r"git cat-file failed \(\d+\): .*" + re.escape(missing)):
+                    self.checkout()
+        self.env.make_remote(self.helpers())
+        self.checkout()  # control: both present
 
 
 class CheckoutTaskTests(CheckoutCase):
@@ -1382,10 +1689,31 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual(1, len(lines), proc.stdout)
         return Path(lines[0][len("Managed checkout: "):])
 
+    def gh_kinds(self):
+        """What each `gh` call of the runner was, in order. A call that is none of the four reads is reported as its own
+        argv, so that any write (`pr ready`, `pr edit`, `pr comment`, `api -X ...`) fails the tests that compare these."""
+        kinds = []
+        for call in self.env.gh_calls():
+            if call[:2] == ["pr", "view"]:
+                kinds.append("pr view")
+            elif call[:2] == ["repo", "clone"]:
+                kinds.append("repo clone")
+            elif call == ["api", "user"]:
+                kinds.append("api user")
+            elif call[:1] == ["api"] and "--slurp" in call and call[-1].split("?")[0].endswith("/timeline"):
+                kinds.append("api timeline")
+            else:
+                kinds.append(" ".join(call))
+        return kinds
+
     def test_a_pr_goes_from_draft_to_merged(self):
-        ready, queued, merged = pr_view_json("ready"), pr_view_json("queued"), pr_view_json("merged")
-        self.env.write_gh(calls=[], seq=[], view=pr_view_json("draft"), login="reviewer", comments=[], clone_exit=0)
-        self.env.set_pane("%1", enter=[{"gh": {"set_view": ready}, "result": {"outcome": "READY", "reason": "gate passed"}}])
+        # The success variant: the gate's Ready is followed by its signal (the marker comment, then the label), which
+        # the fake gh serves as the PR's timeline; only then is the Ready phase dispatched.
+        signed = signal_world()
+        ready, queued, merged = ready_view(signed), pr_view_json("queued"), pr_view_json("merged")
+        self.env.write_gh(calls=[], seq=[], view=pr_view_json("draft"), login=LOGIN, comments=[], clone_exit=0, timeline=[])
+        self.env.set_pane("%1", enter=[{"gh": {"set_view": ready, "set_timeline": signed.s["events"]},
+                                        "result": {"outcome": "READY", "reason": "gate passed"}}])
         self.env.set_pane("%2", enter=[{"gh": {"set_seq": [{"view": v} for v in (queued, queued, queued, merged)]},
                                         "result": {"outcome": "ENQUEUED", "reason": "queued for the train"}}])
         proc = self.run_program()
@@ -1408,8 +1736,10 @@ class ProgramTests(unittest.TestCase):
         # Both panes are closed and a clean checkout is deleted.
         self.assertEqual([["kill-pane", "-t", "%1"], ["kill-pane", "-t", "%2"]], self.env.tmux_calls("kill-pane"))
         self.assertFalse(checkout.exists())
-        # The runner only reads GitHub.
-        self.assertEqual({("pr", "view"), ("repo", "clone")}, {tuple(call[:2]) for call in self.env.gh_calls()})
+        # The runner only reads GitHub, asked for its account once, and read the signal's timeline.
+        kinds = self.gh_kinds()
+        self.assertEqual({"pr view", "repo clone", "api user", "api timeline"}, set(kinds))
+        self.assertEqual(1, kinds.count("api user"), "the account is read once per run")
 
     def test_a_blocker_stops_the_run_and_keeps_everything_for_inspection(self):
         self.env.set_pane("%1", enter=[{"result": {"outcome": "DRAFT-BLOCKED", "reason": "go test failed in the synthetic gate"}}])
@@ -1443,6 +1773,53 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual([], self.env.tmux_calls("kill-pane"), "the pane is retained")
         self.assertTrue(self.managed_checkout(proc).exists())
         self.assertEqual(0, self.env.tmux()["cli"][0]["rc"])
+        self.assertNotIn("api timeline", self.gh_kinds(), "a Ready PR without the label has no signal to read")
+
+    def test_a_blocker_for_a_signal_the_timeline_does_not_show_yet_stops_before_the_ready_agent_starts(self):
+        # The gate wrote the marker comment and the label, could not read the signal back (GitHub lags) and published
+        # DRAFT-BLOCKED: the PR view shows the label, the timeline has no `labeled` event yet. The signal is not
+        # valid then, so the PR stays in the Draft phase and the blocker is what the run stops on. A Ready agent that
+        # would merge the PR is scripted, so that a runner that dispatched it is seen to report success.
+        lagging = signal_world(signed=False)
+        lagging.comment(rs.marker_comment(HEAD, rs.PR_READY))
+        shown = ready_view(signal_world())  # the view already lists the label
+        self.env.set_pane("%1", enter=[{"gh": {"set_view": shown, "set_timeline": lagging.s["events"]},
+                                        "result": {"outcome": "DRAFT-BLOCKED", "reason": "the signal was not confirmed"}}])
+        self.env.set_pane("%2", enter=[{"gh": {"set_view": pr_view_json("merged")}}])
+        proc = self.run_program("--phase-timeout", "5")
+        self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
+        self.assertRegex(proc.stderr, rf"^pr-loop: PR #7: PR #7 DRAFT-BLOCKED at {HEAD[:12]}: the signal was not confirmed\n$")
+        self.assertEqual(1, len(self.env.tmux_calls("new-session")), "the Ready phase was never dispatched")
+        self.assertNotIn("PR #7: merged", proc.stdout)
+        self.assertIn("api timeline", self.gh_kinds(), "the label is on the PR: the timeline was read")
+        self.assertEqual({"pr view", "repo clone", "api user", "api timeline"}, set(self.gh_kinds()))
+
+    def test_a_ready_pr_without_a_signal_is_refused_and_nothing_is_started(self):
+        self.env.update_gh(view=pr_view_json("ready"))
+        proc = self.run_program("--phase-timeout", "5")  # a runner that dispatched would wait here, not for 60 s
+        self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
+        self.assertEqual(f"pr-loop: PR #7: PR #7 is Ready without a valid {rs.LABEL} signal at HEAD {HEAD[:12]}: "
+                         f"the PR does not carry the {rs.LABEL} label; nothing is dispatched for it: convert it to "
+                         "Draft and run pr-ready on it, then start the runner again\n", proc.stderr)
+        self.assertEqual([], self.env.tmux()["log"], "tmux was never called")
+        self.assertEqual(["pr view", "pr view"], self.gh_kinds(), "two reads, no clone, no account, no timeline")
+
+    def test_a_ready_pr_whose_signal_names_an_earlier_head_is_refused_with_the_reason(self):
+        signed = signal_world(NEW)
+        self.env.update_gh(view=dict(ready_view(signed), headRefOid=HEAD), timeline=signed.s["events"])
+        proc = self.run_program("--phase-timeout", "5")
+        self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
+        self.assertIn(f"at HEAD {HEAD[:12]}: stale: the signal was written for HEAD {NEW[:12]}, the PR HEAD is "
+                      f"{HEAD[:12]}; nothing is dispatched for it", proc.stderr)
+        self.assertEqual([], self.env.tmux()["log"])
+        self.assertEqual({"pr view", "api user", "api timeline"}, set(self.gh_kinds()))
+
+    def test_a_dry_run_names_why_a_ready_pr_is_unverified(self):
+        self.env.update_gh(view=pr_view_json("ready"))
+        proc = self.run_program("--dry-run")
+        self.assertEqual((0, f"PR #7: unverified (the PR does not carry the {rs.LABEL} label)\n", ""),
+                         (proc.returncode, proc.stdout, proc.stderr))
+        self.assertEqual([], self.env.tmux()["log"])
 
     def test_a_dry_run_reports_the_phase_and_touches_neither_tmux_nor_the_clone(self):
         proc = self.run_program("--dry-run")
