@@ -69,10 +69,10 @@ class MarkReadyTest(unittest.TestCase):
              patch.object(mark_ready, "unresolved_threads", return_value=list(threads)), \
              patch.object(mark_ready.pr_ci, "inspect", return_value={"status": ci}), \
              patch.object(mark_ready, "execute", side_effect=pr_ready), \
-             self.signal_patch(world), patch("time.sleep") as sleep:
+             self.signal_patch(world), rw.read_back_sleeps() as sleeps:
             result = mark_ready.mark_ready(repo="O/R", issue=1, pr=9, worktree=Path("/tmp"), evidence=Path("/tmp/e.json"),
                                            confirm_complete=confirm)
-        self.sleeps = [c.args[0] for c in sleep.call_args_list]
+        self.sleeps = sleeps
         return result, calls, ev
 
     def signed_ready_world(self, **kw):

@@ -942,16 +942,16 @@ class WaitCLITests(unittest.TestCase):
         self.assertEqual([], [e for e in world.s["events"] if e["event"] in ("commented", "labeled")])
 
     def run_in_process(self, t, plans, *, adjust=None, extra=()):
-        """The wait CLI run by this process, so that the sleeps of the signal's read-back can be counted and are not slept."""
+        """The wait CLI run by this process, so that the waits of the signal's read-back can be counted and are not slept."""
         repo, evidence, env, cli = self.prepare(t, plans, adjust=adjust)
         out = io.StringIO()
         with mock.patch.dict(os.environ, env), mock.patch.object(sys, "argv", cli[1:] + list(extra)), \
-                contextlib.redirect_stdout(out), mock.patch("time.sleep") as sleep:
+                contextlib.redirect_stdout(out), signal_world.read_back_sleeps() as sleeps:
             code = cli_mock.gate.main()
         events = [json.loads(line) for line in out.getvalue().splitlines()]
         status = json.loads((repo / ".pr-ready/7/wait-status.json").read_text())
         self.assertEqual(events[-1], status)
-        return code, events, [c.args[0] for c in sleep.call_args_list]
+        return code, events, sleeps
 
     def test_missing_label_blocks_at_the_first_poll_without_waiting_for_ci(self):
         with tempfile.TemporaryDirectory() as tmp:

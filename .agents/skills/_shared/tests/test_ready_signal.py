@@ -14,8 +14,10 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -729,6 +731,48 @@ class ModelImportCostTests(unittest.TestCase):
         self.assertEqual(rs.PR_READY, assess(world).producer)
         with self.assertRaises(AttributeError):
             rw.nothing_of_the_kind
+
+
+class ReadBackSleepsTests(unittest.TestCase):
+    """`rw.read_back_sleeps` records the waits of the read-back and nothing else. `subprocess` waits for a child that
+    is still running with `time.sleep` calls of its own (1 ms, 2 ms, ... up to its timeout), and a fake `gh` that is
+    still exiting when its pipe closes costs the parent one: a recording by a global patch of `time.sleep` took them
+    in, and the tests of the exact waits failed whenever the machine was busy."""
+
+    @staticmethod
+    def wait_for_a_running_child():
+        child = subprocess.Popen([sys.executable, "-S", "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+        try:
+            child.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            raise AssertionError("the child ended on its own")
+        finally:
+            child.communicate()
+
+    def test_the_polling_of_subprocess_is_not_a_wait_of_the_read_back(self):
+        with rw.read_back_sleeps() as sleeps:
+            self.wait_for_a_running_child()
+            rs.time.sleep(rs.READ_INTERVAL)
+        self.assertEqual([rs.READ_INTERVAL], sleeps)
+        self.assertIs(time, rs.time, "the module has its own `time` back")
+
+    def test_the_control_a_global_patch_of_time_sleep_records_the_polling(self):
+        with mock.patch("time.sleep") as sleep:
+            self.wait_for_a_running_child()
+            rs.time.sleep(rs.READ_INTERVAL)
+        recorded = [call.args[0] for call in sleep.call_args_list]
+        self.assertEqual(rs.READ_INTERVAL, recorded[-1])
+        self.assertGreater(len(recorded), 2, "subprocess polled for the running child")
+        self.assertLess(max(recorded[:-1]), 1, "short polls, none of them a wait of the read-back")
+
+    def test_a_module_that_is_not_loaded_is_not_imported_for_the_recording(self):
+        with mock.patch.dict(sys.modules):
+            del sys.modules["ready_signal"]
+            with rw.read_back_sleeps() as sleeps:
+                self.assertNotIn("ready_signal", sys.modules)
+            self.assertEqual([], sleeps)
 
 
 if __name__ == "__main__":

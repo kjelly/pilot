@@ -19,11 +19,13 @@ expressible without sleeping.
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import sys
+import types
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 # A fake `gh` executable imports this file on the calls that need the model, each one a new Python process with no
 # bytecode cache (`PYTHONDONTWRITEBYTECODE=1`): every import at the top is paid again by each of those calls. With
@@ -56,6 +58,26 @@ def __getattr__(name: str) -> Any:
     if name == "LABEL":
         return production().LABEL
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+@contextlib.contextmanager
+def read_back_sleeps() -> Iterator[list[float]]:
+    """Yields the list in which the waits of `ready_signal`'s read-back are recorded (and none of them is slept).
+
+    The recording is local to that module, the one in `sys.modules` that the code under test uses: its name `time`
+    stands for an object that has only `sleep`. A patch of the global `time.sleep` records every sleep of the process,
+    and `subprocess.run(timeout=...)` sleeps 1 ms, 2 ms ... while a child it has read to the end of is still exiting:
+    under load that was thousands of sleeps among the five of the read-back, and a test of the exact waits failed
+    whenever the machine was busy. A test that removed the module from `sys.modules` (to make its loading fail) has no
+    read-back to record: it gets an empty list, and the module is not imported again here."""
+    from unittest import mock  # see the comment under the imports
+    sleeps: list[float] = []
+    module = sys.modules.get("ready_signal")
+    if module is None:
+        yield sleeps
+        return
+    with mock.patch.object(module, "time", types.SimpleNamespace(sleep=sleeps.append)):
+        yield sleeps
 
 
 def account(login: str) -> dict[str, Any]:

@@ -853,16 +853,17 @@ class ReadySignalTests(unittest.TestCase):
                 self.assertEqual([], signal_world.World.load(t).label_names())
 
     def run_main(self, t, repo, evidence, env, *extra):
-        """`pr_gate.main()` in this process (so that its sleeps can be counted): (exit code, JSON events, sleeps)."""
+        """`pr_gate.main()` in this process (so that the waits of the signal's read-back can be counted): (exit code,
+        JSON events, those waits)."""
         evidence_file = repo / ".pr-ready/evidence.json"
         evidence_file.write_text(json.dumps(evidence), encoding="utf-8")
         argv = ["pr_gate.py", "--repo", "acme/repo", "--pr", "7", "--worktree", str(repo), "--evidence",
                 str(evidence_file), *extra]
         out = io.StringIO()
         with mock.patch.dict(os.environ, env), mock.patch.object(sys, "argv", argv), \
-                contextlib.redirect_stdout(out), mock.patch("time.sleep") as sleep:
+                contextlib.redirect_stdout(out), signal_world.read_back_sleeps() as sleeps:
             code = gate.main()
-        return code, [json.loads(line) for line in out.getvalue().splitlines()], [c.args[0] for c in sleep.call_args_list]
+        return code, [json.loads(line) for line in out.getvalue().splitlines()], sleeps
 
     def test_the_read_back_is_bounded_and_a_signal_that_never_shows_is_a_blocker(self):
         interval = signal_world.ready_signal.READ_INTERVAL
