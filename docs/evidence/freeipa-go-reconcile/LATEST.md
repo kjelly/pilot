@@ -1,5 +1,15 @@
 # FreeIPA Go reconcile 最新驗收
 
+## Phase 3a：HBAC 的 Go 階段（PR #396 積木，PR #418 接線與 live，P3-5 與 P3-6）
+
+目前狀態：**PASS**。驗收日期 2026-11-20。candidate `7c6561ae392d9f4138c4b20d81bc8b425a37c78f`，tree `80281cfaaa36bd95d38ce0a20cf91dd26caedbb0`（它之後只有 evidence 與文件）。
+
+- **範圍**：`pilot reconcile --component freeipa-identity --engine golang --scope full --force`：Go(users/groups) → playbook 第 1 次 apply（延後授權快取的結算）→ Go(HBAC)（services、rules、成員、分類、enabled、刪除、`allow_all` lockdown）→ playbook 第 2 次 apply（`--tags client-cache`，結算）。
+- **Target**：拋棄式 `vm-target` VM：一台 FreeIPA 4.13.4 server（AlmaLinux 9.8）與一台 enrolled client（Ubuntu 24.04）；只在這裡實跑，沒有任何正式環境。
+- **結果**（細節在 [PR #418 驗收紀錄](pr-418.md)）：13 個 arm（基線 A1 加 H0 到 H11）全部 PASS，3159 秒；driver 讀 server 自己的話（`ipa hbacrule-find`、httpd log、`ipa hbactest`、真的 ssh 登入）。涵蓋：Ansible 先收斂時 Go 沒有寫入、從零收斂（hostgroup 與引用它的 rule 同一輪）、Ansible 對 Go 狀態 `changed=0`、client 的登入跟著 rule 變、移除與分類切換、drift 修復、lockdown 成功與回滾、blocked plan 的結束碼 3、playbook 第 1 次與第 2 次失敗、逐成員失敗、playbook 的 gate。
+- **實跑抓到並修掉的**：`hbactest` 的答案沒有內層 `result`，client 的成功契約原本拒絕它，lockdown 的 proof 因此一律失敗（allow_all 沒被動）；計畫為空時 HBAC 階段誤印「讀回不一致」。
+- **未達**：正式規模的 rule 數與讀取成本（K9）、多台 client 的結算成本、apply 時才被阻擋的 HBAC 階段（只有假 server 測試）。
+
 ## Phase 2：使用者與群組的寫入 MVP（PR #284，P2-2 到 P2-8）
 
 目前狀態：**PASS，附已記錄的未達項**（完整 identity 的 180 秒目標，見下）。驗收日期 2026-11-07。最後一個 code candidate：`7ed9f4a2dc6f9eb0d7fde55cb8e5d2a2fdbfeebd`，tree `f441d624415e4935ce339602cbceeac971da41e6`（P2-8 的測試 candidate；它之後只有一個只動測試的 CI 修正與文件）。Go engine 與 identity playbook 的**執行閉包的正式檔案**與 P2-7 的 candidate `0e364254273b917865cbe2002ac5300e1e5fdb83`（tree `b015f2326f2fcf8381577a3251f424b7b1a7e62f`）逐位元組相同（`git diff` 為空），所以 P2-6、P2-7 的 live arm 沒有重跑；P2-8 在合併 main 之後的 tree 上又跑了 users-groups 的新增、修改、刪除、重跑、預覽與混合 run。
