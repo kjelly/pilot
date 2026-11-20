@@ -80,7 +80,7 @@ Spec：`docs/superpowers/specs/2026-11-06-freeipa-go-reconcile-phase2-spec.md` �
 
 - 只在一個 FreeIPA 4.13.4 server、沒有 replica、一台 Ubuntu client 的拋棄式 lab 實跑；沒有任何正式環境。
 - 只驗證 ansible-core 2.19.2（pilot-cli image 釘 `2.19.*`）；其他版本的 controller 沒有驗證。
-- vars 檔裡字面上寫成單一 key 的 mapping `{__ansible_unsafe: x}`，在 `ansible-inventory --list` 裡與 `!unsafe x` 無法分辨，Go 會送 `x`，Ansible 送的是 JSON 物件（刻意模仿 Ansible 內部標記；與 #358 第 5 點同類）。沒有實跑。
+- **candidate `9c0e2772` 之後的 Go 差異沒有 live 驗證**：上面的 live run 跑在 candidate `9c0e2772`；最後的 head 另外有一個 merge-gate review 的修正（`{__ansible_unsafe: x}` 與 `!unsafe x` 在 `ansible-inventory --list` 裡一模一樣，Ansible 對前者送 dict 的 JSON、對後者送文字，Go 原本一律送文字）：vars 端的這個 marker（含引用鏈的結尾）現在以新原因碼 `unsafe-marker` 擋下，不再送。非測試檔的差異：`internal/inventory/roster_run_facts.go`（`runValue.unsafeMarker`、`UserInitialPassword` 的拒絕）、`internal/inventory/roster_user_passwords.go`（原因碼、訊息、`passwordReasonLast`）、`internal/identityreconcile/plan.go`（只有註解）；另有 runbook、Phase 2 spec 與 AGENTS.md 的文字。這個差異只由 native-tool 測試證明，沒有新的 live run：真實 ansible-core 2.19.2 的 oracle `TestRosterUserPasswordValuesMatchAnsible`（字面 mapping 在 vars 檔與 group_vars、`{__ansible_unsafe: ""}`、結尾是 `!unsafe` 或字面 mapping 的鏈、`!unsafe` 文字，明文與加密 vault 兩種模式，每列都記錄 Ansible 實際送了什麼）與真實 CLI 入口 `TestRosterPasswordReferenceThroughTheUnsafeMarkerBlocksTheRun`（真實 `ansible-inventory`、假的 FreeIPA：exit 3、零寫入、零 playbook 呼叫、`password_value_unsupported`、輸出沒有值）。`ServerDeclared` 與 `AdminPasswordProvided` 讀 marker 的行為沒有改（既有的限制，另案追蹤）。
 - 範本以外的 roster 欄位與 run 的其他輸入（#397、#398）不在這個變更。
 - kinit oracle 依賴 kinit 從非 terminal 的 stdin 讀密碼變更的回答；這一輪每個 arm 都以「錯誤的值失敗、正確的值成功」確認了它在這台 server 上成立。
 
