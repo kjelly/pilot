@@ -41,12 +41,25 @@ type applyFake struct {
 	onWrite func(methods []string)
 	// failItem makes the answer to "<method>:<name>" a captured error item.
 	failItem map[string]string
+	// passwords are the password of each user a passwd was answered for: the value as the
+	// request carried it. A user with one is listed with a password change time afterwards.
+	// Guarded by pwMu, not mu: addedEntry reads it from both sides of mu.
+	pwMu      sync.Mutex
+	passwords map[string]string
 }
 
 func newApplyFake(f *fakeIPA) *applyFake {
-	a := &applyFake{f: f, failItem: map[string]string{}}
+	a := &applyFake{f: f, failItem: map[string]string{}, passwords: map[string]string{}}
 	f.respond = a.respond
 	return a
+}
+
+// passwordSent is the password the server received for name, and whether it received one.
+func (a *applyFake) passwordSent(name string) (string, bool) {
+	a.pwMu.Lock()
+	defer a.pwMu.Unlock()
+	pw, ok := a.passwords[name]
+	return pw, ok
 }
 
 func (a *applyFake) addedEntry(name string) map[string]any {
@@ -79,6 +92,12 @@ func (a *applyFake) addedEntry(name string) map[string]any {
 	delete(e, "sshpubkeyfp")
 	delete(e, "mepmanagedentry")
 	e["loginshell"] = []any{"/bin/bash"}
+	if _, set := a.passwordSent(name); set {
+		// What the server lists after an admin set the password (captured shape: a datetime
+		// in a one-item list; the expiration is the change time for an admin reset, K6).
+		stamp := []any{map[string]any{"__datetime__": "20261119000000Z"}}
+		e["krblastpwdchange"], e["krbpasswordexpiration"] = stamp, stamp
+	}
 	return e
 }
 
@@ -107,8 +126,26 @@ func (a *applyFake) respond(method string, params []any) (string, bool) {
 		res["result"], res["count"], res["summary"] = list, len(list), fmt.Sprintf("%d users matched", len(list))
 		out, _ := json.Marshal(env)
 		return string(out), true
+	case "passwd":
+		args, _ := params[0].([]any)
+		name, _ := args[0].(string)
+		pw, _ := opts["password"].(string)
+		a.pwMu.Lock()
+		a.passwords[name] = pw
+		a.pwMu.Unlock()
+		a.mu.Lock()
+		a.writes = append(a.writes, "passwd")
+		a.mu.Unlock()
+		out, _ := json.Marshal(map[string]any{
+			"result": map[string]any{"result": true, "value": name + "@IPA.PILOT.INTERNAL", "summary": "Changed password for \"" + name + "@IPA.PILOT.INTERNAL\""},
+			"error":  nil, "id": 0, "principal": "admin@IPA.PILOT.INTERNAL", "version": "4.13.4",
+		})
+		return string(out), true
 	case "batch":
 		cmds, _ := params[0].([]any)
+		if body, ok := a.showAdded(cmds); ok {
+			return body, true
+		}
 		var methods []string
 		items := make([]any, 0, len(cmds))
 		wrote := false
@@ -162,6 +199,42 @@ func (a *applyFake) respond(method string, params []any) (string, bool) {
 		return string(out), true
 	}
 	return "", false
+}
+
+// showAdded answers a batch of user_show commands for the users this scenario added (the re-read
+// the executor makes before it sends a password), and leaves every other batch to respond.
+func (a *applyFake) showAdded(cmds []any) (string, bool) {
+	if len(cmds) == 0 {
+		return "", false
+	}
+	a.mu.Lock()
+	added := slices.Clone(a.added)
+	a.mu.Unlock()
+	items := make([]any, 0, len(cmds))
+	for _, c := range cmds {
+		cm := c.(map[string]any)
+		if m, _ := cm["method"].(string); m != "user_show" {
+			return "", false
+		}
+		cp, _ := cm["params"].([]any)
+		var args []any
+		if len(cp) > 0 {
+			args, _ = cp[0].([]any)
+		}
+		name := ""
+		if len(args) > 0 {
+			name, _ = args[0].(string)
+		}
+		if !slices.Contains(added, name) {
+			return "", false
+		}
+		items = append(items, map[string]any{"result": a.addedEntry(name), "value": name, "summary": nil, "error": nil})
+	}
+	out, _ := json.Marshal(map[string]any{
+		"result": map[string]any{"count": len(items), "results": items}, "error": nil, "id": 0,
+		"principal": "admin@IPA.PILOT.INTERNAL", "version": "4.13.4",
+	})
+	return string(out), true
 }
 
 func (a *applyFake) writeMethods() []string {

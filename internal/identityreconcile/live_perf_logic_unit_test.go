@@ -54,7 +54,7 @@ func TestPerfRostersAreAcceptedByTheEngine(t *testing.T) {
 			if v := inventory.ValidateRoster(root); len(v) != 0 {
 				t.Fatalf("the validator refuses the roster: %s: %s", v[0].Rule, v[0].Detail)
 			}
-			d, err := FromRosterWithForms(root, roster.yaml())
+			d, err := FromRosterWithForms(root, roster.yaml(), nil)
 			if err != nil {
 				t.Fatalf("the adapter refuses the roster: %v", err)
 			}
