@@ -85,7 +85,7 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
 
 ## Ready signal
 
-`pr-review-merge` 與 `scripts/pr_loop.py` 只處理帶有 Ready signal（`.agents/skills/_shared/scripts/ready_signal.py`）的 Ready PR：label `pr-ready-verified`，加上一則以 marker 行結尾、寫明已驗證 HEAD 與已驗證的那一次 Ready transition 的留言，兩者都由 `gh` 登入的帳號在該 PR 最後一次 Draft → Ready 之後寫入。只有 `isDraft=false` 不夠：手動按 Ready、或繞過本 gate 直接 `gh pr ready` 的 PR 沒有 signal，會被忽略（`list_ready.py` 列在 `excluded`，actor 不寫入任何東西，runner 停在 `unverified`）。
+`pr-review-merge` 與 `scripts/pr_loop.py` 只處理帶有 Ready signal（`.agents/skills/_shared/scripts/ready_signal.py`）的 Ready PR：label `pr-ready-verified`，加上一則以 `## Ready for Review: verified` 開頭、以 marker 行結尾（只有這種結構的留言算，marker 只讀最後一行）、寫明已驗證 HEAD 與已驗證的那一次 Ready transition 的留言，兩者都由 `gh` 登入的帳號在該 PR 最後一次 Draft → Ready 之後寫入。只有 `isDraft=false` 不夠：手動按 Ready、或繞過本 gate 直接 `gh pr ready` 的 PR 沒有 signal，會被忽略（`list_ready.py` 列在 `excluded`，actor 不寫入任何東西，runner 停在 `unverified`）。
 
 - **產生：**`pr_gate.py --ready`（以及 issue-to-pr 的 `mark_ready.py`）。流程與失敗行為見 SKILL.md「The Ready signal」：輪詢 CI 之前先確認 label 存在，`gh pr ready` 之前先移除殘留的舊 label 並記下 Draft 上已有的 Ready／Draft 事件（baseline），post-action verification 成功後才找出被驗證的那一次 Ready transition，依序寫留言、加 label（commit point）並讀回。
 - **前置條件：**repo 必須先有 `pr-ready-verified` label，由 maintainer 建立一次；任何程式碼都不會建立、修改或刪除 label。
@@ -94,7 +94,7 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
 - **補救：**signal 缺少或過期一律是：由人把 PR 轉回 Draft，再跑 pr-ready。`pr_gate.py` 拒絕不是 Draft 的 PR，Ready 的 PR 無法原地補簽。
 - **一開始就是 Ready 的 PR：**`issue-to-pr` 的 `create_pr.py --ready`（只在使用者明確要求時）建立的 PR 沒有 Draft → Ready 事件，永遠不會有有效的 signal，自動化會忽略它；要處理就先轉成 Draft。
 - **`--wait` 的 pin：**固定 PR 的 title、body、HEAD、head/base branch 名稱與 review/留言內容，不包含 label；label 的檢查由 gate 自己做（上述三個步驟）。
-- **人工補簽（例如 signal 機制上線前就已經是 Ready 的 PR，或上述中斷之後的補救）：**用與自動化相同的帳號，依下列順序做：(1) 讀完整 timeline（`gh_runtime.timeline_events`），呼叫 `a = ready_signal.assess(head, labels, events, viewer)`，`head` 是你確認過的 PR HEAD；`a.state` 是 `inconsistent` 就停下來（PR 在最後一次 Ready 之後被轉回 Draft，或 label 與 timeline 對不上），否則 `rid = a.ready_event`（PR 最後一次 `ready_for_review` 事件的 id；`None` 表示 PR 從來沒有經過 Draft → Ready，無法補簽）。(2) 先在 PR 留一則以 marker 結尾的留言：內容用 `ready_signal.marker_comment(head, "maintainer", rid)` 產生，最後一行是 `<!-- pr-ready:verified head=<完整 40 字元 SHA，小寫> ready=<rid> by=maintainer -->`。(3) PR 上若已有舊 label，先移除並確認已移除，最後才加 label：順序不能反，label 必須在留言之後加，才是 Ready 之後的新事件。(4) 再 assess 一次，必須是 `valid` 且 `marker_ready == rid`。(2) 到 (3) 之間若有人把 PR 轉 Draft 再轉 Ready，這則留言只是無效的簽章（`stale-epoch`），從 (1) 重做。
+- **人工補簽（例如 signal 機制上線前就已經是 Ready 的 PR，或上述中斷之後的補救）：**用與自動化相同的帳號，依下列順序做：(1) 讀完整 timeline（`gh_runtime.timeline_events`），呼叫 `a = ready_signal.assess(head, labels, events, viewer)`，`head` 是你確認過的 PR HEAD；`a.state` 是 `inconsistent` 就停下來（PR 在最後一次 Ready 之後被轉回 Draft，或 label 與 timeline 對不上），否則 `rid = a.ready_event`（PR 最後一次 `ready_for_review` 事件的 id；`None` 表示 PR 從來沒有經過 Draft → Ready，無法補簽）。(2) 先在 PR 留一則以 marker 結尾的留言：內容用 `ready_signal.marker_comment(head, "maintainer", rid)` 產生，第一行是 `## Ready for Review: verified`（改寫內容時第一行與最後一行都不能動；只有這種結構的留言算），最後一行是 `<!-- pr-ready:verified head=<完整 40 字元 SHA，小寫> ready=<rid> by=maintainer -->`。(3) PR 上若已有舊 label，先移除並確認已移除，最後才加 label：順序不能反，label 必須在留言之後加，才是 Ready 之後的新事件。(4) 再 assess 一次，必須是 `valid` 且 `marker_ready == rid`。(2) 到 (3) 之間若有人把 PR 轉 Draft 再轉 Ready，這則留言只是無效的簽章（`stale-epoch`），從 (1) 重做。
 
 ## 本機測試
 

@@ -337,7 +337,8 @@ class AssessTests(unittest.TestCase):
     def test_the_last_marker_of_one_comment_wins_over_its_earlier_ones(self):
         world = rw.World()
         world.ready()
-        world.comment(rs.marker_line(OLD, rs.PR_READY, world.latest_ready()) + "\n"
+        # (Since R2 a signal comment starts with the producer's heading; without it neither marker would count.)
+        world.comment(rs.SIGNAL_HEADING + "\n\n" + rs.marker_line(OLD, rs.PR_READY, world.latest_ready()) + "\n"
                       + rs.marker_line(H, rs.ISSUE_TO_PR, world.latest_ready()))
         world.label()
         self.check(assess(world, head=H), "valid", marker=H, producer=rs.ISSUE_TO_PR)
@@ -413,14 +414,103 @@ class AssessTests(unittest.TestCase):
         # The format before the transition was part of the signal certifies nothing: no marker, so absent.
         world = rw.World()
         world.ready()
-        world.comment(f"<!-- pr-ready:verified head={H} by=pr-ready -->")
+        old_format = f"{rs.SIGNAL_HEADING}\n\n<!-- pr-ready:verified head={H} by=pr-ready -->"
+        world.comment(old_format)
         world.label()
         self.check(assess(world), "absent", f"no signal comment by {VIEWER} after the PR's last Ready transition")
         # The newest marker wins, and an old-format one never hides a valid one before it.
         world.comment(rs.marker_comment(H, rs.PR_READY, world.latest_ready()))
         self.check(assess(world), "valid", marker=H, producer=rs.PR_READY)
-        world.comment(f"<!-- pr-ready:verified head={H} by=pr-ready -->")
+        world.comment(old_format)
         self.check(assess(world), "valid", marker=H, producer=rs.PR_READY)
+
+    # -- which comments are signal comments (R2) -------------------------------------------------------------------
+    # The viewer's comments are not all the producer's: `needs_person.comment_text` lists up to 40 gate reasons and
+    # paths in a comment the viewer posts after the Ready transition, and anyone can quote a marker in a comment of
+    # their own account. Only the structure `marker_comment` renders counts: the heading as the first non-empty line and
+    # the marker, as a whole, as the last one.
+    def quoted(self, world, body):
+        """`body` as a viewer comment after a push made the signed PR stale (HEAD H -> OLD), and what `assess` says."""
+        world.s["head"] = OLD
+        world.comment(body)
+        return assess(world)
+
+    def test_a_comment_that_only_quotes_a_marker_for_the_new_head_leaves_a_pushed_pr_stale(self):
+        # The reproduction: a legitimately signed PR gets a push (stale at OLD); a viewer comment that quotes the
+        # marker for (OLD, the same Ready transition) must not turn it valid.
+        world = signed()
+        world.s["head"] = OLD
+        self.check(assess(world), "stale", marker=H, producer=rs.PR_READY)
+        quoted = rs.marker_line(OLD, rs.PR_READY, world.latest_ready())
+        world.comment(f"gate reasons:\n- both sides changed paths: {quoted}\n- more")
+        self.check(assess(world), "stale", marker=H, producer=rs.PR_READY)
+
+    def test_only_the_structure_of_a_producers_comment_counts(self):
+        world = signed()
+        ready = world.latest_ready()
+        marker = rs.marker_line(OLD, rs.PR_READY, ready)
+        text = rs.marker_comment(OLD, rs.PR_READY, ready)
+        cases = {
+            "the marker is the last line, the first line is something else (a needs-person comment)":
+                f"## A person is needed\n\n- reason: x\n{marker}",
+            "the heading and a marker that is not the last non-empty line": f"{rs.SIGNAL_HEADING}\n\n{marker}\nthanks",
+            "a marker inside a fenced block": f"{rs.SIGNAL_HEADING}\n\n```\n{marker}\n```",
+            "text after the marker on its line": f"{rs.SIGNAL_HEADING}\n\n{marker} (see above)",
+            "text before the marker on its line": f"{rs.SIGNAL_HEADING}\n\nsigned: {marker}",
+            "the marker quoted in a reply": f"{rs.SIGNAL_HEADING}\n\n> {marker}",
+            "the heading quoted in a reply": f"> {rs.SIGNAL_HEADING}\n\n{marker}",
+            "a heading of another level": f"# Ready for Review: verified\n\n{marker}",
+            "the heading with more text on its line": f"{rs.SIGNAL_HEADING} (again)\n\n{marker}",
+            "a bare marker": marker,
+            "the heading and no marker": rs.SIGNAL_HEADING,
+            "the whole producer comment quoted with a prefix": "\n".join("> " + line for line in text.splitlines()),
+        }
+        for name, body in cases.items():
+            with self.subTest(name):
+                self.check(self.quoted(copy.deepcopy(world), body), "stale", marker=H, producer=rs.PR_READY)
+
+    def test_two_markers_in_one_comment_only_the_last_line_counts(self):
+        world = signed()
+        ready = world.latest_ready()
+        good, other = rs.marker_line(H, rs.PR_READY, ready), rs.marker_line(OLD, rs.MAINTAINER, ready)
+        # The signed PR is at H: the last line decides, the line above it is ignored (not "the first marker found").
+        both = copy.deepcopy(world)
+        both.comment(f"{rs.SIGNAL_HEADING}\n\n{other}\n{good}")
+        self.check(assess(both), "valid", marker=H, producer=rs.PR_READY)
+        flipped = copy.deepcopy(world)
+        flipped.comment(f"{rs.SIGNAL_HEADING}\n\n{good}\n{other}")
+        self.check(assess(flipped), "stale", marker=OLD, producer=rs.MAINTAINER)
+        # A marker in the middle of the text never counts, whatever is last.
+        middle = copy.deepcopy(world)
+        middle.s["head"] = OLD
+        middle.comment(f"{rs.SIGNAL_HEADING}\n\n{rs.marker_line(OLD, rs.PR_READY, ready)}\nand not a marker")
+        self.check(assess(middle), "stale", marker=H, producer=rs.PR_READY)
+
+    def test_a_producers_comment_and_a_hand_signed_one_count_in_every_line_ending(self):
+        # The controls of the cases above: the real renderer's comment, the maintainer's, with CRLF endings, trailing
+        # blank lines and trailing whitespace (the shapes GitHub stores for a comment typed in a browser).
+        for producer in rs.PRODUCERS:
+            for name, change in (("as rendered", lambda t: t),
+                                 ("crlf", lambda t: t.replace("\n", "\r\n")),
+                                 ("trailing blank lines", lambda t: t + "\n\n  \n"),
+                                 ("surrounding whitespace", lambda t: "\n  " + t.rstrip("\n") + "   \n\n")):
+                with self.subTest(producer=producer, shape=name):
+                    world = rw.World(head=OLD)
+                    world.ready()
+                    ready = world.latest_ready()
+                    world.comment(change(rs.marker_comment(OLD, producer, ready)))
+                    world.label()
+                    self.check(assess(world), "valid", marker=OLD, producer=producer)
+
+    def test_the_signal_structure_is_parsed_by_one_function_that_assess_uses(self):
+        # `signal_marker` is the one parser: what it reads is what `assess` reads.
+        ready = R
+        for producer in rs.PRODUCERS:
+            body = rs.marker_comment(H, producer, ready)
+            self.assertEqual((H, str(ready), producer), rs.signal_marker(body))
+        self.assertIsNone(rs.signal_marker(rs.marker_line(H, rs.PR_READY, ready)))
+        self.assertIsNone(rs.signal_marker(""))
+        self.assertEqual(rs.SIGNAL_HEADING, rs.marker_comment(H, rs.PR_READY, ready).splitlines()[0])
 
     def test_the_id_of_another_event_never_matches_the_ready_transition(self):
         # The marker names an event id; the id of the Draft conversion, of a label event or of a comment (another id
@@ -1054,6 +1144,25 @@ class EpochInterleavingTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual((True, first), (result.valid, result.marker_ready))
         self.assertEqual("valid", assess(world).state)
+
+    def test_a_person_making_the_pr_ready_before_the_gates_ready_call_is_signed_as_that_transition(self):
+        # ACCEPTED BEHAVIOUR, pinned (R3). `prepare` runs on the Draft; a person then makes the PR Ready; the gate's
+        # `gh pr ready` that follows is a no-op (the PR is already Ready), so the timeline gets ONE new Ready transition
+        # and it is the person's. `write` signs it: the gate's preflight (CI, review, mergeability at this HEAD) ran
+        # before and its post-action verification runs after that call, and both cover exactly the HEAD the signal names,
+        # so the signal says what it always says (this HEAD passed the gate and the PR is Ready at it). Refusing would
+        # leave a Ready PR without a signal for a harmless reorder; a second transition (a cycle) is still refused.
+        world, client, repo, baseline = self.begin()
+        persons = world.ready()["id"]  # the person's click, between `prepare` and the gate's `gh pr ready`
+        # the gate's `gh pr ready` on an already Ready PR changes nothing: no event is added
+        ready_events = [e["id"] for e in world.s["events"] if e["event"] == "ready_for_review"]
+        self.assertEqual([persons], ready_events)
+        result, error, sleeps = self.write(world, client, repo, baseline)
+        self.assertIsNone(error)
+        self.assertEqual((True, persons), (result.valid, result.marker_ready))
+        self.assertEqual(["comment", "add-label"], [c for c in world.calls() if c in ("comment", "add-label")])
+        self.assertEqual("valid", assess(world).state)
+        self.assertEqual([], sleeps)
 
     def test_a_draft_after_the_new_ready_transition_at_the_identify_read_is_refused_and_nothing_is_written(self):
         world, client, repo, baseline = self.begin()

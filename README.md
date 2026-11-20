@@ -106,8 +106,8 @@ Agents run with the environment of the tmux server when one is already
 running, not with the environment of the shell that started the runner.
 
 The runner dispatches the Ready phase only for a PR that carries a valid Ready
-signal at its current HEAD: the label `pr-ready-verified` and a comment with a
-marker line for that HEAD and for the PR's latest Ready transition, which `pr-ready` (or issue-to-pr's `mark_ready.py`)
+signal at its current HEAD: the label `pr-ready-verified` and a comment that starts with
+the producer's heading and ends with a marker line for that HEAD and for the PR's latest Ready transition, which `pr-ready` (or issue-to-pr's `mark_ready.py`)
 writes after it verified the Draft and made it Ready. The signal counts only when
 the account `gh` runs as wrote it, so the runner and the skills must run as the
 same GitHub account, and the label must exist in the repository (a one-time

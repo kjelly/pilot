@@ -5,10 +5,10 @@ A PR that is Ready for Review says "quality is already mergeable". Nothing used 
 gate that verifies it: a person clicking "Ready for review", or a script that ran `gh pr ready` without the
 gate, produced the same state, and every consumer (pr-review-merge, scripts/pr_loop.py) acted on it. The
 producers (pr-ready's pr_gate.py, issue-to-pr's mark_ready.py) now sign a Ready PR AFTER their post-action
-verification succeeded, with two artefacts: a comment ending in a marker line that names the verified HEAD, the
-ONE Ready transition it certifies (the id of its `ready_for_review` timeline event) and the producer, and the
-label `pr-ready-verified` (the commit point: it is added last). The consumers act on a Ready PR only when
-`assess` says `valid`.
+verification succeeded, with two artefacts: a comment that starts with the producer's heading and ends with a
+marker line (only such a comment counts) that names the verified HEAD, the ONE Ready transition it certifies (the
+id of its `ready_for_review` timeline event) and the producer, and the label `pr-ready-verified` (the commit
+point: it is added last). The consumers act on a Ready PR only when `assess` says `valid`.
 
 A signal certifies exactly one Ready transition, not a HEAD in general. GitHub has no conditional write, so the
 producer cannot make "verify, then sign" atomic: anybody with write access (the maintainer uses the account the
@@ -27,8 +27,9 @@ and trusts nothing a stranger can write:
      timeline: GitHub read lag): `inconsistent`.
   4. The label was added before R (it was left on the PR while it was a Draft): `stale-epoch`.
   5. The label was added by another account than the viewer: `untrusted`.
-  6. Only markers written by the viewer after R count; the newest wins. None (an old-format marker, one
-     without `ready=`, is none): `absent`.
+  6. Only signal comments written by the viewer after R count (`signal_marker`: the first non-empty line is
+     the heading, the last non-empty line is the marker, as a whole); the newest wins. None (an old-format
+     marker, one without `ready=`, is none): `absent`.
   7. The marker certifies another Ready transition than R: `stale-epoch`. This is checked BEFORE the HEAD,
      so a signal for an earlier Ready transition is never `stale` (the consumers carry a `stale` signal
      across a base import or an evidence-only change; a signal for a Ready transition nobody verified must
@@ -63,6 +64,8 @@ PRODUCERS = (PR_READY, ISSUE_TO_PR, MAINTAINER)
 MARKER = re.compile(r"<!-- pr-ready:verified head=([0-9a-f]{40}) ready=([1-9][0-9]{0,19}) by=("
                     + "|".join(re.escape(producer) for producer in PRODUCERS) + r") -->")
 SHA = re.compile(r"[0-9a-f]{40}")
+# The first line of a signal comment, rendered by `marker_comment` and required by `assess` (one place, AGENTS.md 5.7).
+SIGNAL_HEADING = "## Ready for Review: verified"
 
 STATES = ("valid", "absent", "stale", "stale-epoch", "untrusted", "inconsistent")
 
@@ -109,11 +112,27 @@ def marker_line(head: str, producer: str, ready: int) -> str:
     return f"<!-- pr-ready:verified head={_check_head(head)} ready={_check_ready(ready)} by={producer} -->"
 
 
+def signal_marker(body: str) -> tuple[str, str, str] | None:
+    """The marker of a signal comment, or None when `body` is not one.
+
+    A signal comment has the structure `marker_comment` renders: its first non-empty line is `SIGNAL_HEADING` and its
+    last non-empty line is, as a whole, a marker; the marker is read from that last line only. Text that a comment
+    merely quotes (the gate reasons and paths of a needs-person comment, a code block, a marker followed by more text
+    on its line, a second marker above the last line) is never a signal, whatever it contains. Lines are split on
+    LF only (as GitHub renders them), and surrounding whitespace, a CR included, does not matter.
+    """
+    lines = [line.strip() for line in body.split("\n") if line.strip()]
+    if len(lines) < 2 or lines[0] != SIGNAL_HEADING:
+        return None
+    last = MARKER.fullmatch(lines[-1])
+    return last.groups() if last else None
+
+
 def marker_comment(head: str, producer: str, ready: int) -> str:
     """The comment a producer posts after a verified Ready transition: a short text for people, then the marker."""
     line = marker_line(head, producer, ready)
     head = _check_head(head)
-    return ("## Ready for Review: verified\n\n"
+    return (f"{SIGNAL_HEADING}\n\n"
             f"Verified HEAD: `{head}`  \n"
             f"Verified Ready transition: `{ready}`  \n"
             f"Verified by: `{producer}`\n\n"
@@ -236,9 +255,9 @@ def assess(head: str, labels: Sequence[dict[str, Any]], events: Sequence[dict[st
     marker = None
     for index, body in viewer_comments:
         if index > ready_at:
-            found = MARKER.findall(body)
+            found = signal_marker(body)
             if found:
-                marker = found[-1]
+                marker = found
     if marker is None:
         return result("absent", f"no signal comment by {viewer} after the PR's last Ready transition")
     if int(marker[1]) != ready_id:
