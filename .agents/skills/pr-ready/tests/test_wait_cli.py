@@ -229,6 +229,27 @@ class WaitCLITests(unittest.TestCase):
             self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
             self.assertIn("mergeability not computed yet", " ".join(events[0]["pending_checks"]))
 
+    def test_tmux_ai_result_is_written_for_a_blocker_after_pending_ci(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            task = t / ".tmux-ai-pr/tmux-ai-pr-fixture/task.json"
+
+            def write_task(_repo, evidence, _env):
+                task.parent.mkdir(parents=True)
+                task.write_text(json.dumps(dict(version=1, repo="acme/repo", pr=7, phase="draft",
+                                                nonce="1" * 32, start_head=evidence["head_sha"])))
+
+            proc, events, _ = self.run_gate(
+                t, [plan(PENDING, LINT), plan(FAIL, LINT)], adjust=write_task,
+                extra=("--pr-loop-task", str(task)))
+            self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["WAITING-CI", "DRAFT-BLOCKED"], [e["status"] for e in events])
+            result = json.loads(task.with_name("result.json").read_text())
+            self.assertEqual("1" * 32, result["nonce"])
+            self.assertEqual(events[-1]["head_sha"], result["head_sha"])
+            self.assertEqual("DRAFT-BLOCKED", result["outcome"])
+            self.assertFalse((t / "ready").exists())
+
     def test_pending_to_pass_runs_ready_exactly_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             t = Path(tmp)

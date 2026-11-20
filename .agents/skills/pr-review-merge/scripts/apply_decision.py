@@ -310,13 +310,24 @@ def main() -> int:
     parser.add_argument("--method", choices=["squash", "merge", "rebase"], default="merge")
     parser.add_argument("--execute", action="store_true",
                         help="Actually post comments and convert to Draft, or queue for the merge train")
+    parser.add_argument("--pr-loop-task", type=Path, help="Optional tmux-ai task manifest for the terminal result")
     args = parser.parse_args()
+    task = None
     try:
         if args.pr <= 0:
             raise ValueError("PR number must be positive")
-        result = perform(resolve_repo(args.repo), args.pr, load_evidence(args.evidence), args.method, args.execute,
+        repo = resolve_repo(args.repo)
+        if args.pr_loop_task is not None:
+            if not args.execute:
+                parser.error("--pr-loop-task requires --execute")
+            sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "_shared" / "scripts"))
+            from pr_loop_result import load_task, publish_gate_result
+            task = load_task(args.pr_loop_task, f"{repo.owner}/{repo.name}", args.pr, "ready")
+        result = perform(repo, args.pr, load_evidence(args.evidence), args.method, args.execute,
                          worktree=args.worktree, secret_files=args.secret_file)
         print(json.dumps(result, indent=2, ensure_ascii=False))
+        if task is not None:
+            publish_gate_result(args.pr_loop_task, task, result)
         return 0 if result["outcome"] in ("ENQUEUED", "MERGED", "DRAFT-BLOCKED", "SKIP", "DRY_RUN_MERGE",
                                           "DRY_RUN_DRAFT") else 1
     except Exception as exc:
@@ -324,8 +335,10 @@ def main() -> int:
         # (the saved entry cannot be written, a response of an unexpected shape) is the same kind of result:
         # a structured ERROR on stdout and exit code 2, never a traceback with exit code 1, which is what a
         # PR the gate would not let through ends with. `MutationLockError` is no GitHubError on purpose.
-        print(json.dumps({"outcome": "ERROR", "error_kind": type(exc).__name__, "error": str(exc)},
-                         ensure_ascii=False))
+        result = {"outcome": "ERROR", "error_kind": type(exc).__name__, "error": str(exc)}
+        print(json.dumps(result, ensure_ascii=False))
+        if task is not None:
+            publish_gate_result(args.pr_loop_task, task, result)
         return 2
 
 

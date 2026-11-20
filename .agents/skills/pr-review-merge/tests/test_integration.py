@@ -477,6 +477,23 @@ class Integration(IntegrationBase):
         self.assertFalse(self.state().get('comments'))
         self.assertEqual(self.state()['view']['state'],'OPEN')
 
+    def test_tmux_ai_result_for_pending_ci_leaves_ready(self):
+        self.patch(checks=[{'name': 'lint', 'state': 'PENDING', 'bucket': 'pending'}])
+        task = self.path / ".tmux-ai-pr/tmux-ai-pr-fixture/task.json"
+        task.parent.mkdir(parents=True)
+        task.write_text(json.dumps(dict(version=1, repo="acme/demo", pr=42, phase="ready",
+                                        nonce="2" * 32, start_head=HEAD)))
+        proc = self.script("apply_decision.py", "--pr", "42", "--evidence", str(self.evidence_file),
+                           "--execute", "--pr-loop-task", str(task))
+        self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
+        result = json.loads(task.with_name("result.json").read_text())
+        self.assertEqual("WAITING", result["outcome"])
+        self.assertEqual("transient", result["wait_kind"])
+        self.assertEqual(HEAD, result["head_sha"])
+        self.assertFalse(result["person_handoff"])
+        self.assertFalse(self.state().get("comments"))
+        self.assertFalse(self.state()["view"]["isDraft"])
+
     def test_concurrent_writer_lock_refuses_mutation(self):
         from sys import path as syspath
         syspath.insert(0, str(ROOT / 'scripts'))
