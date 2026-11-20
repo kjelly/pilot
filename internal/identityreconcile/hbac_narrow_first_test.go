@@ -278,9 +278,9 @@ func TestBuildHBACOrdersDisableBeforeWideningAndEnableAfterIt(t *testing.T) {
 }
 
 func TestHBACStagesNarrowBeforeTheyWidenAndEnableLast(t *testing.T) {
-	if !(HBACStageOf(KindHBACRuleDisable) < HBACStageOf(KindHBACCategoryUpdate) &&
-		HBACStageOf(KindHBACRuleDisable) < HBACStageOf(KindHBACUserAdd) &&
-		HBACStageOf(KindHBACRuleDisable) > HBACStageOf(KindHBACRuleCreate)) {
+	if HBACStageOf(KindHBACRuleDisable) >= HBACStageOf(KindHBACCategoryUpdate) ||
+		HBACStageOf(KindHBACRuleDisable) >= HBACStageOf(KindHBACUserAdd) ||
+		HBACStageOf(KindHBACRuleDisable) <= HBACStageOf(KindHBACRuleCreate) {
 		t.Errorf("disable runs in %s, creates in %s, categories in %s, additions in %s",
 			HBACStageOf(KindHBACRuleDisable), HBACStageOf(KindHBACRuleCreate), HBACStageOf(KindHBACCategoryUpdate), HBACStageOf(KindHBACUserAdd))
 	}
