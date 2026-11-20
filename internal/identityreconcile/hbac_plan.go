@@ -5,6 +5,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // The HBAC plan (Phase 3a: docs/superpowers/specs/2026-11-19-freeipa-go-reconcile-phase3-hbac-spec.md
@@ -64,6 +66,7 @@ const (
 	BlockedLockdownNoBreakGlass = "lockdown_no_break_glass"
 	BlockedDuplicateRule        = "duplicate_rule"
 	BlockedUserCategoryAll      = "user_category_all"
+	BlockedNameCollisionGrant   = "name_collision_with_grant"
 )
 
 // HBACReports are findings of the HBAC plan that are neither operations nor blockers.
@@ -190,16 +193,27 @@ func (b *hbacBuilder) index() {
 	b.createdSv = map[string]string{}
 }
 
-// collisions blocks the rule names that appear twice once case is ignored, and the
-// built-in allow_all when it is marked absent.
+// inGrantNamespace says whether a rule name is in the name-space of the rules the grant
+// compiler owns (spec §3.3): the playbook creates, changes and deletes those, so the Go
+// engine must never do either for a roster rule of that name, whatever its state. The
+// prefix is internal/inventory's; FreeIPA rule names are not case-sensitive.
+func inGrantNamespace(name string) bool {
+	return strings.HasPrefix(lower(name), lower(inventory.CompiledLoginRulePrefix))
+}
+
+// collisions blocks the rule names that appear twice once case is ignored, the roster
+// rules (present or absent) in the grant compiler's name-space, and the built-in allow_all
+// when it is marked absent.
 func (b *hbacBuilder) collisions() {
 	d := b.in.Desired
 	seen := map[string][]string{}
 	for _, r := range d.Rules {
 		seen[lower(r.Name)] = append(seen[lower(r.Name)], r.Name)
+		b.grantCollision(r.Name)
 	}
 	for _, n := range d.AbsentRules {
 		seen[lower(n)] = append(seen[lower(n)], n)
+		b.grantCollision(n)
 		if lower(n) == hbacRuleNameAllowAll {
 			b.block(BlockedAllowAllDelete, n, "allow_all is a FreeIPA built-in rule: it cannot be deleted with state: absent, use hbac.disable_allow_all")
 			b.blocked[lower(n)] = true
@@ -222,6 +236,15 @@ func (b *hbacBuilder) collisions() {
 		b.block(reason, k, fmt.Sprintf("HBAC rule names are not case-sensitive in FreeIPA; the roster writes %s", strings.Join(names, ", ")))
 		b.blocked[k] = true
 	}
+}
+
+// grantCollision blocks a roster rule whose name is in the grant compiler's name-space.
+func (b *hbacBuilder) grantCollision(name string) {
+	if !inGrantNamespace(name) || b.blocked[lower(name)] {
+		return
+	}
+	b.block(BlockedNameCollisionGrant, name, fmt.Sprintf("rule names that start with %s belong to the rules compiled from grants, which the playbook manages: the Go engine does not reconcile or delete them", inventory.CompiledLoginRulePrefix))
+	b.blocked[lower(name)] = true
 }
 
 // services creates the HBAC service objects the roster declares and FreeIPA does not

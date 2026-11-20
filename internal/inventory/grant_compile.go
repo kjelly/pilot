@@ -99,12 +99,19 @@ func shortHash(name string) string {
 	return hex.EncodeToString(sum[:])[:8]
 }
 
+// CompiledLoginRulePrefix is the name-space every rule name returned by
+// CompiledLoginRuleName starts with: the HBAC rules the grant compiler owns.
+// Anything else that must stay out of that name-space (the Go HBAC engine's
+// roster rules, spec phase3-hbac §3.3) derives it from here. FreeIPA rule
+// names are not case-sensitive, so a comparison must ignore case.
+const CompiledLoginRulePrefix = "pilot-grant-login-"
+
 // CompiledLoginRuleName returns the deterministic managed HBAC rule name
 // for the temporary_grant named grantName (§9). The "login" wording is
 // intentionally independent of the schema's `kind: temporary_grant` value
 // — it is a human-readable HBAC-rule-naming convention, not a schema echo.
 func CompiledLoginRuleName(grantName string) string {
-	return fmt.Sprintf("pilot-grant-login-%s-%s", sanitizeGrantName(grantName), shortHash(grantName))
+	return fmt.Sprintf("%s%s-%s", CompiledLoginRulePrefix, sanitizeGrantName(grantName), shortHash(grantName))
 }
 
 // CompiledSudoRuleName returns the deterministic managed sudo rule name

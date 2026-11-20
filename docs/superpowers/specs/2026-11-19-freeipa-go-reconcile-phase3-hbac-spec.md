@@ -138,7 +138,7 @@ K9（正式規模的 rule 數與 `hbacrule_find` 成本）與 K10（run 2 的固
 | `reference_unresolved` | rule 引用的 host／hostgroup 在 live 與 roster 宣告兩邊都沒有；user／group 在 live 與 users／groups 的 desired 兩邊都沒有（D8） |
 | `reference_to_absent` | 引用的 user／group 是 `state: absent`（與 P1 同名原因；E49：Go **不**因此擋 preflight，維持 P2 的決定——是否改變是 Q1） |
 | `lockdown_no_break_glass` | `disable_allow_all: true` 而沒有 enabled、subjects 含 `admin`、`hostcat: all` 的 rule |
-| `name_collision_with_grant` | §3.3 |
+| `name_collision_with_grant` | §3.3：rule 名稱（roster 的 `present` 或 `absent` 項目，大小寫不分）以 `inventory.CompiledLoginRulePrefix`（`pilot-grant-login-`，`CompiledLoginRuleName` 使用的同一個常數）開頭。**已實作**（`hbac_plan.go` 的 `collisions`）：只有名稱**開頭**符合才擋，名稱中間含有前綴的不擋；被擋的 rule 不產生任何 operation（也不會刪除 `state: absent` 的項目），其他 rule 照常規劃；live 上、roster 沒有列出的前綴 rule 不會被動到（只出現在 `reports.unmanaged_rules`） |
 | `case_collision` | 兩個 rule 名稱只差大小寫（K7：FreeIPA 的 rule 名稱不分大小寫，第二個會是 `DuplicateEntry`） |
 
 `reference_to_absent` 的處理要與 P2 E49(1) 一致；**Q1 未決**：沿用「不擋」（playbook 會 `partial_failed`，E47(10)(a)）或改成擋。預設沿用，因為兩個 engine 同形。
@@ -288,6 +288,7 @@ Q2 的預設需要維護者確認（見 §10）。
 | 日期 | 變更 |
 |---|---|
 | 2026-11-19 | 初版草案。維護者決定：D1（playbook 之後的第二個 Go 階段）、D2（lockdown 一起搬）。 |
+| 2026-11-20 | Review 修正（PR #396）：`name_collision_with_grant` 實作（§4.2、§3.3），前綴取自 `inventory.CompiledLoginRulePrefix`（`CompiledLoginRuleName` 改用同一個常數；`internal/accessgrants/drift.go` 另有一份舊的字面值，未在本變更處理）。 |
 | 2026-11-19 | P3-3：lockdown（H8）完成。流程：`hbactest`（`value` 布林，不比對文字）→ 讀 `allow_all`（已停用算 noop）→ 送 `hbacrule_disable allow_all` → `hbactest` → 任一步在 disable 送出後失敗就 `hbacrule_enable allow_all` 回滾。與 §6 的差異：(1) 前置 proof 失敗、讀不到 `allow_all` 時**不送任何寫入**，op 是 `conflict-failed`（而不是 `failed`）；(2) 回滾只在「disable 可能已生效」時送（成功後 proof 失敗、結果未知、答案不是 true）；server 明確拒絕 disable（`RPCError`）時 allow_all 沒被碰，不送回滾；(3) disable 之後的 proof 與回滾走 `context.WithoutCancel` 加 `VerifyTimeout` 的 context（run 在 disable 之後被取消，仍要證明與回滾），回滾仍過 Gate 與鎖；(4) lockdown 失敗的 op 一律 `failed`，**不**是 `unknown`：回滾失敗時 allow_all 停用而 proof 不過，若記成 unknown，寫入後的重讀會把它解成 converged；(5) 訊息只在 `hbacrule_enable` 回 true 時才寫「allow_all was re-enabled」，否則寫「re-enabling allow_all FAILED (<原因>); check HBAC access now」；(6) `LockdownReport`（before/after/disabled/rollback）在 `HBACResult.Lockdown` 與 H8 的 journal result 事件；`DisableAllowAll` 而沒有 `TestHost` 的選項在讀取前就拒絕。 |
 | 2026-11-19 | P3-2：`ExecuteHBAC` 完成（H1–H7；H8 在 P3-3 之前一律拒絕）。與 §5.2 的差異：(1) HBAC 階段的 journal 事件 id 一律帶 `hbac:` 前綴（同一個 delivery run 的 users/groups 階段已用 `auth_cache`、`S*-b*`、`verify`，id 在一個 run 內不可重複）；(2) `DuplicateEntry`（`hbacsvc_add`、`hbacrule_add`）與 users/groups 的 `group_add` 同形，一律是 `conflict-failed`（不視為已收斂，run 在該 stage 停止），不是「重讀看到就算 converged」；(3) 破壞性 stage 的前置重讀：H3（移除）、H6 的 disable、H7（刪除）在送出前以 `hbacrule_find` 重讀，已離開的成員／已停用／已不存在算 noop，規則被刪除重建（`ipauniqueid` 不同）、roster 不再宣告、或有計畫沒列出的待移除成員算 `conflict-failed`；(4) `hbac.rule.disable` 與 `hbac.allow_all.disable` 在 Plan₁／Plan₂ 的比較中視為破壞性（收窄存取），與 users/groups 的 `user.disable` 同。 |
 | 2026-11-19 | P3-1：desired、live 讀取、plan 完成；`freeiparpc` 的 allowlist 加入 HBAC 方法（security boundary 的測試計數 11→23）。 |
