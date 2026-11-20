@@ -3,8 +3,9 @@
 
 The runner dispatches the Ready skill (pr-review-merge) only for a PR that carries a valid Ready signal at its
 current HEAD (`ready_signal.assess`): proof that pr-ready (or issue-to-pr's mark_ready.py) verified and signed it. A
-Ready PR without one is `unverified` and is never acted on; the runner has no carry across a base import (the
-merge-train integration commit is the train's business) and writes nothing to GitHub.
+Ready PR without one is `unverified` and is never acted on; the runner carries a signal across nothing (neither a
+base import nor an evidence-only commit; the merge-train integration commit is the train's business) and writes
+nothing to GitHub.
 """
 from __future__ import annotations
 

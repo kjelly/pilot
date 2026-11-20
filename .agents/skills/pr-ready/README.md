@@ -90,7 +90,7 @@ python3 "$SNAP/.agents/skills/pr-ready/scripts/pr_gate.py" \
 - **產生：**`pr_gate.py --ready`（以及 issue-to-pr 的 `mark_ready.py`）。流程與失敗行為見 SKILL.md「The Ready signal」：輪詢 CI 之前先確認 label 存在，`gh pr ready` 之前先移除殘留的舊 label，post-action verification 成功後才依序寫留言、加 label（commit point）並讀回。
 - **前置條件：**repo 必須先有 `pr-ready-verified` label，由 maintainer 建立一次；任何程式碼都不會建立、修改或刪除 label。
 - **同一個 GitHub 帳號：**產生 signal 的工具與讀它的工具（`pr-review-merge`、`pr_loop.py`）必須用同一個帳號登入 `gh`；label 或留言是別的帳號寫的一律不採信。
-- **綁定 HEAD：**marker 寫的是驗證當下的 HEAD。改到 PR 自己 commit 的 push 讓 signal 過期；只是把 base 併進來（merge train 的整合 commit，或人手動 merge base）時，`pr-review-merge` 的 actor 仍接受（與 review 跨 pure base import 的規則相同），`pr_loop.py` 不接受。轉回 Draft 會結束 signal（actor 與 merge train 轉 Draft 後會移除 label）。
+- **綁定 HEAD：**marker 寫的是驗證當下的 HEAD。push 之後 HEAD 與 marker 不同，signal 變成 stale；`pr-review-merge` 的 actor 在 `review_covers` 判定目前 HEAD 涵蓋 marker 的 HEAD 時仍接受：pure base import（merge train 的整合 commit，或人手動 merge base），或只動到 base manifest `evidence_only_paths` 的 delta（例如 `docs/evidence/` 的 sanitized record）；改到 PR 自己其他檔案的 push 不涵蓋，要轉回 Draft 再跑 pr-ready。`pr_loop.py` 與 `mark_ready.py` 一律不接受。轉回 Draft 會結束 signal（actor 與 merge train 轉 Draft 後會移除 label）。
 - **補救：**signal 缺少或過期一律是：由人把 PR 轉回 Draft，再跑 pr-ready。`pr_gate.py` 拒絕不是 Draft 的 PR，Ready 的 PR 無法原地補簽。
 - **一開始就是 Ready 的 PR：**`issue-to-pr` 的 `create_pr.py --ready`（只在使用者明確要求時）建立的 PR 沒有 Draft → Ready 事件，永遠不會有有效的 signal，自動化會忽略它；要處理就先轉成 Draft。
 - **`--wait` 的 pin：**固定 PR 的 title、body、HEAD、head/base branch 名稱與 review/留言內容，不包含 label；label 的檢查由 gate 自己做（上述三個步驟）。

@@ -118,12 +118,13 @@ signed, or was signed by another account. The runner reads
 the phase twice like any other, dispatches nothing for it, writes nothing to
 GitHub and stops with `PR #N is Ready without a valid pr-ready-verified signal at
 HEAD <h12>: <reason>; ...`; `--dry-run` prints `PR #N: unverified (<reason>)`.
-Unlike the `pr-review-merge` actor, the runner does not carry a signal across a
-base import. While the Draft agent is still working, a Ready PR that is not signed
-yet counts as the Draft phase, because the gate marks the PR Ready before it
-verifies and signs it: a blocker it reports afterwards stops the run instead of
-sending the Ready agent in. A signal that never becomes valid (for example one
-written by another account) ends that phase with `timed out in draft (Ready
+Unlike the `pr-review-merge` actor, the runner does not carry a signal across any
+change, a base import or an evidence-only commit included. While the Draft agent
+is still working, a Ready PR that is not signed yet counts as the Draft phase,
+because the gate marks the PR Ready before it verifies and signs it: a blocker
+it reports afterwards stops the run instead of sending the Ready agent in. A
+signal that never becomes valid (for example one written by another account)
+ends that phase with `timed out in draft (Ready
 without a valid pr-ready-verified signal: <reason>)`. To have an unverified PR processed, convert it to
 Draft and run pr-ready on it, then start the runner again (a person can also sign
 it by hand, see the "Ready signal" section of

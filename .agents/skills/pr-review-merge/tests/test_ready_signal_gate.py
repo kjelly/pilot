@@ -2,9 +2,10 @@
 
 A Ready PR says "quality is already mergeable", and only pr-ready's gate and issue-to-pr's mark_ready.py check
 that claim before they sign the PR (`_shared/scripts/ready_signal.py`). The actor acts on a Ready PR only when
-the signal is valid, writes NOTHING to one that has none, and lets a signal bound to an earlier HEAD carry across
-a pure import of the base (what the merge train's integration commit is) but not across a push that changes the
-PR's own commits.
+the signal is valid, writes NOTHING to one that has none, and lets a signal bound to an earlier HEAD carry when
+`review_covers` says the new HEAD covers it: a pure import of the base (what the merge train's integration commit
+is) or a delta that touches only the base manifest's `evidence_only_paths`; a push that changes any other file of
+the PR's own commits does not carry.
 
 The GitHub side is the real-Git fake of test_merge_train.py (a bare `origin`, the developer's pushes, the train's
 own integration commit), so the relation under which a signal carries is the real `review_covers` on real commits;
@@ -24,7 +25,7 @@ import review_gate  # noqa: E402
 from gh_runtime import GitHubError  # noqa: E402
 from scan_stub import CleanScan  # noqa: E402
 from signal_cases import LABEL, OTHER, RECOVERY, VIEWER, Worlds  # noqa: E402
-from test_merge_train import PENDING, REPO, DeliveryTests, git, rw  # noqa: E402
+from test_merge_train import MANIFEST, PENDING, REPO, DeliveryTests, git, rw  # noqa: E402
 from test_merge_train_infra import ActorHarness  # noqa: E402
 import ready_signal  # noqa: E402
 
@@ -164,6 +165,51 @@ class GateTests(DeliveryTests):
         self.push_to_pr()
         self.sign(self.gh.head(42))
         self.assertIsNone(self.ask()[1])
+
+    def test_a_push_that_touches_only_evidence_only_paths_is_carried_and_a_code_push_on_top_is_not(self):
+        # `review_covers` accepts a second kind of delta besides a pure import of the base: every file changed
+        # since is one of the base manifest's `evidence_only_paths` (here `docs/evidence/**`). It is the one coverage
+        # with no `method` in its record, so the gate says `carried: evidence-only`. Nothing else in this workflow
+        # resets a receipt, a review or target evidence over such a delta either (AGENTS.md 1.5).
+        self.gh.manifest = MANIFEST
+        self.sign()
+        evidence = self.push_to_pr('docs/evidence/feat/x.md', 'a sanitized record\n')
+        gate, refusal = self.ask()
+        self.assertIsNone(refusal)
+        self.assertEqual(('stale', self.reviewed, 'evidence-only'),
+                         tuple(gate['ready_signal'].get(k) for k in ('state', 'marker_head', 'carried')))
+        self.assertEqual('MERGE', gate['decision'])
+        self.assertNotIn('underlying', gate)
+        self.assertEqual([], self.gh.writes)
+        # Trigger: the same PR with a code push on top. The delta since the signed HEAD now holds a file outside
+        # `evidence_only_paths`, and the PR is refused for that file only.
+        code = self.push_to_pr('pkg/z.go', 'package z\n')
+        gate, refusal = self.refused()
+        self.assertIn(f'the signal was written for HEAD {self.reviewed[:12]}, the PR HEAD is {code[:12]}', refusal)
+        self.assertIn('the PR changed since in more than a base import', refusal)
+        self.assertIn('pkg/z.go', refusal)
+        self.assertNotIn('docs/evidence/feat/x.md', refusal)
+        for needle in (*RECOVERY, 'Nothing was changed'):
+            self.assertIn(needle, refusal)
+        self.assertEqual(('WAITING', 'transient', False), (gate['decision'], gate['wait_kind'], gate['person_handoff']))
+        self.assertEqual('stale', gate['ready_signal']['state'])
+        self.assertNotIn('carried', gate['ready_signal'])
+        self.assertEqual([], self.gh.writes)
+        # The same two files in ONE commit are refused too: the delta is judged file by file, not commit by commit.
+        self.setUp()
+        self.gh.manifest = MANIFEST
+        self.sign()
+        self.write('docs/evidence/feat/x.md', 'a sanitized record\n')
+        self.push_to_pr('pkg/z.go', 'package z\n')
+        self.assertIn('pkg/z.go', self.refused()[1])
+        # Control: the manifest is what decides. Without `evidence_only_paths` the same evidence file is a change
+        # to the PR's own commits like any other.
+        self.setUp()
+        self.sign()
+        self.push_to_pr('docs/evidence/feat/x.md', 'a sanitized record\n')
+        gate, refusal = self.refused()
+        self.assertIn('no evidence_only_paths declared on the base branch', refusal)
+        self.assertNotIn('carried', gate['ready_signal'])
 
     def test_a_merge_that_drops_the_bases_change_is_not_carried(self):
         # `review_covers` is reused as it is: it also refuses a merge of the base that keeps the PR's side.

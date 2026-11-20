@@ -611,10 +611,11 @@ def ready_signal_gate(client: Any, repo: Repo, number: int, gate: dict[str, Any]
     Reads the PR (unless the caller passes the `view` it already has), the account `gh` runs as and ONE
     timeline, and asks `ready_signal.assess`. `valid` passes. `stale` (the signal names an earlier HEAD)
     passes only when `review_covers` says that HEAD is covered by the current one: the relation under which
-    a review carries across the merge train's integration commit, which a person's merge of the base into the
-    PR branch satisfies too. A push that changes the PR's own commits does not, so such a PR has to go through
-    Draft and pr-ready again. Every other state, a read that fails and a HEAD that moved since the gate judged
-    it is a refusal: fail closed.
+    a review carries. It holds for a pure import of the base (the merge train's integration commit, a person's
+    merge of the base into the PR branch) and for a delta that touches only the base manifest's
+    `evidence_only_paths` (the record then says `carried: evidence-only`). A push that changes any other file
+    of the PR's own commits is not covered, so such a PR has to go through Draft and pr-ready again. Every other
+    state, a read that fails and a HEAD that moved since the gate judged it is a refusal: fail closed.
 
     On a refusal `gate` becomes WAITING, `transient` and not a hand-off (nothing here resolves by waiting
     for a person; the recovery is the producer's), with the refusal as its one reason, and its earlier

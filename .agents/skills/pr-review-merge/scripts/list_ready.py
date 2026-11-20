@@ -10,7 +10,8 @@ names). A PR whose HEAD moved since that comment is listed again with `stale_nee
 have resolved what it waited for, and the next pr-review-merge run removes the stale label.
 
 A PR whose signal names an earlier HEAD is listed with `stale_ready_signal: true`: the actor decides whether the
-new HEAD is still covered (a pure import of the base is; a push that changes the PR's own commits is not, and
+new HEAD is still covered (`review_covers`: a pure import of the base is, and so is a delta that touches only the
+base manifest's `evidence_only_paths`; a push that changes any other file of the PR's own commits is not, and
 leaves the PR with nothing to act on until it goes through Draft and pr-ready again).
 """
 import argparse

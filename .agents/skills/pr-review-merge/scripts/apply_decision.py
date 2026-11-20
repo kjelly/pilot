@@ -13,8 +13,9 @@ The actor acts only on a PR that reached Ready through a verified Draft -> Ready
 reads the PR's Ready signal (the label and marker comment pr-ready and mark_ready.py write after their post-Ready
 verification) after the gate and again on the view taken right before the action. A PR without a valid signal is
 WAITING (`wait_kind: transient`, no hand-off) and NOTHING is written to it: no Draft conversion, no comment, no
-`needs-person` label, no queue label. A signal bound to an earlier HEAD still counts when the new HEAD is a pure
-import of the base (`review_covers`: the merge train's integration commit, a person merging the base in). After a
+`needs-person` label, no queue label. A signal bound to an earlier HEAD still counts when `review_covers` says the
+new HEAD covers it: a pure import of the base (the merge train's integration commit, a person merging the base in)
+or a delta that touches only the base manifest's `evidence_only_paths`. After a
 confirmed Draft the Ready label goes: a PR that is Ready again must be signed again.
 
 A write is reported as done only when the PR itself shows it (`gh pr view`), read again a bounded number
