@@ -16,10 +16,12 @@ evidence and a reply). This script does not triage it; it only refuses to call s
 pr-review-merge returns a PR with an unresolved thread to Draft, so marking it Ready here would bounce.
 
 A Ready PR is only actionable for the automation after the Ready signal (a marker comment and a label,
-`_shared/scripts/ready_signal.py`) was written for the exact HEAD. This script is a second producer next to
-pr-ready's gate: it checks the label exists and removes a stale one from the Draft BEFORE `gh pr ready`
-(BLOCKED), writes the signal AFTER the post-action check and reads it back (READY_UNVERIFIED when it cannot), and
-reports a PR that is already Ready without a valid signal as READY_UNVERIFIED too. A PR created Ready is ignored
+`_shared/scripts/ready_signal.py`) was written for the exact HEAD and for the one Ready transition this script
+invoked. This script is a second producer next to pr-ready's gate: it checks the label exists, removes a stale
+one from the Draft and records the Draft's Ready/Draft transitions (the baseline) BEFORE `gh pr ready` (BLOCKED),
+writes the signal AFTER the post-action check and reads it back (READY_UNVERIFIED when it cannot, among them a PR
+that went through Draft and Ready again in between: nothing is signed), and reports a PR that is already Ready
+without a valid signal as READY_UNVERIFIED too. A PR created Ready is ignored
 by the automation by design: convert it to Draft and run this script.
 """
 from __future__ import annotations
@@ -176,7 +178,7 @@ def mark_ready(*, repo: str, issue: int, pr: int, worktree: Path, evidence: Path
     signal, client = signal_runtime()
     target = client.Repo.parse(repo)
     try:
-        viewer = signal.prepare(client, target, pr)
+        baseline = signal.prepare(client, target, pr)
     except (client.GitHubError, signal.SignalError) as exc:
         return {"status": "BLOCKED", "issue": issue, "pr": pr,
                 "blockers": [f"The {signal.LABEL} signal could not be prepared (Ready not invoked): {exc}"], **scan}
@@ -186,7 +188,7 @@ def mark_ready(*, repo: str, issue: int, pr: int, worktree: Path, evidence: Path
         return {"status": "READY_UNVERIFIED", "issue": issue, "pr": pr,
                 "blockers": ["PR is not a non-Draft PR at the validated HEAD after `gh pr ready`; inspect it"], **scan}
     try:
-        signed = signal.write(client, target, pr, sha, signal.ISSUE_TO_PR, viewer)
+        signed = signal.write(client, target, pr, sha, signal.ISSUE_TO_PR, baseline)
     except (client.GitHubError, signal.SignalError) as exc:
         return {"status": "READY_UNVERIFIED", "issue": issue, "pr": pr, "head_sha": sha,
                 "blockers": [f"Ready invoked and verified, but the {signal.LABEL} signal was not confirmed: {exc}; the PR "

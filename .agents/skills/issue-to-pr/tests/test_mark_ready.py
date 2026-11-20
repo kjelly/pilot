@@ -200,7 +200,7 @@ class MarkReadyTest(unittest.TestCase):
         result, _, _ = self.run_mark(views=[view(), {"isDraft": True, "headRefOid": SHA, "url": "u"}])
         self.assertEqual("READY_UNVERIFIED", result["status"])
         # Ready was not confirmed: no signal is written for it.
-        self.assertEqual(["command", "label-exists", "user", "pr-view", "ready", "command"], self.world.calls())
+        self.assertEqual(["command", "label-exists", "user", "pr-view", "timeline", "ready", "command"], self.world.calls())
 
     # ---- the pr-ready-verified signal: prepared before `gh pr ready`, written and read back after it ----
 
@@ -208,15 +208,17 @@ class MarkReadyTest(unittest.TestCase):
         result, calls, _ = self.run_mark(views=[view(), AFTER])
         self.assertEqual("READY_FOR_REVIEW", result["status"])
         self.assertEqual({"label": rw.LABEL, "head_sha": SHA, "producer": "issue-to-pr"}, result["ready_signal"])
-        # prepare (label, viewer, stale-label check) < gh pr ready < post-action view < comment < label < read-back
-        self.assertEqual(["command", "label-exists", "user", "pr-view", "ready", "command",
-                          "comment", "add-label", "pr-view", "timeline"], self.world.calls())
+        # prepare (label, viewer, stale-label check, baseline timeline) < gh pr ready < post-action view < write:
+        # identify (timeline) < comment < label < read-back
+        self.assertEqual(["command", "label-exists", "user", "pr-view", "timeline", "ready", "command",
+                          "timeline", "comment", "add-label", "pr-view", "timeline"], self.world.calls())
         events = self.world.s["events"]
         self.assertEqual(["ready_for_review", "commented", "labeled"], [e["event"] for e in events])
-        self.assertEqual(ready_signal.marker_comment(SHA, "issue-to-pr"), events[1]["body"])
-        # What every consumer will say about the PR the script left behind.
+        self.assertEqual(ready_signal.marker_comment(SHA, "issue-to-pr", events[0]["id"]), events[1]["body"])
+        # What every consumer will say about the PR the script left behind: valid, for the Ready transition it invoked.
         result_state = ready_signal.assess(SHA, self.world.view_labels(), events, rw.VIEWER)
-        self.assertEqual(("valid", SHA, "issue-to-pr"), (result_state.state, result_state.marker_head, result_state.producer))
+        self.assertEqual(("valid", SHA, "issue-to-pr", events[0]["id"]),
+                         (result_state.state, result_state.marker_head, result_state.producer, result_state.marker_ready))
 
     def test_a_missing_label_blocks_before_gh_pr_ready(self):
         result, calls, _ = self.run_mark(views=[view()], world=rw.World(head=SHA).label_state("missing"))
@@ -246,8 +248,8 @@ class MarkReadyTest(unittest.TestCase):
         self.assertEqual("READY_FOR_REVIEW", result["status"])
         log = world.calls()
         self.assertLess(log.index("remove-label"), log.index("ready"))
-        self.assertEqual(["command", "label-exists", "user", "pr-view", "remove-label", "pr-view", "ready", "command",
-                          "comment", "add-label", "pr-view", "timeline"], log)
+        self.assertEqual(["command", "label-exists", "user", "pr-view", "remove-label", "pr-view", "timeline", "ready",
+                          "command", "timeline", "comment", "add-label", "pr-view", "timeline"], log)
         # The label the script added after Ready is a new event, after the new Ready transition: not stale-epoch.
         self.assertEqual("valid", ready_signal.assess(SHA, world.view_labels(), world.s["events"], rw.VIEWER).state)
 
@@ -279,13 +281,52 @@ class MarkReadyTest(unittest.TestCase):
         result, _, _ = self.run_mark(views=[view(), AFTER], world=world)
         self.assertEqual("READY_UNVERIFIED", result["status"])
         self.assertIn(f"does not read back as valid after {ready_signal.READ_TRIES} reads", result["blockers"][0])
-        self.assertEqual(ready_signal.READ_TRIES, world.calls().count("timeline"))
+        # the baseline read of prepare, the identify read of write and READ_TRIES read-backs
+        self.assertEqual(2 + ready_signal.READ_TRIES, world.calls().count("timeline"))
         self.assertEqual([ready_signal.READ_INTERVAL] * (ready_signal.READ_TRIES - 1), self.sleeps)
+
+    def test_a_ready_transition_nobody_verified_is_never_signed(self):
+        # Somebody converts the PR to Draft and makes it Ready again (the maintainer uses this script's account)
+        # between `gh pr ready` and the end of the signal. Whatever the HEAD, the script must not report a signal for
+        # the transition it did not verify: READY_UNVERIFIED, and no consumer sees a valid signal.
+        push = ["draft", "head=" + OLD, "ready"]
+        cases = {
+            "the same HEAD, before the post-action read": ("command", 2, ["draft", "ready"], "went through Draft and Ready "
+                                                           "again", "absent"),
+            "the same HEAD, before the comment": ("comment", 1, ["draft", "ready"], "was superseded", "stale-epoch"),
+            "Draft, a push and Ready, before the comment": ("comment", 1, push, "was superseded", "stale-epoch"),
+            "the same HEAD, between the comment and the label": ("add-label", 1, ["draft", "ready"], "was superseded",
+                                                                 "absent"),
+            "the same HEAD, before the read-back": ("pr-view", 2, ["draft", "ready"], "was superseded", "stale-epoch"),
+            # A Draft alone: the PR is no longer Ready at all. Before the post-action read nothing is written.
+            "a Draft alone, before the post-action read": ("command", 2, ["draft"], "was converted to Draft after Ready "
+                                                           "transition", "inconsistent"),
+            "a Draft alone, before the comment": ("comment", 1, ["draft"], "was superseded", "inconsistent"),
+        }
+        for name, (op, nth, actions, why, state) in cases.items():
+            with self.subTest(name):
+                world = rw.World(head=SHA)
+                world.inject(op, nth, actions)
+                result, calls, _ = self.run_mark(views=[view(), AFTER], world=world)
+                self.assertEqual("READY_UNVERIFIED", result["status"])
+                self.assertEqual([["gh", "pr", "ready", "9", "-R", "O/R"]], calls)
+                self.assertNotIn("ready_signal", result)
+                (blocker,) = result["blockers"]
+                self.assertIn(f"Ready invoked and verified, but the {rw.LABEL} signal was not confirmed", blocker)
+                self.assertIn(why, blocker)
+                self.assertEqual([], self.sleeps, "a transition that was cycled is refused, not waited for")
+                after = ready_signal.assess(world.s["head"], world.view_labels(), world.s["events"], rw.VIEWER)
+                self.assertEqual(state, after.state, after.reason)
+        # The control: the same run with nobody cycling the PR is signed for the transition the script invoked.
+        world = rw.World(head=SHA)
+        result, _, _ = self.run_mark(views=[view(), AFTER], world=world)
+        self.assertEqual("READY_FOR_REVIEW", result["status"])
+        self.assertEqual("valid", ready_signal.assess(SHA, world.view_labels(), world.s["events"], rw.VIEWER).state)
 
     def test_already_ready_without_a_valid_signal_is_ready_unverified(self):
         def unsigned_created_ready():
             world = rw.World(head=SHA)
-            world.signal()  # a label and a marker, but the PR never went Draft -> Ready
+            world.signal(ready=rw.REAL_LAST_READY)  # a label and a marker, but the PR never went Draft -> Ready
             return world
 
         def stale():
@@ -297,14 +338,14 @@ class MarkReadyTest(unittest.TestCase):
         def by_someone_else():
             world = rw.World(head=SHA)
             world.ready()
-            world.comment(ready_signal.marker_comment(SHA, "issue-to-pr"))
+            world.comment(ready_signal.marker_comment(SHA, "issue-to-pr", world.latest_ready()))
             world.label(actor=rw.OTHER)
             return world
 
         def marker_by_someone_else():
             world = rw.World(head=SHA)
             world.ready()
-            world.comment(ready_signal.marker_comment(SHA, "issue-to-pr"), actor=rw.OTHER)
+            world.comment(ready_signal.marker_comment(SHA, "issue-to-pr", world.latest_ready()), actor=rw.OTHER)
             world.label()
             return world
 

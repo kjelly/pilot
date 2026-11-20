@@ -1050,12 +1050,14 @@ class WaitCLITests(unittest.TestCase):
             self.assertEqual({"label": self.LABEL, "head_sha": sha, "producer": "pr-ready"}, ready["ready_signal"])
             log = self.signal_calls(t)
             self.assertEqual("label-exists", log[0], "the label is checked before any poll")
-            self.assertEqual(["label-exists", "user", "pr-view"], log[log.index("ready") - 3:log.index("ready")])
-            # gh pr ready < the post-action read < the comment < the label < the read-back; READY comes last.
-            self.assertEqual(["ready", "pr-view", "comment", "add-label", "pr-view", "timeline"], log[log.index("ready"):])
+            # prepare: the label, the viewer, the stale-label check and the baseline timeline read
+            self.assertEqual(["label-exists", "user", "pr-view", "timeline"], log[log.index("ready") - 4:log.index("ready")])
+            # gh pr ready < the post-action read < identify < the comment < the label < the read-back; READY comes last.
+            self.assertEqual(["ready", "pr-view", "timeline", "comment", "add-label", "pr-view", "timeline"],
+                             log[log.index("ready"):])
             world = signal_world.World.load(t)
             read = signal_world.ready_signal.assess(sha, world.view_labels(), world.s["events"], signal_world.VIEWER)
-            self.assertEqual(("valid", "pr-ready"), (read.state, read.producer))
+            self.assertEqual(("valid", "pr-ready", world.latest_ready()), (read.state, read.producer, read.marker_ready))
             status = json.loads((repo / ".pr-ready/7/wait-status.json").read_text())
             self.assertEqual(ready["ready_signal"], status["ready_signal"])
 
@@ -1096,7 +1098,8 @@ class WaitCLITests(unittest.TestCase):
                 code, events, sleeps = self.run_in_process(t, [plan(PASS, LINT)], adjust=adjust,
                                                            extra=("--pr-loop-task", str(task)))
                 self.assertEqual([interval] * (tries - 1), sleeps)
-                self.assertEqual(tries, self.signal_calls(t).count("timeline"))
+                # the baseline read of prepare, the identify read of write and `tries` read-backs
+                self.assertEqual(2 + tries, self.signal_calls(t).count("timeline"))
                 if ok:
                     self.assertEqual((0, ["READY"]), (code, [e["status"] for e in events]))
                     self.assertEqual("READY", json.loads(task.with_name("result.json").read_text())["outcome"])

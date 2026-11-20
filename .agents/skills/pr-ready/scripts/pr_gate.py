@@ -1126,7 +1126,7 @@ class ReadySignal:
         self.client = load_by_path("gh_runtime", GH_RUNTIME_PATH, "the GitHub adapter (pr-review-merge gh_runtime.py)")
         self.repo = self.client.Repo.parse(repo)
         self.pr = pr
-        self.viewer: str | None = None
+        self.baseline: Any = None  # what `prepare` saw on the Draft (`ready_signal.Baseline`); `confirm` needs it
 
     def require_label(self) -> None:
         """Ready needs the label to exist: refuse before any CI wait, with Ready not invoked."""
@@ -1140,16 +1140,19 @@ class ReadySignal:
                             "must create it once (this gate never creates labels). Ready not invoked.")
 
     def prepare(self) -> None:
-        """Right before `gh pr ready`: the label still exists and a stale one is off the Draft. Failure: Ready not invoked."""
+        """Right before `gh pr ready`: the label still exists, a stale one is off the Draft, and the Draft's Ready/Draft
+        transitions are recorded (the baseline `confirm` identifies the verified Ready transition against). Failure:
+        Ready not invoked."""
         try:
-            self.viewer = self.signal.prepare(self.client, self.repo, self.pr)
+            self.baseline = self.signal.prepare(self.client, self.repo, self.pr)
         except (self.client.GitHubError, self.signal.SignalError) as exc:
             raise GateError(f"The {self.signal.LABEL} signal could not be prepared (Ready not invoked): {exc}") from exc
 
     def confirm(self, head: str) -> dict[str, str]:
-        """After the verified Ready transition: write the signal and read it back as valid. Returns its report."""
+        """After the verified Ready transition: write the signal for that transition and read it back as valid.
+        Returns its report. A PR that went through Draft and Ready again since `prepare` is refused, nothing signed."""
         try:
-            result = self.signal.write(self.client, self.repo, self.pr, head, self.signal.PR_READY, self.viewer)
+            result = self.signal.write(self.client, self.repo, self.pr, head, self.signal.PR_READY, self.baseline)
         except (self.client.GitHubError, self.signal.SignalError) as exc:
             raise GateError(f"Ready invoked and verified, but the {self.signal.LABEL} signal was not confirmed: {exc}; "
                             "the PR is Ready without the signal; convert it to Draft and run pr-ready again.") from exc

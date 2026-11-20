@@ -750,14 +750,18 @@ class ReadySignalTests(unittest.TestCase):
             self.assertEqual({"label": self.LABEL, "head_sha": sha, "producer": "pr-ready"}, event["ready_signal"])
             log = signal_world.calls(t)
             self.assertEqual("label-exists", log[0], "the label is checked before anything is read")
-            # prepare (label, viewer, stale-label check) < gh pr ready < post-action view < comment < label < read-back
-            self.assertEqual(["label-exists", "user", "pr-view"], log[log.index("ready") - 3:log.index("ready")])
-            self.assertEqual(["ready", "pr-view", "comment", "add-label", "pr-view", "timeline"], log[log.index("ready"):])
+            # prepare (label, viewer, stale-label check, baseline timeline) < gh pr ready < post-action view < write:
+            # identify (timeline) < comment < label < read-back
+            self.assertEqual(["label-exists", "user", "pr-view", "timeline"], log[log.index("ready") - 4:log.index("ready")])
+            self.assertEqual(["ready", "pr-view", "timeline", "comment", "add-label", "pr-view", "timeline"],
+                             log[log.index("ready"):])
             world = signal_world.World.load(t)
             self.assertEqual(["ready_for_review", "commented", "labeled"], [e["event"] for e in world.s["events"]])
-            self.assertEqual(signal_world.ready_signal.marker_comment(sha, "pr-ready"), world.s["events"][1]["body"])
+            ready = world.s["events"][0]["id"]
+            self.assertEqual(signal_world.ready_signal.marker_comment(sha, "pr-ready", ready), world.s["events"][1]["body"])
             read = signal_world.ready_signal.assess(sha, world.view_labels(), world.s["events"], signal_world.VIEWER)
-            self.assertEqual(("valid", sha, "pr-ready"), (read.state, read.marker_head, read.producer))
+            self.assertEqual(("valid", sha, "pr-ready", ready), (read.state, read.marker_head, read.producer,
+                                                                  read.marker_ready))
 
     def test_gate_pass_without_ready_never_touches_the_signal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -812,8 +816,8 @@ class ReadySignalTests(unittest.TestCase):
             self.assertEqual((0, "READY"), (proc.returncode, event["status"]), proc.stdout)
             log = signal_world.calls(t)
             self.assertLess(log.index("remove-label"), log.index("ready"))
-            self.assertEqual(["label-exists", "user", "pr-view", "remove-label", "pr-view", "ready"],
-                             log[log.index("ready") - 5:log.index("ready") + 1])
+            self.assertEqual(["label-exists", "user", "pr-view", "remove-label", "pr-view", "timeline", "ready"],
+                             log[log.index("ready") - 6:log.index("ready") + 1])
             after = signal_world.World.load(t)
             read = signal_world.ready_signal.assess(sha, after.view_labels(), after.s["events"], signal_world.VIEWER)
             self.assertEqual("valid", read.state, "the label added after the new Ready transition is a new event")
@@ -877,7 +881,8 @@ class ReadySignalTests(unittest.TestCase):
                 world.save(t)
                 code, events, sleeps = self.run_main(t, repo, evidence, env, "--ready", "--compact")
                 self.assertEqual([interval] * (tries - 1), sleeps)
-                self.assertEqual(tries, signal_world.calls(t).count("timeline"))
+                # the baseline read of prepare, the identify read of write and `tries` read-backs
+                self.assertEqual(2 + tries, signal_world.calls(t).count("timeline"))
                 if ok:
                     self.assertEqual((0, ["READY"]), (code, [e["status"] for e in events]))
                     continue
@@ -886,6 +891,80 @@ class ReadySignalTests(unittest.TestCase):
                 self.assertIn(f"does not read back as valid after {tries} reads", reason)
                 self.assertIn("last: absent: the PR does not carry the pr-ready-verified label", reason)
                 self.assertTrue((t / "ready").exists())
+
+    def test_a_cycle_between_gh_pr_ready_and_the_comment_is_refused_and_leaves_no_valid_signal(self):
+        # The window the signal must close: after `gh pr ready` the PR is converted to Draft and made Ready again.
+        # One real subprocess run (the fake gh applies the injected change when the comment starts): the gate refuses
+        # and a consumer reads the comment it left as a signal for an earlier Ready transition.
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, sha, evidence, env = self.make_pr(t)
+            signal_world.World(head=sha).inject("comment", 1, ["draft", "ready"]).save(t)
+            proc = self.gate(repo, evidence, env, "--ready", "--compact")
+            events = self.ran(proc)
+            self.assertEqual((2, ["DRAFT-BLOCKED"]), (proc.returncode, [e["status"] for e in events]), proc.stdout)
+            (reason,) = events[0]["errors"]
+            self.assertIn(f"Ready invoked and verified, but the {self.LABEL} signal was not confirmed", reason)
+            self.assertIn("was superseded", reason)
+            self.assertIn("the PR is Ready without the signal; convert it to Draft and run pr-ready again.", reason)
+            self.assertTrue((t / "ready").exists(), "Ready was invoked: the report must not claim a Draft")
+            log = signal_world.calls(t)
+            # Fail fast: the identify read, the comment, the label and ONE read-back, no retry.
+            self.assertEqual(["ready", "pr-view", "timeline", "comment", "add-label", "pr-view", "timeline"],
+                             log[log.index("ready"):])
+            world = signal_world.World.load(t)
+            first, last = [e["id"] for e in world.s["events"] if e["event"] == "ready_for_review"]
+            read = signal_world.ready_signal.assess(sha, world.view_labels(), world.s["events"], signal_world.VIEWER)
+            self.assertEqual(("stale-epoch", first, last), (read.state, read.marker_ready, read.ready_event), read.reason)
+
+    def test_a_cycle_before_the_post_action_read_is_refused_and_nothing_is_signed(self):
+        # In this process, so that the waits can be counted. The control run tells where the gate's post-action read of
+        # the PR is in the call order, the second run cycles the PR just before it.
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, sha, evidence, env = self.pr(t)
+            code, events, _ = self.run_main(t, repo, evidence, env, "--ready", "--compact")
+            self.assertEqual((0, ["READY"]), (code, [e["status"] for e in events]), "control")
+            log = signal_world.calls(t)
+            post_action = log[:log.index("ready")].count("pr-view") + 1
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, sha, evidence, env = self.make_pr(t)
+            signal_world.World(head=sha).inject("pr-view", post_action, ["draft", "ready"]).save(t)
+            code, events, sleeps = self.run_main(t, repo, evidence, env, "--ready", "--compact")
+            self.assertEqual((2, ["DRAFT-BLOCKED"]), (code, [e["status"] for e in events]))
+            (reason,) = events[0]["errors"]
+            self.assertIn("went through Draft and Ready again", reason)
+            self.assertIn("nothing was signed", reason)
+            self.assertEqual([], sleeps)
+            world = signal_world.World.load(t)
+            self.assertEqual(["ready_for_review", "convert_to_draft", "ready_for_review"],
+                             [e["event"] for e in world.s["events"]], "no comment, no label")
+            self.assertNotIn("comment", signal_world.calls(t))
+            read = signal_world.ready_signal.assess(sha, world.view_labels(), world.s["events"], signal_world.VIEWER)
+            self.assertEqual("absent", read.state)
+
+    def test_a_ready_transition_that_never_shows_is_refused_after_the_bound_and_one_that_shows_late_is_signed(self):
+        interval = signal_world.ready_signal.READ_INTERVAL
+        tries = signal_world.ready_signal.READ_TRIES
+        for lag, ok in ((tries - 1, True), (tries, False)):
+            with self.subTest(lag=lag), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                repo, sha, evidence, env = self.make_pr(t)
+                world = signal_world.World(head=sha)
+                world.s["flags"]["ready_lag"] = lag
+                world.save(t)
+                code, events, sleeps = self.run_main(t, repo, evidence, env, "--ready", "--compact")
+                reads = min(lag + 1, tries)
+                self.assertEqual([interval] * (reads - 1), sleeps[:reads - 1])
+                if ok:
+                    self.assertEqual((0, ["READY"]), (code, [e["status"] for e in events]))
+                    continue
+                self.assertEqual((2, ["DRAFT-BLOCKED"]), (code, [e["status"] for e in events]))
+                self.assertIn(f"no Ready transition after the verified Draft shows on the timeline after {tries} reads",
+                              events[0]["errors"][0])
+                self.assertEqual([interval] * (tries - 1), sleeps)
+                self.assertEqual([], [op for op in signal_world.calls(t) if op in ("comment", "add-label")])
 
     def test_a_ready_signal_module_that_cannot_load_is_a_blocker_before_any_github_call(self):
         with tempfile.TemporaryDirectory() as tmp:

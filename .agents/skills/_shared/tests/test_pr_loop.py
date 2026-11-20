@@ -314,7 +314,7 @@ class SignalPhaseTests(unittest.TestCase):
 
         def untrusted():  # the label was added by another account
             world = signal_world(HEAD, signed=False)
-            world.comment(rs.marker_comment(HEAD, rs.PR_READY))
+            world.comment(rs.marker_comment(HEAD, rs.PR_READY, world.latest_ready()))
             world.label(rw.OTHER)
             return world
 
@@ -325,7 +325,15 @@ class SignalPhaseTests(unittest.TestCase):
 
         def never_a_draft():  # created Ready: no Draft -> Ready transition
             world = rw.World(head=HEAD, viewer=LOGIN)
-            world.signal()
+            world.signal(ready=rw.REAL_LAST_READY)
+            return world
+
+        def earlier_ready():  # the comment and the label are for a Ready transition that is not the last one
+            world = signal_world(HEAD, signed=False)
+            first = world.latest_ready()
+            world.to_draft()
+            world.ready()
+            world.signal(ready=first)
             return world
 
         for name, build, reason in (
@@ -333,7 +341,9 @@ class SignalPhaseTests(unittest.TestCase):
                 ("stale-epoch", stale_epoch, r"label was added before the PR's last Ready transition"),
                 ("untrusted", untrusted, r"label was added by someone-else, not by the authenticated account reviewer"),
                 ("inconsistent", converted_back, r"converted to Draft after its last Ready transition"),
-                ("absent", never_a_draft, r"no Ready transition from Draft")):
+                ("absent", never_a_draft, r"no Ready transition from Draft"),
+                ("stale-epoch", earlier_ready, r"signal comment certifies Ready transition \d+, but the PR's last Ready "
+                                               r"transition is \d+")):
             with self.subTest(case=build.__name__):
                 world = build()
                 view = ready_view(world)
@@ -1781,7 +1791,7 @@ class ProgramTests(unittest.TestCase):
         # valid then, so the PR stays in the Draft phase and the blocker is what the run stops on. A Ready agent that
         # would merge the PR is scripted, so that a runner that dispatched it is seen to report success.
         lagging = signal_world(signed=False)
-        lagging.comment(rs.marker_comment(HEAD, rs.PR_READY))
+        lagging.comment(rs.marker_comment(HEAD, rs.PR_READY, lagging.latest_ready()))
         shown = ready_view(signal_world())  # the view already lists the label
         self.env.set_pane("%1", enter=[{"gh": {"set_view": shown, "set_timeline": lagging.s["events"]},
                                         "result": {"outcome": "DRAFT-BLOCKED", "reason": "the signal was not confirmed"}}])

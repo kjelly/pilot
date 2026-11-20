@@ -40,14 +40,14 @@ class Worlds:
     @classmethod
     def created_ready(cls, head):
         world = cls.world(head)      # a marker and a label, but the PR never was a Draft: no Ready transition
-        world.signal(head)
+        world.signal(head, ready=rw.REAL_LAST_READY)
         return world
 
     @classmethod
     def label_by_another_account(cls, head):
         world = cls.world(head)
         world.ready()
-        world.comment(ready_signal.marker_comment(head, ready_signal.PR_READY))
+        world.comment(ready_signal.marker_comment(head, ready_signal.PR_READY, world.latest_ready()))
         world.label(OTHER)
         return world
 
@@ -55,7 +55,7 @@ class Worlds:
     def marker_by_another_account(cls, head):
         world = cls.world(head)
         world.ready()
-        world.comment(ready_signal.marker_comment(head, ready_signal.PR_READY), OTHER)
+        world.comment(ready_signal.marker_comment(head, ready_signal.PR_READY, world.latest_ready()), OTHER)
         world.label()
         return world
 
@@ -66,6 +66,27 @@ class Worlds:
         world.signal(head)
         world.to_draft()
         world.ready()
+        return world
+
+    @classmethod
+    def newer_ready_after_the_signal(cls, head):
+        world = cls.world(head)      # the finding: the comment and the label are for a Ready transition that is not the last
+        world.ready()
+        first = world.latest_ready()
+        world.to_draft()
+        world.ready()
+        world.signal(head, ready=first)
+        return world
+
+    @classmethod
+    def draft_push_ready(cls, head):
+        world = cls.world("c" * 40)  # signed at an earlier HEAD, Draft, a push (to `head`), Ready again, then the signal
+        world.ready()
+        first = world.latest_ready()
+        world.to_draft()
+        world.s["head"] = head
+        world.ready()
+        world.signal("c" * 40, ready=first)
         return world
 
     @classmethod
@@ -83,5 +104,7 @@ class Worlds:
         "label by another account": ("label_by_another_account", "untrusted", f"was added by {OTHER}"),
         "marker by another account": ("marker_by_another_account", "absent", f"no signal comment by {VIEWER}"),
         "earlier Ready epoch": ("earlier_ready_epoch", "stale-epoch", "before the PR's last Ready transition"),
+        "newer Ready after the signal": ("newer_ready_after_the_signal", "stale-epoch", "certifies Ready transition"),
+        "Draft, base-import push, Ready": ("draft_push_ready", "stale-epoch", "certifies Ready transition"),
         "back to Draft": ("back_to_draft", "inconsistent", "converted to Draft after its last Ready transition"),
     }

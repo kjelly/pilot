@@ -12,8 +12,12 @@ verbatim. It has two adapters over the same model:
     and `gh pr view`, `note_ready` and `view_labels`.
 
 Every operation is logged in order (`calls`), which is how tests assert "the label is added after the comment".
+A change of the PR that happens BETWEEN two of those operations (somebody converts it to Draft and makes it Ready
+again, pushes a commit) is injected with `World.inject(op, nth, actions)`: the actions run when the nth following
+operation `op` starts, before its effect, in both adapters (the hook sits in `World.log`, which both call first).
 Failures are injected through `World.fail(...)` / `World.label_state(...)` and the read lag of a write through
-`World.flags["lag"]` (an added label) / `["remove_lag"]` (a removed one) or `World.add(..., lag=N)`: an event added
+`World.flags["lag"]` (an added label) / `["remove_lag"]` (a removed one) / `["ready_lag"]` (the Ready transition a fake
+`gh pr ready` makes) or `World.add(..., lag=N)`: an event added
 with lag N is invisible to the first N reads of the kind that shows it, so a read-back that needs N + 1 reads is
 expressible without sleeping.
 """
@@ -25,7 +29,7 @@ import json
 import sys
 import types
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 # A fake `gh` executable imports this file on the calls that need the model, each one a new Python process with no
 # bytecode cache (`PYTHONDONTWRITEBYTECODE=1`): every import at the top is paid again by each of those calls. With
@@ -40,6 +44,10 @@ VIEWER_CAPTURE = json.loads(FIXTURES["user"]["ok"]["stdout"])
 VIEWER = VIEWER_CAPTURE["login"]
 OTHER = "someone-else"
 ACCOUNTS = {VIEWER: VIEWER_CAPTURE["id"], OTHER: 1001}
+# Event ids of the real timeline of kjelly/pilot#419 (fixtures timeline.pr_419_paged): its two Ready transitions,
+# the Draft conversion between them, a label event and a comment (comments live in another id space).
+REAL_FIRST_READY, REAL_DRAFT, REAL_LAST_READY = 36743658899, 36744735929, 36750750751
+REAL_LABELED, REAL_COMMENT = 36752270477, 7035591012
 LABEL_CAPTURE = json.loads(FIXTURES["labels"]["exists"]["stdout"])
 STATE_FILE = "signal-world.json"
 EVENT_NAMES = ("ready_for_review", "convert_to_draft", "labeled", "unlabeled", "commented")
@@ -144,11 +152,20 @@ class World:
     def comment(self, body: str, actor: str | None = None) -> dict[str, Any]:
         return self.add("commented", actor, body=body)
 
-    def signal(self, head: str | None = None, producer: str | None = None, actor: str | None = None) -> None:
+    def latest_ready(self) -> int:
+        """The id of the PR's latest `ready_for_review` event on the visible timeline."""
+        ids = [event["id"] for event in self.s["events"] if event["event"] == "ready_for_review"]
+        assert ids, "the timeline has no ready_for_review event: name the transition with signal(ready=<event id>)"
+        return ids[-1]
+
+    def signal(self, head: str | None = None, producer: str | None = None, actor: str | None = None,
+               ready: int | None = None) -> None:
         """A complete signal as a producer writes it (`pr-ready` unless `producer` says another): the marker comment,
-        then the label."""
+        then the label. The marker certifies the Ready transition `ready`, the PR's latest one unless named (a
+        timeline without a Ready event needs it named)."""
         module = production()
-        self.comment(module.marker_comment(head or self.s["head"], producer or module.PR_READY), actor)
+        ready = self.latest_ready() if ready is None else ready
+        self.comment(module.marker_comment(head or self.s["head"], producer or module.PR_READY, ready), actor)
         self.label(actor)
 
     def signed_ready(self, producer: str | None = None, actor: str | None = None) -> None:
@@ -195,7 +212,34 @@ class World:
         return snapshot
 
     def log(self, op: str) -> None:
+        """An operation starts: record it, then run the injected actions that are due before its effect."""
         self.s["log"].append(op)
+        counts = self.s["flags"].setdefault("count", {})
+        counts[op] = counts.get(op, 0) + 1
+        for hook in self.s["flags"].get("inject", []):
+            if hook["op"] == op and hook["at"] == counts[op]:
+                self._act(hook["actions"])
+
+    def inject(self, op: str, nth: int, actions: Sequence[str]) -> "World":
+        """Run `actions` when the `nth` operation `op` from now on (1 = the next one) starts, before its effect: "draft"
+        (the viewer converts the PR to Draft), "ready" (makes it Ready), "head=<sha>" (pushes a commit) and "sign" (a
+        complete signal for the latest Ready transition, as another producer run leaves it). The actions are not
+        operations: they are not in `calls()`."""
+        assert nth >= 1 and actions and all(a in ("draft", "ready", "sign") or a.startswith("head=") for a in actions), actions
+        at = self.s["flags"].get("count", {}).get(op, 0) + nth
+        self.s["flags"].setdefault("inject", []).append({"op": op, "at": at, "actions": list(actions)})
+        return self
+
+    def _act(self, actions: Sequence[str]) -> None:
+        for action in actions:
+            if action == "draft":
+                self.to_draft()
+            elif action == "ready":
+                self.ready()
+            elif action == "sign":
+                self.signal()
+            else:
+                self.s["head"] = action.removeprefix("head=")
 
     def calls(self) -> list[str]:
         return list(self.s["log"])
@@ -340,7 +384,8 @@ def note_ready(state: Path) -> None:
     """The fake `gh pr ready` ran: log it and record the ready_for_review event."""
     world = World.load(state)
     world.log("ready")
-    world.ready()
+    # `flags["ready_lag"]` N: the new event is invisible to the first N timeline reads (a Ready that shows late).
+    world.add("ready_for_review", lag=world.s["flags"].get("ready_lag", 0))
     world.save(state)
 
 

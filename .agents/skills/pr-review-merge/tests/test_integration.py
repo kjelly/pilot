@@ -1115,7 +1115,9 @@ class ReadySignalListing(IntegrationBase):
                  4: ('earlier Ready epoch', None, "before the PR's last Ready transition"),
                  5: ('created Ready', None, 'no Ready transition from Draft'),
                  6: ('marker by another account', None, 'no signal comment by prm-bot'),
-                 7: ('back to Draft', None, 'converted to Draft after its last Ready transition')}
+                 7: ('back to Draft', None, 'converted to Draft after its last Ready transition'),
+                 8: ('newer Ready after the signal', None, 'certifies Ready transition'),
+                 9: ('Draft, base-import push, Ready', None, 'certifies Ready transition')}
         prs = []
         for number, (name, listed, extra) in cases.items():
             if name == 'valid':
@@ -1129,8 +1131,8 @@ class ReadySignalListing(IntegrationBase):
         self.assertEqual(0, proc.returncode, proc.stderr)
         self.assertEqual({1: False, 2: True}, {p['number']: p.get('stale_ready_signal', False) for p in out['pull_requests']})
         excluded = {e['number']: e['reason'] for e in out['excluded']}
-        self.assertEqual({3, 4, 5, 6, 7}, set(excluded))
-        for number in (3, 4, 5, 6, 7):
+        self.assertEqual({3, 4, 5, 6, 7, 8, 9}, set(excluded))
+        for number in (3, 4, 5, 6, 7, 8, 9):
             expected = cases[number][2]
             self.assertIn(expected, excluded[number])
             self.assertTrue(excluded[number].startswith(f'ready signal {Worlds.CASES[cases[number][0]][1]}: '), excluded[number])

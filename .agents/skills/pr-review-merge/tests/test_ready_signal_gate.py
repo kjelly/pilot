@@ -99,7 +99,7 @@ class GateTests(DeliveryTests):
         # label in both places passes.
         world = Worlds.world(self.reviewed)
         world.ready()
-        world.comment(ready_signal.marker_comment(self.reviewed, ready_signal.PR_READY))
+        world.comment(ready_signal.marker_comment(self.reviewed, ready_signal.PR_READY, world.latest_ready()))
         self.gh.signals[42] = world
         shown = dict(self.gh.pr_view(REPO, 42), labels=[{'name': LABEL}])
         gate, refusal = self.refused(view=shown)
@@ -243,6 +243,30 @@ class GateTests(DeliveryTests):
                 self.assertIsNotNone(refusal)
                 self.assertEqual([], [c for c in self.gh.calls[len(before):] if c in ('compare', 'merge_base', 'file_at')],
                                  'review_covers is asked only about a stale signal')
+
+    def test_a_signal_for_an_older_ready_transition_is_not_carried_across_a_base_import(self):
+        # The carry is for a `stale` signal: right transition, the HEAD moved by an import of the base. A signal for a
+        # Ready transition nobody verified (the producer lost a race with a Draft -> Ready cycle) is `stale-epoch`
+        # whatever the HEAD does, so the import cannot make it actionable. The control is the carried case above.
+        self.sign()
+        self.advance_main()
+        self.merge_main()
+        gate, refusal = self.ask()
+        self.assertIsNone(refusal, 'control: the signal of the last Ready transition is carried')
+        self.assertEqual(('stale', 'pure-base-import'), tuple(gate['ready_signal'].get(k) for k in ('state', 'carried')))
+        for name in ('newer Ready after the signal', 'Draft, base-import push, Ready'):
+            with self.subTest(name):
+                self.setUp()
+                self.gh.signals[42] = getattr(Worlds, Worlds.CASES[name][0])(self.reviewed)
+                self.advance_main()
+                self.merge_main()
+                before = list(self.gh.calls)
+                gate, refusal = self.refused()
+                self.assertEqual('stale-epoch', gate['ready_signal']['state'])
+                self.assertNotIn('carried', gate['ready_signal'])
+                self.assertIn('certifies Ready transition', refusal)
+                self.assertEqual([], [c for c in self.gh.calls[len(before):] if c in ('compare', 'merge_base', 'file_at')],
+                                 'a signal that is not stale is never asked about the base import')
 
     # -- fail closed ----------------------------------------------------------------------------------------
     def test_a_read_that_fails_is_a_transient_refusal_that_says_to_run_again(self):
