@@ -33,12 +33,13 @@ args = sys.argv[1:]
 root = pathlib.Path(os.environ["FAKE_GH_STATE"])
 sha = os.environ["FAKE_GH_SHA"]
 base = os.environ.get("FAKE_GH_BASE", sha)
-# The pr-ready-verified signal's calls (label, user, timeline, comment, edit) are answered by the shared model.
-sys.path.insert(0, os.environ["FAKE_GH_SIGNAL_DIR"])
-import ready_signal_world as signal_world
-signal_rc = signal_world.handle(args, root)
-if signal_rc is not None:
-    sys.exit(signal_rc)
+# The pr-ready-verified signal's calls (label, user, timeline, comment, edit) are answered by the shared model, and
+# so are the labels of `pr view` and `pr ready`'s bookkeeping. Every `gh` call is a new process that pays for what it
+# imports: only those calls import the model.
+def signal_world():
+    sys.path.insert(0, os.environ["FAKE_GH_SIGNAL_DIR"])
+    import ready_signal_world
+    return ready_signal_world
 views = root / "views.log"
 count = len(views.read_text().splitlines()) if views.exists() else 0
 index = count if args[:2] == ["pr", "view"] else max(0, count - 1)
@@ -54,7 +55,7 @@ if args[:2] == ["pr", "view"]:
           "body": "Reviewed feature change", "headRefOid": sha, "headRefName": "fix-one",
           "baseRefOid": base, "baseRefName": "main", "state": "OPEN", "mergeable": "MERGEABLE",
           "isDraft": not (root / "ready").exists(), "reviewDecision": "REVIEW_REQUIRED",
-          "labels": signal_world.view_labels(root)}
+          "labels": signal_world().view_labels(root)}
     pr.update(plan.get("pr", {}))
     print(json.dumps(pr))
 elif args[:2] == ["pr", "checks"]:
@@ -128,7 +129,7 @@ elif args[0] == "api" and "/contents/" in args[-1]:
     print("gh: Not Found (HTTP 404)", file=sys.stderr)
     sys.exit(1)
 elif args[:2] == ["pr", "ready"]:
-    signal_world.note_ready(root)
+    signal_world().note_ready(root)
     branch = subprocess.check_output(["git", "-C", os.environ["WAIT_REPO"],
                                       "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
     (root / "ready-branch").write_text(branch)
@@ -136,8 +137,12 @@ elif args[:2] == ["pr", "ready"]:
         out.write(str(index) + "\n")
     (root / "ready").write_text("yes")
 else:
-    print("unsupported mock args " + repr(args), file=sys.stderr)
-    sys.exit(1)
+    # None of the calls above is one the model answers, so the signal's own come here.
+    signal_rc = signal_world().handle(args, root)
+    if signal_rc is None:
+        print("unsupported mock args " + repr(args), file=sys.stderr)
+        sys.exit(1)
+    sys.exit(signal_rc)
 '''
 
 
@@ -1434,6 +1439,42 @@ class SecretScanWaitTests(unittest.TestCase):
             self.assertEqual(1, len(walks), "one commit walk for the whole wait, not one per poll")
             self.assertEqual("CLEAN", events[-1]["secret_scan"]["status"])
             self.assertEqual(1, events[-1]["secret_scan"]["commits_scanned"], "the PR commit is the one commit in base..head")
+
+
+class FakeGhCostTests(unittest.TestCase):
+    """A fake `gh` is a new interpreter per call, and a call that needs no signal state must not import the model: the
+    imports it brought made a call take 60 ms instead of 23 and the suite twice as long. A stand-in model that records
+    its import shows which calls import it."""
+
+    MODEL = ("import os, pathlib\n"
+             "pathlib.Path(os.environ['FAKE_GH_STATE'], 'model-imported').write_text('yes')\n"
+             "def view_labels(state): return []\n"
+             "def handle(args, state): return None\n"
+             "def note_ready(state): pass\n")
+    CHECKS = ["pr", "checks", "7"]
+    REF = ["api", "repos/acme/repo/git/ref/heads/main"]
+    CASES = (  # (the call, whether it needs the model)
+        (CHECKS, False), (REF, False),
+        (["pr", "view", "7", "--json", "number"], True),  # the labels it prints
+        (["api", "user"], True),                           # one of the signal's own calls
+    )
+
+    def imports_the_model(self, script, args):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            (t / "gh").write_text(script)
+            (t / "model").mkdir()
+            (t / "model" / "ready_signal_world.py").write_text(self.MODEL)
+            (t / "scenario.json").write_text(json.dumps([plan(PASS, LINT)]))
+            env = dict(os.environ, FAKE_GH_STATE=str(t), FAKE_GH_SHA="a" * 40, FAKE_GH_SIGNAL_DIR=str(t / "model"))
+            subprocess.run([sys.executable, "-B", str(t / "gh"), *args], env=env, capture_output=True, text=True, timeout=20)
+            return (t / "model-imported").exists()
+
+    def test_only_the_calls_that_need_signal_state_import_the_model(self):
+        for name, script in (("wait", WAIT_GH), ("smoke", cli_mock.MOCK_GH)):
+            for args, needs in self.CASES:
+                with self.subTest(fake=name, call=" ".join(args[:3])):
+                    self.assertEqual(needs, self.imports_the_model(script, args))
 
 
 if __name__ == "__main__":

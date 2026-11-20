@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -701,6 +702,33 @@ class LiteralGuardTests(unittest.TestCase):
     def test_the_marker_text_in_the_comment_is_built_from_the_one_source(self):
         # The renderer and the regex are two spellings of one marker: changing the prefix in one breaks this.
         self.assertTrue(re.fullmatch(rs.MARKER.pattern, rs.marker_line(H, rs.PR_READY)))
+
+
+class ModelImportCostTests(unittest.TestCase):
+    """A fake `gh` is a new interpreter per call, with no bytecode cache, and imports the model on the calls that need
+    it: what the model imports at the top is a cost of each of them. `unittest.mock` and `ready_signal` (with its
+    `dataclasses`) there made a fake call take 60 ms instead of 23 and the pr-ready suite twice as long."""
+
+    HEAVY = ("unittest.mock", "asyncio", "dataclasses", "ready_signal")
+
+    def test_importing_the_model_leaves_the_heavy_modules_to_the_functions_that_need_them(self):
+        code = (f"import sys; sys.path.insert(0, {str(HERE)!r}); import ready_signal_world; "
+                f"print(sorted(m for m in {self.HEAVY!r} if m in sys.modules))")
+        done = subprocess.run([sys.executable, "-S", "-c", code], capture_output=True, text=True, check=True)
+        self.assertEqual("[]", done.stdout.strip())
+        # The control: the same probe sees them once a function that needs them has run.
+        code = code.replace("import ready_signal_world;", "import ready_signal_world; ready_signal_world.production();")
+        done = subprocess.run([sys.executable, "-S", "-c", code], capture_output=True, text=True, check=True)
+        self.assertIn("'ready_signal'", done.stdout)
+
+    def test_the_names_read_as_attributes_are_still_the_production_module_and_its_label(self):
+        self.assertIs(rs, rw.ready_signal)
+        self.assertEqual(rs.LABEL, rw.LABEL)
+        world = rw.World(head=H)
+        world.signed_ready()  # no producer named: pr-ready's
+        self.assertEqual(rs.PR_READY, assess(world).producer)
+        with self.assertRaises(AttributeError):
+            rw.nothing_of_the_kind
 
 
 if __name__ == "__main__":

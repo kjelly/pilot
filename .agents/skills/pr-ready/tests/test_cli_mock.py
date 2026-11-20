@@ -28,12 +28,13 @@ import json, os, pathlib, re, sys
 args = sys.argv[1:]
 state = pathlib.Path(os.environ["FAKE_GH_STATE"])
 sha = os.environ["FAKE_GH_SHA"]
-# The pr-ready-verified signal's calls (label, user, timeline, comment, edit) are answered by the shared model.
-sys.path.insert(0, os.environ["FAKE_GH_SIGNAL_DIR"])
-import ready_signal_world as signal_world
-signal_rc = signal_world.handle(args, state)
-if signal_rc is not None:
-    sys.exit(signal_rc)
+# The pr-ready-verified signal's calls (label, user, timeline, comment, edit) are answered by the shared model, and
+# so are the labels of `pr view` and `pr ready`'s bookkeeping. Every `gh` call is a new process that pays for what it
+# imports: only those calls import the model.
+def signal_world():
+    sys.path.insert(0, os.environ["FAKE_GH_SIGNAL_DIR"])
+    import ready_signal_world
+    return ready_signal_world
 default_bases = [os.environ.get("FAKE_GH_BASE", sha)]
 checks = [{"name": "go test", "bucket": "pass", "state": "SUCCESS"},
           {"name": "lint", "bucket": "pass", "state": "SUCCESS"}]
@@ -53,7 +54,7 @@ if args[:2] == ["pr", "view"]:
         "baseRefName": "main", "state": "OPEN",
         "isDraft": not (state / "ready").exists(),
         "mergeable": "CONFLICTING" if (state / "conflict").exists() else "MERGEABLE",
-        "reviewDecision": "REVIEW_REQUIRED", "labels": signal_world.view_labels(state)}))
+        "reviewDecision": "REVIEW_REQUIRED", "labels": signal_world().view_labels(state)}))
 elif args[:2] == ["pr", "checks"] and "--required" in args and (state / "checks_error").exists():
     print("HTTP 502: Bad Gateway", file=sys.stderr)
     sys.exit(1)
@@ -107,11 +108,15 @@ elif args[:2] == ["api", "graphql"]:
         field: {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}
     }}}}))
 elif args[:2] == ["pr", "ready"]:
-    signal_world.note_ready(state)
+    signal_world().note_ready(state)
     (state / "ready").write_text("yes")
 else:
-    print(f"unsupported mock args {args}", file=sys.stderr)
-    sys.exit(1)
+    # None of the calls above is one the model answers, so the signal's own come here.
+    signal_rc = signal_world().handle(args, state)
+    if signal_rc is None:
+        print(f"unsupported mock args {args}", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(signal_rc)
 '''
 
 

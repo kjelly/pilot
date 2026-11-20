@@ -8,8 +8,8 @@ verbatim. It has two adapters over the same model:
   * `Client`: an in-process object with the interface of `gh_runtime` that `ready_signal` takes injected;
   * `handle`: what a fake `gh` EXECUTABLE answers for the signal's calls (label, user, timeline, comment, edit),
     keeping the state in `<state dir>/signal-world.json`, so that `pr_gate.py` and `mark_ready.py` run for real
-    against it. The fake executables call `handle` first and, for `gh pr ready` and `gh pr view`, `note_ready`
-    and `view_labels`.
+    against it. The fake executables call `handle` for a call they do not answer themselves and, for `gh pr ready`
+    and `gh pr view`, `note_ready` and `view_labels`.
 
 Every operation is logged in order (`calls`), which is how tests assert "the label is added after the comment".
 Failures are injected through `World.fail(...)` / `World.label_state(...)` and the read lag of a write through
@@ -24,14 +24,16 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
-from unittest import mock
+
+# A fake `gh` executable imports this file on the calls that need the model, each one a new Python process with no
+# bytecode cache (`PYTHONDONTWRITEBYTECODE=1`): every import at the top is paid again by each of those calls. With
+# `unittest.mock` and `ready_signal` (and its `dataclasses`) imported here a fake `gh` call took 60 ms instead of 23, so
+# those two are imported by the one function that needs each (`mark_ready_signal`, `production`).
 
 SKILLS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SKILLS / "_shared" / "scripts"))
-import ready_signal  # noqa: E402
 
 FIXTURES = json.loads((SKILLS / "pr-review-merge" / "tests" / "fixtures" / "github_api.json").read_text())
-LABEL = ready_signal.LABEL
 VIEWER_CAPTURE = json.loads(FIXTURES["user"]["ok"]["stdout"])
 VIEWER = VIEWER_CAPTURE["login"]
 OTHER = "someone-else"
@@ -39,6 +41,21 @@ ACCOUNTS = {VIEWER: VIEWER_CAPTURE["id"], OTHER: 1001}
 LABEL_CAPTURE = json.loads(FIXTURES["labels"]["exists"]["stdout"])
 STATE_FILE = "signal-world.json"
 EVENT_NAMES = ("ready_for_review", "convert_to_draft", "labeled", "unlabeled", "commented")
+
+
+def production() -> Any:
+    """`ready_signal`, the module whose view of GitHub this model stands for, imported when first needed."""
+    import ready_signal
+    return ready_signal
+
+
+def __getattr__(name: str) -> Any:
+    """PEP 562: `ready_signal` and `LABEL` of this module are those of `production()`."""
+    if name == "ready_signal":
+        return production()
+    if name == "LABEL":
+        return production().LABEL
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def account(login: str) -> dict[str, Any]:
@@ -96,19 +113,23 @@ class World:
     def to_draft(self, actor: str | None = None) -> dict[str, Any]:
         return self.add("convert_to_draft", actor)
 
-    def label(self, actor: str | None = None, *, add: bool = True, name: str = LABEL, lag: int = 0,
+    def label(self, actor: str | None = None, *, add: bool = True, name: str | None = None, lag: int = 0,
               lag_on: str = "timeline") -> dict[str, Any]:
-        return self.add("labeled" if add else "unlabeled", actor, label=name, lag=lag, lag_on=lag_on)
+        """A label event; the signal's label unless `name` says another."""
+        return self.add("labeled" if add else "unlabeled", actor, label=name or production().LABEL,
+                        lag=lag, lag_on=lag_on)
 
     def comment(self, body: str, actor: str | None = None) -> dict[str, Any]:
         return self.add("commented", actor, body=body)
 
-    def signal(self, head: str | None = None, producer: str = ready_signal.PR_READY, actor: str | None = None) -> None:
-        """A complete signal as a producer writes it: the marker comment, then the label."""
-        self.comment(ready_signal.marker_comment(head or self.s["head"], producer), actor)
+    def signal(self, head: str | None = None, producer: str | None = None, actor: str | None = None) -> None:
+        """A complete signal as a producer writes it (`pr-ready` unless `producer` says another): the marker comment,
+        then the label."""
+        module = production()
+        self.comment(module.marker_comment(head or self.s["head"], producer or module.PR_READY), actor)
         self.label(actor)
 
-    def signed_ready(self, producer: str = ready_signal.PR_READY, actor: str | None = None) -> None:
+    def signed_ready(self, producer: str | None = None, actor: str | None = None) -> None:
         """Draft -> Ready, then a complete signal: what a producer leaves behind."""
         self.ready(actor)
         self.signal(producer=producer, actor=actor)
@@ -199,7 +220,7 @@ class Client:
         state = self.world.s["flags"].get("label")
         if state == "error":
             raise self.GitHubError("injected failure of label-exists")
-        return state != "missing" and label == LABEL
+        return state != "missing" and label == production().LABEL
 
     def viewer_login(self, repo: Any) -> str:
         self._down("user")
@@ -227,7 +248,8 @@ def mark_ready_signal(mark_ready: Any, world: World) -> Any:
     """A patch that gives `mark_ready` (issue-to-pr's script module) the shared signal module and a `Client` over `world`
     instead of loading `gh_runtime`, which would run the real `gh`. Every test that gets mark_ready as far as the
     Ready transition needs it."""
-    return mock.patch.object(mark_ready, "signal_runtime", return_value=(ready_signal, Client(world)))
+    from unittest import mock  # see the comment under the imports
+    return mock.patch.object(mark_ready, "signal_runtime", return_value=(production(), Client(world)))
 
 
 def pr_ready_executor(world: World, calls: list[list[str]]) -> Any:
@@ -262,7 +284,7 @@ def handle(args: list[str], state: Path) -> int | None:
         capture = FIXTURES["labels"]
         if flags.get("label") == "error":
             code = _reply(stderr="HTTP 502: Bad Gateway\n", rc=1)
-        elif flags.get("label") == "missing" or not args[-1].endswith("/labels/" + LABEL):
+        elif flags.get("label") == "missing" or not args[-1].endswith("/labels/" + production().LABEL):
             code = _reply(capture["missing"]["stdout"], capture["missing"]["stderr"], capture["missing"]["rc"])
         else:
             code = _reply(capture["exists"]["stdout"])
