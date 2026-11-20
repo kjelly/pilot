@@ -66,6 +66,50 @@ rotated files. Override the limits with `PILOT_ANSIBLE_LOG_MAX_BYTES` and
 This is defense in depth; playbooks must still use Ansible `no_log: true` for
 secret-bearing tasks.
 
+## Process a batch of pull requests
+
+Run the standalone PR loop from a Pilot checkout:
+
+```bash
+python3 scripts/pr_loop.py 371 372 --repo kjelly/pilot
+```
+
+The runner uses the Python 3 standard library. Install `git`, authenticated
+`gh`, `tmux`, and the coding agents, with `claude` and `codex` as defaults.
+The target repository's default branch must contain Pilot's PR skills and
+result helper, and the merge train consumer must be running.
+
+The runner starts agents automatically on the verified default branch. An
+agent process is reused for its role while the same PR moves between Draft
+and Ready. After GitHub confirms the merge, the runner closes that PR's agent
+panes and starts new processes for the next PR. A gate that reports a blocker,
+a current-HEAD `needs-person` hand-off, or a timeout stops the batch and retains
+the checkout and panes for inspection. The runner prints their locations.
+
+Use `--draft-agent` and `--ready-agent` to choose executable paths. The prompts
+default to `/pr-ready {pr}` and `$pr-review-merge {pr}`; you can set them with
+`--draft-command` and `--ready-command`. Quote them in the shell to preserve
+the native skill syntax. Add `--dry-run` to see PR states before starting any
+agent. The phase timeout defaults to 7200 seconds.
+
+Each dispatch writes `<checkout>/.pr-loop/<nonce>/task.json` and pastes
+`--pr-loop-task=<path>` after the prompt; the skill writes `result.json` beside
+it. The runner hides `/.pr-loop/` and `/.pr-ready/` from `git status` through the
+checkout's `.git/info/exclude` and refuses to start when git does not ignore
+them. A newly started agent may ask whether to trust the new checkout
+directory; answer it in the printed tmux session within `--startup-timeout`.
+Agents run with the environment of the tmux server when one is already
+running, not with the environment of the shell that started the runner.
+
+The runner acts on a state only after reading it twice in a row, and retries a
+failed GitHub read twice before it stops, so one lagging or failing read neither
+dispatches an agent nor ends the run. An agent that is still working when
+GitHub shows the next phase is given the phase timeout to return to its prompt;
+a PR can therefore take up to about twice `--phase-timeout` in one phase. Every
+exhausted wait stops the runner without sending a command and retains the
+panes and the checkout. The runner reads the finished agent's result before it
+moves on, and stops on a blocker even when GitHub already shows the next phase.
+
 ## Command map
 
 ### Authoring, inventory, and delivery

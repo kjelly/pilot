@@ -1106,6 +1106,7 @@ def main() -> int:
     parser.add_argument("--poll-interval", type=float, default=30, help="Wait poll interval in seconds, >0 and <=60 (default 30)")
     parser.add_argument("--wait-timeout", type=float, help="Explicit optional wait limit in seconds; default waits until settled or cancelled")
     parser.add_argument("--compact", action="store_true", help="One-line JSON output")
+    parser.add_argument("--pr-loop-task", type=Path, help="Optional pr-loop task.json (scripts/pr_loop.py); the terminal outcome is written to result.json beside it")
     parser.add_argument("--base-remote", default="origin",
                         help="Remote whose fetched base branch carries .github/pr-evidence.json (default origin)")
     args = parser.parse_args()
@@ -1119,6 +1120,16 @@ def main() -> int:
         parser.error("--poll-interval must be >0 and <=60 seconds")
     if args.wait_timeout is not None and (not args.wait or not math.isfinite(args.wait_timeout) or args.wait_timeout <= 0):
         parser.error("--wait-timeout requires --wait and a positive finite duration")
+    task = None
+    if args.pr_loop_task is not None:
+        if not args.ready:
+            parser.error("--pr-loop-task requires --ready")
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "_shared" / "scripts"))
+        from pr_loop_result import load_task, publish_gate_result
+        try:
+            task = load_task(args.pr_loop_task, args.repo, args.pr, "draft")
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
 
     status_path = args.worktree.resolve() / ".pr-ready" / str(args.pr) / "wait-status.json" if args.wait else None
     started = time.monotonic()
@@ -1150,6 +1161,8 @@ def main() -> int:
             temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             temporary.replace(status_path)
         json_line(result, compact=args.compact)
+        if task is not None:
+            publish_gate_result(args.pr_loop_task, task, result)
 
     def deadline() -> None:
         if args.wait_timeout is not None and time.monotonic() - started >= args.wait_timeout:
