@@ -92,6 +92,23 @@ default to `/pr-ready {pr}` and `$pr-review-merge {pr}`; you can set them with
 the native skill syntax. Add `--dry-run` to see PR states before starting any
 agent. The phase timeout defaults to 7200 seconds.
 
+Each dispatch writes `<checkout>/.pr-loop/<nonce>/task.json` and pastes
+`--pr-loop-task=<path>` after the prompt; the skill writes `result.json` beside
+it. The runner hides `/.pr-loop/` and `/.pr-ready/` from `git status` through the
+checkout's `.git/info/exclude` and refuses to start when git does not ignore
+them. A newly started agent may ask whether to trust the new checkout
+directory; answer it in the printed tmux session within `--startup-timeout`.
+Agents run with the environment of the tmux server when one is already
+running, not with the environment of the shell that started the runner.
+
+The runner acts on a state only after reading it twice in a row, and retries a
+failed GitHub read twice before it stops, so one lagging or failing read neither
+dispatches an agent nor ends the run. An agent that is still working when
+GitHub shows the next phase is given the phase timeout to return to its prompt;
+a PR can therefore take up to about twice `--phase-timeout` in one phase. Every
+exhausted wait stops the runner without sending a command and retains the
+panes and the checkout.
+
 ## Command map
 
 ### Authoring, inventory, and delivery

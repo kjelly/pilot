@@ -229,10 +229,10 @@ class WaitCLITests(unittest.TestCase):
             self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
             self.assertIn("mergeability not computed yet", " ".join(events[0]["pending_checks"]))
 
-    def test_tmux_ai_result_is_written_for_a_blocker_after_pending_ci(self):
+    def test_pr_loop_task_result_is_written_for_a_blocker_after_pending_ci(self):
         with tempfile.TemporaryDirectory() as tmp:
             t = Path(tmp)
-            task = t / ".tmux-ai-pr/tmux-ai-pr-fixture/task.json"
+            task = t / (".pr-loop/" + "1" * 32) / "task.json"
 
             def write_task(_repo, evidence, _env):
                 task.parent.mkdir(parents=True)
@@ -249,6 +249,238 @@ class WaitCLITests(unittest.TestCase):
             self.assertEqual(events[-1]["head_sha"], result["head_sha"])
             self.assertEqual("DRAFT-BLOCKED", result["outcome"])
             self.assertFalse((t / "ready").exists())
+
+    # ---- pr-loop `--pr-loop-task`: bound before any gh read, one result, no change to the gate ----
+
+    LOOP_PARENT = ".pr-loop/" + "1" * 32  # the directory is named after the task's nonce
+    LOOP_START = "c" * 40  # differs from the PR head: a result must carry the head the gate judged
+
+    def loop_task(self, t, **overrides):
+        """(task path, adjust): adjust writes the task for prepare()/run_gate() with the PR head known."""
+        task = t / self.LOOP_PARENT / "task.json"
+
+        def adjust(_repo, evidence, _env):
+            body = dict(version=1, repo="acme/repo", pr=7, phase="draft", nonce="1" * 32,
+                        start_head=self.LOOP_START)
+            body.update(overrides)
+            task.parent.mkdir(parents=True, exist_ok=True)
+            task.write_text(json.dumps(body))
+            self.pr_head = evidence["head_sha"]
+
+        return task, adjust
+
+    def log_gh_calls(self, t):
+        """Every gh call, in order, in <state>/calls.log (the fake gh only logs `pr view` and a few more)."""
+        gh = t / "bin/gh"
+        source = gh.read_text()
+        anchor = "args = sys.argv[1:]\n"
+        self.assertEqual(1, source.count(anchor))
+        gh.write_text(source.replace(anchor, anchor + (
+            "with open(os.path.join(os.environ['FAKE_GH_STATE'], 'calls.log'), 'a') as _log:\n"
+            "    _log.write(json.dumps(args) + '\\n')\n"), 1))
+
+    def gh_calls(self, t):
+        log = t / "calls.log"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def run_loop_cli(self, t, plans, extra, *, remove=(), **kwargs):
+        repo, evidence, env, cli = self.prepare(t, plans, **kwargs)
+        self.log_gh_calls(t)
+        for flag in remove:
+            cli.remove(flag)
+        proc = subprocess.run(cli + list(extra), env=env, capture_output=True, text=True, timeout=20)
+        return proc, repo, env
+
+    def test_pr_loop_task_invalid_task_stops_before_any_gh_call_or_gate_event(self):
+        refused = {
+            "another repository": (dict(repo="acme/other"), "does not match this PR invocation"),
+            "another PR": (dict(pr=8), "does not match this PR invocation"),
+            "the ready phase": (dict(phase="ready"), "does not match this PR invocation"),
+            "a short nonce": (dict(nonce="1" * 31), "does not match this PR invocation"),
+            "a valid nonce that is not the directory's": (dict(nonce="3" * 32), "nonce does not match its directory"),
+        }
+        for case, (overrides, reason) in refused.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                task, adjust = self.loop_task(t, **overrides)
+                proc, repo, _ = self.run_loop_cli(t, [plan(PASS, LINT)], ("--pr-loop-task", str(task)), adjust=adjust)
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual("", proc.stdout, "no gate event: nothing was judged")
+                self.assertIn("error: pr-loop task " + reason, proc.stderr)
+                self.assertEqual([], self.gh_calls(t), "the task is bound before the first gh read")
+                for log in ("views.log", "graphql.log", "workflow-queries.log", "ready.log", "ready"):
+                    self.assertFalse((t / log).exists(), log)
+                self.assertFalse((repo / ".pr-ready/7/wait-status.json").exists())
+                self.assertFalse(task.with_name("result.json").exists())
+
+    def move_loop_task(self, task):
+        """The same valid task, in a directory that is not <checkout>/.pr-loop/."""
+        target = task.parents[2] / "elsewhere" / task.parent.name
+        target.parent.mkdir()
+        task.parent.rename(target)
+
+    def test_pr_loop_task_at_a_wrong_path_or_that_is_unreadable_stops_before_any_gh_call(self):
+        for case, setup, reason in (
+                ("wrong file name", lambda task: task.rename(task.with_name("job.json")),
+                 "expected the absolute path of <checkout>/.pr-loop/<nonce>/task.json"),
+                ("wrong directory", lambda task: self.move_loop_task(task),
+                 "expected the absolute path of <checkout>/.pr-loop/<nonce>/task.json"),
+                ("not json", lambda task: task.write_text("{not json"), "Expecting property name"),
+                ("missing file", lambda task: task.unlink(), "No such file or directory")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                task, adjust = self.loop_task(t)
+                repo, evidence, env, cli = self.prepare(t, [plan(PASS, LINT)], adjust=adjust)
+                self.log_gh_calls(t)
+                setup(task)
+                shown = {"wrong file name": task.with_name("job.json"),
+                         "wrong directory": t / "elsewhere" / task.parent.name / "task.json"}.get(case, task)
+                proc = subprocess.run(cli + ["--pr-loop-task", str(shown)], env=env,
+                                      capture_output=True, text=True, timeout=20)
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual("", proc.stdout)
+                self.assertIn("error: ", proc.stderr)
+                self.assertIn(reason, proc.stderr)
+                self.assertEqual([], self.gh_calls(t))
+                self.assertFalse((t / "ready").exists())
+
+    def test_pr_loop_task_a_valid_task_lets_the_same_scenario_run(self):
+        # The control of the two tests above: the same call with a matching task reads GitHub.
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            task, adjust = self.loop_task(t)
+            proc, _, _ = self.run_loop_cli(t, [plan(PASS, LINT)], ("--pr-loop-task", str(task)), adjust=adjust)
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertIn(["pr", "view"], [call[:2] for call in self.gh_calls(t)])
+            self.assertTrue((t / "ready").exists())
+
+    def test_pr_loop_task_loop_task_requires_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            task, adjust = self.loop_task(t)
+            proc, repo, _ = self.run_loop_cli(t, [plan(PASS, LINT)], ("--pr-loop-task", str(task)),
+                                              remove=("--ready",), adjust=adjust)
+            self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual("", proc.stdout)
+            self.assertIn("error: --pr-loop-task requires --ready", proc.stderr)
+            self.assertEqual([], self.gh_calls(t))
+            self.assertFalse(task.with_name("result.json").exists())
+
+    def test_pr_loop_task_ready_publishes_the_ready_outcome_with_the_judged_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            task, adjust = self.loop_task(t)
+            proc, events, _ = self.run_gate(t, [plan(PENDING, LINT), plan(PASS, LINT)], adjust=adjust,
+                                            extra=("--pr-loop-task", str(task)))
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
+            self.assertEqual("", proc.stderr, "a pending-CI poll is progress: nothing is published or reported for it")
+            result = json.loads(task.with_name("result.json").read_text())
+            self.assertEqual("READY", result["outcome"])
+            self.assertEqual(self.pr_head, result["head_sha"])
+            self.assertEqual(events[-1]["head_sha"], result["head_sha"])
+            self.assertEqual(self.LOOP_START, result["start_head"])
+            self.assertNotEqual(result["start_head"], result["head_sha"])
+            self.assertEqual(("draft", "1" * 32, 7, "acme/repo"),
+                             (result["phase"], result["nonce"], result["pr"], result["repo"]))
+            self.assertEqual(("", False), (result["wait_kind"], result["person_handoff"]))
+            self.assertEqual(events[-1]["message"], result["reason"])
+            self.assertEqual(["2"], (t / "ready.log").read_text().splitlines())
+
+    def test_pr_loop_task_a_blocker_publishes_draft_blocked_with_the_gate_reason_and_judged_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            task, adjust = self.loop_task(t)
+            proc, events, _ = self.run_gate(t, [plan(FAIL, LINT)], adjust=adjust,
+                                            extra=("--pr-loop-task", str(task)))
+            self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+            result = json.loads(task.with_name("result.json").read_text())
+            self.assertEqual("DRAFT-BLOCKED", result["outcome"])
+            self.assertEqual(self.pr_head, result["head_sha"])
+            self.assertEqual(events[-1]["errors"][0][:600], result["reason"])
+            self.assertIn("go test", result["reason"])
+            self.assertFalse((t / "ready").exists())
+
+    def test_pr_loop_task_wait_timeout_publishes_wait_interrupted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            task, adjust = self.loop_task(t)
+            proc, events, _ = self.run_gate(t, [plan(PENDING)], adjust=adjust,
+                                            extra=("--wait-timeout", "1.0", "--pr-loop-task", str(task)))
+            self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual("WAIT-INTERRUPTED", events[-1]["status"])
+            result = json.loads(task.with_name("result.json").read_text())
+            self.assertEqual("WAIT-INTERRUPTED", result["outcome"])
+            self.assertIn("timeout", result["reason"])
+            self.assertEqual(events[-1]["head_sha"], result["head_sha"])
+            self.assertEqual(self.pr_head, result["head_sha"])
+            self.assertFalse((t / "ready").exists())
+
+    def reset_fake_gh(self, t, repo):
+        for name in ("ready", "ready-branch", "ready.log", "views.log", "graphql.log", "workflow-queries.log",
+                     "calls.log"):
+            (t / name).unlink(missing_ok=True)
+        (repo / ".pr-ready/7/wait-status.json").unlink(missing_ok=True)
+
+    def observe(self, t, repo, env, cli, volatile):
+        proc = subprocess.run(cli, env=env, capture_output=True, text=True, timeout=20)
+        events = [json.loads(line) for line in proc.stdout.splitlines()]
+        for event in events:
+            for key in volatile:
+                event.pop(key, None)
+        return {"returncode": proc.returncode, "events": events, "gh": self.gh_calls(t),
+                "ready": (t / "ready").exists()}, proc
+
+    def test_pr_loop_task_flag_changes_neither_stdout_nor_exit_code_nor_gh_calls(self):
+        # Same repository, same scenario, the fake gh state reset in between: the only difference is the flag.
+        # elapsed_seconds is the one per-run field (a wall clock); everything else is compared as printed.
+        scenarios = {
+            "READY": ([plan(PENDING, LINT), plan(PASS, LINT)], (), 0, ("elapsed_seconds",)),
+            "DRAFT-BLOCKED": ([plan(PENDING, LINT), plan(FAIL, LINT)], (), 2, ("elapsed_seconds",)),
+            # The number of polls inside a wall-clock timeout varies from run to run.
+            "WAIT-INTERRUPTED": ([plan(PENDING)], ("--wait-timeout", "1.0"), 2, ("elapsed_seconds", "polls")),
+        }
+        for status, (plans, extra, code, volatile) in scenarios.items():
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                task, adjust = self.loop_task(t)
+                repo, evidence, env, cli = self.prepare(t, plans, adjust=adjust)
+                self.log_gh_calls(t)
+                without, proc = self.observe(t, repo, env, cli + list(extra), volatile)
+                self.assertEqual(code, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual(status, without["events"][-1]["status"])
+                self.assertFalse(task.with_name("result.json").exists(), "no flag, no result")
+                self.reset_fake_gh(t, repo)
+                with_flag, proc = self.observe(t, repo, env, cli + list(extra) + ["--pr-loop-task", str(task)], volatile)
+                self.assertEqual("", proc.stderr)
+                self.assertTrue(task.with_name("result.json").exists())
+                if status == "WAIT-INTERRUPTED":
+                    # How many WAITING-CI events and gh calls fit in a wall-clock timeout varies from run to
+                    # run: compare the final report, the exit code and whether Ready ran.
+                    self.assertEqual(without["events"][-1], with_flag["events"][-1])
+                    self.assertEqual((without["returncode"], without["ready"]),
+                                     (with_flag["returncode"], with_flag["ready"]))
+                else:
+                    self.assertEqual(without, with_flag)
+
+    def test_pr_loop_task_a_result_that_cannot_be_published_does_not_change_the_gate(self):
+        # The task already has a different result: publishing is refused. The gate's mutation, report and
+        # exit code are exactly those of a run without the flag; only stderr says what was not published.
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            task, adjust = self.loop_task(t)
+            repo, evidence, env, cli = self.prepare(t, [plan(PASS, LINT)], adjust=adjust)
+            self.log_gh_calls(t)
+            without, _ = self.observe(t, repo, env, cli, ("elapsed_seconds",))
+            self.reset_fake_gh(t, repo)
+            earlier = task.with_name("result.json")
+            earlier.write_text("an earlier invocation's result\n")
+            with_flag, proc = self.observe(t, repo, env, cli + ["--pr-loop-task", str(task)], ("elapsed_seconds",))
+            self.assertEqual(without, with_flag)
+            self.assertEqual(0, proc.returncode)
+            self.assertEqual("pr-loop result could not be published: "
+                             "this pr-loop task already has a different result\n", proc.stderr)
+            self.assertEqual("an earlier invocation's result\n", earlier.read_text())
 
     def test_pending_to_pass_runs_ready_exactly_once(self):
         with tempfile.TemporaryDirectory() as tmp:

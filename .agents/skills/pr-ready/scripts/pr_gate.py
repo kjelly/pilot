@@ -1106,7 +1106,7 @@ def main() -> int:
     parser.add_argument("--poll-interval", type=float, default=30, help="Wait poll interval in seconds, >0 and <=60 (default 30)")
     parser.add_argument("--wait-timeout", type=float, help="Explicit optional wait limit in seconds; default waits until settled or cancelled")
     parser.add_argument("--compact", action="store_true", help="One-line JSON output")
-    parser.add_argument("--pr-loop-task", type=Path, help="Optional tmux-ai task manifest for the terminal result")
+    parser.add_argument("--pr-loop-task", type=Path, help="Optional pr-loop task.json (scripts/pr_loop.py); the terminal outcome is written to result.json beside it")
     parser.add_argument("--base-remote", default="origin",
                         help="Remote whose fetched base branch carries .github/pr-evidence.json (default origin)")
     args = parser.parse_args()

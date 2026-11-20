@@ -310,7 +310,7 @@ def main() -> int:
     parser.add_argument("--method", choices=["squash", "merge", "rebase"], default="merge")
     parser.add_argument("--execute", action="store_true",
                         help="Actually post comments and convert to Draft, or queue for the merge train")
-    parser.add_argument("--pr-loop-task", type=Path, help="Optional tmux-ai task manifest for the terminal result")
+    parser.add_argument("--pr-loop-task", type=Path, help="Optional pr-loop task.json (scripts/pr_loop.py); the terminal outcome is written to result.json beside it")
     args = parser.parse_args()
     task = None
     try:

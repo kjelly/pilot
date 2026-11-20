@@ -24,7 +24,14 @@ sys.path[:0] = [str(SKILLS / skill / "scripts") for skill in ("pr-review-merge",
 from gh_runtime import GitHubError, Repo, issue_comments, pr_view, viewer_login
 from list_ready import QUEUE_LABEL
 from needs_person import LABEL as PERSON_LABEL, latest_marker
-from pr_loop_result import OUTCOMES, SHA
+from pr_loop_result import OUTCOMES, SHA, TASK_DIR
+
+
+# A phase must be read this many times in a row before the runner acts on it, and a failed GitHub read is
+# retried up to READ_ATTEMPTS times in a row: one lagging or failing read must not dispatch an agent or stop
+# the run. Module constants, not flags.
+STABLE_POLLS = 2
+READ_ATTEMPTS = 3
 
 
 class Stop(RuntimeError):
@@ -105,8 +112,16 @@ class Checkout:
         self.head = self.git("rev-parse", "--verify", remote_ref + "^{commit}")
         self.verify()
         self.git("cat-file", "-e", "HEAD:.agents/skills/_shared/scripts/pr_loop_result.py")
-        with (self.path / ".git/info/exclude").open("a", encoding="utf-8") as stream:
-            stream.write("\n/.pr-ready/\n/.tmux-ai-pr/\n")
+        info = self.path / ".git/info"
+        info.mkdir(parents=True, exist_ok=True)
+        with (info / "exclude").open("a", encoding="utf-8") as stream:
+            stream.write(f"\n/.pr-ready/\n/{TASK_DIR}/\n")
+        # `git check-ignore -q` with several paths succeeds when ANY is ignored: ask for each path itself.
+        for probe in (f"{TASK_DIR}/{'0' * 32}/task.json", ".pr-ready/probe"):
+            try:
+                self.git("check-ignore", "-q", "--", probe)
+            except Stop:
+                raise Stop(f"managed checkout does not ignore {TASK_DIR}/ and .pr-ready/") from None
 
     def git(self, *args):
         return command("git", *args, cwd=self.path).strip()
@@ -119,12 +134,15 @@ class Checkout:
 
     def task(self, repo, number, phase, head):
         nonce = uuid.uuid4().hex
-        directory = self.path / ".tmux-ai-pr" / ("tmux-ai-pr-" + nonce)
-        directory.mkdir(parents=True, mode=0o700)
+        base = self.path / TASK_DIR
+        base.mkdir(mode=0o700, exist_ok=True)
+        directory = base / nonce
+        directory.mkdir(mode=0o700)
         task = dict(version=1, repo=f"{repo.owner}/{repo.name}", pr=number, phase=phase,
                     nonce=nonce, start_head=head)
         path = directory / "task.json"
-        path.write_text(json.dumps(task), encoding="utf-8")
+        with path.open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(task))
         return path, task
 
     def clean_up(self):
@@ -237,24 +255,50 @@ class Batch:
         if self.checkout is not None:
             self.checkout.clean_up()
 
+    def read(self, number):
+        """One observation of the PR. A failed GitHub read is retried; a Stop (a PR that cannot be driven)
+        is a verdict, never retried."""
+        for attempt in range(1, READ_ATTEMPTS + 1):
+            try:
+                return observe(self.repo, number)
+            except GitHubError as exc:
+                if attempt == READ_ATTEMPTS:
+                    raise Stop(f"GitHub read failed {READ_ATTEMPTS} consecutive times; no command sent: {exc}") from exc
+                tell(f"PR #{number}: GitHub read failed ({attempt}/{READ_ATTEMPTS}): {exc}")
+                time.sleep(self.args.poll_interval)
+
     def run_pr(self, number):
         agents = {}
         active = None
         current, task_path, task = None, None, None
+        candidate, seen = None, 0
         actions, exited = 0, 0
         deadline = time.monotonic() + self.args.phase_timeout
         while True:
-            view = observe(self.repo, number)
+            view = self.read(number)
             phase = state_of(view)
             if self.args.dry_run:
                 tell(f"PR #{number}: {phase}")
                 return
-            if phase != current:
+            if phase == current:
+                candidate, seen = None, 0
+                if active is not None and phase != "queued":
+                    check_result(task_path, task, head_of(view))
+                    dead, _, foreground = active[1].status()
+                    exited = exited + 1 if dead or foreground in SHELLS else 0
+                    if exited >= 2:
+                        raise Stop(f"{phase} agent exited before GitHub confirmed a state change")
+            else:
+                seen = seen + 1 if phase == candidate else 1
+                candidate = phase
+            if phase != current and seen >= STABLE_POLLS:
+                candidate, seen = None, 0
                 if current == "queued" and phase == "ready":
                     raise Stop("left the merge train while still Ready; inspect the PR conversation")
                 if phase != "queued" and active is not None:
                     role, agent = active
-                    if not agent.wait_for_prompt(self.args.startup_timeout, allow_exit=True):
+                    tell(f"PR #{number}: waiting for the {role} agent in {agent.pane} to return to its prompt")
+                    if not agent.wait_for_prompt(self.args.phase_timeout, allow_exit=True):
                         agent.close()
                         del agents[role]
                     active = None
@@ -268,8 +312,7 @@ class Batch:
                 if phase == "queued":
                     tell(f"PR #{number}: waiting for merge train")
                 else:
-                    actions += 1
-                    if actions > self.args.max_actions:
+                    if actions >= self.args.max_actions:
                         raise Stop("maximum agent dispatches reached")
                     if self.checkout is None:
                         self.checkout = Checkout(view, self.repo)
@@ -283,19 +326,14 @@ class Batch:
                         agents[phase] = agent
                     agent.wait_for_prompt(self.args.startup_timeout)
                     # An approval prompt at startup can take long enough for GitHub to change.
-                    view = observe(self.repo, number)
+                    view = self.read(number)
                     if state_of(view) != phase:
                         raise Stop("GitHub state changed before dispatch; retry against the current PR")
                     task_path, task = self.checkout.task(self.repo, number, phase, head_of(view))
                     prompt = getattr(self.args, phase + "_command").replace("{pr}", str(number))
+                    actions += 1
                     agent.submit(prompt + " --pr-loop-task=" + json.dumps(str(task_path), ensure_ascii=False))
                     active, exited = (phase, agent), 0
-            elif active is not None and phase != "queued":
-                check_result(task_path, task, head_of(view))
-                dead, _, foreground = active[1].status()
-                exited = exited + 1 if dead or foreground in SHELLS else 0
-                if exited >= 2:
-                    raise Stop(f"{phase} agent exited before GitHub confirmed a state change")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise Stop(f"timed out in {phase}")
@@ -318,7 +356,7 @@ def main():
     parser.add_argument("--draft-command", default="/pr-ready {pr}")
     parser.add_argument("--ready-command", default="$pr-review-merge {pr}")
     parser.add_argument("--phase-timeout", type=seconds, default=7200, help="seconds waiting per phase (default: 7200)")
-    parser.add_argument("--startup-timeout", type=seconds, default=60, help="seconds waiting for an agent prompt (default: 60)")
+    parser.add_argument("--startup-timeout", type=seconds, default=60, help="seconds waiting for a newly started agent's prompt (default: 60)")
     parser.add_argument("--poll-interval", type=seconds, default=10, help="seconds between GitHub reads (default: 10)")
     parser.add_argument("--max-actions", type=int, default=20, help="maximum dispatches per PR (default: 20)")
     parser.add_argument("--dry-run", action="store_true", help="show current PR states without starting agents")

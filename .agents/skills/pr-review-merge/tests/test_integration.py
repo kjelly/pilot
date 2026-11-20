@@ -1,7 +1,9 @@
 """End-to-end tests of the CLI with a fake gh executable (no GitHub writes)."""
+import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -477,9 +479,9 @@ class Integration(IntegrationBase):
         self.assertFalse(self.state().get('comments'))
         self.assertEqual(self.state()['view']['state'],'OPEN')
 
-    def test_tmux_ai_result_for_pending_ci_leaves_ready(self):
+    def test_pr_loop_task_result_for_pending_ci_leaves_ready(self):
         self.patch(checks=[{'name': 'lint', 'state': 'PENDING', 'bucket': 'pending'}])
-        task = self.path / ".tmux-ai-pr/tmux-ai-pr-fixture/task.json"
+        task = self.path / (".pr-loop/" + "2" * 32) / "task.json"
         task.parent.mkdir(parents=True)
         task.write_text(json.dumps(dict(version=1, repo="acme/demo", pr=42, phase="ready",
                                         nonce="2" * 32, start_head=HEAD)))
@@ -493,6 +495,214 @@ class Integration(IntegrationBase):
         self.assertFalse(result["person_handoff"])
         self.assertFalse(self.state().get("comments"))
         self.assertFalse(self.state()["view"]["isDraft"])
+
+    # ---- pr-loop `--pr-loop-task`: bound before any gh call, one result, no change to the actor ----
+
+    LOOP_START = 'c' * 40   # differs from the PR HEAD: a result must carry the HEAD the gate judged
+
+    @staticmethod
+    def loop_nonce(name):
+        """The nonce (and so the directory name) of the task called `name`."""
+        return hashlib.sha256(name.encode()).hexdigest()[:32]
+
+    def loop_task(self, name='fixture', **overrides):
+        body = dict(version=1, repo='acme/demo', pr=42, phase='ready', nonce=self.loop_nonce(name),
+                    start_head=self.LOOP_START)
+        body.update(overrides)
+        task = self.path / '.pr-loop' / self.loop_nonce(name) / 'task.json'
+        task.parent.mkdir(parents=True, exist_ok=True)
+        task.write_text(json.dumps(body))
+        return task
+
+    def loop_actor(self, task, *extra, flag=True):
+        args = ['--pr', '42', '--evidence', str(self.evidence_file), '--execute', *extra]
+        if flag:
+            args += ['--pr-loop-task', str(task)]
+        return self.script('apply_decision.py', *args)
+
+    def published(self, task):
+        return json.loads(task.with_name('result.json').read_text())
+
+    def gh_calls(self):
+        return self.state().get('calls', [])
+
+    def test_pr_loop_task_invalid_task_makes_no_gh_call_and_changes_nothing(self):
+        refused = {
+            'another repository': (dict(repo='acme/other'), 'pr-loop task does not match this PR invocation'),
+            'another PR': (dict(pr=43), 'pr-loop task does not match this PR invocation'),
+            'the draft phase': (dict(phase='draft'), 'pr-loop task does not match this PR invocation'),
+            'a short nonce': (dict(nonce='2' * 31), 'pr-loop task does not match this PR invocation'),
+            'a valid nonce that is not the directory\'s': (dict(nonce='4' * 32),
+                                                          'pr-loop task nonce does not match its directory'),
+        }
+        for case, (overrides, reason) in refused.items():
+            with self.subTest(case=case):
+                self.fixture_file.write_text(json.dumps(fixture()))
+                task = self.loop_task(case.replace(' ', '-'), **overrides)
+                proc = self.loop_actor(task)
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                out = json.loads(proc.stdout)
+                self.assertEqual(('ERROR', 'ValueError', reason), (out['outcome'], out['error_kind'], out['error']))
+                self.assertEqual([], self.gh_calls(), 'the task is bound before the first gh call')
+                self.assertFalse(task.with_name('result.json').exists())
+                self.assertFalse((Path(self.env['PRM_STATE_DIR']) / 'queue').exists(), 'nothing was saved for the train')
+
+    def test_pr_loop_task_at_a_wrong_path_or_that_is_unreadable_makes_no_gh_call(self):
+        wrong = self.loop_task('layout')
+        wrong = wrong.rename(wrong.with_name('job.json'))
+        invalid = self.loop_task('json')
+        invalid.write_text('{not json')
+        misplaced = self.loop_task('misplaced')   # a valid task, outside <checkout>/.pr-loop/
+        moved = self.path / 'elsewhere' / misplaced.parent.name
+        moved.parent.mkdir()
+        misplaced.parent.rename(moved)
+        misplaced = moved / 'task.json'
+        for case, task, needle in (('wrong file name', wrong, 'expected the absolute path of <checkout>/.pr-loop/<nonce>/task.json'),
+                                   ('wrong directory', misplaced,
+                                    'expected the absolute path of <checkout>/.pr-loop/<nonce>/task.json'),
+                                   ('not json', invalid, 'Expecting property name'),
+                                   ('missing file', self.path / '.pr-loop' / ('3' * 32) / 'task.json',
+                                    'No such file or directory')):
+            with self.subTest(case=case):
+                proc = self.loop_actor(task)
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                out = json.loads(proc.stdout)
+                self.assertEqual('ERROR', out['outcome'])
+                self.assertIn(needle, out['error'])
+                self.assertEqual([], self.gh_calls())
+
+    def test_pr_loop_task_valid_task_is_the_control_of_the_refusals_above(self):
+        task = self.loop_task()
+        proc = self.loop_actor(task)
+        self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+        self.assertEqual('ENQUEUED', json.loads(proc.stdout)['outcome'])
+        self.assertIn(['pr', 'view'], [call[:2] for call in self.gh_calls()])
+
+    def test_pr_loop_task_loop_task_requires_execute(self):
+        task = self.loop_task()
+        proc = self.script('apply_decision.py', '--pr', '42', '--evidence', str(self.evidence_file),
+                           '--pr-loop-task', str(task))
+        self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+        self.assertEqual('', proc.stdout)
+        self.assertIn('error: --pr-loop-task requires --execute', proc.stderr)
+        self.assertEqual([], self.gh_calls())
+        self.assertFalse(task.with_name('result.json').exists())
+
+    def loop_scenario(self, name):
+        """Set up one actor outcome; returns (expected outcome, expected exit code, extra expectations)."""
+        if name == 'ENQUEUED':
+            return 'ENQUEUED', 0, {'wait_kind': '', 'person_handoff': False, 'head_sha': HEAD}
+        if name == 'DRAFT-BLOCKED':
+            self.patch(checks=[{'name': 'lint', 'state': 'FAILURE', 'bucket': 'fail'}])
+            return 'DRAFT', 0, {'wait_kind': '', 'person_handoff': False, 'head_sha': HEAD}
+        if name == 'SKIP':
+            d = self.state()
+            d['view']['isDraft'] = True
+            self.fixture_file.write_text(json.dumps(d))
+            return 'SKIP', 0, {'wait_kind': '', 'person_handoff': False, 'head_sha': HEAD}
+        if name == 'WAITING-person':
+            d = self.state()
+            d['view']['reviewDecision'] = 'CHANGES_REQUESTED'
+            self.fixture_file.write_text(json.dumps(d))
+            return 'WAITING', 1, {'wait_kind': 'person', 'person_handoff': True, 'head_sha': HEAD}
+        if name == 'WAITING-transient':
+            self.patch(checks=[{'name': 'lint', 'state': 'PENDING', 'bucket': 'pending'}])
+            return 'WAITING', 1, {'wait_kind': 'transient', 'person_handoff': False, 'head_sha': HEAD}
+        if name == 'ERROR-returned':
+            self.patch(fail_label=True)
+            return 'ERROR', 1, {'wait_kind': '', 'person_handoff': False, 'head_sha': HEAD}
+        raise AssertionError(name)
+
+    def test_pr_loop_task_publishes_the_outcome_wait_hand_off_and_judged_head(self):
+        for name in ('ENQUEUED', 'DRAFT-BLOCKED', 'SKIP', 'WAITING-person', 'WAITING-transient', 'ERROR-returned'):
+            with self.subTest(scenario=name):
+                self.fixture_file.write_text(json.dumps(fixture()))
+                outcome, code, expected = self.loop_scenario(name)
+                task = self.loop_task(name.lower())
+                proc = self.loop_actor(task)
+                self.assertEqual(code, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual('', proc.stderr)
+                report = json.loads(proc.stdout)
+                result = self.published(task)
+                self.assertEqual(outcome, result['outcome'])
+                wanted = dict(expected, phase='ready', start_head=self.LOOP_START, nonce=task.parent.name,
+                              pr=42, repo='acme/demo', version=1)
+                self.assertEqual(wanted, {key: result[key] for key in wanted})
+                self.assertNotEqual(result['start_head'], result['head_sha'], 'the judged HEAD, not the starting one')
+                self.assertEqual({'version', 'repo', 'pr', 'phase', 'nonce', 'start_head', 'head_sha', 'outcome',
+                                  'reason', 'wait_kind', 'person_handoff'}, set(result))
+                self.assertTrue(result['reason'])
+                if name == 'DRAFT-BLOCKED':
+                    self.assertEqual('DRAFT-BLOCKED', report['outcome'], 'the actor still reports its own word')
+                    self.assertIn('lint', result['reason'])
+                if name == 'WAITING-person':
+                    self.assertIn('CHANGES_REQUESTED', result['reason'])
+                    self.assertEqual('needs-person', report['handoff'])
+                if name == 'SKIP':
+                    self.assertEqual('PR is not an open non-draft PR', result['reason'])
+                if name == 'ERROR-returned':
+                    self.assertIn('label denied', report['error'] + result['reason'])
+                    self.assertEqual(report['error'], result['reason'])
+
+    def test_pr_loop_task_an_exception_is_published_as_error(self):
+        state = Path(self.env['PRM_STATE_DIR'])
+        state.mkdir(parents=True)
+        (state / 'queue').write_text('not a directory')
+        task = self.loop_task('exception', start_head=HEAD)
+        proc = self.loop_actor(task)
+        self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+        report = json.loads(proc.stdout)
+        self.assertEqual(('ERROR', 'NotADirectoryError'), (report['outcome'], report['error_kind']))
+        result = self.published(task)
+        self.assertEqual(('ERROR', HEAD, False, ''), (result['outcome'], result['head_sha'],
+                                                      result['person_handoff'], result['wait_kind']))
+        self.assertIn('queue', result['reason'])
+        self.assertEqual(report['error'], result['reason'])
+
+    def normalized_run(self, scenario, task, *, flag):
+        """One actor run from a fresh fixture and a fresh state directory: what it printed, its exit code and
+        what it did to GitHub (the fake gh's call log and final state), with the temporary comment file's path
+        (the one per-run value) masked."""
+        self.fixture_file.write_text(json.dumps(fixture()))
+        state = self.path / f'state-{scenario}'   # the same path both times: an error message may name it
+        shutil.rmtree(state, ignore_errors=True)
+        state.mkdir()
+        if scenario == 'ERROR-exception':
+            (state / 'queue').write_text('not a directory')
+        else:
+            self.loop_scenario(scenario)
+        self.env['PRM_STATE_DIR'] = str(state)
+        proc = self.loop_actor(task, flag=flag)
+        final = self.state()
+        for call in final.get('calls', []):
+            if '--body-file' in call:
+                call[call.index('--body-file') + 1] = '<comment file>'
+        return {'returncode': proc.returncode, 'stdout': json.loads(proc.stdout), 'gh': final}, proc
+
+    def test_pr_loop_task_flag_changes_neither_stdout_nor_exit_code_nor_gh_calls(self):
+        for scenario in ('ENQUEUED', 'DRAFT-BLOCKED', 'SKIP', 'WAITING-person', 'WAITING-transient',
+                         'ERROR-returned', 'ERROR-exception'):
+            with self.subTest(scenario=scenario):
+                task = self.loop_task(scenario.lower())
+                without, _ = self.normalized_run(scenario, task, flag=False)
+                self.assertFalse(task.with_name('result.json').exists(), 'no flag, no result')
+                with_flag, proc = self.normalized_run(scenario, task, flag=True)
+                self.assertEqual('', proc.stderr)
+                self.assertTrue(task.with_name('result.json').exists())
+                self.assertEqual(without, with_flag)
+                self.assertTrue(without['gh'].get('calls'), 'the scenario really ran against the fake gh')
+
+    def test_pr_loop_task_a_result_that_cannot_be_published_does_not_change_the_actor(self):
+        task = self.loop_task()
+        without, _ = self.normalized_run('ENQUEUED', task, flag=False)
+        earlier = task.with_name('result.json')
+        earlier.write_text("an earlier invocation's result\n")
+        with_flag, proc = self.normalized_run('ENQUEUED', task, flag=True)
+        self.assertEqual(without, with_flag)
+        self.assertEqual(0, proc.returncode)
+        self.assertEqual('pr-loop result could not be published: this pr-loop task already has a different result\n',
+                         proc.stderr)
+        self.assertEqual("an earlier invocation's result\n", earlier.read_text())
 
     def test_concurrent_writer_lock_refuses_mutation(self):
         from sys import path as syspath
