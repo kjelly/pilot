@@ -288,15 +288,23 @@ func (d *applyDriver) runA23(base func() rosterDoc) {
 		initial string
 		vars    map[string]string // raw YAML scalars for the vault ("__INLINE_VAULT__" is an inline !vault value)
 		want    string
+		also    []string // more the refusal must name: the variable, the marker
+		encrypt bool     // the vars file is ansible-vault encrypted, as the Ansible engine would read it
 	}
 	secretish := a23Hostile()
 	for _, tg := range []trigger{
-		{"the variable is not defined", ref, nil, "nothing in the run defines"},
-		{"the variable is an empty string", ref, map[string]string{a23Var: `""`}, "empty string"},
-		{"the variable is an unquoted number", ref, map[string]string{a23Var: "12345678"}, "not a string"},
-		{"the variable is an inline !vault value", ref, map[string]string{a23Var: "__INLINE_VAULT__"}, "inline !vault value"},
-		{"a filter", "{{ " + a23Var + " | default('') }}", map[string]string{a23Var: yamlText(secretish)}, "not exactly one bare"},
-		{"a name the identity playbook sets itself", "{{ identity_admin_password }}", map[string]string{"identity_admin_password": yamlText(secretish)}, "before the playbook reads the password"},
+		{"the variable is not defined", ref, nil, "nothing in the run defines", nil, false},
+		{"the variable is an empty string", ref, map[string]string{a23Var: `""`}, "empty string", nil, false},
+		{"the variable is an unquoted number", ref, map[string]string{a23Var: "12345678"}, "not a string", nil, false},
+		{"the variable is an inline !vault value", ref, map[string]string{a23Var: "__INLINE_VAULT__"}, "inline !vault value", nil, false},
+		{"a filter", "{{ " + a23Var + " | default('') }}", map[string]string{a23Var: yamlText(secretish)}, "not exactly one bare", nil, false},
+		{"a name the identity playbook sets itself", "{{ identity_admin_password }}", map[string]string{"identity_admin_password": yamlText(secretish)}, "before the playbook reads the password", nil, false},
+		// ansible-inventory lists an !unsafe string and a literal single-key mapping of that name the
+		// same way, and Ansible sends the first as text and the second as the JSON of a dict, so the
+		// Go engine cannot tell which password the playbook would send: both are refused, from the
+		// encrypted vault the Ansible engine would read.
+		{"the variable is a literal {__ansible_unsafe: ...} mapping", ref, map[string]string{a23Var: "{__ansible_unsafe: " + yamlText(secretish) + "}"}, "__ansible_unsafe", []string{a23Var}, true},
+		{"the variable is an !unsafe string", ref, map[string]string{a23Var: "!unsafe " + yamlText(secretish)}, "__ansible_unsafe", []string{a23Var}, true},
 	} {
 		tg := tg
 		d.arm("A23(e) trigger: "+tg.name, func(a *armCtx) {
@@ -313,14 +321,17 @@ func (d *applyDriver) runA23(base func() rosterDoc) {
 				vars[k] = v
 			}
 			ws := lv.copyWorkspace(withTemplated("p26-tpl", tg.initial), "", nil)
-			if err := lv.vaultWith(ws, vars, false); err != nil {
+			if err := lv.vaultWith(ws, vars, tg.encrypt); err != nil {
 				a.fail("the vault: %v", err)
 				return
 			}
 			r := a.apply(ws)
 			a.exit(r, 3)
 			a.ok(r.HasDoc && !r.Doc.Entry.Ran && r.WriteN == 0, "the run entered or wrote: %v", r.Writes)
-			for _, want := range []string{"p26-tpl", "password.initial", tg.want} {
+			if tg.encrypt {
+				a.ok(r.Doc.Verdict == VerdictBlocked, "the verdict is %q, want blocked", r.Doc.Verdict)
+			}
+			for _, want := range append([]string{"p26-tpl", "password.initial", tg.want}, tg.also...) {
 				a.ok(strings.Contains(r.Out, want), "the refusal does not say %q:\n%s", want, tail(r.Out, 900))
 			}
 			a.noValue(r, secretish)
