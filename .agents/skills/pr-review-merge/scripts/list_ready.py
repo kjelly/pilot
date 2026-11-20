@@ -3,8 +3,9 @@
 
 Left out (listed under `excluded` with the reason), in this order: a PR the merge train owns (`merge-queue`
 label); a PR without a valid Ready signal, that is, one that did not get to Ready through pr-ready's (or
-issue-to-pr's) verification (`ready_signal.assess`: the signal's label, a marker comment bound to the verified
-HEAD and the Ready transition they follow; a PR without the label is excluded without reading its timeline);
+issue-to-pr's) verification (`ready_signal.assess`: the signal's label, a marker comment naming the verified
+HEAD and the one Ready transition it certifies, which must still be the PR's latest; a PR without the label
+is excluded without reading its timeline);
 and a PR waiting for a person (`needs-person` label, while its HEAD is the one the actor's needs-person comment
 names). A PR whose HEAD moved since that comment is listed again with `stale_needs_person: true`: the push may
 have resolved what it waited for, and the next pr-review-merge run removes the stale label.

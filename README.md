@@ -107,14 +107,15 @@ running, not with the environment of the shell that started the runner.
 
 The runner dispatches the Ready phase only for a PR that carries a valid Ready
 signal at its current HEAD: the label `pr-ready-verified` and a comment with a
-marker line for that HEAD, which `pr-ready` (or issue-to-pr's `mark_ready.py`)
+marker line for that HEAD and for the PR's latest Ready transition, which `pr-ready` (or issue-to-pr's `mark_ready.py`)
 writes after it verified the Draft and made it Ready. The signal counts only when
 the account `gh` runs as wrote it, so the runner and the skills must run as the
 same GitHub account, and the label must exist in the repository (a one-time
 maintainer action; nothing here creates labels). A Ready PR without a valid
 signal is `unverified`, for example because it was made Ready by hand or by a
 script that skipped the gate, was created Ready, was pushed to after it was
-signed, or was signed by another account. The runner reads
+signed, went through Draft and Ready again after it was signed, or was signed by
+another account. The runner reads
 the phase twice like any other, dispatches nothing for it, writes nothing to
 GitHub and stops with `PR #N is Ready without a valid pr-ready-verified signal at
 HEAD <h12>: <reason>; ...`; `--dry-run` prints `PR #N: unverified (<reason>)`.

@@ -605,7 +605,8 @@ def ready_signal_gate(client: Any, repo: Repo, number: int, gate: dict[str, Any]
 
     A Ready PR says "quality is already mergeable", and nothing but the producers (pr-ready's `pr_gate.py`,
     issue-to-pr's `mark_ready.py`) check that claim. They sign a PR they verified (`ready_signal`: a label and
-    a marker comment bound to the verified HEAD), and a PR made Ready by hand or by a script that skipped the
+    a marker comment bound to the verified HEAD and to the one Ready transition the producer verified), and a
+    PR made Ready by hand or by a script that skipped the
     verification has no signal, so it is left alone.
 
     Reads the PR (unless the caller passes the `view` it already has), the account `gh` runs as and ONE
@@ -614,7 +615,8 @@ def ready_signal_gate(client: Any, repo: Repo, number: int, gate: dict[str, Any]
     a review carries. It holds for a pure import of the base (the merge train's integration commit, a person's
     merge of the base into the PR branch) and for a delta that touches only the base manifest's
     `evidence_only_paths` (the record then says `carried: evidence-only`). A push that changes any other file
-    of the PR's own commits is not covered, so such a PR has to go through Draft and pr-ready again. Every other
+    of the PR's own commits is not covered, so such a PR has to go through Draft and pr-ready again. A signal for
+    an earlier Ready transition (`stale-epoch`) is never `stale`: it is refused. Every other
     state, a read that fails and a HEAD that moved since the gate judged it is a refusal: fail closed.
 
     On a refusal `gate` becomes WAITING, `transient` and not a hand-off (nothing here resolves by waiting

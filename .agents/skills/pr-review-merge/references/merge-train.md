@@ -106,7 +106,7 @@ itself requires no signal and never reads one (`tests/test_merge_train.py`, `NoS
 
 - It trusts the saved entry, bound to `enqueued_head` and its own `train_commits` (Binding, above), as it
   always did.
-- The integration commit it pushes is exactly what would make a signal bound to the enqueued HEAD stale.
+- The integration commit it pushes is exactly what would make a signal bound to the enqueued HEAD stale. It creates no Ready event, so the Ready transition the signal certifies still matches.
 - A PR enqueued before the check existed is merged as it was enqueued. One that leaves the queue is an
   ordinary Ready PR again: it follows the signal rules, and a PR without a valid signal needs Draft and
   `pr-ready`.

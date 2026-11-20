@@ -1374,6 +1374,60 @@ class LiteralGuardTests(unittest.TestCase):
         # The renderer and the regex are two spellings of one marker: changing the prefix in one breaks this.
         self.assertTrue(re.fullmatch(rs.MARKER.pattern, rs.marker_line(H, rs.PR_READY, R)))
 
+    OPENER = "<!-- pr-ready:verified"
+    FIELDS = ("head=", "ready=", "by=")
+
+    @staticmethod
+    def documents(root):
+        """Every Markdown file under `.agents/` plus the root README: the documents that spell the marker."""
+        return sorted(root.glob(".agents/**/*.md")) + sorted(root.glob("README.md"))
+
+    @classmethod
+    def misspelt(cls, text):
+        """The marker spellings in `text` that do not name `head=`, `ready=` and `by=` in that order before `-->`."""
+        found, at = [], text.find(cls.OPENER)
+        while at != -1:
+            end = text.find("-->", at)
+            spelling = text[at:end] if end != -1 and end - at <= 400 else text[at:at + 120]
+            places = [spelling.find(field) for field in cls.FIELDS]
+            if end == -1 or end - at > 400 or -1 in places or places != sorted(places):
+                found.append(" ".join(spelling.split()))
+            at = text.find(cls.OPENER, at + len(cls.OPENER))
+        return found
+
+    @classmethod
+    def mentions(cls, root):
+        return {f.relative_to(root).as_posix(): f.read_text(encoding="utf-8").count(cls.OPENER)
+                for f in cls.documents(root) if cls.OPENER in f.read_text(encoding="utf-8")}
+
+    def test_docs_spell_the_marker_with_every_field(self):
+        # The marker certifies a Ready transition: a document that still shows `head=` then `by=` teaches a hand-signer
+        # (or a reader of the grammar) a marker that `ready_signal.MARKER` rejects.
+        mentions = self.mentions(REPO_ROOT)
+        self.assertTrue(mentions, "no document mentions the marker: the scan covers nothing")
+        bad = {name: spellings for name in mentions
+               if (spellings := self.misspelt((REPO_ROOT / name).read_text(encoding="utf-8")))}
+        self.assertEqual({}, bad)
+
+    def test_the_docs_guard_fails_on_the_old_grammar_and_passes_on_the_new_one(self):
+        old = f"sign it: `{self.OPENER} head=<sha> by=maintainer -->`"
+        self.assertEqual([f"{self.OPENER} head=<sha> by=maintainer"], self.misspelt(old))
+        swapped = f"{self.OPENER} ready=<id> head=<sha> by=maintainer -->"
+        self.assertEqual([f"{self.OPENER} ready=<id> head=<sha> by=maintainer"], self.misspelt(swapped))
+        self.assertEqual([f"{self.OPENER} head=<sha> ready=<id>"], self.misspelt(f"{self.OPENER} head=<sha> ready=<id> -->"))
+        self.assertEqual([], self.misspelt(f"{self.OPENER} head=<40 hex, lower> ready=<id> by=<producer> -->"))
+        # One good and one old spelling in the same file: the old one is still found.
+        both = f"`{self.OPENER} head=<h> ready=<id> by=x -->` and `{self.OPENER} head=<h> by=x -->`"
+        self.assertEqual([f"{self.OPENER} head=<h> by=x"], self.misspelt(both))
+        # An opener with no closing `-->` is a refusal too.
+        self.assertEqual(1, len(self.misspelt(f"{self.OPENER} head=<h> ready=<id> by=x")))
+
+    def test_the_docs_guard_scans_the_skill_documents_and_the_readme(self):
+        names = set(self.mentions(REPO_ROOT))
+        for needed in (".agents/skills/pr-ready/README.md", ".agents/skills/pr-ready/SKILL.md",
+                       ".agents/skills/issue-to-pr/SKILL.md", ".agents/skills/pr-review-merge/SKILL.md"):
+            self.assertIn(needed, names)
+
 
 class ModelImportCostTests(unittest.TestCase):
     """A fake `gh` is a new interpreter per call, with no bytecode cache, and imports the model on the calls that need
