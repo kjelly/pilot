@@ -44,6 +44,41 @@ func TestLiveGoApplyDriver(t *testing.T) {
 	if base == "" {
 		t.Skip("PILOT_IDENTITY_ENGINE_LIVE_APPLY is not set")
 	}
+	lv := newLiveLab(t, base)
+	repo := lv.repo
+	summary := &applySummary{Revision: gitOut(t, repo, "rev-parse", "HEAD"), Tree: gitOut(t, repo, "rev-parse", "HEAD^{tree}"), BaseSnapshot: base, MaxBatch: MaxBatch}
+	defer func() { writeApplySummary(t, summary) }()
+	want := map[string]bool{}
+	for _, a := range strings.Split(os.Getenv("PILOT_IDENTITY_ENGINE_LIVE_ARMS"), ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			want[a] = true
+		}
+	}
+	selected := func(name string) bool {
+		if len(want) == 0 {
+			return true
+		}
+		for w := range want {
+			if strings.HasPrefix(name, w) {
+				return true
+			}
+		}
+		return false
+	}
+	d := &applyDriver{lv: lv, summary: summary, selected: selected, pws: map[string]string{}}
+	d.runAll()
+	for _, arm := range summary.Arms {
+		if !arm.Pass && !arm.Skipped {
+			t.Errorf("arm %s failed: %s", arm.Name, strings.Join(arm.Failures, "; "))
+		}
+	}
+}
+
+// newLiveLab is the lab of the live drivers (TestLiveGoApplyDriver, TestLiveHBACDriver): the two VMs the
+// environment names, the pilot binaries built from the repository the test runs in, and the oracle key the
+// roster users' ssh_keys carry. base is the snapshot tag both VMs are first reverted to.
+func newLiveLab(t *testing.T, base string) *labEnv {
+	t.Helper()
 	repo, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -78,32 +113,7 @@ func TestLiveGoApplyDriver(t *testing.T) {
 	}
 	lv.pub = strings.TrimSpace(string(pub))
 
-	summary := &applySummary{Revision: gitOut(t, repo, "rev-parse", "HEAD"), Tree: gitOut(t, repo, "rev-parse", "HEAD^{tree}"), BaseSnapshot: base, MaxBatch: MaxBatch}
-	defer func() { writeApplySummary(t, summary) }()
-	want := map[string]bool{}
-	for _, a := range strings.Split(os.Getenv("PILOT_IDENTITY_ENGINE_LIVE_ARMS"), ",") {
-		if a = strings.TrimSpace(a); a != "" {
-			want[a] = true
-		}
-	}
-	selected := func(name string) bool {
-		if len(want) == 0 {
-			return true
-		}
-		for w := range want {
-			if strings.HasPrefix(name, w) {
-				return true
-			}
-		}
-		return false
-	}
-	d := &applyDriver{lv: lv, summary: summary, selected: selected, pws: map[string]string{}}
-	d.runAll()
-	for _, arm := range summary.Arms {
-		if !arm.Pass && !arm.Skipped {
-			t.Errorf("arm %s failed: %s", arm.Name, strings.Join(arm.Failures, "; "))
-		}
-	}
+	return lv
 }
 
 // ---- the summary ----
