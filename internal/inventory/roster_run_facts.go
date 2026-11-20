@@ -28,8 +28,11 @@ import (
 // value that came through the {"__ansible_unsafe": x} marker: a genuine !unsafe
 // string and a literal mapping of that shape list identically, so it is refused
 // (PasswordReasonUnsafeMarker). ServerDeclared and AdminPasswordProvided still
-// read through the marker, as they always have: the text decides nothing there
-// that the mapping would decide differently.
+// read through the marker (pre-existing, unchanged here, tracked in #358). Their
+// reading differs from Ansible's when the text is blank (ServerDeclared: a
+// literal mapping is declared) or empty (AdminPasswordProvided: a literal
+// mapping is a non-empty dict, so truthy); on ansible-core 2.19.2 a genuine
+// !unsafe "" lists as null, so an empty text there is always a literal mapping.
 
 // maxRunVarHops bounds the chain of bare references one lookup follows.
 const maxRunVarHops = 8
