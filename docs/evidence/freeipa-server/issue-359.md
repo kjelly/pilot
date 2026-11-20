@@ -4150,7 +4150,7 @@ Scanned every captured step output for 3 secret-named value(s) (`/tmp/claude-100
 - The `--topology` is a per-run copy of the committed `docs/topologies/site-day2-roles-topology.yaml`. Its nodes are renamed from `i362-*` to `i359-*`; the FQDNs come from the playbooks' defaults (`ipa1.`/`ipa2.<domain>`), not from node names.
 - The three nodes were created by `topology up --fresh` immediately before the chain, so L3 ran on never-applied hosts.
 - The vault (`-e @…`) held synthetic values generated at run time with Python `secrets`. It was stored 0600 outside the repository, and no value was ever printed.
-  - `ipa_admin_password` and `ipa_dm_password` are different values. Each has 31 printable ASCII characters, starts with `~/`, and contains `$HOME` followed by `-` and also `${HOME}`. These are the forms the command module expands by default.
+  - `ipa_admin_password` and `ipa_dm_password` are different values of random printable ASCII characters. Each was built to include the three forms the command module expands by default: a leading `~/`, `$HOME` followed by a non-word character, and `${HOME}`.
   - `ipa_enroll_password` was left unset, so it defaults to the admin password.
   - `node_exporter_basic_auth_password` is plain alphanumeric.
 - Besides the redaction scan above, a grep of every captured log and of this record for the three values found 0 hits.
@@ -4184,7 +4184,7 @@ On base, both the admin password and the DM password the realm received were the
 
 - **Realm replacement.** The enroll task in `freeipa-realm-replacement-apply.yml` is a one-time migration that is not in `site.yml`. Only `TestRegression_FreeIPAInstallerArgvPassesPasswordUnchanged` covers it, with real `ansible-playbook` and a fake installer; it did not run on a VM.
 - **Expansion forms.** A leading `~` changes only an argv element that is the whole secret: the server's `-p` and `-a`. For `--password=` and `--admin-password=` only the `$` forms change. The VM values exercised both kinds.
-- **Other characters.** Quotes, inner spaces, backslash, `%`, backticks and `$(...)` were exercised only in the harness. FreeIPA's own validators reject `\` and non-printable characters in the server passwords, so those are not usable values there.
+- **Other characters.** Quotes, inner spaces, backslash, `%`, backticks and `$(...)` were exercised only in the harness. Per the FreeIPA 4.13.4 source (`validate_dm_password`, `validate_admin_password` in `ipaserver/install/server/install.py`), `ipa-server-install` rejects `\` and non-printable characters in these passwords, so those values were not used on the VMs.
 - **Directory Manager.** The DM bind was probed on the primary only.
 - **Ansible version.** The controller ran ansible-core 2.19.2 (the CI pin); 2.20 was not used on the VMs.
 - **Existing realms.** A realm installed before this fix with such a password keeps the expanded value. The base arm shows that state; the recovery (resetting the admin and DM passwords to the vault values) was not exercised.
