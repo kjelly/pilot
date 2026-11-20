@@ -164,24 +164,28 @@ task 的 `fatal:` 結果行被 no_log 遮蔽，所以失敗發生在執行到一
   單純引用最多 8 層；值必須是非空字串。其他一律以 `password_value_unsupported` 擋下，結束碼 3、
   零寫入：filter、`lookup`、前後有文字或屬性存取的範本、roster 裡的行內 `!vault`、變數未定義、
   是空字串、不是字串（數字、布林、list、`null`）、值本身是行內 `!vault` 或不是單純引用的範本、
-  循環或更長的引用鏈（Ansible 解得開遠長於 8 層的鏈，pilot 在 8 層之後就拒絕）、以及這支 playbook 在
+  值（或引用鏈的結尾）是 vars 端的 `!unsafe` 字串，或是只有 `__ansible_unsafe` 這一個 key 的字面
+  mapping（原因 `unsafe-marker`，見下）、循環或更長的引用鏈（Ansible 解得開遠長於 8 層的鏈，pilot 在 8 層之後就拒絕）、以及這支 playbook 在
   讀密碼之前自己定義的名稱（例如 `identity_admin_password`、`ipa_domain`）或 pilot 自己用 `-e` 傳的
   名稱（例如 `freeipa_roster_file`、`target_group`），因為 inventory 裡同名的值不是 playbook 會送的值；
   Ansible 保留給自己的名稱（magic 變數、`ansible_*`、`role_*`、Jinja 的全域）也不解，訊息說的是
   Ansible 保留這個名稱，不是有人定義了它。`item`（loop 變數）同樣被拒，但那只是保守：名冊的範本在
   loop 變數存在之前就 render，Ansible 送的其實是 inventory 的 `item`。訊息點名使用者、`password.initial`、原因，以及
-  單純引用的變數名稱，不含任何值。`!unsafe` 標在值之上時送字面文字，與 Ansible 一致；被 alias 或
-  merge key 在 `!unsafe` 與一般 YAML 之間共用的值不送。沒有密碼操作的使用者（已經有密碼、
+  單純引用的變數名稱，不含任何值。`!unsafe` 標在 roster 裡的 `password.initial`（或它之上的 mapping、
+  list、文件）時送字面文字，與 Ansible 一致；被 alias 或 merge key 在 `!unsafe` 與一般 YAML 之間共用的
+  值不送。**vars 端**（`.vault/main.yaml`、group_vars 等）的 `!unsafe` 字串不送：`ansible-inventory --list`
+  把真正的 `!unsafe "x"` 與字面的 `{__ansible_unsafe: x}` mapping 都印成 `{"__ansible_unsafe": "x"}`，
+  Ansible 對前者送文字 `x`、對後者送那個 dict 的 JSON，從列出來的結果分不出是哪一個，所以兩者（含引用鏈
+  的結尾）都以 `unsafe-marker` 擋下，訊息點名使用者、變數與 `__ansible_unsafe`；要用的話把密碼寫在 roster 裡
+  （加引號，或在 roster 裡標 `!unsafe`），或改用 Ansible engine。沒有密碼操作的使用者（已經有密碼、
   `preserve_existing` 預設）不會因為它的引用解不出而被擋。`ansible-inventory` 讀不出 run 的變數時，
   錯誤文字不顯示（它可能引用 vault 檔的內容）。混合 run（`--scope full`）走同一個 preflight，
   但 Ansible engine 的引用檢查（上一點）先拒絕沒人定義的名稱，結束碼 1。這條路徑的 live 驗證
   （`TestLiveGoApplyDriver` 的 arm A23）的紀錄見 evidence 索引
   [LATEST](../evidence/freeipa-go-reconcile/LATEST.md)，這份 runbook 不記結果。已知限制：
-  (a) vars 檔裡一個只有 `__ansible_unsafe` 這一個 key 的字面 mapping，在 `ansible-inventory --list`
-  裡讀起來與 `!unsafe x` 完全一樣，所以 Go 會送 `x`，而 Ansible 送的是那個 JSON 物件（對 Ansible
-  內部標記的刻意模仿，與 #358 的第 5 點同類）；(b) 送不送的判斷是對 ansible-core 2.19.2 驗證的，
+  (a) 送不送的判斷是對 ansible-core 2.19.2 驗證的，
   那是 pilot-cli image 釘住的版本（`2.19.*`），原生 controller 上的其他 ansible-core 版本沒有驗證；
-  (c) 這台主機的 run 變數（解密後的值）在整次執行期間留在記憶體裡，所有 formatter 都不印它們。
+  (b) 這台主機的 run 變數（解密後的值）在整次執行期間留在記憶體裡，所有 formatter 都不印它們。
 - 判斷優先順序是「寧可不判斷，也不拒絕一個能跑的 run」：拒絕的集合必須是 Ansible 會因 undefined
   失敗的集合的子集。`freeipa.server` 或 `ipa_admin_password` 如果剛好是單獨一個 `{{ name }}`
   （含 `{{- name -}}`，沒有屬性、filter 或前後文字），就用這次執行實際生效的變數（
