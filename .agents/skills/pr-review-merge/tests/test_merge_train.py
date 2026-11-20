@@ -5,6 +5,7 @@ clone. The fake GitHub client reads PR HEAD, base tip, ancestry, file lists and 
 (as GitHub would), so the review-coverage and alignment checks run for real against the merge commit
 the train pushes. Only CI, labels, comments, Draft and merge are simulated.
 """
+import ast
 import contextlib
 import json
 import os
@@ -16,7 +17,11 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+# The shared model of a PR's Ready-signal state (timeline, label, viewer), behind the fake's reads and label writes.
+# Appended: _shared/tests has a test_secret_scan of its own, which must not shadow this directory's under discovery.
+sys.path.append(str(Path(__file__).resolve().parents[2] / '_shared' / 'tests'))
 import merge_train  # noqa: E402
+import ready_signal_world as rw  # noqa: E402
 import review_gate  # noqa: E402
 from gh_runtime import CompareLimitError, GitHubError, Repo  # noqa: E402
 from scan_stub import CleanScan  # noqa: E402
@@ -72,6 +77,10 @@ class FakeGitHub:
         self.pull_ref = {}     # number -> commit refs/pull/<n>/head shows (GitHub lags the branch)
         self.manifest = None   # text of .github/pr-evidence.json at every revision, or None (absent)
         self.rules = []
+        # The Ready signal (the shared ready_signal_world model) of the PRs a test signs: number -> World. The
+        # train never reads it; the fake answers the reads anyway so that a train that did read it is seen in `calls`.
+        self.signals = {}
+        self.failing_labels = {}   # label name -> exception raised by a write of that label (queue label writes: none)
 
     def outage(self, name):
         self.calls.append(name)
@@ -103,6 +112,7 @@ class FakeGitHub:
             state = 'OPEN'
         if draft and self.lagging('draft'):
             draft = False
+        signal_labels = self.signals[number].view_labels() if number in self.signals else []
         return {'number': number, 'url': f'https://github.com/acme/demo/pull/{number}', 'state': state,
                 'isDraft': draft, 'headRefOid': head, 'headRefName': pr['branch'],
                 'isCrossRepository': pr.get('cross', False), 'baseRefOid': pr['base'],
@@ -111,7 +121,7 @@ class FakeGitHub:
                 'mergeStateStatus': pr.get('merge_state') or (
                     'DIRTY' if pr.get('mergeable') == 'CONFLICTING' else 'CLEAN'),
                 'reviewDecision': pr.get('review', ''), 'autoMergeRequest': None,
-                'labels': [{'name': 'merge-queue'}] if labelled else []}
+                'labels': ([{'name': 'merge-queue'}] if labelled else []) + signal_labels}
 
     def branch_head(self, repo, name):
         self.outage('branch_head')
@@ -168,6 +178,21 @@ class FakeGitHub:
         self.outage('branch_rules')
         return self.rules
 
+    def signal(self, number=42):
+        """The Ready-signal state of PR `number` (a ready_signal_world.World; the PR's HEAD is the one it was
+        created with, which only `assess` callers that pass their own head care about)."""
+        if number not in self.signals:
+            self.signals[number] = rw.World(viewer='prm-bot', number=number)
+        return self.signals[number]
+
+    def viewer_login(self, repo):
+        self.outage('viewer_login')
+        return self.signal().s['viewer']
+
+    def timeline_events(self, repo, number):
+        self.outage('timeline_events')
+        return self.signal(number).timeline()
+
     # queue
     def labeled_open_prs(self, repo, label):
         self.outage('labeled_open_prs')
@@ -188,6 +213,14 @@ class FakeGitHub:
     # writes
     def edit_label(self, repo, number, label, *, add):
         self.outage('edit_label')
+        if label == rw.LABEL:
+            # The Ready signal's label lives in the shared model (it is an event on the PR's timeline); the
+            # queue label's bookkeeping below is not touched.
+            self.writes.append(('ready-label+' if add else 'ready-label-', number))
+            if label in self.failing_labels:
+                raise self.failing_labels[label]
+            self.signal(number).label(None, add=add, name=label)
+            return
         self.writes.append(('label+' if add else 'label-', number))
         self.label_before[number] = number in self.labels
         self.stale['label_view'] = self.lag.get('label_view', 0)
@@ -299,6 +332,14 @@ class TrainHarness(unittest.TestCase):
                 'live_base_sha': self.gh.branch_head(REPO, 'main')}
         merge_train.enqueue(REPO, number, dict(self.evidence(head), pr=number), gate, client=self.gh)
         return head
+
+    def sign(self, head=None, number=42, **kw):
+        """Draft -> Ready, then a complete Ready signal for `head` (the PR's reviewed HEAD by default), written by the
+        account the fake's viewer is, as a producer leaves a PR. Returns the signal's ready_signal_world.World."""
+        world = self.gh.signal(number)
+        world.ready()
+        world.signal(head or self.reviewed, **kw)
+        return world
 
     def lock_hook(self, action):
         """A mutation lock that runs `action` as it is first taken: the moment between a check made before
@@ -1460,6 +1501,117 @@ class ZeroChecksTests(TrainHarness):
                     out = self.train(registration_grace=300).run()
                 self.assertEqual(('INFRA', 'GitHubError', []), (out['status'], out['error_kind'], out['results']), out)
                 self.assertStillQueued()
+
+
+class ReadySignalTests(DeliveryTests):
+    """The train needs no Ready signal, and takes the label off a PR it returns to Draft (the actor refuses a PR
+    without a valid signal BEFORE it queues it; see test_ready_signal_gate.py)."""
+
+    def overlap(self):
+        """Queue the PR, then let main change the file the PR changed: the train returns the PR to Draft."""
+        self.queue()
+        self.advance_main('pkg/a.go', 'package a // main change\n')
+
+    def labels(self):
+        return [label['name'] for label in self.gh.pr_view(REPO, 42)['labels']]
+
+    def read_the_signal(self):
+        return [call for call in self.gh.calls if call in ('timeline_events', 'viewer_login')]
+
+    def test_an_integrated_head_merges_with_the_marker_at_the_enqueued_head(self):
+        world = self.sign()
+        self.queue()
+        live = self.advance_main()
+        out = self.train().run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        head = self.gh.head(42)
+        self.assertEqual(f'{self.reviewed} {live}', git(self.origin, 'log', '-1', '--format=%P', head), 'the train pushed it')
+        # The precondition that makes this a test: the signal names the enqueued HEAD, not the one that merged.
+        shown = review_gate.ready_signal.assess(head, world.view_labels(), world.s['events'], 'prm-bot')
+        self.assertEqual(('stale', self.reviewed), (shown.state, shown.marker_head))
+        self.assertEqual([], self.read_the_signal(), 'the train never reads the signal')
+
+    def test_a_pr_queued_without_any_signal_is_merged_unchanged(self):
+        # Queued by an actor that predates the signal, or by hand: the train trusts its saved entry.
+        self.queue()
+        self.assertEqual({}, self.gh.signals)
+        out = self.train().run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        self.assertEqual([], self.read_the_signal())
+
+    def test_a_draft_takes_the_ready_label_off_after_the_draft_is_confirmed(self):
+        self.sign()
+        self.overlap()
+        train = self.train()
+        out = train.run()
+        self.assertEqual(['DRAFTED'], [r['outcome'] for r in out['results']], out)
+        # Draft first, then the queue label, then the signal's label: nothing goes before the Draft stands.
+        self.assertEqual(['comment', 'draft', 'label-', 'ready-label-'], [w[0] for w in self.gh.writes[2:]])
+        self.assertNotIn(rw.LABEL, self.labels())
+        self.assertIsNone(merge_train.load_entry(REPO, 42))
+        self.assertEqual([], self.read_the_signal())
+
+    def test_a_draft_that_is_never_shown_keeps_the_label(self):
+        self.sign()
+        self.overlap()
+        self.gh.lag['draft'] = 10 ** 6
+        out = self.train().run()
+        self.assertEqual(['ERROR'], [r['outcome'] for r in out['results']], out)
+        self.assertEqual('draft-unconfirmed', out['results'][0]['kind'])
+        self.assertEqual(['comment', 'draft'], [w[0] for w in self.gh.writes[2:]], 'no label is touched')
+        self.assertIn(rw.LABEL, self.labels())
+
+    def test_a_label_that_cannot_be_removed_is_logged_and_changes_nothing_else(self):
+        self.sign()
+        self.overlap()
+        self.gh.failing_labels[rw.LABEL] = GitHubError('gh pr edit failed (1): HTTP 502')
+        train = self.train()
+        out = train.run()
+        self.assertEqual(('DONE', ['DRAFTED']), (out['status'], [r['outcome'] for r in out['results']]), out)
+        self.assertEqual(['comment', 'draft', 'label-', 'ready-label-'], [w[0] for w in self.gh.writes[2:]])
+        self.assertIsNone(merge_train.load_entry(REPO, 42), 'the entry is dropped before the label is touched')
+        self.assertTrue([line for line in train.log if 'could not be removed' in line and 'HTTP 502' in line], train.log)
+        self.assertEqual(3, self.gh.counts['edit_label'], 'the enqueue, the queue label, and ONE attempt at the signal label')
+
+    def test_a_draft_of_a_pr_without_the_label_writes_nothing_more(self):
+        # The control of the three tests above (it is what test_overlap_and_conflict... asserts for every PR).
+        self.overlap()
+        out = self.train().run()
+        self.assertEqual(['DRAFTED'], [r['outcome'] for r in out['results']], out)
+        self.assertEqual(['comment', 'draft', 'label-'], [w[0] for w in self.gh.writes[2:]])
+
+
+class NoSignalRequirementTests(unittest.TestCase):
+    """Structure: the train and the gate it calls on its own commits name no Ready signal."""
+
+    SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
+
+    def test_merge_train_never_references_the_ready_signal(self):
+        source = (self.SCRIPTS / 'merge_train.py').read_text()
+        tree = ast.parse(source)
+        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        names |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        names |= {alias.name for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names}
+        names |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+        self.assertEqual(set(), {'ready_signal', 'ready_signal_gate'} & names)
+        self.assertNotIn('ready_signal', source, 'not even in a comment or a string: the train needs no signal')
+
+    def test_only_the_actor_and_the_cli_ask_for_the_signal(self):
+        # Every place in review_gate.py that touches the signal module: `evaluate` and what it calls must not be one.
+        tree = ast.parse((self.SCRIPTS / 'review_gate.py').read_text())
+        users = set()
+        for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+            for node in ast.walk(function):
+                if isinstance(node, ast.Name) and node.id in ('ready_signal', 'ready_signal_gate'):
+                    users.add(function.name)
+        self.assertEqual({'ready_signal_gate', 'main'}, users)
+
+    def test_the_gate_the_train_calls_names_no_signal(self):
+        # The same property as a behaviour: evaluate answers for a PR nobody signed (test_ready_signal_gate.py
+        # asserts it reads neither the account nor a timeline).
+        import inspect
+        for function in (review_gate.evaluate, review_gate._evaluate, review_gate.review_covers):
+            self.assertNotIn('ready_signal', inspect.getsource(function))
 
 
 if __name__ == '__main__':

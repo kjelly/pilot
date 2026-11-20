@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Read-only, fail-closed GitHub pull-request review quality gate."""
+"""Read-only, fail-closed GitHub pull-request review quality gate.
+
+Run as a command it also asks whether the Ready PR got to Ready through pr-ready's (or issue-to-pr's) verification
+(`ready_signal_gate`); a PR without a valid signal is WAITING, `transient`, with the way back as its reason.
+"""
 from __future__ import annotations
 import argparse
 import importlib.util
@@ -14,12 +18,22 @@ from typing import Any, Sequence
 sys.dont_write_bytecode = True
 from gh_runtime import CompareLimitError, GitHubError, Repo, branch_rules, current_repo, pr_checks, pr_view, unresolved_threads
 
+# The Ready signal (`_shared/scripts/ready_signal.py`) lives in the `_shared` bundle directory, like the secret
+# scanner below; it is a plain module, so it goes on the import path after the sibling modules.
+_SHARED_SCRIPTS = str(Path(__file__).resolve().parents[2] / "_shared" / "scripts")
+if _SHARED_SCRIPTS not in sys.path:
+    sys.path.append(_SHARED_SCRIPTS)
+import ready_signal  # noqa: E402
+
 COVERAGE = ("requirements", "correctness", "architecture", "security", "concurrency",
             "edge_cases", "semantic_regression", "tests")
 SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 SEVERITIES = ("P0", "P1", "P2", "P3", "P4")
 TARGET_DECISIONS = ("required", "not-needed", "blocked")
 TARGET_BLOCKED = "target validation is blocked"
+# The label the Ready signal puts on a PR. The merge train takes it off a PR it returns to Draft and must not
+# import the signal module (it needs no signal), so it reads the name here.
+READY_LABEL = ready_signal.LABEL
 # Same floor as issue-to-pr's `not-applicable` reason and `unrelated_failing_checks`.
 TARGET_REASON_MIN = 30
 REPO_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "issue-to-pr" / "scripts" / "repo_evidence.py"
@@ -578,6 +592,87 @@ class WaitKinds:
         return "transient" if any(r in self.transient for r in reasons) else "person"
 
 
+# What a refusal tells the person who owns the PR. Converting to Draft is the only way back: pr-ready and
+# mark_ready.py refuse a PR that is not a Draft, so a PR that is Ready without a valid signal cannot be signed
+# where it stands.
+RECOVERY = ("Convert the PR to Draft and run `pr-ready` again (issue-to-pr's `mark_ready.py` does the same for "
+            "its PRs): that verifies it at its current HEAD and signs it.")
+
+
+def ready_signal_gate(client: Any, repo: Repo, number: int, gate: dict[str, Any],
+                      view: dict[str, Any] | None = None) -> str | None:
+    """Whether automation may act on this Ready PR: None when it may, otherwise the refusal.
+
+    A Ready PR says "quality is already mergeable", and nothing but the producers (pr-ready's `pr_gate.py`,
+    issue-to-pr's `mark_ready.py`) check that claim. They sign a PR they verified (`ready_signal`: a label and
+    a marker comment bound to the verified HEAD), and a PR made Ready by hand or by a script that skipped the
+    verification has no signal, so it is left alone.
+
+    Reads the PR (unless the caller passes the `view` it already has), the account `gh` runs as and ONE
+    timeline, and asks `ready_signal.assess`. `valid` passes. `stale` (the signal names an earlier HEAD)
+    passes only when `review_covers` says that HEAD is covered by the current one: the relation under which
+    a review carries across the merge train's integration commit, which a person's merge of the base into the
+    PR branch satisfies too. A push that changes the PR's own commits does not, so such a PR has to go through
+    Draft and pr-ready again. Every other state, a read that fails and a HEAD that moved since the gate judged
+    it is a refusal: fail closed.
+
+    On a refusal `gate` becomes WAITING, `transient` and not a hand-off (nothing here resolves by waiting
+    for a person; the recovery is the producer's), with the refusal as its one reason, and its earlier
+    decision and reasons under `underlying`. Either way `gate["ready_signal"]` records what was seen. This
+    is a gate of the actor and of the read-only CLI, never of `evaluate`: the merge train calls `evaluate` on
+    the integration commits it pushes itself, which a signal bound to the enqueued HEAD would refuse.
+    """
+    kinds = WaitKinds()
+    seen: dict[str, Any] = {}
+    retry: str | None = None      # nothing is known about the signal: look again
+    refused: str | None = None    # the signal is what it is: it does not count
+    head = ""
+    try:
+        if view is None:
+            view = client.pr_view(repo, number)
+        head, judged = view.get("headRefOid"), gate.get("head_sha")
+        if isinstance(judged, str) and isinstance(head, str) and judged.lower() != head.lower():
+            retry = f"the PR HEAD changed from {judged[:12]} to {head[:12]} after the gate judged it"
+        else:
+            found = ready_signal.assess(head, view.get("labels"), client.timeline_events(repo, number),
+                                        client.viewer_login(repo))
+            seen = {"state": found.state, "reason": found.reason, "marker_head": found.marker_head,
+                    "producer": found.producer}
+            if found.state == "stale":
+                live_base, base_name = gate.get("live_base_sha"), gate.get("base_name")
+                if not isinstance(live_base, str) or not isinstance(base_name, str) or not base_name:
+                    refused = f"{found.reason}, and the gate has no live base to show that the new HEAD covers it"
+                else:
+                    covered, covers = review_covers(client, repo, found.marker_head, head.lower(), live_base,
+                                                    base_name)
+                    if covered is None:
+                        refused = f"{found.reason}, and the PR changed since in more than a base import ({covers})"
+                    else:
+                        # An evidence-only delta is the one coverage that carries no `method` in its record.
+                        seen["carried"] = covered.get("method") or "evidence-only"
+            elif not found.valid:
+                refused = f"{found.state}: {found.reason}"
+    except (GitHubError, ValueError, KeyError) as exc:
+        # A read that failed says nothing about the PR; ValueError includes ready_signal.SignalError (a
+        # timeline entry of an unexpected shape). Both are refusals: an unread signal is not a valid one.
+        retry = f"cannot read the signal: {exc}"
+    gate["ready_signal"] = seen
+    if retry is None and refused is None:
+        return None
+    # What to do comes before why: the pr-loop keeps the first 600 characters of a reason (pr_loop_result.write_result),
+    # and the why can be as long as a GitHub error or a list of paths.
+    refusal = (f"Unable to verify the Ready signal; nothing was changed, run again. Why: {retry}." if retry else
+               f"No valid Ready signal at HEAD {str(head)[:12]}. Nothing was changed. {RECOVERY} Why: {refused}. "
+               f"Automation acts on a Ready PR only after pr-ready or mark_ready.py verified and signed it (the "
+               f"`{READY_LABEL}` label and its marker comment, both written by the account that runs this tool).")
+    gate["underlying"] = {"decision": gate.get("decision"), "reasons": list(gate.get("reasons", []))}
+    gate["decision"] = "WAITING"
+    gate["reasons"] = [kinds.later(refusal)]
+    gate["wait_kind"] = kinds.kind(gate["reasons"])
+    gate["person_handoff"] = kinds.handoff(gate["reasons"])
+    return refusal
+
+
 def actions_workflows(entries: dict[str, Any]) -> list[str]:
     """The GitHub Actions workflow files in a Git tree (path -> entry): `.github/workflows/*.yml` or
     `*.yaml`, directly in that directory (GitHub does not read subdirectories)."""
@@ -974,8 +1069,12 @@ def main() -> int:
     try:
         if args.pr <= 0:
             raise ValueError("PR number must be positive")
-        result = evaluate(resolve_repo(args.repo), args.pr, load_evidence(args.evidence),
+        repo = resolve_repo(args.repo)
+        result = evaluate(repo, args.pr, load_evidence(args.evidence),
                           worktree=args.worktree, secret_files=args.secret_file)
+        if result["decision"] != "SKIP":
+            import gh_runtime
+            ready_signal_gate(gh_runtime, repo, args.pr, result)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["decision"] == "MERGE" else 1
     except (ValueError, GitHubError) as exc:
