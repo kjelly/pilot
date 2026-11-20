@@ -95,7 +95,7 @@ func TestExecuteHBACLockdownDisablesAllowAllAfterTheProofsHold(t *testing.T) {
 			t.Errorf("proof asked %v", p.opts)
 		}
 	}
-	// The order of the calls: the roster's own disable (parked, H6), then the proof, the
+	// The order of the calls: the roster's own disable (parked, H3), then the proof, the
 	// disable of allow_all and the proof again; no rollback.
 	var order []string
 	for _, m := range e.f.methods() {

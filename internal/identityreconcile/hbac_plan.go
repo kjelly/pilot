@@ -11,17 +11,21 @@ import (
 
 // The HBAC plan (Phase 3a: docs/superpowers/specs/2026-11-19-freeipa-go-reconcile-phase3-hbac-spec.md
 // §4). It is the playbook's HBAC section as operations, in the playbook's order:
-// services, rules, the removal of members the rule no longer names (only on that
-// rule), the categories, the additions, enable and disable, deletion, and last the
-// lockdown of allow_all.
+// services, rules, then what narrows access (the disable of a rule the roster wants
+// disabled, the removal of members the rule no longer names, only on that rule), the
+// categories, the additions, the enable of a rule the roster wants enabled, deletion,
+// and last the lockdown of allow_all.
 
 // HBAC operation kinds, in the order a plan lists them. Removals come before the
 // categories and the additions come after them: a category and members exclude each
 // other (K3), so a rule that goes from hosts to hostcat all must lose its hosts
-// first, and one that goes the other way must lose the category first.
+// first, and one that goes the other way must lose the category first. The disable of
+// a rule the roster wants disabled comes before every change that can widen the rule
+// (categories, additions) and the enable of a rule the roster wants enabled after them.
 const (
 	KindHBACServiceCreate     = "hbac.service.create"
 	KindHBACRuleCreate        = "hbac.rule.create"
+	KindHBACRuleDisable       = "hbac.rule.disable"
 	KindHBACHostRemove        = "hbac.rule.member_host.remove"
 	KindHBACHostgroupRemove   = "hbac.rule.member_hostgroup.remove"
 	KindHBACServiceRemove     = "hbac.rule.member_service.remove"
@@ -34,7 +38,6 @@ const (
 	KindHBACUserAdd           = "hbac.rule.member_user.add"
 	KindHBACGroupAdd          = "hbac.rule.member_group.add"
 	KindHBACRuleEnable        = "hbac.rule.enable"
-	KindHBACRuleDisable       = "hbac.rule.disable"
 	KindHBACRuleDelete        = "hbac.rule.delete"
 	KindHBACAllowAllDisable   = "hbac.allow_all.disable"
 	hbacRuleNameAllowAll      = "allow_all"
@@ -51,11 +54,11 @@ const (
 
 // HBACKinds is every HBAC operation kind, in plan order.
 var HBACKinds = []string{
-	KindHBACServiceCreate, KindHBACRuleCreate,
+	KindHBACServiceCreate, KindHBACRuleCreate, KindHBACRuleDisable,
 	KindHBACHostRemove, KindHBACHostgroupRemove, KindHBACServiceRemove, KindHBACUserRemove, KindHBACGroupRemove,
 	KindHBACCategoryUpdate,
 	KindHBACHostgroupAdd, KindHBACHostAdd, KindHBACServiceAdd, KindHBACUserAdd, KindHBACGroupAdd,
-	KindHBACRuleEnable, KindHBACRuleDisable, KindHBACRuleDelete, KindHBACAllowAllDisable,
+	KindHBACRuleEnable, KindHBACRuleDelete, KindHBACAllowAllDisable,
 }
 
 // Reasons an HBAC object is blocked instead of planned (spec §4.2). The collision
@@ -354,11 +357,23 @@ func (b *hbacBuilder) rule(r DesiredHBACRule, key string) {
 		return out
 	}
 
-	b.members(key, live, deps, KindHBACHostRemove, KindHBACHostAdd, live.Hosts, hosts, nil)
-	b.members(key, live, deps, KindHBACHostgroupRemove, KindHBACHostgroupAdd, live.Hostgroups, r.Hostgroups, nil)
-	b.members(key, live, deps, KindHBACServiceRemove, KindHBACServiceAdd, live.Services, r.Services, b.createdSv)
-	b.members(key, live, deps, KindHBACUserRemove, KindHBACUserAdd, live.Users, r.Users, nil)
-	b.members(key, live, deps, KindHBACGroupRemove, KindHBACGroupAdd, live.Groups, r.Groups, nil)
+	// A rule the roster wants disabled and that is enabled now (a rule this run creates is
+	// enabled until then) is disabled before anything else is done to it: its members and
+	// categories can only widen access, and a run that stops half way must not leave the
+	// rule enabled with them (spec §4.3). Its operations wait for the disable. Enabling a
+	// rule the roster wants enabled is the opposite: it comes last (below).
+	var disable string
+	if live.Enabled && !r.Enabled {
+		disable = b.add(Operation{Kind: KindHBACRuleDisable, Object: key, Fields: map[string]Change{hbacFieldEnabled: {From: true, To: false}}, DependsOn: deps()})
+		inner := deps
+		deps = func(extra ...string) []string { return append(inner(extra...), disable) }
+	}
+	var converge []string // what the rule's enable waits for
+	converge = append(converge, b.members(key, live, deps, KindHBACHostRemove, KindHBACHostAdd, live.Hosts, hosts, nil)...)
+	converge = append(converge, b.members(key, live, deps, KindHBACHostgroupRemove, KindHBACHostgroupAdd, live.Hostgroups, r.Hostgroups, nil)...)
+	converge = append(converge, b.members(key, live, deps, KindHBACServiceRemove, KindHBACServiceAdd, live.Services, r.Services, b.createdSv)...)
+	converge = append(converge, b.members(key, live, deps, KindHBACUserRemove, KindHBACUserAdd, live.Users, r.Users, nil)...)
+	converge = append(converge, b.members(key, live, deps, KindHBACGroupRemove, KindHBACGroupAdd, live.Groups, r.Groups, nil)...)
 
 	// The categories: the roster rule has services (the validator requires one), so
 	// its service category is cleared; its host category is all or cleared.
@@ -370,15 +385,13 @@ func (b *hbacBuilder) rule(r DesiredHBACRule, key string) {
 		fields[hbacFieldServiceCategory] = Change{From: live.ServiceCategory, To: ""}
 	}
 	if len(fields) > 0 && exists {
-		b.add(Operation{Kind: KindHBACCategoryUpdate, Object: key, Fields: fields, DependsOn: deps()})
+		converge = append(converge, b.add(Operation{Kind: KindHBACCategoryUpdate, Object: key, Fields: fields, DependsOn: deps()}))
 	}
 
-	if live.Enabled != r.Enabled {
-		kind := KindHBACRuleDisable
-		if r.Enabled {
-			kind = KindHBACRuleEnable
-		}
-		b.add(Operation{Kind: kind, Object: key, Fields: map[string]Change{hbacFieldEnabled: {From: live.Enabled, To: r.Enabled}}, DependsOn: deps()})
+	// Enabling is the last thing done to a rule: it waits for every member and category
+	// operation of the rule, so a rule is never enabled half built.
+	if !live.Enabled && r.Enabled {
+		b.add(Operation{Kind: KindHBACRuleEnable, Object: key, Fields: map[string]Change{hbacFieldEnabled: {From: false, To: true}}, DependsOn: deps(converge...)})
 	}
 }
 
@@ -393,7 +406,7 @@ func orNil(s string) any {
 // and the addition of what the roster names and the rule does not have. Only this rule
 // is touched (spec §4.3). created maps a service to the operation that creates it, so
 // the addition waits for it.
-func (b *hbacBuilder) members(rule string, _ LiveHBACRule, deps func(...string) []string, removeKind, addKind string, live, want []string, created map[string]string) {
+func (b *hbacBuilder) members(rule string, _ LiveHBACRule, deps func(...string) []string, removeKind, addKind string, live, want []string, created map[string]string) (ids []string) {
 	wantSet := set(want, lower)
 	var stale, missing []string
 	for _, m := range live {
@@ -410,7 +423,7 @@ func (b *hbacBuilder) members(rule string, _ LiveHBACRule, deps func(...string) 
 	sort.Strings(stale)
 	sort.Strings(missing)
 	if len(stale) > 0 {
-		b.add(Operation{Kind: removeKind, Object: rule, Members: stale, Destructive: true, DependsOn: deps()})
+		ids = append(ids, b.add(Operation{Kind: removeKind, Object: rule, Members: stale, Destructive: true, DependsOn: deps()}))
 	}
 	if len(missing) > 0 {
 		var extra []string
@@ -419,8 +432,9 @@ func (b *hbacBuilder) members(rule string, _ LiveHBACRule, deps func(...string) 
 				extra = append(extra, id)
 			}
 		}
-		b.add(Operation{Kind: addKind, Object: rule, Members: missing, DependsOn: deps(extra...)})
+		ids = append(ids, b.add(Operation{Kind: addKind, Object: rule, Members: missing, DependsOn: deps(extra...)}))
 	}
+	return ids
 }
 
 // deletions plans the deletion of the rules marked absent that FreeIPA has. One it does

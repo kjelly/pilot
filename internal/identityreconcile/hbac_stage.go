@@ -12,17 +12,19 @@ import (
 // HBACStage is one step of the HBAC write order (spec §5.2): the operations of a stage
 // are independent of each other, and a later stage depends on an earlier one. Removals
 // come before the categories and the additions after them, because a category and members
-// exclude each other (K3).
+// exclude each other (K3). What narrows access (the disable of a rule the roster wants
+// disabled, the removals) comes before what can widen it (the categories, the additions),
+// and the enable of a rule the roster wants enabled comes after the additions.
 type HBACStage int
 
 // The HBAC stages, in the order they run.
 const (
 	H1 HBACStage = iota + 1 // hbacsvc_add
 	H2                      // hbacrule_add
-	H3                      // hbacrule_remove_host, _remove_service, _remove_user
+	H3                      // hbacrule_disable of the rules the roster wants disabled, then hbacrule_remove_host, _remove_service, _remove_user
 	H4                      // hbacrule_mod (the categories)
 	H5                      // hbacrule_add_host, _add_service, _add_user
-	H6                      // hbacrule_enable, hbacrule_disable
+	H6                      // hbacrule_enable
 	H7                      // hbacrule_del
 	H8                      // the lockdown of allow_all
 )
@@ -40,13 +42,13 @@ func HBACStageOf(kind string) HBACStage {
 		return H1
 	case KindHBACRuleCreate:
 		return H2
-	case KindHBACHostRemove, KindHBACHostgroupRemove, KindHBACServiceRemove, KindHBACUserRemove, KindHBACGroupRemove:
+	case KindHBACRuleDisable, KindHBACHostRemove, KindHBACHostgroupRemove, KindHBACServiceRemove, KindHBACUserRemove, KindHBACGroupRemove:
 		return H3
 	case KindHBACCategoryUpdate:
 		return H4
 	case KindHBACHostgroupAdd, KindHBACHostAdd, KindHBACServiceAdd, KindHBACUserAdd, KindHBACGroupAdd:
 		return H5
-	case KindHBACRuleEnable, KindHBACRuleDisable:
+	case KindHBACRuleEnable:
 		return H6
 	case KindHBACRuleDelete:
 		return H7
@@ -325,17 +327,16 @@ func (r *hbacRunner) runStages() {
 		}
 		switch s {
 		case H3:
-			r.runRemovals(idxs)
-		case H6:
-			r.runEnableDisable(idxs)
+			r.runNarrowing(idxs)
 		case H7:
 			r.runDeletes(idxs)
 		case H8:
 			r.runLockdown(idxs)
 		default:
-			// H1, H2, H4, H5: the server's answer to each command is the check (an add of
-			// what exists is DuplicateEntry, a mod of what is gone is NotFound): they are
-			// idempotent or only widen, and Plan₂ was just made.
+			// H1, H2, H4, H5, H6: the server's answer to each command is the check (an add
+			// of what exists is DuplicateEntry, a mod of what is gone is NotFound): they are
+			// idempotent or only widen, and Plan₂ was just made. H6 (enable) is the last
+			// thing done to a rule, after every stage before it succeeded.
 			r.sendBatches(s, r.plainItems(idxs))
 		}
 	}
@@ -517,15 +518,43 @@ func (r *hbacRunner) liveAndWant(kind string, live LiveHBACRule, want DesiredHBA
 	return nil, nil
 }
 
-// H3: a removal is checked against the rule as the re-read shows it. The members the
-// roster would remove from it now must all be in the plan's list: another one means the
-// rule changed since the plan, and the removal is not sent. A member the plan lists that
-// has already left is not removed again. The other rules' removals are sent, and the
-// stages after this one are not.
-func (r *hbacRunner) runRemovals(idxs []int) {
+// H3 narrows access. It reads the rules once, then sends first the disables of the rules
+// the roster wants disabled and then the removals, each checked against the rule as the
+// re-read shows it. Disabling comes first and is its own batch: the stages that can widen
+// a rule (the categories, the additions) come after this one, and a rule the roster wants
+// disabled must be disabled by then, whatever stops the run later. A disable or removal
+// that cannot be sent is a conflict; the others are sent, and the stages after this one
+// are not.
+func (r *hbacRunner) runNarrowing(idxs []int) {
+	var disables, removals []int
+	for _, i := range idxs {
+		if r.res.Ops[i].Operation.Kind == KindHBACRuleDisable {
+			disables = append(disables, i)
+		} else {
+			removals = append(removals, i)
+		}
+	}
 	rules, readErr := r.readRules()
-	var items []hbacPending
-	conflicted := false
+	dItems, dConflicted := r.prepareDisables(disables, rules, readErr)
+	if r.stopped {
+		return
+	}
+	rItems, rConflicted := r.prepareRemovals(removals, rules, readErr)
+	if r.stopped {
+		return
+	}
+	r.sendBatches(H3, dItems)
+	r.sendBatches(H3, rItems)
+	if (dConflicted || rConflicted) && !r.stopped {
+		r.stopAt(H3, "a precondition of a disable or removal no longer holds")
+	}
+}
+
+// prepareRemovals checks each removal against the rule as the re-read shows it. The
+// members the roster would remove from it now must all be in the plan's list: another one
+// means the rule changed since the plan, and the removal is not sent. A member the plan
+// lists that has already left is not removed again.
+func (r *hbacRunner) prepareRemovals(idxs []int, rules map[string]LiveHBACRule, readErr error) (items []hbacPending, conflicted bool) {
 	for _, i := range idxs {
 		op := r.res.Ops[i].Operation
 		live, present := rules[lower(op.Object)]
@@ -555,17 +584,14 @@ func (r *hbacRunner) runRemovals(idxs []int) {
 			if err != nil {
 				r.settle(i, classified{Outcome: OutcomeFailed, Error: "not sent", Detail: err.Error()})
 				r.stopAt(H3, op.ID+": "+err.Error())
-				return
+				return items, conflicted
 			}
 			items = append(items, hbacPending{idx: i, op: sent, cmd: cmd})
 			continue
 		}
 		conflicted = true
 	}
-	r.sendBatches(H3, items)
-	if conflicted && !r.stopped {
-		r.stopAt(H3, "a removal's precondition no longer holds")
-	}
+	return items, conflicted
 }
 
 // sameRule says why the rule the re-read shows is not the one Plan₂ observed ("" when it
@@ -586,55 +612,41 @@ func (r *hbacRunner) sameRule(name string, live LiveHBACRule) string {
 	return ""
 }
 
-// H6: enabling widens access and has no check of its own; disabling narrows it, so it is
-// checked first: the rule must still be the one the plan observed, and one that is already
-// disabled needs nothing and is not a conflict.
-func (r *hbacRunner) runEnableDisable(idxs []int) {
-	var rules map[string]LiveHBACRule
-	var readErr error
-	for _, i := range idxs {
-		if r.res.Ops[i].Operation.Kind == KindHBACRuleDisable {
-			rules, readErr = r.readRules()
-			break
-		}
-	}
-	var items []hbacPending
-	conflicted := false
+// prepareDisables checks each disable against the rule as the re-read shows it: it must
+// still be the one the plan observed (a rule this run created has only to exist), and one
+// that is already disabled needs nothing and is not a conflict. Disabling narrows access,
+// which is why it is checked; enabling (H6) widens it and has no check of its own.
+func (r *hbacRunner) prepareDisables(idxs []int, rules map[string]LiveHBACRule, readErr error) (items []hbacPending, conflicted bool) {
 	for _, i := range idxs {
 		op := r.res.Ops[i].Operation
-		if op.Kind == KindHBACRuleDisable {
-			live, present := rules[lower(op.Object)]
-			switch {
-			case readErr != nil:
-				r.conflict(i, "the rules could not be read before a rule was disabled: "+readErr.Error())
-				conflicted = true
-				continue
-			case !present:
-				r.conflict(i, "the rule is not there any more")
-				conflicted = true
-				continue
-			case !live.Enabled:
-				r.settle(i, classified{Outcome: OutcomeNoop, Detail: "the rule is already disabled"})
-				continue
-			}
-			if why := r.sameRule(lower(op.Object), live); why != "" {
-				r.conflict(i, why)
-				conflicted = true
-				continue
-			}
+		live, present := rules[lower(op.Object)]
+		switch {
+		case readErr != nil:
+			r.conflict(i, "the rules could not be read before a rule was disabled: "+readErr.Error())
+			conflicted = true
+			continue
+		case !present:
+			r.conflict(i, "the rule is not there any more")
+			conflicted = true
+			continue
+		case !live.Enabled:
+			r.settle(i, classified{Outcome: OutcomeNoop, Detail: "the rule is already disabled"})
+			continue
+		}
+		if why := r.sameRule(lower(op.Object), live); why != "" {
+			r.conflict(i, why)
+			conflicted = true
+			continue
 		}
 		cmd, err := hbacCommandFor(op)
 		if err != nil {
 			r.settle(i, classified{Outcome: OutcomeFailed, Error: "not sent", Detail: err.Error()})
-			r.stopAt(H6, op.ID+": "+err.Error())
-			return
+			r.stopAt(H3, op.ID+": "+err.Error())
+			return items, conflicted
 		}
 		items = append(items, hbacPending{idx: i, op: op, cmd: cmd})
 	}
-	r.sendBatches(H6, items)
-	if conflicted && !r.stopped {
-		r.stopAt(H6, "a disable's precondition no longer holds")
-	}
+	return items, conflicted
 }
 
 // H7: a delete is checked against the rule as the re-read shows it: one that is already

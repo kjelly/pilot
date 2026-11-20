@@ -145,16 +145,19 @@ K9（正式規模的 rule 數與 `hbacrule_find` 成本）與 K10（run 2 的固
 
 ### 4.3 operation 與順序
 
-kind，順序照 playbook（約 2368–2650 行）：
+kind 與順序。大方向照 playbook（約 2368–2650 行），但**收窄存取的動作一律排在可能放寬存取的動作之前**（見下方「為什麼 disable 提前」）：
 
 1. `hbacsvc.create`
 2. `hbacrule.create`（新 rule：只帶 `hostcategory`／`servicecategory`，與 playbook 的 "Ensure HBAC rules exist" 同）
-3. `hbacrule.member.remove`（host、hostgroup、service、user、group 五種；**逐 rule 限定**：只移除這條 rule 目前有、而它自己的 desired 沒有的成員）
-4. `hbacrule.category.update`（`hostcategory`／`servicecategory`，一律明確送值，空字串是清除）
-5. `hbacrule.member.add`（hostgroup、host、service、user、group）
-6. `hbacrule.enable`／`hbacrule.disable`
-7. `hbacrule.delete`（`state: absent`；刪不存在的是 converged，不是錯誤）
-8. `hbac.allow_all.disable`（lockdown，§6）
+3. `hbacrule.disable`（roster 宣告 `enabled: false`、而 rule 目前是 enabled 的——包含剛在步驟 2 建立的 rule，FreeIPA 建立的 rule 一律是 enabled）
+4. `hbacrule.member.remove`（host、hostgroup、service、user、group 五種；**逐 rule 限定**：只移除這條 rule 目前有、而它自己的 desired 沒有的成員）
+5. `hbacrule.category.update`（`hostcategory`／`servicecategory`，一律明確送值，空字串是清除）
+6. `hbacrule.member.add`（hostgroup、host、service、user、group）
+7. `hbacrule.enable`（roster 宣告 `enabled: true`、而 rule 目前是 disabled 的；排在最後，等成員與分類都收斂之後）
+8. `hbacrule.delete`（`state: absent`；刪不存在的是 converged，不是錯誤）
+9. `hbac.allow_all.disable`（lockdown，§6）
+
+**為什麼 disable 提前**：playbook 把 enable／disable 放在成員附加之後（約 2650 行），因為 playbook 的單一 task 序列沒有「中途停下」的情形要顧；Go writer 有：任何 stage 的失敗都會讓之後的 stage 不送（§5.3，包括預期中的 Q1 `no such entry`、或同一批裡別條 rule 的失敗）。若 disable 排在附加之後，roster 宣告停用的 rule 會停在「enabled、已有 roster 的成員」——存取被放寬、而 roster 說它該是停用的。所以：(a) 宣告 disabled 的 rule 先 disable（H3），之後它的分類變更與成員附加都發生在 disabled 的 rule 上；(b) 宣告 enabled 的 rule 的 enable 留在最後（H6），在它的成員與分類操作全部成功之後才生效。新建的 rule 在 H2 與 H3 之間是 enabled，但沒有任何 subject 與 service，不會符合任何存取；H3 之後才有成員。operation 的 `depends_on` 照這個順序：一條 rule 的移除、分類、附加依賴它的 disable，它的 enable 依賴它自己所有的成員與分類操作。
 
 不刪 roster 沒列出的 rule、不移除 service。這與 playbook 一致（playbook 沒有這類 task），列在 `reports.unmanaged_hbac`。
 
@@ -170,10 +173,10 @@ kind，順序照 playbook（約 2368–2650 行）：
 |---|---|---|---|
 | H1 | `hbacsvc.create` | 無 | 後續附加 service 需要它存在 |
 | H2 | `hbacrule.create` | H1 | 同上 |
-| H3 | `member.remove` | H2 | R3：先清成員，才能把分類設成 `all` |
+| H3 | `hbacrule.disable`（宣告 disabled 的 rule）、`member.remove` | H2 | 收窄存取先於任何放寬：disable 先送、自成一批，removal 之後；R3：先清成員，才能把分類設成 `all` |
 | H4 | `category.update` | H3 | R3、K3 |
-| H5 | `member.add` | H4 | 分類清掉之後才能附加成員（K3） |
-| H6 | `enable`／`disable` | H5 | 收斂完才啟用，避免半成品 rule 生效 |
+| H5 | `member.add` | H4 | 分類清掉之後才能附加成員（K3）；此時宣告 disabled 的 rule 已是 disabled |
+| H6 | `enable`（宣告 enabled 的 rule） | H5 | 收斂完才啟用，避免半成品 rule 生效 |
 | H7 | `rule.delete` | H6 | 與 netgroup 的刪除排在最後同理 |
 | H8 | lockdown | H7 | R1：所有 rule 收斂之後 |
 
@@ -288,6 +291,7 @@ Q2 的預設需要維護者確認（見 §10）。
 | 日期 | 變更 |
 |---|---|
 | 2026-11-19 | 初版草案。維護者決定：D1（playbook 之後的第二個 Go 階段）、D2（lockdown 一起搬）。 |
+| 2026-11-20 | Review 修正（PR #396）：**disable 提前**。原本 `hbacrule.disable` 與 enable 一起在 H6，roster 宣告 `enabled: false` 的 rule（含剛建立的）會先在 H5 附加成員、H6 才停用，H5 的任何失敗都讓它停在 enabled 且有成員。現在 disable 在 H3（H2 建立之後、removal 之前，自成一批），enable 留在 H6（stage 編號與數量不變，H3 與 H6 的內容變了）；plan 的 kind 順序、`depends_on`、§4.3、§5.2 同步；`TestExecuteHBACFailureStopsTheStagesAfterIt` 改為證明失敗之後的 stage 不送、且停用的 rule 仍是停用；新增在每一次寫入失敗（拒絕與結果未知）處停下、以 server 狀態為準的測試（宣告 disabled 的 rule 不會在 enabled 時被附加成員或改分類、宣告 enabled 的 rule 在成員到齊前不會被 enable）。H3 的 disable 與 removal 共用一次 `hbacrule_find`（原本 H3、H6 各讀一次）。 |
 | 2026-11-20 | Review 修正（PR #396）：`name_collision_with_grant` 實作（§4.2、§3.3），前綴取自 `inventory.CompiledLoginRulePrefix`（`CompiledLoginRuleName` 改用同一個常數；`internal/accessgrants/drift.go` 另有一份舊的字面值，未在本變更處理）。 |
 | 2026-11-19 | P3-3：lockdown（H8）完成。流程：`hbactest`（`value` 布林，不比對文字）→ 讀 `allow_all`（已停用算 noop）→ 送 `hbacrule_disable allow_all` → `hbactest` → 任一步在 disable 送出後失敗就 `hbacrule_enable allow_all` 回滾。與 §6 的差異：(1) 前置 proof 失敗、讀不到 `allow_all` 時**不送任何寫入**，op 是 `conflict-failed`（而不是 `failed`）；(2) 回滾只在「disable 可能已生效」時送（成功後 proof 失敗、結果未知、答案不是 true）；server 明確拒絕 disable（`RPCError`）時 allow_all 沒被碰，不送回滾；(3) disable 之後的 proof 與回滾走 `context.WithoutCancel` 加 `VerifyTimeout` 的 context（run 在 disable 之後被取消，仍要證明與回滾），回滾仍過 Gate 與鎖；(4) lockdown 失敗的 op 一律 `failed`，**不**是 `unknown`：回滾失敗時 allow_all 停用而 proof 不過，若記成 unknown，寫入後的重讀會把它解成 converged；(5) 訊息只在 `hbacrule_enable` 回 true 時才寫「allow_all was re-enabled」，否則寫「re-enabling allow_all FAILED (<原因>); check HBAC access now」；(6) `LockdownReport`（before/after/disabled/rollback）在 `HBACResult.Lockdown` 與 H8 的 journal result 事件；`DisableAllowAll` 而沒有 `TestHost` 的選項在讀取前就拒絕。 |
 | 2026-11-19 | P3-2：`ExecuteHBAC` 完成（H1–H7；H8 在 P3-3 之前一律拒絕）。與 §5.2 的差異：(1) HBAC 階段的 journal 事件 id 一律帶 `hbac:` 前綴（同一個 delivery run 的 users/groups 階段已用 `auth_cache`、`S*-b*`、`verify`，id 在一個 run 內不可重複）；(2) `DuplicateEntry`（`hbacsvc_add`、`hbacrule_add`）與 users/groups 的 `group_add` 同形，一律是 `conflict-failed`（不視為已收斂，run 在該 stage 停止），不是「重讀看到就算 converged」；(3) 破壞性 stage 的前置重讀：H3（移除）、H6 的 disable、H7（刪除）在送出前以 `hbacrule_find` 重讀，已離開的成員／已停用／已不存在算 noop，規則被刪除重建（`ipauniqueid` 不同）、roster 不再宣告、或有計畫沒列出的待移除成員算 `conflict-failed`；(4) `hbac.rule.disable` 與 `hbac.allow_all.disable` 在 Plan₁／Plan₂ 的比較中視為破壞性（收窄存取），與 users/groups 的 `user.disable` 同。 |

@@ -320,11 +320,11 @@ func TestBuildHBACCreatesWhatIsMissingInThePlaybooksOrder(t *testing.T) {
 	want := []string{
 		"hbac.service.create:custom-svc",
 		"hbac.rule.create:login-team", "hbac.rule.create:break-glass", "hbac.rule.create:parked",
+		"hbac.rule.disable:parked",
 		"hbac.rule.member_hostgroup.add:login-team", "hbac.rule.member_host.add:login-team",
 		"hbac.rule.member_service.add:login-team", "hbac.rule.member_service.add:break-glass", "hbac.rule.member_service.add:parked",
 		"hbac.rule.member_user.add:login-team", "hbac.rule.member_user.add:break-glass", "hbac.rule.member_user.add:parked",
 		"hbac.rule.member_group.add:login-team",
-		"hbac.rule.disable:parked",
 	}
 	if got := hbacKinds(p); !slices.Equal(got, want) {
 		t.Fatalf("plan:\n got %v\nwant %v", got, want)
@@ -451,7 +451,7 @@ func TestBuildHBACEnablesAndDisablesOnlyOnADifferentState(t *testing.T) {
 		}
 	}
 	got := hbacKinds(BuildHBAC(HBACInput{Desired: hbacDesired(t, hbacRosterDoc), Obs: obs}))
-	want := []string{"hbac.rule.enable:break-glass", "hbac.rule.disable:parked"}
+	want := []string{"hbac.rule.disable:parked", "hbac.rule.enable:break-glass"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("plan %v, want %v", got, want)
 	}

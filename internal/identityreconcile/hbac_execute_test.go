@@ -190,14 +190,15 @@ func TestExecuteHBACAppliesTheRosterInStageOrder(t *testing.T) {
 		t.Error("a run that wrote is not committed")
 	}
 
-	// The writes go out in the order of the stages: services, rules, (no removals), (no
-	// category changes), additions, enable and disable.
+	// The writes go out in the order of the stages: services, rules, the disable of the
+	// rule the roster wants disabled (before anything is added to it), (no removals), (no
+	// category changes), additions, (no enables).
 	want := []string{
 		"hbacsvc_add",
 		"hbacrule_add", "hbacrule_add", "hbacrule_add",
+		"hbacrule_disable",
 		"hbacrule_add_host", "hbacrule_add_host", "hbacrule_add_service", "hbacrule_add_service", "hbacrule_add_service",
 		"hbacrule_add_user", "hbacrule_add_user", "hbacrule_add_user", "hbacrule_add_user",
-		"hbacrule_disable",
 	}
 	if got := e.writeMethods(); !slices.Equal(got, want) {
 		t.Fatalf("writes:\n got %v\nwant %v", got, want)
@@ -454,21 +455,24 @@ func TestExecuteHBACRechecksARemovalBeforeSendingIt(t *testing.T) {
 	}
 	// Someone else puts one more member on the rule between the second plan and the
 	// removal: the roster would remove him too, the plan did not list him, so nothing is
-	// removed and the later stages do not run.
+	// removed and the later stages (here the enable of break-glass) do not run. The
+	// disable of parked is narrowing and is sent before the removals are looked at; it is
+	// the only write.
 	e := newHBACEnv(t, hbacRosterDoc, func(f *fakeHBAC) { setup(f); f.users["carl"] = true; f.ruleNamed("parked").enabled = true })
+	e.f.ruleNamed("break-glass").enabled = false
 	e.f.onFind = func(f *fakeHBAC, n int) {
 		if n == 3 {
 			f.ruleNamed("Login-Team").users["carl"] = true
 		}
 	}
 	res, err := e.execute()
-	if !errors.Is(err, ErrWrites) || len(e.f.writes()) != 0 || res.Stop == nil || res.Stop.Stage != "H3" {
+	if !errors.Is(err, ErrWrites) || !slices.Equal(e.writeMethods(), []string{"hbacrule_disable"}) || res.Stop == nil || res.Stop.Stage != "H3" {
 		t.Fatalf("err %v writes %v stop %v\n%s", err, e.writeMethods(), res.Stop, describeHBACOps(res))
 	}
 	if o := res.op("hbac.rule.member_user.remove:login-team"); o.Outcome != OutcomeConflictFailed || !strings.Contains(o.Detail, "carl") {
 		t.Errorf("removal outcome %+v", o)
 	}
-	if res.outcomeOf("hbac.rule.disable:parked") != OutcomeNotExecuted {
+	if res.outcomeOf("hbac.rule.enable:break-glass") != OutcomeNotExecuted {
 		t.Errorf("a stage after the conflict ran: %s", describeHBACOps(res))
 	}
 
@@ -597,7 +601,8 @@ func TestExecuteHBACAMemberAnotherWriterAddedAfterThePlanIsANoopNotAFailure(t *t
 }
 
 func TestExecuteHBACFailureStopsTheStagesAfterIt(t *testing.T) {
-	e := newHBACEnv(t, hbacRosterDoc, nil)
+	// A rule Old-Rule that the roster marks absent gives a stage after H5 something to do.
+	e := newHBACEnv(t, hbacRosterDoc, func(f *fakeHBAC) { f.newRule("Old-Rule").hostCat = "all" })
 	e.f.intercept = func(f *fakeHBAC, c call) (json.RawMessage, error, bool) {
 		if c.method == "hbacrule_add_service" && c.args[0] == "break-glass" {
 			return nil, f.errFixture("hbacrule-add-service-while-servicecat-all"), true
@@ -611,10 +616,18 @@ func TestExecuteHBACFailureStopsTheStagesAfterIt(t *testing.T) {
 	if o := res.op("hbac.rule.member_service.add:break-glass"); o.Outcome != OutcomeFailed || !strings.HasPrefix(o.Error, "MutuallyExclusiveError (4303)") {
 		t.Errorf("outcome %+v", o)
 	}
-	// The batch that failed was sent whole, and the stage after it (disable of parked,
-	// H6) was not.
-	if res.outcomeOf("hbac.rule.disable:parked") != OutcomeNotExecuted || slices.Contains(e.writeMethods(), "hbacrule_disable") {
+	// The batch that failed was sent whole, and the stage after it (the delete of
+	// Old-Rule, H7) was not.
+	if res.outcomeOf("hbac.rule.delete:old-rule") != OutcomeNotExecuted || slices.Contains(e.writeMethods(), "hbacrule_del") || e.f.ruleNamed("Old-Rule") == nil {
 		t.Errorf("a stage after the failure ran: %s", describeHBACOps(res))
+	}
+	// The rule the roster wants disabled was disabled before the stage that failed added
+	// its members: the stop leaves it disabled, not enabled with alice and sshd.
+	if pk := e.f.ruleNamed("parked"); pk == nil || pk.enabled {
+		t.Errorf("parked is enabled after the failure: %+v", pk)
+	}
+	if res.outcomeOf("hbac.rule.disable:parked") != OutcomeSuccess {
+		t.Errorf("the disable of parked (H3) was %s: %s", res.outcomeOf("hbac.rule.disable:parked"), describeHBACOps(res))
 	}
 	resulted, notSent := e.journalOps()
 	planned := map[string]int{}
