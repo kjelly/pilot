@@ -216,8 +216,16 @@ func TestPasswordCaptureNamesMatchThePlaybook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(raw), "freeipa-identity-normalize-users-groups.yml"); n != 1 {
-		t.Errorf("the identity playbook names the normalize file %d times; a second include captures the passwords again at another point", n)
+	// Comments may name the file (the credential-keys note does); only a line that is
+	// not a comment can include it.
+	includes := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.Contains(line, "freeipa-identity-normalize-users-groups.yml") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			includes++
+		}
+	}
+	if includes != 1 {
+		t.Errorf("the identity playbook names the normalize file %d times outside comments; a second include captures the passwords again at another point", includes)
 	}
 
 	// 3. The names that exist only inside the include's tasks: every `vars:` key and
@@ -255,8 +263,9 @@ func TestPasswordCaptureNamesMatchThePlaybook(t *testing.T) {
 	}
 
 	// 4. The capture itself: password.initial is rendered into ipa_users by that
-	// task, and ipa_users reaches the passwd call through ipa_active_users and
-	// nowhere else sets it again.
+	// task, and ipa_users reaches the passwd call through ipa_active_user_credentials
+	// (selected from ipa_users whole, by a no_log task; ipa_active_users is the same
+	// users without the credential keys) and nowhere else sets it again.
 	if !strings.Contains(capture, "'password': (pilot_identity_roster_user.password | default({})).initial | default(none)") {
 		t.Errorf("the normalize task no longer captures password.initial the way the check assumes:\n%s", capture)
 	}
@@ -289,14 +298,28 @@ func TestPasswordCaptureNamesMatchThePlaybook(t *testing.T) {
 	if got := setters("ipa_active_users"); !reflect.DeepEqual(got, []string{"Select active identity objects"}) {
 		t.Errorf("tasks that set ipa_active_users with set_fact: %v", got)
 	}
+	if got := setters("ipa_active_user_credentials"); !reflect.DeepEqual(got, []string{"Select the credentials of the active users"}) {
+		t.Errorf("tasks that set ipa_active_user_credentials with set_fact: %v", got)
+	}
 	playbook := string(raw)
 	for _, want := range []string{
-		"{{ (ipa_users | rejectattr('state', 'defined') | list)",
+		// ipa_active_user_credentials: the active users that declare a password, taken
+		// whole from ipa_users (issue #216 splits them from ipa_active_users).
+		"{{ ((ipa_users | rejectattr('state', 'defined') | list)",
+		"| selectattr('password', 'defined') | rejectattr('password', 'none') | list }}",
 		"stdin: \"{{ {'principal': item.name, 'password': item.password} | to_json }}\"",
-		`loop: "{{ ipa_active_users | selectattr('password', 'defined') | rejectattr('password', 'none') | list }}"`,
+		`loop: "{{ ipa_active_user_credentials }}"`,
 	} {
 		if !strings.Contains(playbook, want) {
 			t.Errorf("the playbook no longer holds %q: the password the passwd call sends is not the one the check resolves", want)
 		}
+	}
+	// Both password tasks (the state look-up and the passwd call) loop over the
+	// credentials fact, and the other facts do not carry the password.
+	if n := strings.Count(playbook, `loop: "{{ ipa_active_user_credentials }}"`); n != 2 {
+		t.Errorf("%d tasks loop over ipa_active_user_credentials, want the 2 password tasks", n)
+	}
+	if !strings.Contains(playbook, "ipa_identity_credential_keys: [password, force_password, preserve_existing]") {
+		t.Errorf("ipa_active_users no longer drops the credential keys the check assumes it drops")
 	}
 }
