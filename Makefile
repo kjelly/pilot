@@ -200,7 +200,7 @@ identity-ssh-cache-live-test: ## Require an external private fixture config for 
 .PHONY: identity-ssh-cache-test identity-ssh-cache-live-test
 
 identity-secret-test: ## Require real Ansible for password transport, failure, cleanup and rerun regressions (issue 118).
-	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^(TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|NoSecretInCommandText|FreeIPANFSServerAdminPasswordDriftGate|FreeIPANFSServerAdminPasswordGateIsVisible)|TestIdentityDriftSharedNormalizationInAnsible)$$' ./internal/spec/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^(TestRegression_(IdentitySecret.*|IdentityPassword.*|IdentityPasswdFailureFailsTheRun|FreeIPAKinitTasksPassPasswordUnchanged|StdinHarnessDetectsAShellSpelling|KadminCpwOutcomesAreJudgedFromItsOutput|AuditLogDummyWrite.*|AuditFileStatsSkipTheChecksum|HostauthzDemoPasswordDefaultsResolveOnce|NoSecretInCommandText|FreeIPANFSServerAdminPasswordDriftGate|FreeIPANFSServerAdminPasswordGateIsVisible)|TestIdentityDriftSharedNormalizationInAnsible)$$' ./internal/spec/
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^(TestYAML11NonStringMatchesAnsible|TestAnsibleTagsMatchTheClassifier|TestRosterRenderedFieldsMatchAnsible|TestRosterUnsafeScopeMatchesAnsible|TestImplicitVarNamesAreNeverUndefinedInAnsible)$$' ./internal/inventory/
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_IdentitySecretDriftProbe' ./internal/accessgrants/
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 8m -run '^(TestIdentitySecretDriftCommands|TestPrecheckRosterReferencesFactsMatchAnsible|TestRosterReferencesHonorUnsafeAboveTheValue)' ./cmd/pilot/cmd/
@@ -223,6 +223,12 @@ freeipa-server-pool-test: ## Include tasks/freeipa-server-pool.yml twice on one 
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 5m -run '^TestRegression_FreeIPAServerPool' ./internal/spec/
 
 .PHONY: freeipa-server-pool-test
+
+site-day2-roles-test: ## Run the real freeipa-server-replica pre_tasks (G-ip, G-pool and G-resolve gates and its serial: 1, issue 362) and ask real ansible-playbook which tasks the site.yml tags of the two imported day-2 roles select, with mandatory real Ansible.
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_SiteDay2Roles' ./internal/spec/
+	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestSiteYMLDay2RolesTagsSelectTheirTasksInAnsible$$' ./cmd/pilot/cmd/
+
+.PHONY: site-day2-roles-test
 
 install-hooks: ## Enable the git pre-commit hook (runs playbook-lint before each commit)
 	git config core.hooksPath .githooks

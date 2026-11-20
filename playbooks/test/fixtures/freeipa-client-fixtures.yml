@@ -87,8 +87,9 @@
         # kinit reads the password from stdin (no_log so it never lands in the
         # ansible log). changed_when:false — obtaining a ticket is not a change.
         - name: "Fixtures — kinit admin (ticket for the ipa CLI below)"
-          ansible.builtin.shell:
-            cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ ipa_realm }}"]
+            stdin: "{{ ipa_admin_password }}"
           register: ipa_kinit
           changed_when: false
           no_log: true

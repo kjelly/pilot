@@ -19,6 +19,8 @@
         ipa_hbac_services: []
         ipa_sudo_command_groups: []
         ipa_active_users: []
+        ipa_active_user_credentials: []
+        ipa_absent_users: []
         ipa_active_groups: []
         ipa_active_netgroups: []
         canonical_group_removals: []

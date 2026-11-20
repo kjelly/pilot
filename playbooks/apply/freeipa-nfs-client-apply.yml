@@ -242,13 +242,18 @@
       tags: [nfs-client-verify-mount-check]
       # A hard failure here would exclude this host from every later site.yml
       # play (Ansible's default "failed host is dropped from all subsequent
-      # plays in the run" behavior) — but this check's own prerequisites
-      # (the IPA automount map/key, created only by the separate
-      # freeipa-identity day-2 reconcile; and the NFS server FQDN actually
-      # resolving, which needs the separate freeipa-dns-client day-2 role)
-      # are never guaranteed to exist yet on a plain site.yml pass, since
-      # both run after site.yml in this project's own established rebuild
-      # order. ignore_errors keeps the real pass/fail result visible in the
+      # plays in the run" behavior) — but this check's own prerequisite, the
+      # IPA automount map/key, is created only by the separate
+      # freeipa-identity reconcile (roster-driven, deliberately not in
+      # site.yml), so it is never guaranteed to exist yet on a plain site.yml
+      # pass. That alone justifies ignore_errors. History: when this was
+      # written (2026-08-15) the other prerequisite, the NFS server FQDN
+      # actually resolving, also needed the separate freeipa-dns-client day-2
+      # role, which site.yml did not run. Since issue #362 (2026-11-17)
+      # site.yml runs freeipa-dns-client right after freeipa-client and before
+      # the NFS roles, but only on hosts the inventory assigns that role to; a
+      # host without it can still fail to resolve the NFS server FQDN.
+      # ignore_errors keeps the real pass/fail result visible in the
       # recap (as "ignored", not "failed") without derailing every other
       # role this host still needs from the rest of site.yml. Confirmed live
       # 2026-08-15: without this, a fresh topology's first site.yml pass

@@ -6,9 +6,10 @@
 #
 # Why: a freeipa-server-replica host that leaves freeipa_setup_dns unset is
 # a DNS provider, because freeipa-server-replica-apply.yml installs FreeIPA
-# DNS on it by default (issue #67). But that playbook is a day-2 step
-# (contracts/freeipa-server-replica.yaml site.include: false), so an
-# inventory normally lists a replica before it is promoted, and a replica
+# DNS on it by default (issue #67). site.yml promotes a replica before the
+# dns tier and the resolver tasks run (issue #362), but an inventory can
+# still list one that is not promoted yet (a playbook run on its own, a
+# --limit that leaves the replica out, a failed promotion), and a replica
 # promoted before 2026-09-17 may run no named. Sending queries to such a
 # host would fail dns.md G5 on the tier and write a dead nameserver on a
 # consumer.

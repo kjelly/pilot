@@ -38,6 +38,10 @@
     ipa_realm: "{{ ipa_domain | upper }}"
     webhost_fqdn: freeipa-client.ipa.pilot.internal
     dbhost_fqdn: freeipa-client-2.ipa.pilot.internal
+    # The lab users' declared passwords, resolved once (same shape as
+    # audit_demo_user_pass in freeipa-audit-demo.yml); every use reads these.
+    hz_web_pass: "{{ hz_web_password | default('TestWebPass123') }}"
+    hz_db_pass: "{{ hz_db_password | default('TestDbPass123') }}"
 
   pre_tasks:
     - name: "Gate: admin credential present"
@@ -64,8 +68,9 @@
 
         # Also tagged t3 and hbactest: those selections run the ipa reads below.
         - name: "Fixtures — kinit admin"
-          ansible.builtin.shell:
-            cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ ipa_realm }}"]
+            stdin: "{{ ipa_admin_password }}"
           changed_when: false
           no_log: true
           tags: [fixtures, t3, hbactest]
@@ -153,28 +158,93 @@
         # expires immediately and forces change-on-next-login, which breaks
         # non-interactive kinit in the sim. Reset via kadmin.local for a stable
         # password, same fix as freeipa-audit-demo.yml.
+        # kadmin.local exits 0 whatever happens (captured on FreeIPA 4.13.4, krb5
+        # 1.21.1), so success is its stdout line `Password for "<principal>"
+        # changed.` and the gate after it fails with kadmin's own stderr; the
+        # realm's minimum password lifetime makes a second change in a row fail,
+        # so the password is only set when the declared one does not work yet.
+        - name: "Fixtures — does hz_web already have the declared password?"
+          become: true
+          ansible.builtin.command:
+            argv: [kinit, -c, "MEMORY:pilot-hz_web-pwcheck", "hz_web@{{ ipa_realm }}"]
+            stdin: "{{ hz_web_pass }}"
+          register: hz_web_pwcheck
+          changed_when: false
+          failed_when: false
+          no_log: true
+          tags: [fixtures]
+
         - name: "Fixtures — set stable password for hz_web via kadmin.local"
           become: true
-          ansible.builtin.shell:
-            cmd: |
-              printf "cpw hz_web\n{{ hz_web_password | default('TestWebPass123') }}\n{{ hz_web_password | default('TestWebPass123') }}\n" \
-                | kadmin.local 2>&1 | grep -E "(changed|error|Error)" || true
+          ansible.builtin.command:
+            argv: [kadmin.local, -q, "cpw hz_web"]
+            stdin: "{{ hz_web_pass }}\n{{ hz_web_pass }}"
           register: hz_web_cpw
-          changed_when: "'changed' in hz_web_cpw.stdout"
+          changed_when: "' changed.' in hz_web_cpw.stdout"
+          failed_when: false
+          no_log: true
+          when:
+            - not ansible_check_mode
+            - hz_web_pwcheck.rc != 0
+          tags: [fixtures]
+
+        - name: "Gate: kadmin.local changed the password of hz_web"
+          ansible.builtin.assert:
+            that:
+              - hz_web_cpw.rc == 0
+              - "' changed.' in hz_web_cpw.stdout"
+              - "'change_password:' not in hz_web_cpw.stderr"
+            fail_msg: >-
+              kadmin.local did not change the password of hz_web
+              (rc={{ hz_web_cpw.rc }}; it exits 0 even on failure):
+              {{ hz_web_cpw.stderr | default('') | trim }} ("Too soon to change
+              password" means the realm's minimum password lifetime has not
+              passed: ipa pwpolicy-mod --minlife=0 on a lab realm).
+          when:
+            - not ansible_check_mode
+            - hz_web_pwcheck.rc != 0
+          tags: [fixtures]
+
+        - name: "Fixtures — does hz_db already have the declared password?"
+          become: true
+          ansible.builtin.command:
+            argv: [kinit, -c, "MEMORY:pilot-hz_db-pwcheck", "hz_db@{{ ipa_realm }}"]
+            stdin: "{{ hz_db_pass }}"
+          register: hz_db_pwcheck
+          changed_when: false
           failed_when: false
           no_log: true
           tags: [fixtures]
 
         - name: "Fixtures — set stable password for hz_db via kadmin.local"
           become: true
-          ansible.builtin.shell:
-            cmd: |
-              printf "cpw hz_db\n{{ hz_db_password | default('TestDbPass123') }}\n{{ hz_db_password | default('TestDbPass123') }}\n" \
-                | kadmin.local 2>&1 | grep -E "(changed|error|Error)" || true
+          ansible.builtin.command:
+            argv: [kadmin.local, -q, "cpw hz_db"]
+            stdin: "{{ hz_db_pass }}\n{{ hz_db_pass }}"
           register: hz_db_cpw
-          changed_when: "'changed' in hz_db_cpw.stdout"
+          changed_when: "' changed.' in hz_db_cpw.stdout"
           failed_when: false
           no_log: true
+          when:
+            - not ansible_check_mode
+            - hz_db_pwcheck.rc != 0
+          tags: [fixtures]
+
+        - name: "Gate: kadmin.local changed the password of hz_db"
+          ansible.builtin.assert:
+            that:
+              - hz_db_cpw.rc == 0
+              - "' changed.' in hz_db_cpw.stdout"
+              - "'change_password:' not in hz_db_cpw.stderr"
+            fail_msg: >-
+              kadmin.local did not change the password of hz_db
+              (rc={{ hz_db_cpw.rc }}; it exits 0 even on failure):
+              {{ hz_db_cpw.stderr | default('') | trim }} ("Too soon to change
+              password" means the realm's minimum password lifetime has not
+              passed: ipa pwpolicy-mod --minlife=0 on a lab realm).
+          when:
+            - not ansible_check_mode
+            - hz_db_pwcheck.rc != 0
           tags: [fixtures]
 
         # ── T4: HBAC decision-engine check (authoritative — same evaluation SSSD
@@ -266,8 +336,9 @@
         # one-directional disable) — run with --tags restore after the sim's
         # negative phase so the sandbox's other accounts aren't left locked out.
         - name: "Restore — kinit admin"
-          ansible.builtin.shell:
-            cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ ipa_realm }}"]
+            stdin: "{{ ipa_admin_password }}"
           changed_when: false
           no_log: true
           tags: [restore]
@@ -302,8 +373,9 @@
 
         # ── T7 cleanup: remove everything this test created server-side ──────
         - name: "Cleanup — kinit admin"
-          ansible.builtin.shell:
-            cmd: 'printf %s "{{ ipa_admin_password }}" | kinit admin@{{ ipa_realm }}'
+          ansible.builtin.command:
+            argv: [kinit, "admin@{{ ipa_realm }}"]
+            stdin: "{{ ipa_admin_password }}"
           changed_when: false
           no_log: true
           tags: [cleanup]
