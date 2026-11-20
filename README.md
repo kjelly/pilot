@@ -66,6 +66,32 @@ rotated files. Override the limits with `PILOT_ANSIBLE_LOG_MAX_BYTES` and
 This is defense in depth; playbooks must still use Ansible `no_log: true` for
 secret-bearing tasks.
 
+## Process a batch of pull requests
+
+Run the standalone PR loop from a Pilot checkout:
+
+```bash
+python3 scripts/pr_loop.py 371 372 --repo kjelly/pilot
+```
+
+The runner uses the Python 3 standard library. Install `git`, authenticated
+`gh`, `tmux`, and the coding agents, with `claude` and `codex` as defaults.
+The target repository's default branch must contain Pilot's PR skills and
+result helper, and the merge train consumer must be running.
+
+The runner starts agents automatically on the verified default branch. An
+agent process is reused for its role while the same PR moves between Draft
+and Ready. After GitHub confirms the merge, the runner closes that PR's agent
+panes and starts new processes for the next PR. A gate that reports a blocker,
+a current-HEAD `needs-person` hand-off, or a timeout stops the batch and retains
+the checkout and panes for inspection. The runner prints their locations.
+
+Use `--draft-agent` and `--ready-agent` to choose executable paths. The prompts
+default to `/pr-ready {pr}` and `$pr-review-merge {pr}`; you can set them with
+`--draft-command` and `--ready-command`. Quote them in the shell to preserve
+the native skill syntax. Add `--dry-run` to see PR states before starting any
+agent. The phase timeout defaults to 7200 seconds.
+
 ## Command map
 
 ### Authoring, inventory, and delivery
