@@ -1,0 +1,40 @@
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_show('allow_all', all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_disable('allow_all', version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacsvc_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacsvc_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacsvc_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacsvc_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacsvc_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: admin@IPA.PILOT.INTERNAL: batch: hbacrule_remove_host('p3a-login', version='2.257', hostgroup=('hg-p3a',)): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: batch(hbacrule_remove_host('p3a-login', version='2.257', hostgroup=('hg-p3a',))): SUCCESS
+ipa: INFO: admin@IPA.PILOT.INTERNAL: batch: hbacrule_mod('p3a-login', hostcategory='all', version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: batch(hbacrule_mod('p3a-login', hostcategory='all', version='2.257')): SUCCESS
+ipa: INFO: admin@IPA.PILOT.INTERNAL: batch: hbacrule_add_user('p3a-login', version='2.257', user=('p3a-alice',)): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: batch(hbacrule_add_user('p3a-login', version='2.257', user=('p3a-alice',))): SUCCESS
+ipa: INFO: admin@IPA.PILOT.INTERNAL: batch: hbacrule_enable('p3a-login', version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: batch(hbacrule_enable('p3a-login', version='2.257')): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: admin@IPA.PILOT.INTERNAL: batch: hbacrule_del(('p3a-gone',), version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: batch(hbacrule_del(('p3a-gone',), version='2.257')): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacsvc_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacsvc_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacsvc_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacsvc_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacsvc_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: admin@IPA.PILOT.INTERNAL: batch: hbacrule_mod('p3a-login', hostcategory='', version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: batch(hbacrule_mod('p3a-login', hostcategory='', version='2.257')): SUCCESS
+ipa: INFO: admin@IPA.PILOT.INTERNAL: batch: hbacrule_add_host('p3a-login', version='2.257', hostgroup=('hg-p3a',)): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: batch(hbacrule_add_host('p3a-login', version='2.257', hostgroup=('hg-p3a',))): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacrule_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS
+ipa: INFO: [jsonserver_session] admin@IPA.PILOT.INTERNAL: hbacsvc_find(None, timelimit=0, sizelimit=0, all=True, version='2.257'): SUCCESS

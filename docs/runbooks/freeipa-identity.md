@@ -470,6 +470,23 @@ ansible-playbook、ssh、approval 紀錄與入口自己的步驟之前拒絕（�
    但訊息寫的是「下架已完成」，並說明同時執行的 identity 作業可能讓 client 的授權快取沒被刷新（client 在 SSSD 快取過期前
    可能仍沿用被下架主機的授權），不會叫你重跑。已完成的 plan 重跑只重播 receipt，不取鎖。
 
+### 4.3.1 Go engine 的混合執行：roster 的 HBAC 由 Go 寫入（`--engine golang --scope full`）
+
+`pilot reconcile --dir <workspace> --component freeipa-identity --engine golang --scope full [--preview-only | --force] [--result-out <檔>] [--plan-out <檔>]` 是 Ansible engine 的 reconcile 流程（依賴、availability、預覽、stage、冪等性檢查），只是 identity 這一步改成：
+
+```
+Go(users/groups) → identity playbook 第 1 次 → Go(HBAC) → identity playbook 第 2 次（--tags client-cache）
+```
+
+- **HBAC 在 playbook 之後**：rule 引用的 host、hostgroup 由 playbook 建立，所以同一輪建 hostgroup 與引用它的 rule 會收斂。第 1 次 playbook 帶 `-e pilot_identity_users_groups_engine=go`、`-e pilot_identity_hbac_engine=go`（略過 roster 的 users/groups 與 HBAC，SSH key、hosts、hostgroups、sudo、NFS 與 `pilot access` 編譯出的 rule 照常）與 `-e pilot_identity_cache_settle=defer`；第 2 次只刷新授權快取並確認義務。這幾個變數是 pilot 自己帶的，不要手動帶：playbook 的 gate 會擋下沒有 users/groups engine 的 `hbac_engine=go`、沒有 `hbac_engine=go` 的 `cache_settle=defer`、以及不認得的值。
+- **Go(HBAC) 管的**：`hbac.services`、`hbac.rules`（建立、成員增減、`hostcat`／`all` 與指定 host／hostgroup 之間的切換、`enabled`、`state: absent` 的刪除）與 `hbac.disable_allow_all`。比對一律小寫（rule 名稱與 host；host 的短名稱補上 server 的 domain），所以大小寫或短名稱不同不會來回變動。
+- **不會做的**：roster 沒有提到的 rule 不會被刪（preview 會列出「FreeIPA 有、roster 沒有提到的 HBAC rule」，內建的 rule 不列）；要刪就在 roster 把它寫成 `state: absent`。`allow_all` 不能用 `state: absent` 刪（roster 驗證器直接拒絕），要用 `hbac.disable_allow_all: true`。
+- **lockdown**：停用 `allow_all` 之前與之後各用 `hbactest` 證明 admin 仍能以 `sshd` 登入這台 server；停用之後的證明失敗就把 `allow_all` 重新啟用，結果檔的 `hbac.result.lockdown.rollback` 只在 enable 被 server 回答之後才寫 `re-enabled`。lockdown 之前的寫入不回滾。
+- **預覽**（`--preview-only`，不取鎖）：Go 的唯讀 plan 含 HBAC（roster 宣告而 FreeIPA 還沒有的 host、hostgroup、service 視為 playbook 會建立）加 Ansible 的 `--check --diff`。plan 有被阻擋的物件（`reference_unresolved`、`lockdown_no_break_glass`、`user_category_all`、`case_collision`）就在 playbook 開始之前結束碼 3、零寫入；套用時同樣的 plan 也是結束碼 3、不執行 playbook。
+- **結束碼**：0 全部完成、驗證，義務已結清；1 失敗（含部分套用：Go 已寫入的不回滾）；3 plan 被阻擋（零寫入）；4 只剩授權快取義務未結清。第 1 次 playbook 失敗：HBAC 階段與第 2 次都不執行（結果檔 `hbac.skipped`）；HBAC 階段失敗（例如 rule 名單列了同一份 roster 刪除的使用者，該成員是 `conflict-failed`）：第 2 次仍會執行，整輪是結束碼 1；第 2 次失敗（例如 client 失聯）：結束碼 1，義務維持未結清，下一次選到 identity 或 client-cache 的 apply 會重做刷新。client 在這一輪開始前就失聯，pilot 的套用前可用性檢查會以結束碼 1 中止，什麼都沒套用。
+- **讀回對不對**：用 server 自己的話，不要用 pilot 的輸出：`ipa hbacrule-find --all`、`ipa hbactest --user=<使用者> --host=<client FQDN> --service=sshd`；結果檔（`--result-out`）的 `hbac` 物件有每個操作的結果、讀回驗證與 lockdown 報告。client 的登入在這一輪結束後立即跟著 rule 變（對 `p26-` 驗證使用者的 ssh 登入，最慢的第一次探測 0.3 秒內拒絕）。
+- **還沒有的**：`--scope users-groups` 與預設的 Ansible engine 不讀 HBAC、不帶上面的變數；正式規模的 rule 數與多台 client 的結算成本沒有量過。實跑紀錄與未涵蓋項目見 [驗收紀錄](../evidence/freeipa-go-reconcile/LATEST.md)。
+
 ### 4.4 只跑一部分（tags）
 
 ```bash

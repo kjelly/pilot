@@ -94,6 +94,23 @@ type Desired struct {
 	NotInScope []string
 }
 
+// WithoutNotInScope is d with the named roster sections no longer reported as left to the playbook: the mixed
+// run (`--scope full`) hands the roster's hbac section to the Go HBAC stage, so it is no longer one of them
+// (spec 2026-11-19 phase 3a §0). It returns a copy; d is not changed.
+func (d Desired) WithoutNotInScope(sections ...string) Desired {
+	kept := make([]string, 0, len(d.NotInScope))
+	for _, s := range d.NotInScope {
+		if !slices.Contains(sections, s) {
+			kept = append(kept, s)
+		}
+	}
+	if len(kept) == 0 {
+		kept = nil
+	}
+	d.NotInScope = kept
+	return d
+}
+
 // inScopeSections are the top-level roster keys this engine reads; every
 // other non-empty key is left to the playbook (spec §5.3).
 var inScopeSections = map[string]bool{"schema_version": true, "freeipa": true, "users": true, "groups": true, "migration": true}

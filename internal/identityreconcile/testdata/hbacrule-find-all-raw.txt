@@ -1,0 +1,60 @@
+--------------------
+4 HBAC rules matched
+--------------------
+  dn: ipaUniqueID=cd31818c-e3e9-11f1-9895-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal
+  cn: allow_all
+  usercategory: all
+  hostcategory: all
+  servicecategory: all
+  description: Allow all users to access any host from any host
+  ipaenabledflag: FALSE
+  accessRuleType: allow
+  ipaUniqueID: cd31818c-e3e9-11f1-9895-525400dff9fd
+  objectClass: ipaassociation
+  objectClass: ipahbacrule
+
+  dn: ipaUniqueID=cd323078-e3e9-11f1-acef-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal
+  cn: allow_systemd-user
+  usercategory: all
+  hostcategory: all
+  description: Allow pam_systemd to run user@.service to create a system user session
+  ipaenabledflag: TRUE
+  memberservice: cn=systemd-user,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal
+  accessRuleType: allow
+  ipaUniqueID: cd323078-e3e9-11f1-acef-525400dff9fd
+  objectClass: ipaassociation
+  objectClass: ipahbacrule
+
+  dn: ipaUniqueID=250cbf3a-e48e-11f1-bbba-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal
+  cn: p26-admin
+  hostcategory: all
+  ipaenabledflag: TRUE
+  memberuser: uid=admin,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  memberservice: cn=sshd,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal
+  accessRuleType: allow
+  ipaUniqueID: 250cbf3a-e48e-11f1-bbba-525400dff9fd
+  objectClass: ipaassociation
+  objectClass: ipahbacrule
+
+  dn: ipaUniqueID=2488aaf6-e48e-11f1-a23d-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal
+  cn: p26-ssh
+  ipaenabledflag: FALSE
+  memberhost: cn=p26-targets,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  memberhost: fqdn=h3a-cli.ipa.pilot.internal,cn=computers,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  memberuser: uid=p26-ann,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  memberuser: uid=p26-ben,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  memberuser: uid=p26-cat,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  memberuser: uid=p26-dan,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  memberuser: uid=p26-eve,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  memberuser: uid=p26-adm,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  memberuser: uid=p26-adn,cn=users,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  memberuser: cn=team-p26,cn=groups,cn=accounts,dc=ipa,dc=pilot,dc=internal
+  memberservice: cn=sshd,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal
+  memberservice: cn=sudo,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal
+  accessRuleType: allow
+  ipaUniqueID: 2488aaf6-e48e-11f1-a23d-525400dff9fd
+  objectClass: ipaassociation
+  objectClass: ipahbacrule
+----------------------------
+Number of entries returned 4
+----------------------------

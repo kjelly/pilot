@@ -821,3 +821,52 @@ func TestLogoutNeedsACompleteAnswer(t *testing.T) {
 		}
 	}
 }
+
+// Every HBAC read of Phase 3a goes through the client's success contract with the answer FreeIPA gave to it.
+// hbactest has no inner result (its answer is a value and a summary), and the lockdown's proof failed on
+// that on the first live run: the answer was refused as incomplete, and allow_all stayed as it was.
+func TestHBACReadsAreAcceptedWithTheirCapturedAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		method, fixture string
+		args            []any
+		options         map[string]any
+	}{
+		{"hbacrule_find", "hbacrule-find-builtin", nil, map[string]any{"all": true}},
+		{"hbacrule_show", "hbacrule-show-all-members", []any{"x"}, map[string]any{"all": true}},
+		{"hbacsvc_find", "hbacsvc-find-builtin", nil, map[string]any{"all": true}},
+		{"hbacsvc_show", "hbacsvc-show-sshd", []any{"sshd"}, nil},
+		{"host_find", "host-find-pkey-only", nil, map[string]any{"pkey_only": true}},
+		{"hostgroup_find", "hostgroup-find-pkey-only", nil, map[string]any{"pkey_only": true}},
+		{"env", "env-domain", []any{"domain"}, nil},
+		{"hbactest", "hbactest-granted", nil, map[string]any{"user": "admin", "targethost": testFQDN, "service": "sshd"}},
+		{"hbactest", "hbactest-denied", nil, map[string]any{"user": "admin", "targethost": testFQDN, "service": "sshd"}},
+		{"hbactest", "hbactest-breakglass-granted", nil, map[string]any{"user": "admin", "targethost": testFQDN, "service": "sshd"}},
+		{"hbactest", "hbactest-admin-granted", nil, map[string]any{"user": "admin", "targethost": testFQDN, "service": "sshd"}},
+	} {
+		t.Run(tc.method+"/"+tc.fixture, func(t *testing.T) {
+			_, c := loggedIn(t, map[string]string{tc.method: tc.fixture})
+			if _, err := c.Call(context.Background(), Command{Method: tc.method, Args: tc.args, Options: tc.options}); err != nil {
+				t.Fatalf("the captured answer %s was refused: %v", tc.fixture, err)
+			}
+		})
+	}
+}
+
+// An hbactest answer without a value proves nothing, and is not taken for an answer (the case that fires).
+func TestHBACTestWithoutAValueIsIncomplete(t *testing.T) {
+	for _, body := range []string{
+		`{"error":null,"result":{"summary":"Access granted: True"}}`,
+		`{"error":null,"result":{"value":null,"summary":"x"}}`,
+		`{"error":null,"result":{}}`,
+		`{"error":null,"result":null}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			f, c := loggedIn(t, nil)
+			injectBody(f, body)
+			_, err := c.Call(context.Background(), Command{Method: "hbactest", Options: map[string]any{"user": "admin"}})
+			if err == nil || errors.As(err, new(*OutcomeUnknownError)) || !errors.Is(err, ErrIncompleteResponse) {
+				t.Fatalf("got %v, want an incomplete-response error of a read", err)
+			}
+		})
+	}
+}

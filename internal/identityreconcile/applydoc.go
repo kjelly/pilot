@@ -67,6 +67,23 @@ type PlaybookReport struct {
 	ObservationError string `json:"observation_error,omitempty"`
 }
 
+// HBACReport is what the Go HBAC stage of a mixed run did, after the playbook's first run and before its
+// second (spec 2026-11-19 phase 3a §7.2). It holds the stage's plans, the outcome of each operation, the
+// verification and the lockdown with the truth about its rollback, as the users and groups part does.
+type HBACReport struct {
+	// Ran: the stage was started and connected to FreeIPA. A run whose playbook failed before it, or
+	// whose context ended, never starts it.
+	Ran bool `json:"ran"`
+	// Skipped says why the stage did not run, when it did not: the first playbook run failed, or the
+	// run's context had ended.
+	Skipped string `json:"skipped,omitempty"`
+	// Error is the stage's error, when it ended in one.
+	Error string `json:"error,omitempty"`
+	// Result is what ExecuteHBAC returned, whatever it returned it with.
+	Result *HBACResult `json:"result,omitempty"`
+	Stats  Stats       `json:"stats"`
+}
+
 // ApplyDocument is the result file: the plans, what became of each operation, the
 // verification, the obligation and the transaction's outcome. It holds no password,
 // cookie, vault content or SSH key body (I6): the operations carry names and the fields
@@ -86,8 +103,12 @@ type ApplyDocument struct {
 	Server          Server        `json:"server"`
 	DesiredRevision string        `json:"desired_revision"`
 	Authorization   ObligationDoc `json:"authorization_cache"`
-	// Playbook is the mixed scope's account of the identity playbook; absent in users-groups.
+	// Playbook is the mixed scope's account of the identity playbook; absent in users-groups. Its
+	// Observation is the one the obligation is settled by: the second run's (`--tags client-cache`),
+	// or, when the run ended before it, the last run's.
 	Playbook *PlaybookReport `json:"playbook,omitempty"`
+	// HBAC is the mixed scope's account of the Go HBAC stage; absent in users-groups.
+	HBAC *HBACReport `json:"hbac,omitempty"`
 	Result
 	Stats Stats `json:"stats"`
 }
@@ -113,18 +134,23 @@ type ApplyDocumentInput struct {
 	Scope string
 	// Playbook is the mixed run's account of the identity playbook (nil for users-groups).
 	Playbook *PlaybookReport
+	// HBAC is the mixed run's account of the Go HBAC stage (nil for users-groups).
+	HBAC *HBACReport
 }
 
 // fullObligation is the authorization cache obligation after a mixed run: the identity
 // playbook settles it (its own settle, its refresh of the enrolled clients and its
 // acknowledgement), so it is owed unless the observation of the run says it acknowledged
 // (spec §6.2): no observation, an unacknowledged one and a playbook that never ran all leave
-// it owed, from this run when the entry ran in it.
-func fullObligation(res Result, pb *PlaybookReport) Obligation {
+// it owed, from this run when an entry ran in it, the users and groups phase's or the HBAC stage's.
+// The observation is the playbook's last run's, which is its second one, the one after the HBAC
+// stage, when the run got that far: an acknowledgement before the HBAC stage wrote would settle
+// nothing the stage did, and the first run is told to defer it.
+func fullObligation(res Result, pb *PlaybookReport, hbac *HBACReport) Obligation {
 	if pb != nil && pb.Observation != nil && pb.Observation.Acked {
 		return Obligation{}
 	}
-	if res.Entry.Ran {
+	if res.Entry.Ran || (hbac != nil && hbac.Result != nil && hbac.Result.Entry.Ran) {
 		return Obligation{Owed: true, Source: ObligationThisRun}
 	}
 	if pb != nil && pb.Ran {
@@ -141,7 +167,7 @@ func NewApplyDocument(in ApplyDocumentInput) ApplyDocument {
 	scope := ScopeUsersGroups
 	if in.Scope == ScopeFull {
 		scope = ScopeFull
-		ob = fullObligation(in.Result, in.Playbook)
+		ob = fullObligation(in.Result, in.Playbook, in.HBAC)
 	}
 	doc := ApplyDocument{
 		Schema:          ApplyDocumentSchema,
@@ -161,6 +187,9 @@ func NewApplyDocument(in ApplyDocumentInput) ApplyDocument {
 		Playbook: in.Playbook,
 		Result:   in.Result,
 		Stats:    in.Stats,
+	}
+	if in.Scope == ScopeFull {
+		doc.HBAC = in.HBAC
 	}
 	if in.Playbook != nil && in.Playbook.Observation != nil {
 		doc.Authorization.ObservedAcked = in.Playbook.Observation.Acked

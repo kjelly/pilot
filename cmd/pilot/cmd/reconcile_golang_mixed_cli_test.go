@@ -31,7 +31,9 @@ import (
 // captured shape), as the scenario's environment says:
 //
 //	P27_OBSERVE   acked (default), notacked, none (writes nothing, as `no hosts matched` does), otherhost
-//	P27_IDENTITY_EXIT  the exit code of the identity playbook's apply run (default 0)
+//	P27_SECOND_OBSERVE the same, for the apply's second run (--tags client-cache); default: P27_OBSERVE
+//	P27_IDENTITY_EXIT  the exit code of the identity playbook's first apply run (default 0)
+//	P27_SECOND_EXIT    the exit code of its second apply run (--tags client-cache; default 0)
 //	P27_CHECK_EXIT     the exit code of a --check run of the identity playbook (default 0)
 //	P27_BLOCK     a file: the identity playbook's apply writes its pid there and then waits (killed by the test's cancel)
 //
@@ -64,9 +66,19 @@ if play.endswith("freeipa-identity-auth-cache.yml"):
     sys.exit(0)
 if play.endswith("freeipa-identity-apply.yml"):
     engine = [a for a in args if a.startswith("pilot_identity_users_groups_engine=")]
+    hbac = [a for a in args if a.startswith("pilot_identity_hbac_engine=")]
+    defer = "pilot_identity_cache_settle=defer" in args
+    second = "--tags" in args and "client-cache" in args
     out = vars.get("pilot_identity_auth_cache_output")
     if engine and not out:
         sys.stdout.write("fatal: go without the observation file\n")
+        sys.exit(2)
+    # The playbook's own gate (spec 2026-11-19 phase 3a section 7.1).
+    if hbac and not engine:
+        sys.stdout.write("fatal: the HBAC engine without the users/groups engine\n")
+        sys.exit(2)
+    if defer and not hbac:
+        sys.stdout.write("fatal: a deferred settlement without the HBAC engine\n")
         sys.exit(2)
     sys.stdout.write(recap)
     sys.stdout.flush()
@@ -78,11 +90,17 @@ if play.endswith("freeipa-identity-apply.yml"):
         import time
         time.sleep(120)
     mode = os.environ.get("P27_OBSERVE", "acked")
+    if second and os.environ.get("P27_SECOND_OBSERVE"):
+        mode = os.environ["P27_SECOND_OBSERVE"]
     if out and mode != "none":
+        # What the real playbook writes: a run told to defer the settlement does not refresh or acknowledge.
+        settled = mode == "acked" and not defer
         res = {"schema": "pilot.identity-auth-cache/v1", "action": "observe", "host": "ipa-9" if mode == "otherhost" else "ipa-1",
-               "fqdn": "ipa.example.test", "prepared": True, "dirty": True, "refreshed": mode == "acked", "acked": mode == "acked"}
+               "fqdn": "ipa.example.test", "prepared": True, "dirty": True, "refreshed": settled, "acked": settled}
         with open(out, "w") as f:
             json.dump(res, f)
+    if second:
+        sys.exit(int(os.environ.get("P27_SECOND_EXIT", "0")))
     sys.exit(int(os.environ.get("P27_IDENTITY_EXIT", "0")))
 sys.stdout.write(recap)
 sys.exit(0)
@@ -140,6 +158,10 @@ func (e *mixedCLIEnv) runs() []string {
 			out = append(out, "ipa-write")
 			continue
 		}
+		if len(args) > 0 && args[0] == "HBAC-WRITE" {
+			out = append(out, "hbac-write")
+			continue
+		}
 		for _, a := range args {
 			if strings.HasSuffix(a, ".yml") && name == "" {
 				name = filepath.Base(a)
@@ -156,7 +178,7 @@ func (e *mixedCLIEnv) runs() []string {
 // identityArgs are the arguments of the identity playbook's run of the kind (check or apply), or nil.
 func (e *mixedCLIEnv) identityArgs(kind string) []string {
 	for _, args := range e.playbookCalls() {
-		if len(args) == 0 || args[0] == "IPA-WRITE" {
+		if len(args) == 0 || args[0] == "IPA-WRITE" || args[0] == "HBAC-WRITE" {
 			continue
 		}
 		joined := strings.Join(args, " ")
@@ -212,7 +234,8 @@ func TestMixedRunWritesThroughTheGoEngineThenRunsThePlaybook(t *testing.T) {
 	wantRuns := []string{
 		"preflight.yml apply", "freeipa-server-apply.yml check", "freeipa-server-apply.yml apply", // the dependency, as in the Ansible engine
 		"preflight.yml apply", "freeipa-identity-apply.yml check", // the identity transaction: the Go plan came before this check
-		"freeipa-identity-auth-cache.yml apply", "ipa-write", "freeipa-identity-apply.yml apply", // the entry, the Go write, the playbook
+		"freeipa-identity-auth-cache.yml apply", "ipa-write", "freeipa-identity-apply.yml apply", // the entry, the Go write, the playbook's first run
+		"freeipa-identity-apply.yml apply", // the HBAC stage had nothing to write (no entry, no write), the playbook's second run
 	}
 	if got := e.runs(); !slices.Equal(got, wantRuns) {
 		t.Fatalf("runs:\n got %v\nwant %v\n%s", got, wantRuns, out)

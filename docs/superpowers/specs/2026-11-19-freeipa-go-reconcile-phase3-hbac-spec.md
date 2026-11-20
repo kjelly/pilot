@@ -2,7 +2,7 @@
 
 日期：2026-11-19。前一階段：`docs/superpowers/specs/2026-11-06-freeipa-go-reconcile-phase2-spec.md`（下稱 P2）、Phase 1：`2026-10-30-freeipa-go-reconcile-phase1-spec.md`（下稱 P1）。
 
-狀態：**草案；P3-0（K1–K8 的擷取）已在拋棄式 lab 完成（§1.3），其餘尚未實作、沒有實跑**。本文件是 acceptance contract：它定義完成後外部可觀察到什麼，不是實作的逐行翻譯。文中的指令、旗標、變數是要實作的介面，不是已實跑的步驟。凡是寫成「K-」開頭的項目都是**要擷取的事實**，不可由本文件推測（AGENTS.md §5.6）；已擷取的列在 §1.3，K9、K10 仍未做。
+狀態：**P3-0 到 P3-6 已完成：K1–K11 的擷取與 `--scope full` 的接線，並在拋棄式 lab（FreeIPA server + 一台 enrolled client）以 `TestLiveHBACDriver` 的 13 個 arm 實跑通過，紀錄在 `docs/evidence/freeipa-go-reconcile/pr-418.md`；正式環境沒有跑過**。本文件是 acceptance contract：它定義完成後外部可觀察到什麼，不是實作的逐行翻譯。文中的指令、旗標、變數是要實作的介面，不是已實跑的步驟。凡是寫成「K-」開頭的項目都是**要擷取的事實**，不可由本文件推測（AGENTS.md §5.6）；已擷取的列在 §1.3，K10 已在 lab 量測（§1.3 末），K9 仍未做。
 
 ## 0 範圍
 
@@ -59,7 +59,11 @@ Phase 3a 把 **roster 的 HBAC** 從 identity playbook 搬到 Go engine，只在
 | K7 | **rule 名稱不分大小寫**，保留第一次建立的拼法：以小寫再建一次是 `DuplicateEntry`，以任一種大小寫 show 都回原拼法；`hbacrule_find` 的條件也不分大小寫 | **Q4 定案**：比對一律小寫；roster 內兩個只差大小寫的 rule 是 `case_collision`；送指令時保留 roster 的拼法 |
 | K8 | **刪除使用者會自動把他從引用它的 rule 移掉**；對不存在的使用者附加是 `no such entry` 的逐成員失敗 | 「roster 把已刪使用者仍列在 rule」的行為：Go 階段的 user 刪除之後 rule 已經沒有他，HBAC 階段再附加會逐成員失敗，所以要在 plan 階段分類（§4.2 Q1） |
 
-K9（正式規模的 rule 數與 `hbacrule_find` 成本）與 K10（run 2 的固定成本）仍未量測。
+K9（正式規模的 rule 數與 `hbacrule_find` 成本）仍未量測。
+
+K10（run 2 的固定成本，P3-5 在 lab 實跑，一台 FreeIPA server、沒有 enrolled client）：已收斂的 apply，playbook 第 1 次約 11 秒、HBAC 階段約 1.4 秒（讀 6 個、0 個寫入）、第 2 次（`--tags client-cache`）約 7 秒；有 5 個寫入時 HBAC 階段約 8 秒，第 2 次約 8 秒。第 2 次的固定成本約 7–8 秒，主要是 ansible 啟動、連線與 always 標記的 task；**沒有量到** 有 enrolled client 時的 SSSD 刷新（lab 沒有 client，`Refresh SSSD caches` 被 skip），那一段取代的是正式環境約 280 秒的重複刷新，仍待在正式規模量測。
+
+K11（P3-5 實跑發現）：`hbactest` 的答案沒有內層 `result`（只有 `value`、`summary`、`matched`、`notmatched`、`warning`、`error`），`freeiparpc` 的成功契約原本對每個指令都要求內層 `result`，所以 lockdown 的前置 proof 一律被當成 incomplete response、lockdown 以 `conflict-failed` 停在 H8（allow_all 沒被碰，是安全的失敗）。P3-3 的 lockdown 只用過假 RPC，沒走過 client。修正：`validateCommandResult` 對 `hbactest` 要求 `value`；新增用 8 個 HBAC 讀取的真實擷取答案走完整 client 的測試與「沒有 value 就是 incomplete」的觸發測試。
 
 ### 1.4 風險
 
@@ -223,9 +227,11 @@ idempotency: Go(users/groups) plan 與 Go(HBAC) plan 都必須沒有操作
 |---|---|
 | Go(users/groups) blocked／失敗 | 不啟動 playbook，沿用 P2 |
 | run 1 非 0 | **不跑** HBAC 階段與 run 2；義務欠著；`partial_failed`，結束碼 1（Go 已寫入）或沿用 P2 |
-| HBAC 階段 blocked（apply 時重讀發現 host 不存在等） | 零寫入、不跑 run 2，義務欠著、結束碼 3 若整輪沒有任何寫入，否則 1 |
-| HBAC 階段部分失敗 | 不跑 run 2？**Q2：** 預設仍跑 run 2 結清已發生的變更的快取（失敗的 rule 保持原狀），結束碼 1 |
-| run 2 失敗或沒觀察到 ack | 結束碼 4（未結清） |
+| HBAC 階段 blocked（apply 時重讀發現 host 不存在等） | HBAC 階段零寫入、**仍跑 run 2**（其他寫入的快取要結清），整輪是失敗，**結束碼 1（不是 3）**，錯誤訊息明說 HBAC 階段沒有寫入任何東西。理由：3 的意思是「整輪沒有任何寫入」，而 run 1 已經跑過、可能寫了東西，沒有辦法說真話；原因以文字保留、不帶 `ErrBlocked`（P3-5 實作） |
+| HBAC 階段部分失敗 | 仍跑 run 2 結清已發生的變更的快取（失敗的 rule 保持原狀），整輪失敗：有寫入是部分套用，結束碼 1（Q2 預設，P3-5 實作） |
+| run 2 失敗（錯誤或非 0） | 整輪失敗（有寫入是部分套用），結束碼 1；觀察結果是 run 2 的，沒有被接受就是義務未結清 |
+| run 2 啟動了、成功，但觀察結果沒有說 ack | 結束碼 4（未結清）；義務由**最後一次** apply run 的觀察決定，第 1 次（defer）的 `acked=false` 不算 |
+| 這一輪的 context 在 run 1 之後結束 | HBAC 階段與 run 2 都不啟動，錯誤說義務未結清；在 HBAC 階段之中結束則 run 2 不啟動 |
 
 Q2 的預設需要維護者確認（見 §10）。
 
@@ -257,9 +263,15 @@ Q2 的預設需要維護者確認（見 §10）。
 
 `docs/evidence/freeipa-go-reconcile/pr-<n>.md`（機器部分由 pilot 產生）與 `LATEST.md` 新增 Phase 3a 一節；candidate 凍結與隔離 checkout 依 AGENTS.md §1.5。
 
-## 9 與 playbook 的已知差異（實作時填，目前為空）
+## 9 與 playbook 的已知差異
 
-已知的：(1) host 比對：Go 用小寫 FQDN，playbook 去掉網域後比（§3.2，K4）；(2) `reference_to_absent`（§4.2，K8：刪使用者已自動移出 rule）；(3) rule 名稱 `case_collision`：playbook 沒有這個檢查，同名只差大小寫時 playbook 會在 `hbacrule-add` 之後把第二個當成「已存在」而靜默合併，Go 擋下。每一項要寫出理由與 live 證據。
+已知的：(1) host 比對：Go 用小寫 FQDN，playbook 去掉網域後比（§3.2，K4）；(2) `reference_to_absent`（§4.2，K8：刪使用者已自動移出 rule）；(3) rule 名稱 `case_collision`：playbook 沒有這個檢查，同名只差大小寫時 playbook 會在 `hbacrule-add` 之後把第二個當成「已存在」而靜默合併，Go 擋下。每一項的理由與 live 證據（PR #418 的 H0–H11，candidate `7c6561ae`）：
+
+1. **host 比對**：Go 把 roster 的 host 與 server 的成員都轉小寫 FQDN（短名稱以 server 的 domain 補全），playbook 去掉網域後比。理由：FreeIPA 把短名稱補成 FQDN 存成小寫（K4），兩邊用同一個身分才不會來回變動（AGENTS.md §5.13）。live：H3 把 rule 的 host 寫成大寫 FQDN 與短名稱，對已經是成員的 host 都是 0 個操作、server 沒有任何 HBAC 指令。
+2. **`reference_to_absent`**：實作**沒有**把它當成 blocked 原因（Q1，沿用 P2 E49(1) 與 Ansible）。刪除使用者會自動把他從 rule 移掉（K8），roster 卻仍列他時，HBAC 階段的附加是逐成員的 `no such entry`。live：H10 的 rule 名字列了同一份 roster 刪除的使用者，`hbac.rule.member_user.add` 是 `conflict-failed`，整輪結束碼 1（部分套用），第 2 次 playbook run 照跑；所以 §4.2 表中這一列是「分類為失敗」而不是「blocked」，plan 不擋。
+3. **`case_collision`**：Go 在 plan 擋下（blocked，結束碼 3，沒有寫入），playbook 沒有這個檢查。理由：FreeIPA 的 rule 名稱不分大小寫，第二個 `hbacrule_add` 會是 `DuplicateEntry`（K7）。live：H6 的 roster 有 `p26-ssh` 與 `P26-SSH` 兩條 rule，預覽結束碼 3，plan 文件的 blocked 是 `case_collision`，server 沒有 HBAC 指令。playbook 端「靜默合併」的說法來自 K7 的擷取，沒有在 live 重跑 Ansible engine 驗證。
+
+另一個實跑才看到的差異：roster 把 `allow_all` 標 `state: absent`，roster validator（兩個 engine 共用）先拒絕，結束碼 1、沒有 plan 文件（H6），所以 plan 的 `allow_all_delete` 是第二道線，這份 roster 走不到。
 
 ## 10 待確認
 
@@ -280,14 +292,17 @@ Q2 的預設需要維護者確認（見 §10）。
 | P3-2 | writer：stage、批次、分類、驗證、journal、fake IPA 矩陣（**已完成**：`hbac_execute.go`、`hbac_stage.go`、`hbac_execute_test.go`、`hbac_classify_test.go`、`hbac_fakeipa_test.go`；`ExecuteHBAC`，H8 在 P3-3 之前一律拒絕） | 否 |
 | P3-3 | lockdown（**已完成**：`hbac_lockdown.go`、`hbac_lockdown_test.go`；proof、disable、rollback、`LockdownReport`；fake 只依 K5／K6 的擷取；live 驗證留給 P3-6） | 是（K5、K6，live 端留給 P3-6） |
 | P3-4 | playbook：`pilot_identity_hbac_engine`、`pilot_identity_cache_settle=defer`、gate、regression test（**已完成靜態與 Ansible runtime 部分**：`internal/spec/freeipa_identity_hbac_engine_regression_test.go`；run 2 的 `--tags client-cache` 路徑與 K10（run 2 固定成本）要等 P3-5 在 lab 實跑） | 是（K10） |
-| P3-5 | transaction 整合：第二階段、run 2、結果檔、結束碼、idempotency | 是 |
-| P3-6 | live driver、evidence、文件 | 是 |
+| P3-5 | transaction 整合：第二階段、run 2、結果檔、結束碼、idempotency（**程式碼與假 server 測試已完成**：`cmd/pilot/cmd/reconcile_golang_mixed.go` 的 `applyMixedPlaybook`、`mixedHBACStage`、`mixedHBACPlanDoc`；`identityreconcile` 的 `Document.HBAC`、`ApplyDocument.HBAC`、`HBACReport`、環境變數常數；**已在 lab 實跑**：preview、apply、已收斂的重跑、成員增減與移除、分類更新與清除、停用與啟用、規則刪除（名稱大小寫不同）、`allow_all` lockdown；K10 已量） | 是 |
+| P3-6 | live driver、evidence、文件（**已完成**：`live_hbac_test.go` 的 `TestLiveHBACDriver`，12 個 arm H0–H11 加共用的基線 A1，13 個全部 PASS；`live_hbac_unit_test.go` 與兩個真實擷取的 fixture；`docs/evidence/freeipa-go-reconcile/pr-418.md`、`LATEST.md`；operator 文件 `docs/runbooks/freeipa-identity.md` §4.3.1） | 是 |
 
 ## 12 變更紀錄
 
 | 日期 | 變更 |
 |---|---|
 | 2026-11-19 | 初版草案。維護者決定：D1（playbook 之後的第二個 Go 階段）、D2（lockdown 一起搬）。 |
+| 2026-11-19 | P3-5：`--scope full` 接線。流程 Go(users/groups) → playbook 第 1 次 apply（`-e pilot_identity_hbac_engine=go`、`-e pilot_identity_cache_settle=defer`）→ Go(HBAC)（同一把鎖、自己的連線與入口、journal `hbac:` 前綴）→ playbook 第 2 次 apply（`--tags client-cache`，沒有 defer）；每次 playbook 執行（preview、兩次 apply、idempotency）都帶兩個 engine 變數，只有第 1 次 apply 帶 defer。預覽在同一個唯讀連線上讀並規劃 HBAC（`BuildHBAC` Preview=true；blocked 也是結束碼 3，在任何 playbook task 之前），`--plan-out` 在 full 時多一個 `hbac` 欄位且 scope 是 full（users-groups 的文件不變）；冪等性檢查要求 users/groups 與 HBAC 兩個 plan 都沒有操作，訊息指出是哪一個；結果檔多一個選用的 `hbac` 物件（ran、skipped、error、HBACResult、stats），義務由最後一次 apply run 的觀察或 HBAC 階段的入口決定；`Desired.NotInScope` 在 full 不再列 `hbac`；run 的 metadata 加 `hbac_engine=go`。與 §7.3 原文的差異：HBAC 階段在 apply 時被阻擋是結束碼 1、仍跑 run 2（見 §7.3 表）。`--scope users-groups` 與預設 engine 不讀 HBAC、不帶任何新變數（測試鎖住）。實跑：只有假 server 與假 ansible-playbook 的 CLI 測試（真 cobra、真 transaction、真 store），沒有 lab。 |
+| 2026-11-20 | P3-6：live driver 與 evidence。`TestLiveHBACDriver` 在拋棄式 lab（FreeIPA 4.13.4 server + 一台 enrolled Ubuntu 24.04 client）跑 13 個 arm，candidate `7c6561ae`，全部 PASS（3159 秒）；driver 讀 server 自己的話（`ipa hbacrule-find`、httpd log、`ipa hbactest`、真的 ssh 登入）。覆蓋 §8.2 的每一項：反向（Ansible 先收斂，Go 0 個寫入）、正向（Go 之後 Ansible 的 64 個 HBAC task `changed=0`）、登入 oracle（移出、停用、啟用、刪除，client 立即跟著）、撤銷與分類雙向、drift、lockdown 成功與回滾、每個可到達的 blocked 原因（H6）、playbook 第 1 次與第 2 次失敗、逐成員失敗、playbook gate 的通過與觸發；也補上 §9 的 live 證據。與規格的差異：(1) `allow_all` 標 absent 是 roster validator 先拒絕（結束碼 1、無 plan 文件），plan 的 `allow_all_delete` 這份 roster 走不到；(2) pilot 的套用前可用性檢查在 client 失聯時以結束碼 1 中止，所以「第 2 次 run 失敗」要在 HBAC 階段結束之後才讓 client 失聯；(3) apply 時才被阻擋的 HBAC 階段沒有在 live 做出來（只有假 server 測試）。K9（正式規模的讀取成本）仍未量。 |
+| 2026-11-19 | P3-5 lab 實跑（FreeIPA 4.13.4，拋棄式 lab，sandbox）：`--scope full --preview-only` 都結束碼 0；`--force` 六輪（建立、已收斂重跑、成員移除與新增＋服務＋停用＋lockdown、lockdown 重跑、刪除＋分類＋啟用、還原）只有第三輪結束碼 1（K11，部分套用：H1–H7 的 7 個寫入已生效，lockdown 沒送），其餘 0；每輪之後以 `ipa hbacrule-find` 讀回與 roster 相符，lockdown 後 `ipa hbactest` 顯示 admin 仍由 break-glass 規則放行。實跑抓到兩個問題，都已修並有測試：(1) K11：`hbactest` 被 client 的成功契約拒絕（見 §1.3），第一輪的 lockdown 因此 `conflict-failed`、allow_all 沒被動，修正後重跑 lockdown 成功；(2) 計畫沒有操作時，HBAC 階段的輸出印「讀回與 roster 不一致」（實際是沒有寫入所以沒有讀回），改為「計畫沒有操作，沒有寫入，不需要讀回」，並區分沒讀回與讀回不一致。實跑時沒有觸發的：HBAC 階段 apply 時被 blocked、部分失敗、第 2 次 run 失敗（只有假 server 測試）。 |
 | 2026-11-19 | P3-3：lockdown（H8）完成。流程：`hbactest`（`value` 布林，不比對文字）→ 讀 `allow_all`（已停用算 noop）→ 送 `hbacrule_disable allow_all` → `hbactest` → 任一步在 disable 送出後失敗就 `hbacrule_enable allow_all` 回滾。與 §6 的差異：(1) 前置 proof 失敗、讀不到 `allow_all` 時**不送任何寫入**，op 是 `conflict-failed`（而不是 `failed`）；(2) 回滾只在「disable 可能已生效」時送（成功後 proof 失敗、結果未知、答案不是 true）；server 明確拒絕 disable（`RPCError`）時 allow_all 沒被碰，不送回滾；(3) disable 之後的 proof 與回滾走 `context.WithoutCancel` 加 `VerifyTimeout` 的 context（run 在 disable 之後被取消，仍要證明與回滾），回滾仍過 Gate 與鎖；(4) lockdown 失敗的 op 一律 `failed`，**不**是 `unknown`：回滾失敗時 allow_all 停用而 proof 不過，若記成 unknown，寫入後的重讀會把它解成 converged；(5) 訊息只在 `hbacrule_enable` 回 true 時才寫「allow_all was re-enabled」，否則寫「re-enabling allow_all FAILED (<原因>); check HBAC access now」；(6) `LockdownReport`（before/after/disabled/rollback）在 `HBACResult.Lockdown` 與 H8 的 journal result 事件；`DisableAllowAll` 而沒有 `TestHost` 的選項在讀取前就拒絕。 |
 | 2026-11-19 | P3-2：`ExecuteHBAC` 完成（H1–H7；H8 在 P3-3 之前一律拒絕）。與 §5.2 的差異：(1) HBAC 階段的 journal 事件 id 一律帶 `hbac:` 前綴（同一個 delivery run 的 users/groups 階段已用 `auth_cache`、`S*-b*`、`verify`，id 在一個 run 內不可重複）；(2) `DuplicateEntry`（`hbacsvc_add`、`hbacrule_add`）與 users/groups 的 `group_add` 同形，一律是 `conflict-failed`（不視為已收斂，run 在該 stage 停止），不是「重讀看到就算 converged」；(3) 破壞性 stage 的前置重讀：H3（移除）、H6 的 disable、H7（刪除）在送出前以 `hbacrule_find` 重讀，已離開的成員／已停用／已不存在算 noop，規則被刪除重建（`ipauniqueid` 不同）、roster 不再宣告、或有計畫沒列出的待移除成員算 `conflict-failed`；(4) `hbac.rule.disable` 與 `hbac.allow_all.disable` 在 Plan₁／Plan₂ 的比較中視為破壞性（收窄存取），與 users/groups 的 `user.disable` 同。 |
 | 2026-11-19 | P3-1：desired、live 讀取、plan 完成；`freeiparpc` 的 allowlist 加入 HBAC 方法（security boundary 的測試計數 11→23）。 |
