@@ -282,7 +282,9 @@ else:
                       "class GitHubError(Exception): pass\n"
                       "class Repo: pass\n"
                       "def current_repo(): pass\n"
-                      "def list_open_prs(repo): pass\n", cfile)
+                      "def list_open_prs(repo): pass\n"
+                      "def issue_comments(repo, number): pass\n"
+                      "def viewer_login(repo): pass\n", cfile)
         p = self.run_script(r, snapshot, self.LIST_READY, "--help")
         self.assertEqual(0, p.returncode, p.stderr)
         self.assertIn("PLANTED-GH-RUNTIME-LOADED", p.stdout, "premise: the planted bytecode is what ran")

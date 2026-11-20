@@ -95,9 +95,18 @@ def pr_view(repo: Repo, number: int) -> dict[str, Any]:
     return data
 
 
+# `gh pr checks` for a PR whose head commit has no check run and no status at all exits 1, prints nothing on
+# stdout and, on stderr, exactly this line (gh 2.104.0, kjelly/pilot#106: tests/fixtures/github_api.json
+# `pr_checks.zero_checks`). gh answers before its JSON exporter, so `--json` never prints `[]`.
+# Case-sensitive and anchored to the whole of stderr: anything else stays a GitHubError.
+NO_CHECKS = re.compile(r"no checks reported on the '[^\n]+' branch\n?")
+
+
 def pr_checks(repo: Repo, number: int) -> list[dict[str, Any]]:
     cp = run_gh(["pr", "checks", str(number), "-R", repo.raw,
                  "--json", "name,state,bucket,link,workflow"], check=False)
+    if cp.returncode == 1 and not cp.stdout.strip() and NO_CHECKS.fullmatch(cp.stderr):
+        return []
     # gh checks may exit nonzero for failing or pending checks; valid JSON still describes them.
     # Empty stdout with a nonzero rc is *not* proof there is no CI.
     if not cp.stdout.strip():
@@ -369,6 +378,31 @@ def label_added_at(repo: Repo, number: int, label: str) -> str | None:
                 raise GitHubError("Invalid labeled event time")
             added = created if added is None or created > added else added
     return added
+
+
+def issue_comments(repo: Repo, number: int) -> list[dict[str, Any]]:
+    """Every conversation comment on the PR, oldest first: `[{"body": str, "login": str}]`."""
+    endpoint = f"repos/{repo.owner}/{repo.name}/issues/{number}/comments?per_page=100"
+    result = gh_json(["api", *host_args(repo), "--paginate", "--slurp", endpoint])
+    if not isinstance(result, list) or not all(isinstance(page, list) for page in result):
+        raise GitHubError("gh api --paginate --slurp did not return pages")
+    comments = []
+    for item in (entry for page in result for entry in page):
+        user = item.get("user") if isinstance(item, dict) else None
+        if not isinstance(item, dict) or not isinstance(item.get("body"), str) or not isinstance(user, dict) \
+                or not isinstance(user.get("login"), str):
+            raise GitHubError("Invalid issue comment entry")
+        comments.append({"body": item["body"], "login": user["login"]})
+    return comments
+
+
+def viewer_login(repo: Repo) -> str:
+    """The login `gh` is authenticated as on the repository's host (the author of the actor's comments)."""
+    data = gh_json(["api", *host_args(repo), "user"])
+    login = data.get("login") if isinstance(data, dict) else None
+    if not isinstance(login, str) or not login:
+        raise GitHubError("gh api user returned no login")
+    return login
 
 
 def edit_label(repo: Repo, number: int, label: str, *, add: bool) -> None:
