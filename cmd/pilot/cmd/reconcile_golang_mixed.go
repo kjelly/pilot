@@ -204,7 +204,7 @@ func runMixedGoPhase(ctx context.Context, held *identitylock.Held, s *mixedStep)
 	}
 	defer session.close()
 	s.session, s.fqdn = session, session.fqdn
-	passwords, err := identityreconcile.NewRosterPasswords(prep.rosterData)
+	passwords, err := identityreconcile.NewRosterPasswords(prep.rosterData, prep.runVars)
 	if err != nil {
 		return mixedApplyError(nil, fmt.Errorf("roster 的密碼：%w", err))
 	}

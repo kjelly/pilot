@@ -133,7 +133,8 @@ func namedTasks(tasks []any, names []string) []map[string]any {
 	return out
 }
 
-// pwUser is one ipa_active_users entry plus the captured user-show output
+// pwUser is one ipa_active_user_credentials entry (an active user that
+// declares a password) plus the captured user-show output
 // its lookup returns ("" = the lookup fails).
 type pwUser struct {
 	entry   map[string]any
@@ -171,7 +172,7 @@ func runIdentityPassword(t *testing.T, users []pwUser, args ...string) (ag82Run,
 		}
 	}
 	res := runGatewayTasks(t, dir, identityTasks(t, identityPasswordTaskNames),
-		map[string]any{"ipa_active_users": active, "pw_fixture_dir": dir}, nil, args...)
+		map[string]any{"ipa_active_user_credentials": active, "pw_fixture_dir": dir}, nil, args...)
 	var passwd []string
 	prefix := identityPwSetTask + `: "PASSWD `
 	for _, m := range res.messages {

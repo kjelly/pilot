@@ -262,6 +262,12 @@
         - (freeipa_roster.freeipa | default({})).server | default('') | string | trim | length == 0
       tags: [always]
 
+    # The fact this task sets is the WHOLE roster, so the task result carries
+    # freeipa.admin.password and every users[].password.initial: a `-v` run, a
+    # JSON stdout callback and ANSIBLE_LOG_PATH all print it (issue #142). The
+    # roster stays one fact (roster_playbook_names.go models this task as the
+    # place freeipa.server is rendered), so the task is no_log, like the load
+    # above and the normalization below.
     - name: "Fill canonical roster freeipa.server for this reconcile"
       ansible.builtin.set_fact:
         freeipa_roster: >-
@@ -272,6 +278,7 @@
       when:
         - freeipa_detected_server_fqdn is defined
         - freeipa_detected_server_fqdn.stdout | default('') | trim | length > 0
+      no_log: true
       tags: [always]
 
     - name: "Gate: canonical roster version and legacy fields are mutually exclusive"
@@ -776,12 +783,48 @@
       no_log: true
       tags: [always]
 
+    # An initial password is a credential: it may sit only in no_log tasks.
+    # At the default verbosity Ansible prints the whole loop `item` of a FAILED
+    # iteration; at -v, and in JSON/YAML stdout callbacks and ANSIBLE_LOG_PATH,
+    # it prints the `item` of every iteration and the facts of a set_fact
+    # (`loop_control.label` only changes the prefix) (issue #216). So the
+    # users are split in two:
+    #   ipa_active_user_credentials  the active users that declare a password,
+    #                                whole, for the two password tasks below,
+    #                                which are no_log;
+    #   ipa_active_users, ipa_absent_users
+    #                                the same users without the keys that carry
+    #                                the credential, for every other task, so
+    #                                that a failure there still shows `ipa`'s
+    #                                reason and the user.
+    # `ipa_users` itself is never rewritten: an `-e ipa_users` (legacy roster)
+    # outranks set_fact. `ipa_identity_credential_keys` is the list of the keys
+    # freeipa-identity-normalize-users-groups.yml writes when it produces the
+    # credentials (TestRegression_IdentityCredentialKeysHaveOneSource).
+    - name: "Select the credentials of the active users"
+      ansible.builtin.set_fact:
+        ipa_active_user_credentials: >-
+          {{ ((ipa_users | rejectattr('state', 'defined') | list)
+              + (ipa_users | selectattr('state', 'defined') |
+                 rejectattr('state', 'equalto', 'absent') | list))
+             | selectattr('password', 'defined') | rejectattr('password', 'none') | list }}
+      no_log: true
+      tags: [always]
+
     - name: "Select active identity objects"
       ansible.builtin.set_fact:
         ipa_active_users: >-
-          {{ (ipa_users | rejectattr('state', 'defined') | list)
-             + (ipa_users | selectattr('state', 'defined') |
-                rejectattr('state', 'equalto', 'absent') | list) }}
+          {{ ((ipa_users | rejectattr('state', 'defined') | list)
+              + (ipa_users | selectattr('state', 'defined') |
+                 rejectattr('state', 'equalto', 'absent') | list))
+             | map('dict2items')
+             | map('rejectattr', 'key', 'in', ipa_identity_credential_keys)
+             | map('items2dict') | list }}
+        ipa_absent_users: >-
+          {{ ipa_users | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent')
+             | map('dict2items')
+             | map('rejectattr', 'key', 'in', ipa_identity_credential_keys)
+             | map('items2dict') | list }}
         ipa_active_groups: >-
           {{ (ipa_groups | rejectattr('state', 'defined') | list)
              + (ipa_groups | selectattr('state', 'defined') |
@@ -791,6 +834,8 @@
         # legacy -e with no state key at all — so this needs only the one
         # simpler filter.
         ipa_active_netgroups: "{{ ipa_netgroups | rejectattr('state', 'equalto', 'absent') | list }}"
+      vars:
+        ipa_identity_credential_keys: [password, force_password, preserve_existing]
       tags: [always]
 
     - name: "Gate: admin credential present (fail early, before any mutation)"
@@ -1295,7 +1340,7 @@
         - name: "Look up password state for users with a declared password"
           ansible.builtin.command:
             argv: [ipa, user-show, "{{ item.name }}", --all, --raw]
-          loop: "{{ ipa_active_users | selectattr('password', 'defined') | rejectattr('password', 'none') | list }}"
+          loop: "{{ ipa_active_user_credentials }}"
           loop_control:
             label: "{{ item.name }}"
           register: ipa_pwd_state
@@ -1389,7 +1434,7 @@
                           type(error).__name__ + ')', file=sys.stderr)
                     sys.exit(1)
             stdin: "{{ {'principal': item.name, 'password': item.password} | to_json }}"
-          loop: "{{ ipa_active_users | selectattr('password', 'defined') | rejectattr('password', 'none') | list }}"
+          loop: "{{ ipa_active_user_credentials }}"
           loop_control:
             label: "{{ item.name }}"
           when:
@@ -1830,7 +1875,7 @@
         - name: "Delete canonical users explicitly marked absent"
           ansible.builtin.command:
             argv: [ipa, user-del, "{{ item.name }}"]
-          loop: "{{ ipa_users | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list }}"
+          loop: "{{ ipa_absent_users }}"
           loop_control:
             label: "{{ item.name }}"
           register: canonical_user_delete

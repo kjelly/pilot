@@ -225,7 +225,7 @@ func runGolangApplyUnderLock(ctx context.Context, held *identitylock.Held, prep 
 		return nil, err // gate: apply-connect
 	}
 	defer session.close()
-	passwords, err := identityreconcile.NewRosterPasswords(prep.rosterData)
+	passwords, err := identityreconcile.NewRosterPasswords(prep.rosterData, prep.runVars)
 	if err != nil {
 		return nil, fmt.Errorf("roster 的密碼：%w", err) // gate: apply-passwords
 	}

@@ -38,6 +38,12 @@ if a[:2] == ['pr', 'view']:
     emit(dict(d['view'], labels=[{'name': n} for n in d.get('labels', [])]))
 if a[:2] == ['pr', 'checks']:
     persist()
+    # Answers recorded from real `gh pr checks` calls (fixtures/github_api.json, `pr_checks`): a PR with no
+    # check at all is answered with rc 1, empty stdout and a stderr line, never with `[]`; `checks_capture`
+    # replays any other recorded answer (an authentication, unknown-PR or network failure).
+    answer = d.get('checks_capture') or (d['checks_zero'] if not d['checks'] else None)
+    if answer:
+        sys.stdout.write(answer['stdout']); sys.stderr.write(answer['stderr']); sys.exit(answer['rc'])
     print(json.dumps(d['checks']))
     sys.exit(d.get('checks_rc', 0))
 if a[:2] == ['api', 'graphql'] or ('graphql' in a and a[0] == 'api'):
@@ -59,6 +65,13 @@ if a[0] == 'api' and '/git/ref/heads/' in a[-1]:
     emit({'object': {'type': 'commit', 'sha': d.get('live_base', d['view']['baseRefOid'])}})
 if a[0] == 'api' and '/pulls?' in a[-1]:
     emit(d.get('pages', []))
+if a[0] == 'api' and a[-1] == 'user':
+    emit({'login': d.get('viewer', 'prm-bot')})
+if a[0] == 'api' and '/issues/' in a[-1] and '/comments?' in a[-1]:
+    if d.get('comments_error'):
+        persist(); print('comments unavailable', file=sys.stderr); sys.exit(1)
+    number = a[-1].split('/issues/')[1].split('/')[0]
+    emit([d.get('issue_comments', {}).get(number, [])])
 if a[0] == 'api' and '/issues?' in a[-1]:
     label = a[-1].split('labels=')[1].split('&')[0]
     d['listing_reads'] = d.get('listing_reads', 0) + 1
@@ -92,6 +105,9 @@ if a[:2] == ['pr', 'comment']:
         persist(); print('comment denied', file=sys.stderr); sys.exit(1)
     path = a[a.index('--body-file')+1]
     d.setdefault('comments', []).append(Path(path).read_text())
+    # The same comment as the issues comments API lists it, authored by the account gh runs as.
+    d.setdefault('issue_comments', {}).setdefault(a[2], []).append(
+        {'body': Path(path).read_text(), 'user': {'login': d.get('viewer', 'prm-bot')}})
     persist(); sys.exit(0)
 if a[:2] == ['pr', 'ready']:
     if d.get('fail_draft'):
@@ -132,11 +148,15 @@ def fixture():
                      'baseRefName':'main', 'mergeable':'MERGEABLE', 'mergeStateStatus':'CLEAN',
                      'reviewDecision':'APPROVED', 'autoMergeRequest':None},
             'checks':[{'name':'unit','bucket':'pass','state':'SUCCESS','link':'https://example.com'}],
+            'checks_zero': GITHUB_API['pr_checks']['zero_checks'],
             'rules':[], 'threads':0, 'api': {},
             'not_found': GITHUB_API['contents']['manifest_absent_at_d013ed95']}
 
 
-class Integration(unittest.TestCase):
+class IntegrationBase(unittest.TestCase):
+    """The fake gh executable and the per-test state directory; no tests of its own, so a subclass
+    does not run another class's tests again."""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='prm-test-')
         self.addCleanup(self.temp.cleanup)
@@ -184,6 +204,8 @@ class Integration(unittest.TestCase):
         except ValueError: self.fail(f'bad json: {proc.stdout}\n{proc.stderr}')
         return proc, output
 
+
+class Integration(IntegrationBase):
     def test_read_only_gate(self):
         proc = self.script('review_gate.py','--pr','42','--evidence',str(self.evidence_file))
         self.assertEqual(proc.returncode,0,proc.stderr)
@@ -566,8 +588,14 @@ class Integration(unittest.TestCase):
         proc, out = self.actor(execute=True)
         self.assertEqual(out['outcome'], 'WAITING', proc.stderr)
         self.assertIn("requires the 'actual-run' record", ' '.join(out['gate']['reasons']))
-        self.assertFalse(any(a[:2] in (['pr', 'merge'], ['pr', 'comment'], ['pr', 'ready'])
-                             for a in self.state()['calls']))
+        self.assertFalse(any(a[:2] in (['pr', 'merge'], ['pr', 'ready']) for a in self.state()['calls']))
+        # No reviewer finding drafts it. The evidence has no target_validation at all: the next review
+        # run can supply it, so this is the merge train's `person` but no hand-off (no comment, no label).
+        self.assertEqual(('person', None), (out['wait_kind'], out.get('handoff')), out)
+        self.assertFalse(out['gate']['person_handoff'])
+        d = self.state()
+        self.assertFalse(d.get('labels'))
+        self.assertFalse(d.get('comments'))
 
     def test_captured_pr_record_of_an_older_candidate_waits(self):
         self.use_captured_pr(self.captured_record(tested_revision='d013ed95cf65216a40deefcc2de9c6a4dd57f4ef'))
@@ -591,5 +619,249 @@ class Integration(unittest.TestCase):
         self.assertEqual(proc.returncode,0,proc.stderr)
         arr = json.loads(proc.stdout)['pull_requests']
         self.assertEqual([a['number'] for a in arr],[42,50])
+
+
+class NeedsPersonHandoff(IntegrationBase):
+    """A WAITING gate that waits for a person leaves the PR Ready with a comment and the `needs-person`
+    label; DRAFT, ENQUEUED and a transient WAITING take the label off again."""
+
+    def waits_for_a_person(self, **kwargs):
+        d = self.state()
+        d['view']['reviewDecision'] = 'CHANGES_REQUESTED'
+        d.update(kwargs)
+        self.fixture_file.write_text(json.dumps(d))
+
+    def marker_comment(self, login, head=HEAD):
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        import needs_person
+        body = needs_person.comment_text({'head_sha': head, 'base_sha': BASE, 'live_base_sha': BASE,
+                                          'reasons': ['GitHub reviewDecision is CHANGES_REQUESTED: waiting for '
+                                                      'that reviewer to re-review']})
+        return {'body': body, 'user': {'login': login}}
+
+    def writes(self):
+        return [a[1] for a in self.state()['calls'] if a[:2] in
+                (['pr', 'comment'], ['pr', 'edit'], ['pr', 'ready'], ['pr', 'merge'])]
+
+    def test_a_wait_for_a_person_is_commented_and_labelled(self):
+        self.waits_for_a_person()
+        proc, out = self.actor(execute=True)
+        self.assertEqual((proc.returncode, out['outcome'], out['wait_kind'], out.get('handoff')),
+                         (1, 'WAITING', 'person', 'needs-person'), proc.stdout + proc.stderr)
+        d = self.state()
+        self.assertEqual(['needs-person'], d['labels'])
+        self.assertFalse(d['view']['isDraft'])
+        self.assertEqual(['comment', 'edit'], self.writes())
+        comment = d['comments'][0]
+        self.assertIn(f'Judged HEAD: `{HEAD}`', comment)
+        self.assertIn('CHANGES_REQUESTED', comment)
+        self.assertIn(f'<!-- pr-review-merge:needs-person head={HEAD} ', comment)
+
+    def test_the_hand_off_is_made_once_per_head_and_reasons(self):
+        self.waits_for_a_person()
+        self.actor(execute=True)
+        proc, out = self.actor(execute=True)
+        self.assertEqual('needs-person', out.get('handoff'), proc.stdout)
+        self.assertEqual(1, len(self.state()['comments']), 'the same HEAD and reasons are not commented again')
+        # A person removes the label while the reasons stand: the next run puts it back without a comment.
+        self.patch(labels=[])
+        self.actor(execute=True)
+        self.assertEqual((['needs-person'], 1), (self.state()['labels'], len(self.state()['comments'])))
+        # Different reasons on the same HEAD: a new comment, the label stays.
+        self.patch(rules=[{'type': 'merge_queue'}])
+        self.actor(execute=True)
+        d = self.state()
+        self.assertEqual(2, len(d['comments']))
+        self.assertIn('merge queue', d['comments'][1])
+        self.assertEqual(['needs-person'], d['labels'])
+
+    def test_a_marker_by_another_account_does_not_count(self):
+        self.waits_for_a_person(labels=['needs-person'],
+                                issue_comments={'42': [self.marker_comment('someone-else')]})
+        _, out = self.actor(execute=True)
+        self.assertEqual('needs-person', out.get('handoff'))
+        self.assertEqual(['comment'], self.writes(), 'only the comment: the label is already on')
+        # The actor's own marker for this HEAD and these reasons suppresses it.
+        self.patch(calls=[], issue_comments={'42': [self.marker_comment('prm-bot')]})
+        _, out = self.actor(execute=True)
+        self.assertEqual(('needs-person', []), (out.get('handoff'), self.writes()))
+
+    def test_a_transient_wait_releases_the_label(self):
+        self.patch(labels=['needs-person'], checks=[{'name': 'lint', 'state': 'PENDING', 'bucket': 'pending'}])
+        _, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', 'transient', 'released'), (out['outcome'], out['wait_kind'], out.get('handoff')))
+        self.assertEqual([], self.state()['labels'])
+        self.assertFalse(self.state().get('comments'))
+
+    def test_enqueue_releases_the_label(self):
+        self.patch(labels=['needs-person'])
+        proc, out = self.actor(execute=True)
+        self.assertEqual(('ENQUEUED', 'released'), (out['outcome'], out.get('handoff')), proc.stdout + proc.stderr)
+        self.assertEqual(['merge-queue'], self.state()['labels'])
+
+    def test_draft_releases_the_label(self):
+        self.patch(labels=['needs-person'], checks=[{'name': 'lint', 'state': 'FAILURE', 'bucket': 'fail'}])
+        _, out = self.actor(execute=True)
+        self.assertEqual(('DRAFT-BLOCKED', 'released'), (out['outcome'], out.get('handoff')))
+        self.assertEqual([], self.state()['labels'])
+
+    def test_a_label_that_cannot_be_removed_after_a_draft_is_a_warning(self):
+        self.patch(labels=['needs-person'], fail_label=True,
+                   checks=[{'name': 'lint', 'state': 'FAILURE', 'bucket': 'fail'}])
+        proc, out = self.actor(execute=True)
+        self.assertEqual((0, 'DRAFT-BLOCKED'), (proc.returncode, out['outcome']), proc.stdout)
+        self.assertIn('could not be removed', ' '.join(out['warnings']))
+
+    def test_a_label_that_cannot_be_added_is_a_warning(self):
+        self.waits_for_a_person(fail_label=True)
+        proc, out = self.actor(execute=True)
+        self.assertEqual((1, 'WAITING'), (proc.returncode, out['outcome']))
+        self.assertIsNone(out.get('handoff'))
+        self.assertIn('label denied', ' '.join(out['warnings']))
+        self.assertEqual(1, len(self.state()['comments']), 'the explanation is posted before the label')
+
+    def test_unreadable_comments_hand_off_nothing(self):
+        self.waits_for_a_person(comments_error=True)
+        _, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', None), (out['outcome'], out.get('handoff')))
+        self.assertIn('comments unavailable', ' '.join(out['warnings']))
+        self.assertEqual([], self.writes())
+
+    def test_a_dry_run_hands_off_nothing(self):
+        self.waits_for_a_person()
+        _, out = self.actor()
+        self.assertEqual(('WAITING', 'person'), (out['outcome'], out['wait_kind']))
+        self.assertEqual([], self.writes())
+
+    def test_a_head_that_moves_after_the_gate_hands_off_nothing(self):
+        self.waits_for_a_person(race_on_view=3)
+        _, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', None), (out['outcome'], out.get('handoff')))
+        self.assertIn('changed after the gate', ' '.join(out['warnings']))
+        self.assertEqual([], self.writes())
+
+    def review_side_wait(self):
+        """Incomplete reviewer coverage: `wait_kind` is `person` for the merge train, but the next
+        pr-review-merge run supplies it, so nobody is waited for."""
+        e = evidence()
+        e['coverage']['security'] = False
+        self.evidence_file.write_text(json.dumps(e))
+
+    def test_a_review_side_wait_is_neither_commented_nor_labelled(self):
+        self.review_side_wait()
+        proc, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', 'person', None, False),
+                         (out['outcome'], out['wait_kind'], out.get('handoff'), out['gate']['person_handoff']),
+                         proc.stdout + proc.stderr)
+        self.assertIn('coverage incomplete', ' '.join(out['gate']['reasons']))
+        self.assertEqual([], self.writes())
+        self.assertFalse(self.state().get('labels'))
+        self.assertFalse(self.state().get('comments'))
+
+    def test_a_review_side_wait_releases_a_stale_label_and_stays_listable(self):
+        self.review_side_wait()
+        self.patch(labels=['needs-person'])
+        _, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', 'person', 'released'), (out['outcome'], out['wait_kind'], out.get('handoff')))
+        self.assertEqual([], self.state()['labels'])
+        self.assertFalse(self.state().get('comments'))
+        pr = {'number': 42, 'state': 'open', 'draft': False, 'html_url': 'u', 'title': 't',
+              'labels': [{'name': name} for name in self.state()['labels']],
+              'head': {'sha': HEAD}, 'base': {'sha': BASE, 'ref': 'main'}}
+        self.patch(pages=[[pr]])
+        proc = self.script('list_ready.py')
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        listing = json.loads(proc.stdout)
+        self.assertEqual(([42], []), ([p['number'] for p in listing['pull_requests']], listing['excluded']))
+
+    def listed(self, labels):
+        pr = {'number': 42, 'state': 'open', 'draft': False, 'html_url': 'u', 'title': 't',
+              'labels': [{'name': name} for name in labels], 'head': {'sha': HEAD}, 'base': {'sha': BASE, 'ref': 'main'}}
+        self.patch(pages=[[pr]])
+        proc = self.script('list_ready.py')
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        out = json.loads(proc.stdout)
+        return [p['number'] for p in out['pull_requests']], [e['number'] for e in out['excluded']]
+
+    def test_required_checks_without_results_hand_off_with_contract_evidence(self):
+        # The branch requires status checks and GitHub returned none; the evidence is what the contract asks
+        # for (no no_ci_rationale: that field is for a branch without required checks). A rationale gap that
+        # hid this reason made the actor leave the PR unlabelled and list_ready select it every run.
+        self.patch(checks=[], rules=[{'type': 'required_status_checks'}])
+        proc, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', 'person', 'needs-person', True),
+                         (out['outcome'], out['wait_kind'], out.get('handoff'), out['gate']['person_handoff']),
+                         proc.stdout + proc.stderr)
+        d = self.state()
+        self.assertEqual(['needs-person'], d['labels'])
+        self.assertIn('Branch requires status checks, but GitHub returned no completed checks', d['comments'][0])
+        self.assertNotIn('No GitHub CI', d['comments'][0])
+        self.assertEqual(([], [42]), self.listed(d['labels']))
+
+    def gh(self, *args):
+        return subprocess.run(['gh', *args], env=self.env, capture_output=True, text=True)
+
+    def test_the_fake_gh_answers_zero_checks_as_the_recorded_gh_does(self):
+        # The fake used to print `[]`, which real gh never does for a PR without checks; the empty-CI tests
+        # passed on that and the production adapter raised. Pin the fake to the recorded capture.
+        real = GITHUB_API['pr_checks']['zero_checks']
+        self.patch(checks=[])
+        proc = self.gh('pr', 'checks', '42', '-R', 'acme/demo', '--json', 'name,state,bucket,link,workflow')
+        self.assertEqual((real['rc'], real['stdout'], real['stderr']), (proc.returncode, proc.stdout, proc.stderr))
+        self.assertNotIn('[]', proc.stdout)
+        # With checks it prints what the recorded answer looks like: a JSON list of check objects.
+        recorded = json.loads(GITHUB_API['pr_checks']['with_checks']['stdout'])
+        self.assertTrue(recorded and all({'name', 'state', 'bucket', 'link', 'workflow'} == set(c) for c in recorded))
+        self.patch(checks=[{'name': 'unit', 'bucket': 'pass', 'state': 'SUCCESS', 'link': 'u', 'workflow': 'CI'}])
+        proc = self.gh('pr', 'checks', '42', '-R', 'acme/demo')
+        self.assertEqual((0, ''), (proc.returncode, proc.stderr))
+        self.assertEqual('unit', json.loads(proc.stdout)[0]['name'])
+
+    def test_a_failed_checks_read_on_a_required_checks_branch_is_transient_not_a_hand_off(self):
+        # Negative control of the test above: the same branch, but GitHub answered with a real 401 instead of
+        # "no checks reported". That is an infrastructure failure: no comment, no label, still listable.
+        for key in ('auth_failure', 'no_such_pr', 'network_failure'):
+            with self.subTest(key):
+                self.fixture_file.write_text(json.dumps(fixture()))
+                self.patch(checks=[], rules=[{'type': 'required_status_checks'}],
+                           checks_capture=GITHUB_API['pr_checks'][key])
+                proc, out = self.actor(execute=True)
+                self.assertEqual(('WAITING', 'transient', None, False),
+                                 (out['outcome'], out['wait_kind'], out.get('handoff'), out['gate']['person_handoff']),
+                                 proc.stdout + proc.stderr)
+                d = self.state()
+                self.assertFalse(d.get('labels'))
+                self.assertFalse(d.get('comments'))
+                self.assertEqual(([42], []), self.listed([]))
+
+    def test_no_checks_without_a_required_checks_rule_is_not_a_hand_off(self):
+        self.patch(checks=[], rules=[])
+        proc, out = self.actor(execute=True)
+        self.assertEqual(('WAITING', False, None), (out['outcome'], out['gate']['person_handoff'], out.get('handoff')),
+                         proc.stdout + proc.stderr)
+        self.assertIn('No GitHub CI', ' '.join(out['gate']['reasons']))
+        d = self.state()
+        self.assertFalse(d.get('labels'))
+        self.assertFalse(d.get('comments'))
+        self.assertEqual(([42], []), self.listed([]))
+
+    def test_list_ready_leaves_out_the_queue_and_a_current_wait(self):
+        pr = {'number': 1, 'state': 'open', 'draft': False, 'html_url': 'u', 'title': 't', 'labels': [],
+              'head': {'sha': HEAD}, 'base': {'sha': BASE, 'ref': 'main'}}
+        queued = dict(pr, number=2, labels=[{'name': 'merge-queue'}])
+        waiting = dict(pr, number=3, labels=[{'name': 'needs-person'}])
+        moved = dict(pr, number=4, labels=[{'name': 'needs-person'}], head={'sha': 'c' * 40})
+        forged = dict(pr, number=5, labels=[{'name': 'needs-person'}])
+        unmarked = dict(pr, number=6, labels=[{'name': 'needs-person'}])
+        self.patch(pages=[[pr, queued, waiting, moved, forged, unmarked]],
+                   issue_comments={'3': [self.marker_comment('prm-bot')], '4': [self.marker_comment('prm-bot')],
+                                   '5': [self.marker_comment('someone-else')]})
+        proc = self.script('list_ready.py')
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        out = json.loads(proc.stdout)
+        listed = {p['number']: p.get('stale_needs_person', False) for p in out['pull_requests']}
+        self.assertEqual({1: False, 4: True, 5: True, 6: True}, listed)
+        self.assertEqual([2, 3], [e['number'] for e in out['excluded']])
+        self.assertEqual([], self.writes(), 'listing is read-only')
 
 if __name__ == '__main__': unittest.main()

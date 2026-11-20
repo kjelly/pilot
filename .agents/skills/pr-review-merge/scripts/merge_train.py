@@ -3,7 +3,8 @@
 
 Enqueue (`apply_decision.py --execute` on a MERGE gate): the gate-checked review evidence is saved
 in the train's state directory, with the HEAD the review covers (`reviewed_head`), the HEAD the
-gate saw (`enqueued_head`) and an `entry_id` that names this enqueue, and the PR gets the
+gate saw (`enqueued_head`), an `entry_id` that names this enqueue, the number of checks the gate saw
+(`checks_at_enqueue`) and the live base tip it decided on (`base_at_enqueue`), and the PR gets the
 `merge-queue` label.
 
 Process (this script; one consumer per repository and host, from a timer or by hand): take the PR
@@ -21,9 +22,14 @@ to Draft with the reason (`pr-ready` repairs it). A review that no longer covers
 outside the train, and a gate result only a person can change (an unresolved approval, a requested
 change, a disputed finding, a failing check the reviewer confirmed unrelated, a merge state that is
 not clean for another reason, a comparison GitHub cut) dequeue it: Ready, with the reasons in a
-comment, and the run goes on with the next PR. Transient states (CI that is pending, a base that
-keeps moving, mergeability GitHub has not computed, an API or infrastructure failure, a secret scan
-that could not run) leave it enqueued and stop this run.
+comment, and the run goes on with the next PR. Transient states (CI that is pending, no check on HEAD
+after `registration_grace` for a PR that was enqueued with checks (CI has not started), or for a
+PR that was enqueued with none but is no longer on the HEAD and the live base the gate decided
+that no-CI case on (`base_at_enqueue`: an integration or a base that moved can bring a workflow the
+rationale never covered, so the train waits for checks on the new HEAD; only a PR still on that HEAD
+and base goes on to the gate, which decides the no-CI case), a base that keeps moving,
+mergeability GitHub has not computed, an API or infrastructure failure, a secret scan that could not
+run) leave it enqueued and stop this run.
 
 An infrastructure failure is never the PR's verdict (kjelly/pilot#310). Anything that is not one of the
 outcomes above (a GitHub or git failure, a git command that timed out, an unreadable state directory, a
@@ -199,6 +205,13 @@ def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _check_count(gate: dict[str, Any]) -> int | None:
+    counts = gate.get("checks")
+    if not isinstance(counts, dict) or not counts or not all(type(v) is int for v in counts.values()):
+        return None
+    return sum(counts.values())
+
+
 def enqueue(repo: Repo, number: int, evidence: dict[str, Any], gate: dict[str, Any], *,
             client: Any = gh_runtime) -> dict[str, Any]:
     """Queue a PR the gate decided MERGE. Saves the evidence first, so a labelled PR always has it.
@@ -216,7 +229,11 @@ def enqueue(repo: Repo, number: int, evidence: dict[str, Any], gate: dict[str, A
     record = {"schema": SCHEMA, "repo": repo.raw, "pr": number, "entry_id": uuid.uuid4().hex, "queued_at": _now(),
               "reviewed_head": reviewed, "enqueued_head": gate["head_sha"], "train_commits": [], "errors": 0,
               "reviewed_base": gate.get("base_sha"), "live_base": gate.get("live_base_sha"),
-              "alignment": gate.get("alignment"), "evidence": evidence}
+              "alignment": gate.get("alignment"), "evidence": evidence,
+              "checks_at_enqueue": _check_count(gate),
+              # The live base tip the no-CI decision (checks_at_enqueue == 0) was made on; None when the
+              # gate result carries none, which the train reads as "the base moved".
+              "base_at_enqueue": gate.get("live_base_sha")}
     save_entry(repo, number, record)
     client.edit_label(repo, number, QUEUE_LABEL, add=True)
     out = {"outcome": "ENQUEUED", "pr": number, "reviewed_head": reviewed, "enqueued_head": gate["head_sha"]}
@@ -698,6 +715,24 @@ class Train:
             return NEXT if outcome is None else outcome
         # aligned: HEAD contains the live tip.
         state = self.wait_ci(number, view["headRefOid"], view["baseRefName"], align["live_base_sha"])
+        # No check registered within the grace: only a PR the gate queued with no checks at all (the no-CI
+        # rationale) goes on to the gate, and only on the HEAD and the live base that decision was made on.
+        # For any other PR, CI has not started on HEAD yet (the train just pushed it, or GitHub Actions is
+        # late): the gate would read that as missing CI and dequeue it. A zero-check PR whose HEAD or base
+        # changed since may now have a workflow the rationale never covered, so it waits for checks on the
+        # new HEAD instead of merging an untested one.
+        if state == "no-checks":
+            if entry.get("checks_at_enqueue") != 0:
+                return self.waiting(number, f"GitHub reports no checks for HEAD {view['headRefOid'][:12]} "
+                                    f"{self.registration_grace:g} s after the train started waiting; CI has not "
+                                    "started on it, and it stays enqueued")
+            if view["headRefOid"] != entry["enqueued_head"] or \
+                    align["live_base_sha"] != entry.get("base_at_enqueue"):
+                return self.waiting(number, f"GitHub reports no checks for HEAD {view['headRefOid'][:12]} "
+                                    f"{self.registration_grace:g} s after the train started waiting, and the "
+                                    "no-CI decision for this PR was made on another HEAD or live base "
+                                    f"(`{entry['enqueued_head'][:12]}` on `{str(entry.get('base_at_enqueue'))[:12]}`): "
+                                    "the train waits for checks on this HEAD, and it stays enqueued")
         if state in ("base-moved", "left"):
             return NEXT
         if state == "head-moved":
@@ -798,8 +833,9 @@ class Train:
                 return "base-moved"
             checks = self.client.pr_checks(self.repo, number)
             elapsed = self.monotonic() - start
-            pending = any(check.get("bucket") == "pending" for check in checks) or \
-                (not checks and elapsed < self.registration_grace)
+            if not checks and elapsed >= self.registration_grace:
+                return "no-checks"
+            pending = not checks or any(check.get("bucket") == "pending" for check in checks)
             if not pending:
                 return "settled"
             if elapsed > self.ci_timeout:

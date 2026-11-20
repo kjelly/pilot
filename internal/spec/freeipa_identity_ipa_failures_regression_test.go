@@ -124,7 +124,7 @@ func TestRegression_IdentityPasswdFailureFailsTheRun(t *testing.T) {
 		dir := t.TempDir()
 		fakeIdentityPasswordAPI(t, dir)
 		t.Setenv("IDENTITY_API_FAIL_USER", "gone-user")
-		res := runIdentityTasks(t, names, map[string]any{"ipa_active_users": users})
+		res := runIdentityTasks(t, names, map[string]any{"ipa_active_user_credentials": users})
 		if res.rc == 0 {
 			t.Fatalf("expected the run to fail\n%s", res.raw)
 		}
@@ -144,7 +144,7 @@ func TestRegression_IdentityPasswdFailureFailsTheRun(t *testing.T) {
 	t.Run("all passwords accepted", func(t *testing.T) {
 		fakeIPA(t, answers)
 		fakeIdentityPasswordAPI(t, t.TempDir())
-		if res := runIdentityTasks(t, names, map[string]any{"ipa_active_users": users}); res.rc != 0 {
+		if res := runIdentityTasks(t, names, map[string]any{"ipa_active_user_credentials": users}); res.rc != 0 {
 			t.Fatalf("rc=%d failures=%v\n%s", res.rc, res.failures, res.raw)
 		}
 	})

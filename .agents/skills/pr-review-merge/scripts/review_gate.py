@@ -19,6 +19,7 @@ COVERAGE = ("requirements", "correctness", "architecture", "security", "concurre
 SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 SEVERITIES = ("P0", "P1", "P2", "P3", "P4")
 TARGET_DECISIONS = ("required", "not-needed", "blocked")
+TARGET_BLOCKED = "target validation is blocked"
 # Same floor as issue-to-pr's `not-applicable` reason and `unrelated_failing_checks`.
 TARGET_REASON_MIN = 30
 REPO_EVIDENCE_PATH = Path(__file__).resolve().parents[2] / "issue-to-pr" / "scripts" / "repo_evidence.py"
@@ -185,7 +186,8 @@ def read_manifest(client: Any, repo: Repo, base: str) -> tuple[dict[str, Any] | 
 def check_target_validation(client: Any, repo: Repo, head: str, base: str,
                             evidence: dict[str, Any], *, base_name: str | None = None,
                             integrated_base: bool = False,
-                            infra: list[str] | None = None) -> tuple[list[str], dict[str, Any]]:
+                            infra: list[str] | None = None,
+                            person: list[str] | None = None) -> tuple[list[str], dict[str, Any]]:
     """Gaps that keep the PR from MERGE under the base branch's `.github/pr-evidence.json`.
 
     The manifest is read at the PR's base SHA, never the head, so a PR cannot weaken its own
@@ -196,6 +198,11 @@ def check_target_validation(client: Any, repo: Repo, head: str, base: str,
     the changed files cannot be listed, GitHub fails) says nothing about the record. With `infra`
     given, those messages go into it and `gaps` holds only what the record itself lacks; without
     it every message is a gap, as before. The merge train must not Draft a PR for the former.
+
+    With `person` given, the gaps that only a person can resolve (the record's committed state at
+    HEAD, a blocked decision, a manifest that wants more than one record) are also appended to it;
+    they stay in `gaps`. Gaps about the shape of `target_validation` are not: the next review run
+    can supply them.
     """
     head, base = head.lower(), base.lower()
     manifest, errors, report = read_manifest(client, repo, base)
@@ -210,18 +217,27 @@ def check_target_validation(client: Any, repo: Repo, head: str, base: str,
     report["manifest"] = "loaded"
     tv = evidence.get("target_validation")
     unverified: set[str] = set()
-    gaps = _check_record(client, repo, head, base, ctx, tv, unverified)
+    person_owned: set[str] = set()
+    gaps = _check_record(client, repo, head, base, ctx, tv, unverified, person_owned)
     report.update(ctx.report(), decision=tv.get("decision") if isinstance(tv, dict) else None)
     if infra is not None:
         infra.extend(g for g in gaps if g in unverified)
         gaps = [g for g in gaps if g not in unverified]
+    if person is not None:
+        person.extend(g for g in gaps if g in person_owned)
     return gaps, report
 
 
 def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: Any,
-                  unverified: set[str] | None = None) -> list[str]:
-    """The record's gaps. `unverified` collects the messages that are read/compare/API failures."""
+                  unverified: set[str] | None = None, person: set[str] | None = None) -> list[str]:
+    """The record's gaps. `unverified` collects the messages that are read/compare/API failures;
+    `person` the ones about the PR's committed state that only a person can change."""
     unverified = set() if unverified is None else unverified
+    person = set() if person is None else person
+
+    def owned(message: str) -> str:
+        person.add(message)
+        return message
 
     def failure(message: str) -> str:
         unverified.add(message)
@@ -231,8 +247,8 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
     if not required:
         return []
     if len(required) > 1:
-        return [f"{repo_evidence.MANIFEST_PATH} requires {len(required)} records "
-                f"({', '.join(sorted(ctx.required))}); target_validation records one, so a person decides"]
+        return [owned(f"{repo_evidence.MANIFEST_PATH} requires {len(required)} records "
+                      f"({', '.join(sorted(ctx.required))}); target_validation records one, so a person decides")]
     item = required[0]
     need = f"The base branch requires the '{item['id']}' record ({item['source']})"
     if not isinstance(tv, dict):
@@ -243,7 +259,7 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
     if not isinstance(reason, str) or len(reason.strip()) < TARGET_REASON_MIN:
         return [f"target_validation.reason must state why it is {decision} ({TARGET_REASON_MIN}+ characters)"]
     if decision == "blocked":
-        return [f"{need}; target validation is blocked: {reason.strip()[:300]}"]
+        return [owned(f"{need}; {TARGET_BLOCKED}: {reason.strip()[:300]}")]
     if decision == "not-needed":
         patterns = [repo_evidence.glob_regex(p) for p in item.get("required_paths", [])]
         if not patterns:
@@ -271,7 +287,8 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
         rev = rev.lower()
         try:
             if not ctx.accepts_target(rev, "target_validation", tv.get("target_reuse"), art, item["id"]):
-                gaps.append(f"{need}; the run at {rev[:12]} does not cover HEAD {head[:12]} ({ctx.target_stale_reason(rev)})")
+                gaps.append(owned(f"{need}; the run at {rev[:12]} does not cover HEAD {head[:12]} "
+                                  f"({ctx.target_stale_reason(rev)})"))
         except (GitHubError, ValueError, KeyError) as exc:
             gaps.append(failure(f"{need}; cannot verify that the run at {rev[:12]} covers HEAD: {exc}"))
     if not _safe_relative(art):
@@ -285,9 +302,9 @@ def _check_record(client: Any, repo: Repo, head: str, base: str, ctx: Any, tv: A
     except (GitHubError, ValueError, KeyError) as exc:
         return gaps + [failure(f"{need}; cannot read artifact {art} at HEAD: {exc}")]
     if content is None:
-        gaps.append(f"{need}; artifact {art} is not committed at HEAD {head[:12]}")
+        gaps.append(owned(f"{need}; artifact {art} is not committed at HEAD {head[:12]}"))
     elif rev and not _names_revision(content.decode("utf-8", "replace"), rev):
-        gaps.append(f"{need}; artifact {art} does not name the tested revision {rev[:12]}")
+        gaps.append(owned(f"{need}; artifact {art} does not name the tested revision {rev[:12]}"))
     return gaps
 
 
@@ -399,7 +416,87 @@ def train_alignment(client: Any, repo: Repo, number: int, view: dict[str, Any]) 
         return out
     out["overlap"] = sorted(set(pr_side["files"]) & set(base_side["files"]))
     out["alignment"] = "overlap" if out["overlap"] else "train"
+    # What the train's integration commit would bring in: the files the base changed since the merge base.
+    out["base_import"] = sorted(base_side["files"])
     return out
+
+
+def train_import_invalidates_record(manifest: dict[str, Any] | None, tv: Any,
+                                    base_import: Sequence[str]) -> dict[str, list[str]]:
+    """The base files the merge train's integration would bring in that the saved target record cannot
+    cover afterwards: `{"files": [...], "rerun": [...]}` (`rerun` is the subset matching the item's
+    `rerun_paths`), empty lists when nothing does.
+
+    After the train integrates the live base, the saved evidence keeps the record only through an
+    evidence-only delta or a pure import of `non_execution_paths` (a reviewed `target_reuse` names the
+    old HEAD and base, so it cannot match the train's new HEAD). An imported file that is neither
+    evidence-only nor non-execution therefore always ends in the train's step-5 Draft ("the target
+    record no longer covers HEAD"). Deciding it here is the same verdict, before the PR waits in the
+    queue for an integration and a CI run that can only end in Draft. Files that are non-execution but
+    reachable from a recorded closure are left to the train, which reads the closure after integrating.
+    """
+    empty: dict[str, list[str]] = {"files": [], "rerun": []}
+    if manifest is None or not isinstance(tv, dict) or tv.get("decision") != "required" or not base_import:
+        return empty
+    ctx = repo_evidence.Context(None, "", manifest, [], [])
+    items = [item for item in ctx.required.values() if item.get("kind") == "target-run"]
+    if len(items) != 1:
+        return empty
+    rerun = [repo_evidence.glob_regex(g) for g in items[0].get("rerun_paths", [])]
+    files = sorted(p for p in base_import
+                   if not any(rx.match(p) for rx in ctx.patterns) and not ctx.non_execution_path(p))
+    return {"files": files, "rerun": [p for p in files if any(rx.match(p) for rx in rerun)]}
+
+
+def _rerun_reason(base_name: str, live_base: str, files: Sequence[str], rerun: Sequence[str]) -> str:
+    shown = ", ".join(f"{p} (rerun_paths)" if p in rerun else p for p in files[:8])
+    if len(files) > 8:
+        shown += f", and {len(files) - 8} more"
+    return (f"The merge train would integrate live {base_name} {live_base[:12]}, which brings runtime files the "
+            f"saved target record cannot cover after the integration: {shown}. The train would return the PR to "
+            "Draft for this after integrating (references/merge-train.md, step 5), so it is decided now. "
+            f"Steps for pr-ready: 1. merge live {base_name} into HEAD; 2. run the target chain again on the new "
+            "candidate (`pilot vm-target test` / `topology test` with `--evidence-record`), or have the independent "
+            "reviewer record `target_reuse` for the integrated base where "
+            ".agents/skills/_shared/target-evidence-reuse.md allows it; 3. commit the evidence-only record; "
+            "4. get a fresh independent review of the new HEAD before Ready.")
+
+
+UNVERIFIED_DEPENDENCY = "Unresolved/unverified inter-PR dependencies"
+UNRESOLVED_DEPENDENCY = "Unresolved inter-PR dependency"
+
+
+def _dependency_gate(deps: Any) -> tuple[list[str], list[str]]:
+    """(defects, gaps) for the reviewer's `dependencies` object.
+
+    `resolved: true` with a checked explanation passes. A stated unresolved dependency (`resolved: false`
+    with an explanation) waits for a person (`UNRESOLVED_DEPENDENCY`); a missing or too short explanation, a
+    `resolved` that is not a boolean and a malformed or contradictory `branch_repair` are gaps in the review
+    evidence (`UNVERIFIED_DEPENDENCY`), which the next review run can supply. When the reviewer says
+    `pr-ready` can resolve it on this branch (`branch_repair`: a reason and the concrete steps, for example
+    integrating the base and running the target chain again), it is a Draft with those steps, so the PR has
+    an owner instead of staying Ready with nobody acting on it."""
+    if not isinstance(deps, dict) or not isinstance(deps.get("evidence"), str) or \
+            len(deps["evidence"].strip()) < 12:
+        return [], [UNVERIFIED_DEPENDENCY]
+    repair = deps.get("branch_repair")
+    if deps.get("resolved") is True:
+        if repair is not None:
+            return [], ["dependencies.branch_repair is only for an unresolved dependency"]
+        return [], []
+    if repair is None:
+        if deps.get("resolved") is False:
+            return [], [f"{UNRESOLVED_DEPENDENCY}: {deps['evidence'].strip()[:300]}"]
+        return [], [UNVERIFIED_DEPENDENCY]
+    steps = repair.get("steps") if isinstance(repair, dict) else None
+    reason = repair.get("reason") if isinstance(repair, dict) else None
+    if deps.get("resolved") is not False or not isinstance(reason, str) or len(reason.strip()) < 20 or \
+            not isinstance(steps, list) or not 1 <= len(steps) <= 12 or \
+            any(not isinstance(s, str) or not s.strip() for s in steps):
+        return [], ["dependencies.branch_repair needs resolved: false, a reason (20+ characters) and 1-12 steps"]
+    listing = " ".join(f"{i}. {s.strip()[:300]}" for i, s in enumerate(steps, 1))
+    return [f"Inter-PR dependency pr-ready can resolve on this branch: {reason.strip()[:600]} | "
+            f"Steps for pr-ready: {listing}"], []
 
 
 def review_covers(client: Any, repo: Repo, reviewed: Any, head: str, live_base: str,
@@ -439,11 +536,23 @@ class WaitKinds:
     is pending, a base or PR that moved during the gate, mergeability or merge state GitHub has not
     computed, an API/infrastructure failure, a secret scan that could not run. `derived` reasons (the
     merge state of a PR that waits for something else) decide nothing alone. Every other reason, one
-    nobody registered included, needs a person."""
+    nobody registered included, needs a person.
+
+    That catch-all is the train's: it only decides whether to keep a PR enqueued. The `needs-person`
+    hand-off (apply_decision.py) is stricter, because it labels the PR and hides it from `list_ready.py`
+    until a person acts. A reason that only the next review run can settle (stale or missing evidence,
+    an incomplete review, a record shaped wrongly) is `person` for the train and must not be labelled.
+    So a reason is owned by a person only when it is registered with `person()` where it is emitted:
+    requested changes, a required approval, a finding disputed without new evidence, a failure the
+    reviewer confirmed unrelated, a merge queue / required checks / auto-merge, a comparison GitHub
+    cut, an unresolved dependency the reviewer stated, and a target record whose committed state at
+    HEAD is wrong. `handoff()` is true when at least one reason is person-owned and every other one is
+    person-owned, transient or derived; any reason nobody registered keeps the PR listable."""
 
     def __init__(self) -> None:
         self.transient: set[str] = set()
         self.derived: set[str] = set()
+        self.owned: set[str] = set()
 
     def later(self, reason: str) -> str:
         self.transient.add(reason)
@@ -453,6 +562,15 @@ class WaitKinds:
         self.derived.add(reason)
         return reason
 
+    def person(self, reason: str) -> str:
+        self.owned.add(reason)
+        return reason
+
+    def handoff(self, reasons: Sequence[str]) -> bool:
+        """True when a person has to act: some reason is person-owned and none is an unregistered one."""
+        return any(r in self.owned for r in reasons) and \
+            all(r in self.owned or r in self.transient or r in self.derived for r in reasons)
+
     def kind(self, reasons: Sequence[str]) -> str:
         """`transient` when at least one reason is and every other is transient or derived."""
         if any(r not in self.transient and r not in self.derived for r in reasons):
@@ -460,13 +578,23 @@ class WaitKinds:
         return "transient" if any(r in self.transient for r in reasons) else "person"
 
 
+def actions_workflows(entries: dict[str, Any]) -> list[str]:
+    """The GitHub Actions workflow files in a Git tree (path -> entry): `.github/workflows/*.yml` or
+    `*.yaml`, directly in that directory (GitHub does not read subdirectories)."""
+    prefix = ".github/workflows/"
+    return sorted(path for path in entries if path.startswith(prefix) and "/" not in path[len(prefix):]
+                  and path.endswith((".yml", ".yaml")))
+
+
 def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any = None,
              worktree: Any = None, secret_files: Sequence[Any] = ()) -> dict[str, Any]:
-    """The live gate. A WAITING result also carries `wait_kind`: `transient` or `person` (WaitKinds)."""
+    """The live gate. A WAITING result also carries `wait_kind`: `transient` or `person` (WaitKinds), and
+    `person_handoff`: whether only a person can resolve it, which is what the `needs-person` label means."""
     kinds = WaitKinds()
     result = _evaluate(repo, number, evidence, client, worktree, secret_files, kinds)
     if result["decision"] == "WAITING":
         result["wait_kind"] = kinds.kind(result["reasons"])
+        result["person_handoff"] = kinds.handoff(result["reasons"])
     return result
 
 
@@ -515,7 +643,8 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
         if result["alignment"] == "unknown":
             reason = (f"PR HEAD does not include live {base_name} SHA {live_base} and the merge train "
                       f"cannot classify it yet: {result.get('alignment_detail', 'unknown')}")
-            reasons.append(kinds.later(reason) if result.get("unknown_reason") == "transient" else reason)
+            reasons.append(kinds.later(reason) if result.get("unknown_reason") == "transient" else
+                           kinds.person(reason) if result.get("unknown_reason") == "needs-person" else reason)
             return result
     except (GitHubError, ValueError, KeyError) as exc:
         reasons.append(kinds.later(f"Unable to verify live base branch: {exc}"))
@@ -587,8 +716,9 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
                 new = finding.get("new_evidence")
                 if not isinstance(new, str) or len(new.strip()) < 30:
                     repeated_disputes += 1
-                    missing.append(f"{text} | Repeats the claim disputed in {disputed} without new evidence; "
-                                   "a person decides between the finding and the dispute")
+                    missing.append(kinds.person(
+                        f"{text} | Repeats the claim disputed in {disputed} without new evidence; "
+                        "a person decides between the finding and the dispute"))
                     continue
                 text += f" | Disputed in {disputed}; new evidence: {new.strip()}"
             defects.append(text)
@@ -596,9 +726,14 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
     test_defects, test_gaps, tested = _test_assessment(evidence.get("tests"), reviewed_head)
     defects.extend(test_defects)
     missing.extend(test_gaps)
-    if evidence.get("verdict") == "BLOCK" and not defects and not repeated_disputes:
-        missing.append("BLOCK verdict needs a specific finding or failed test")
-    elif evidence.get("verdict") not in ("PASS", "BLOCK", "NEEDS_MORE_EVIDENCE"):
+    # A BLOCK verdict judges the diff and needs a finding or failed test behind it. The exceptions are a
+    # disputed finding a person decides, and a state a person alone can change (a stated unresolved
+    # dependency, a blocked target record): the reviewer's contract says to give PASS for those, and a
+    # BLOCK that names one is still handed to that person instead of being reported as a malformed
+    # review. Those two are only known after the dependency and target checks below, which place the
+    # message at this position when neither holds.
+    block_at = len(missing) if evidence.get("verdict") == "BLOCK" and not defects and not repeated_disputes else None
+    if block_at is None and evidence.get("verdict") not in ("PASS", "BLOCK", "NEEDS_MORE_EVIDENCE"):
         missing.append("Invalid reviewer verdict")
     if evidence.get("verdict") == "NEEDS_MORE_EVIDENCE":
         missing.append("Reviewer requested further evidence")
@@ -611,10 +746,9 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
             area for area in COVERAGE if not isinstance(coverage, dict) or coverage.get(area) is not True))
     if not isinstance(evidence.get("summary"), str) or len(evidence["summary"].strip()) < 20:
         missing.append("Reviewer summary insufficient")
-    deps = evidence.get("dependencies")
-    if not isinstance(deps, dict) or deps.get("resolved") is not True or \
-       not isinstance(deps.get("evidence"), str) or len(deps["evidence"].strip()) < 12:
-        missing.append("Unresolved/unverified inter-PR dependencies")
+    dep_defects, dep_gaps = _dependency_gate(evidence.get("dependencies"))
+    defects.extend(dep_defects)
+    missing.extend(kinds.person(g) if g.startswith(UNRESOLVED_DEPENDENCY + ":") else g for g in dep_gaps)
 
     # A failing check the reviewer confirmed unrelated to this PR (for example the
     # same failure on the base branch) is not something the PR can fix: it keeps the
@@ -635,11 +769,27 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
 
     # Actual-run record the base branch's .github/pr-evidence.json mandates: gaps are WAITING.
     target_infra: list[str] = []
+    target_person: list[str] = []
     target_gaps, result["target_validation"] = check_target_validation(
         client, repo, result["head_sha"], live_base, evidence, base_name=view.get("baseRefName"),
-        integrated_base=True, infra=target_infra)
-    missing.extend(target_gaps)
+        integrated_base=True, infra=target_infra, person=target_person)
+    missing.extend(kinds.person(gap) if gap in target_person else gap for gap in target_gaps)
+    if block_at is not None and not (any(g.startswith(UNRESOLVED_DEPENDENCY + ":") for g in dep_gaps)
+                                     or any(TARGET_BLOCKED in g for g in target_person)):
+        missing.insert(block_at, "BLOCK verdict needs a specific finding or failed test")
     missing.extend(kinds.later(message) for message in target_infra)
+    if result.get("alignment") == "train" and not target_infra:
+        # The train's integration would bring files the saved record cannot cover: its step 5 would
+        # Draft the PR after an integration and a CI run, so the same Draft is decided now.
+        manifest, manifest_errors, _ = read_manifest(client, repo, live_base)
+        if manifest_errors:
+            missing.append(kinds.later("; ".join(manifest_errors)))
+        else:
+            invalid = train_import_invalidates_record(manifest, evidence.get("target_validation"),
+                                                      result.get("base_import") or [])
+            result["train_import_rerun"] = invalid["files"]
+            if invalid["files"]:
+                defects.append(_rerun_reason(base_name, live_base, invalid["files"], invalid["rerun"]))
 
     # Every commit of the PR, scanned locally by the PR's own SHAs. A leaked secret is a DRAFT even when
     # HEAD no longer has it; a scan that could not run is WAITING, never a pass.
@@ -655,11 +805,13 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
     except (GitHubError, ValueError, KeyError) as exc:
         missing.append(kinds.later(f"CI state unavailable: {exc}"))
         checks = None
+    # GitHub returned no checks. Whether that needs a no-CI rationale depends on the branch rules, which are
+    # read below: a branch that requires status checks is a person's to resolve, and the rationale gap would
+    # only hide that (it is unregistered, so the hand-off would never fire). The gap goes back at this
+    # position once the rules are known.
+    no_ci_at = len(missing) if checks is not None and not checks else None
+    required_checks = False
     if checks is not None:
-        if not checks:
-            rationale = evidence.get("no_ci_rationale")
-            if not isinstance(rationale, str) or len(rationale.strip()) < 20 or not tested:
-                missing.append("No GitHub CI: requires a concrete no-CI rationale and passing test evidence")
         for check in checks:
             bucket = check.get("bucket")
             name = check.get("name") or "unnamed check"
@@ -670,9 +822,10 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
             elif bucket in ("fail", "cancel"):
                 result["checks"]["failed"] += 1
                 if name in unrelated:
-                    missing.append(f"GitHub CI check {name} is {bucket}, unrelated to this PR per the reviewer "
-                                   f"({unrelated[name]['reason'].strip()[:300]}); rerun it once the cause is fixed: "
-                                   f"{check.get('link', '')}")
+                    missing.append(kinds.person(
+                        f"GitHub CI check {name} is {bucket}, unrelated to this PR per the reviewer "
+                        f"({unrelated[name]['reason'].strip()[:300]}); rerun it once the cause is fixed: "
+                        f"{check.get('link', '')}"))
                 else:
                     defects.append(f"GitHub CI check {name} is {bucket}: {check.get('link', '')}")
             elif bucket == "pending":
@@ -695,26 +848,52 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
         rules = client.branch_rules(repo, base)
         result["merge_queue"] = any(rule["type"] == "merge_queue" for rule in rules)
         if result["merge_queue"]:
-            missing.append("Base branch requires merge queue; no unattended queue/auto-merge")
-        if checks is not None and not checks and any(rule["type"] == "required_status_checks" for rule in rules):
-            missing.append("Branch requires status checks, but GitHub returned no completed checks")
+            missing.append(kinds.person("Base branch requires merge queue; no unattended queue/auto-merge"))
+        if no_ci_at is not None and any(rule["type"] == "required_status_checks" for rule in rules):
+            # Never a MERGE, with or without a rationale: the branch protection wants checks that did not run.
+            required_checks = True
+            missing.append(kinds.person("Branch requires status checks, but GitHub returned no completed checks"))
         for rule in rules:
             if rule["type"] == "pull_request":
                 parameters = rule.get("parameters") or {}
                 count = parameters.get("required_approving_review_count", 0)
                 if isinstance(count, int) and count > 0 and view.get("reviewDecision") != "APPROVED":
-                    missing.append("Branch rules require reviewer approval")
+                    missing.append(kinds.person("Branch rules require reviewer approval"))
     except (GitHubError, ValueError, KeyError) as exc:
         missing.append(kinds.later(f"Unable to verify active branch rules: {exc}"))
+
+    if no_ci_at is not None and not required_checks:
+        # The branch rules do not require checks, or could not be read (fail closed).
+        rationale = evidence.get("no_ci_rationale")
+        no_ci_gap = "No GitHub CI: requires a concrete no-CI rationale and passing test evidence"
+        if not isinstance(rationale, str) or len(rationale.strip()) < 20 or not tested:
+            missing.insert(no_ci_at, no_ci_gap)
+        else:
+            # A rationale says no CI applies; a HEAD whose tree has GitHub Actions workflows says it might
+            # (main can add one after the rationale was written). Zero checks on such a HEAD are CI that has
+            # not reported, not CI that does not exist, so the rationale cannot exempt it.
+            try:
+                workflows = actions_workflows(client.tree_entries(repo, result["head_sha"]))
+            except (GitHubError, ValueError, KeyError) as exc:
+                missing.insert(no_ci_at, kinds.later(
+                    f"Unable to read the HEAD tree to check that no GitHub Actions workflow applies: {exc}"))
+            else:
+                if workflows:
+                    missing.insert(no_ci_at, no_ci_gap)
+                    missing.insert(no_ci_at + 1, (
+                        "A no-CI rationale cannot exempt a HEAD whose tree has GitHub Actions workflows "
+                        f"({', '.join(workflows[:5])}{', ...' if len(workflows) > 5 else ''}): GitHub returned no "
+                        "checks for it, so wait for the workflow runs on this HEAD"))
 
     decision = view.get("reviewDecision")
     if decision == "CHANGES_REQUESTED":
         # pr-ready marks a PR Ready once the requested changes are fixed or disputed,
         # without waiting for the reviewer to re-approve; drafting it again would only
         # restart that loop. Objections still open come back as reviewer findings.
-        missing.append("GitHub reviewDecision is CHANGES_REQUESTED: waiting for that reviewer to re-review")
+        missing.append(kinds.person(
+            "GitHub reviewDecision is CHANGES_REQUESTED: waiting for that reviewer to re-review"))
     elif decision == "REVIEW_REQUIRED":
-        missing.append("Human approval required by repository rules")
+        missing.append(kinds.person("Human approval required by repository rules"))
     elif decision not in ("APPROVED", None, ""):
         missing.append(f"Unrecognized GitHub reviewDecision: {decision!r}")
 
@@ -732,7 +911,7 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
         text = f"Merge state is not CLEAN: {state!r}"
         missing.append(kinds.later(text) if state in (None, "", "UNKNOWN", "BEHIND") else kinds.secondary(text))
     if view.get("autoMergeRequest") is not None:
-        missing.append("PR already has auto-merge configured; do not modify silently")
+        missing.append(kinds.person("PR already has auto-merge configured; do not modify silently"))
 
     # Cross-check HEAD/Base *after* external API calls: no live state changes during review.
     try:
