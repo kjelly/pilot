@@ -1,7 +1,9 @@
 """Isolated end-to-end smoke tests; never call real GitHub."""
 import base64
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -12,8 +14,10 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT.parent / "_shared" / "tests"))
+SIGNAL_DIR = ROOT.parent / "_shared" / "tests"  # ready_signal_world.py: the fake gh's model of the signal
+sys.path.insert(0, str(SIGNAL_DIR))
 import secret_fixtures as fx  # noqa: E402
+import ready_signal_world as signal_world  # noqa: E402
 spec = importlib.util.spec_from_file_location("pr_gate", ROOT / "scripts" / "pr_gate.py")
 gate = importlib.util.module_from_spec(spec)
 sys.modules["pr_gate"] = gate
@@ -24,6 +28,12 @@ import json, os, pathlib, re, sys
 args = sys.argv[1:]
 state = pathlib.Path(os.environ["FAKE_GH_STATE"])
 sha = os.environ["FAKE_GH_SHA"]
+# The pr-ready-verified signal's calls (label, user, timeline, comment, edit) are answered by the shared model.
+sys.path.insert(0, os.environ["FAKE_GH_SIGNAL_DIR"])
+import ready_signal_world as signal_world
+signal_rc = signal_world.handle(args, state)
+if signal_rc is not None:
+    sys.exit(signal_rc)
 default_bases = [os.environ.get("FAKE_GH_BASE", sha)]
 checks = [{"name": "go test", "bucket": "pass", "state": "SUCCESS"},
           {"name": "lint", "bucket": "pass", "state": "SUCCESS"}]
@@ -43,7 +53,7 @@ if args[:2] == ["pr", "view"]:
         "baseRefName": "main", "state": "OPEN",
         "isDraft": not (state / "ready").exists(),
         "mergeable": "CONFLICTING" if (state / "conflict").exists() else "MERGEABLE",
-        "reviewDecision": "REVIEW_REQUIRED"}))
+        "reviewDecision": "REVIEW_REQUIRED", "labels": signal_world.view_labels(state)}))
 elif args[:2] == ["pr", "checks"] and "--required" in args and (state / "checks_error").exists():
     print("HTTP 502: Bad Gateway", file=sys.stderr)
     sys.exit(1)
@@ -97,6 +107,7 @@ elif args[:2] == ["api", "graphql"]:
         field: {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}
     }}}}))
 elif args[:2] == ["pr", "ready"]:
+    signal_world.note_ready(state)
     (state / "ready").write_text("yes")
 else:
     print(f"unsupported mock args {args}", file=sys.stderr)
@@ -181,7 +192,7 @@ class CLIMockTests(unittest.TestCase):
         gh.chmod(0o755)
         env = os.environ.copy()
         env.update(PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", FAKE_GH_STATE=str(t), FAKE_GH_SHA=sha,
-                   FAKE_GH_BASE=self.base_sha)
+                   FAKE_GH_BASE=self.base_sha, FAKE_GH_SIGNAL_DIR=str(SIGNAL_DIR))
         return repo, sha, evidence, env
 
     def gate(self, repo, evidence, env, *extra):
@@ -702,6 +713,202 @@ class SecretScanTests(unittest.TestCase):
             self.assertIn("authorization-header", " ".join(errors))
             self.assertIn(ART, " ".join(errors))
             self.assertNotIn(token, blocked.stdout + blocked.stderr)
+
+
+class ReadySignalTests(unittest.TestCase):
+    """The pr-ready-verified signal around `gh pr ready` (non-wait mode): the label is checked before anything is
+    read, a stale one leaves the Draft before Ready, the signal is written only after the post-action check passed
+    and read back before READY is reported. The fake gh answers the signal's calls from the shared model
+    (`ready_signal_world`), whose log is the call order; every refusal asserts its reason."""
+
+    make_pr = CLIMockTests.make_pr
+    gate = CLIMockTests.gate
+    LABEL = signal_world.LABEL
+
+    def pr(self, t, world=None):
+        repo, sha, evidence, env = self.make_pr(t)
+        (world or signal_world.World(head=sha)).save(t)
+        return repo, sha, evidence, env
+
+    def ran(self, proc):
+        """The gate's JSON events, after checking that it produced them and no traceback."""
+        self.assertNotIn("Traceback", proc.stderr)
+        return [json.loads(line) for line in proc.stdout.splitlines()]
+
+    def test_ready_signs_the_pr_after_the_verified_transition_and_reports_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, sha, evidence, env = self.pr(t)
+            proc = self.gate(repo, evidence, env, "--ready", "--compact")
+            (event,) = self.ran(proc)
+            self.assertEqual((0, "READY"), (proc.returncode, event["status"]), proc.stdout)
+            self.assertEqual({"label": self.LABEL, "head_sha": sha, "producer": "pr-ready"}, event["ready_signal"])
+            log = signal_world.calls(t)
+            self.assertEqual("label-exists", log[0], "the label is checked before anything is read")
+            # prepare (label, viewer, stale-label check) < gh pr ready < post-action view < comment < label < read-back
+            self.assertEqual(["label-exists", "user", "pr-view"], log[log.index("ready") - 3:log.index("ready")])
+            self.assertEqual(["ready", "pr-view", "comment", "add-label", "pr-view", "timeline"], log[log.index("ready"):])
+            world = signal_world.World.load(t)
+            self.assertEqual(["ready_for_review", "commented", "labeled"], [e["event"] for e in world.s["events"]])
+            self.assertEqual(signal_world.ready_signal.marker_comment(sha, "pr-ready"), world.s["events"][1]["body"])
+            read = signal_world.ready_signal.assess(sha, world.view_labels(), world.s["events"], signal_world.VIEWER)
+            self.assertEqual(("valid", sha, "pr-ready"), (read.state, read.marker_head, read.producer))
+
+    def test_gate_pass_without_ready_never_touches_the_signal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, evidence, env = self.pr(t, signal_world.World().label_state("missing"))
+            proc = self.gate(repo, evidence, env)
+            self.assertEqual((0, "GATE-PASS"), (proc.returncode, json.loads(proc.stdout)["status"]), proc.stdout)
+            self.assertEqual([], [op for op in signal_world.calls(t) if op != "pr-view"], "only the PR was read")
+
+    def test_a_missing_label_blocks_before_any_read_and_before_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, sha, evidence, env = self.pr(t, signal_world.World().label_state("missing"))
+            proc = self.gate(repo, evidence, env, "--ready", "--compact")
+            (event,) = self.ran(proc)
+            self.assertEqual((2, "DRAFT-BLOCKED"), (proc.returncode, event["status"]), proc.stdout)
+            (reason,) = event["errors"]
+            self.assertIn(f"The repository has no {self.LABEL} label", reason)
+            self.assertIn("a maintainer must create it once", reason)
+            self.assertIn("Ready not invoked", reason)
+            self.assertFalse((t / "views.log").exists(), "not a single PR read: the check precedes the first poll")
+            self.assertFalse((t / "ready").exists())
+            self.assertEqual(["label-exists"], signal_world.calls(t))
+            # Control: the same PR with the label present is made Ready.
+            signal_world.World(head=sha).save(t)
+            self.assertEqual(0, self.gate(repo, evidence, env, "--ready", "--compact").returncode)
+
+    def test_a_label_lookup_that_fails_is_a_blocker_not_a_traceback(self):
+        # A server error: `gh_runtime.GitHubError` is a RuntimeError the gate's handler does not catch by itself.
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, evidence, env = self.pr(t, signal_world.World().label_state("error"))
+            proc = self.gate(repo, evidence, env, "--ready", "--compact")
+            (event,) = self.ran(proc)
+            self.assertEqual((2, "DRAFT-BLOCKED"), (proc.returncode, event["status"]), proc.stdout + proc.stderr)
+            (reason,) = event["errors"]
+            self.assertIn(f"Cannot check that the repository has the {self.LABEL} label (Ready not invoked)", reason)
+            self.assertIn("HTTP 502", reason)
+            self.assertFalse((t / "ready").exists())
+            self.assertFalse((t / "views.log").exists())
+
+    def test_a_stale_label_is_removed_from_the_draft_before_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, sha, evidence, env = self.make_pr(t)
+            world = signal_world.World(head=sha)
+            world.signed_ready()
+            world.to_draft()  # the label from the earlier Ready epoch stays on the Draft
+            world.save(t)
+            proc = self.gate(repo, evidence, env, "--ready", "--compact")
+            (event,) = self.ran(proc)
+            self.assertEqual((0, "READY"), (proc.returncode, event["status"]), proc.stdout)
+            log = signal_world.calls(t)
+            self.assertLess(log.index("remove-label"), log.index("ready"))
+            self.assertEqual(["label-exists", "user", "pr-view", "remove-label", "pr-view", "ready"],
+                             log[log.index("ready") - 5:log.index("ready") + 1])
+            after = signal_world.World.load(t)
+            read = signal_world.ready_signal.assess(sha, after.view_labels(), after.s["events"], signal_world.VIEWER)
+            self.assertEqual("valid", read.state, "the label added after the new Ready transition is a new event")
+
+    def test_a_stale_label_that_cannot_be_removed_keeps_the_pr_a_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, sha, evidence, env = self.make_pr(t)
+            world = signal_world.World(head=sha)
+            world.signed_ready()
+            world.to_draft()
+            world.fail("remove-label").save(t)
+            proc = self.gate(repo, evidence, env, "--ready", "--compact")
+            (event,) = self.ran(proc)
+            self.assertEqual((2, "DRAFT-BLOCKED"), (proc.returncode, event["status"]), proc.stdout)
+            self.assertIn(f"The {self.LABEL} signal could not be prepared (Ready not invoked)", event["errors"][0])
+            self.assertFalse((t / "ready").exists(), "gh pr ready must not run")
+            self.assertNotIn("ready", signal_world.calls(t))
+
+    def test_a_signal_that_cannot_be_written_is_a_blocker_and_ready_is_not_reported(self):
+        for failing in ("comment", "add-label"):
+            with self.subTest(failing), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                repo, sha, evidence, env = self.make_pr(t)
+                signal_world.World(head=sha).fail(failing).save(t)
+                proc = self.gate(repo, evidence, env, "--ready", "--compact")
+                events = self.ran(proc)
+                self.assertEqual((2, ["DRAFT-BLOCKED"]), (proc.returncode, [e["status"] for e in events]), proc.stdout)
+                (reason,) = events[0]["errors"]
+                self.assertIn(f"Ready invoked and verified, but the {self.LABEL} signal was not confirmed", reason)
+                self.assertIn("HTTP 502", reason)
+                self.assertTrue(reason.endswith("the PR is Ready without the signal; convert it to Draft and run pr-ready "
+                                                "again."), reason)
+                self.assertTrue((t / "ready").exists(), "Ready was invoked: the report must not claim a Draft")
+                log = signal_world.calls(t)
+                self.assertEqual(failing == "add-label", "add-label" in log, "no label write after a failed comment")
+                self.assertEqual([], signal_world.World.load(t).label_names())
+
+    def run_main(self, t, repo, evidence, env, *extra):
+        """`pr_gate.main()` in this process (so that its sleeps can be counted): (exit code, JSON events, sleeps)."""
+        evidence_file = repo / ".pr-ready/evidence.json"
+        evidence_file.write_text(json.dumps(evidence), encoding="utf-8")
+        argv = ["pr_gate.py", "--repo", "acme/repo", "--pr", "7", "--worktree", str(repo), "--evidence",
+                str(evidence_file), *extra]
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env), mock.patch.object(sys, "argv", argv), \
+                contextlib.redirect_stdout(out), mock.patch("time.sleep") as sleep:
+            code = gate.main()
+        return code, [json.loads(line) for line in out.getvalue().splitlines()], [c.args[0] for c in sleep.call_args_list]
+
+    def test_the_read_back_is_bounded_and_a_signal_that_never_shows_is_a_blocker(self):
+        interval = signal_world.ready_signal.READ_INTERVAL
+        tries = signal_world.ready_signal.READ_TRIES
+        for lag, ok in ((tries - 1, True), (tries, False)):
+            with self.subTest(lag=lag), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                repo, sha, evidence, env = self.make_pr(t)
+                world = signal_world.World(head=sha)
+                world.s["flags"]["lag"] = lag
+                world.save(t)
+                code, events, sleeps = self.run_main(t, repo, evidence, env, "--ready", "--compact")
+                self.assertEqual([interval] * (tries - 1), sleeps)
+                self.assertEqual(tries, signal_world.calls(t).count("timeline"))
+                if ok:
+                    self.assertEqual((0, ["READY"]), (code, [e["status"] for e in events]))
+                    continue
+                self.assertEqual((2, ["DRAFT-BLOCKED"]), (code, [e["status"] for e in events]), "READY is never emitted first")
+                (reason,) = events[0]["errors"]
+                self.assertIn(f"does not read back as valid after {tries} reads", reason)
+                self.assertIn("last: absent: the PR does not carry the pr-ready-verified label", reason)
+                self.assertTrue((t / "ready").exists())
+
+    def test_a_ready_signal_module_that_cannot_load_is_a_blocker_before_any_github_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, evidence, env = self.pr(t)
+            broken = t / "ready_signal.py"
+            broken.write_text("def (:\n", encoding="utf-8")
+            for name, path, needle in (("missing", t / "absent.py", "is missing"),
+                                       ("a syntax error", broken, "cannot be loaded (SyntaxError)")):
+                with self.subTest(name), mock.patch.dict(sys.modules), mock.patch.object(gate, "READY_SIGNAL_PATH", path):
+                    sys.modules.pop("ready_signal", None)
+                    code, events, _ = self.run_main(t, repo, evidence, env, "--ready", "--compact")
+                    self.assertEqual((2, ["DRAFT-BLOCKED"]), (code, [e["status"] for e in events]))
+                    self.assertIn(f"the shared ready-signal module {needle}", events[0]["errors"][0])
+                    self.assertFalse((t / "views.log").exists())
+                    self.assertFalse((t / "ready").exists())
+                    self.assertEqual([], signal_world.calls(t))
+
+    def test_a_second_run_on_a_ready_pr_is_refused_before_any_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            repo, _, evidence, env = self.pr(t)
+            self.assertEqual(0, self.gate(repo, evidence, env, "--ready", "--compact").returncode)
+            before = signal_world.World.load(t).s["events"]
+            again = self.gate(repo, evidence, env, "--ready", "--compact")
+            (event,) = self.ran(again)
+            self.assertEqual((2, "DRAFT-BLOCKED"), (again.returncode, event["status"]))
+            self.assertIn("PR is not currently Draft", " ".join(event["errors"]))
+            self.assertEqual(before, signal_world.World.load(t).s["events"], "no comment, label or Ready the second time")
 
 
 if __name__ == '__main__':

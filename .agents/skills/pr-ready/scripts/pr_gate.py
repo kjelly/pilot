@@ -1084,6 +1084,78 @@ class WaitPins:
         return errors
 
 
+READY_SIGNAL_PATH = Path(__file__).resolve().parents[2] / "_shared" / "scripts" / "ready_signal.py"
+GH_RUNTIME_PATH = Path(__file__).resolve().parents[2] / "pr-review-merge" / "scripts" / "gh_runtime.py"
+
+
+def load_by_path(name: str, path: Path, what: str) -> Any:
+    """`path` loaded as module `name` once per process (`sys.modules`), like `load_secret_scan`.
+
+    A module that is missing or does not load is a refusal (GateError), never a traceback and never a
+    skipped check. `name` is the module's import name, so a later `import` of it in this process, for
+    example by the merge skill's review_gate.py, finds this very module.
+    """
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None or not path.is_file():
+        raise GateError(f"{what} is missing: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # a module that does not load must refuse, whatever the reason
+        sys.modules.pop(name, None)
+        raise GateError(f"{what} cannot be loaded ({type(exc).__name__})") from None
+    return module
+
+
+class ReadySignal:
+    """This gate's side of the Ready signal (`_shared/scripts/ready_signal.py`).
+
+    Three steps: `require_label` before anything is polled, `prepare` right before `gh pr ready`, and
+    `confirm` once the post-action verification passed. Consumers (pr-review-merge, scripts/pr_loop.py) act
+    only on a Ready PR whose signal reads back as valid, so a Ready this gate invoked is not finished until
+    `confirm` returns. Every GitHub or signal failure is a GateError: a `GitHubError` escaping here would end
+    the run in a traceback and publish no result.
+    """
+
+    def __init__(self, repo: str, pr: int) -> None:
+        self.signal = load_by_path("ready_signal", READY_SIGNAL_PATH, "the shared ready-signal module")
+        self.client = load_by_path("gh_runtime", GH_RUNTIME_PATH, "the GitHub adapter (pr-review-merge gh_runtime.py)")
+        self.repo = self.client.Repo.parse(repo)
+        self.pr = pr
+        self.viewer: str | None = None
+
+    def require_label(self) -> None:
+        """Ready needs the label to exist: refuse before any CI wait, with Ready not invoked."""
+        label = self.signal.LABEL
+        try:
+            present = self.client.label_exists(self.repo, label)
+        except self.client.GitHubError as exc:
+            raise GateError(f"Cannot check that the repository has the {label} label (Ready not invoked): {exc}") from exc
+        if not present:
+            raise GateError(f"The repository has no {label} label, so a Ready PR could not be signed: a maintainer "
+                            "must create it once (this gate never creates labels). Ready not invoked.")
+
+    def prepare(self) -> None:
+        """Right before `gh pr ready`: the label still exists and a stale one is off the Draft. Failure: Ready not invoked."""
+        try:
+            self.viewer = self.signal.prepare(self.client, self.repo, self.pr)
+        except (self.client.GitHubError, self.signal.SignalError) as exc:
+            raise GateError(f"The {self.signal.LABEL} signal could not be prepared (Ready not invoked): {exc}") from exc
+
+    def confirm(self, head: str) -> dict[str, str]:
+        """After the verified Ready transition: write the signal and read it back as valid. Returns its report."""
+        try:
+            result = self.signal.write(self.client, self.repo, self.pr, head, self.signal.PR_READY, self.viewer)
+        except (self.client.GitHubError, self.signal.SignalError) as exc:
+            raise GateError(f"Ready invoked and verified, but the {self.signal.LABEL} signal was not confirmed: {exc}; "
+                            "the PR is Ready without the signal; convert it to Draft and run pr-ready again.") from exc
+        return {"label": self.signal.LABEL, "head_sha": result.marker_head, "producer": result.producer}
+
+
 def json_line(result: dict[str, Any], *, compact: bool) -> None:
     print(json.dumps(result, ensure_ascii=False, indent=None if compact else 2), flush=True)
 
@@ -1180,6 +1252,9 @@ def main() -> int:
         if not isinstance(evidence, dict):
             raise GateError("Evidence JSON must be an object")
         conversation = args.wait or bool(args.restore_sha) or bool(evidence.get("disputed_review_comments"))
+        signaller = ReadySignal(args.repo, args.pr) if args.ready else None
+        if signaller is not None:
+            signaller.require_label()
 
         def inspect(snapshot: Snapshot) -> tuple[list[str], list[str], list[Any]]:
             local = check_local(args.worktree)
@@ -1260,6 +1335,7 @@ def main() -> int:
                             raise GateError("Post-restore preflight blocked Ready: " +
                                             "; ".join(errors + pending))
                         deadline()
+                    signaller.prepare()  # --ready always has a signaller; a failure leaves the PR a Draft
                     ready_invoked = True
                     action = subprocess.run(["gh", "pr", "ready", str(args.pr), "-R", args.repo],
                                             capture_output=True, text=True, check=False)
@@ -1285,8 +1361,10 @@ def main() -> int:
                             errors.extend(lifecycle.errors + lifecycle.pending)
                         if errors:
                             raise GateError("Ready invoked but post-action verification failed: " + "; ".join(errors))
+                    ready_signal = signaller.confirm(after_pr["headRefOid"])
                     emit({"status": "READY", "pr": after_pr.get("url"), "head_sha": after_pr["headRefOid"],
-                          "receipt_reuse": reuse, "secret_scan": dict(scan_summary), "message": "Ready for Review; no merge performed"})
+                          "receipt_reuse": reuse, "secret_scan": dict(scan_summary), "ready_signal": ready_signal,
+                          "message": "Ready for Review; no merge performed"})
                     return 0
             if not args.wait:
                 # inspect() normally rejects pending outside wait mode.

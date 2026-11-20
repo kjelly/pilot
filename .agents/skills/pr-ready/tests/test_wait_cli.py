@@ -1,5 +1,7 @@
 """Native CLI wait/Ready contract: real Git, fake gh, no GitHub mutation."""
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -9,10 +11,15 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import test_cli_mock as cli_mock
 
 ROOT = cli_mock.ROOT
+signal_world = cli_mock.signal_world  # the fake gh's model of the pr-ready-verified signal (_shared/tests)
+# ready.log holds the fake gh's PR-view count at the moment of `gh pr ready`. The signal's prepare reads the PR once
+# more (its labels) right before Ready, so that count is the gate's own reads plus this one.
+PREPARE_READ = 1
 
 
 PASS = {"name": "go test", "bucket": "pass", "state": "SUCCESS"}
@@ -26,6 +33,12 @@ args = sys.argv[1:]
 root = pathlib.Path(os.environ["FAKE_GH_STATE"])
 sha = os.environ["FAKE_GH_SHA"]
 base = os.environ.get("FAKE_GH_BASE", sha)
+# The pr-ready-verified signal's calls (label, user, timeline, comment, edit) are answered by the shared model.
+sys.path.insert(0, os.environ["FAKE_GH_SIGNAL_DIR"])
+import ready_signal_world as signal_world
+signal_rc = signal_world.handle(args, root)
+if signal_rc is not None:
+    sys.exit(signal_rc)
 views = root / "views.log"
 count = len(views.read_text().splitlines()) if views.exists() else 0
 index = count if args[:2] == ["pr", "view"] else max(0, count - 1)
@@ -40,7 +53,8 @@ if args[:2] == ["pr", "view"]:
     pr = {"number": 7, "url": "https://github.com/acme/repo/pull/7", "title": "Fix feature",
           "body": "Reviewed feature change", "headRefOid": sha, "headRefName": "fix-one",
           "baseRefOid": base, "baseRefName": "main", "state": "OPEN", "mergeable": "MERGEABLE",
-          "isDraft": not (root / "ready").exists(), "reviewDecision": "REVIEW_REQUIRED"}
+          "isDraft": not (root / "ready").exists(), "reviewDecision": "REVIEW_REQUIRED",
+          "labels": signal_world.view_labels(root)}
     pr.update(plan.get("pr", {}))
     print(json.dumps(pr))
 elif args[:2] == ["pr", "checks"]:
@@ -114,6 +128,7 @@ elif args[0] == "api" and "/contents/" in args[-1]:
     print("gh: Not Found (HTTP 404)", file=sys.stderr)
     sys.exit(1)
 elif args[:2] == ["pr", "ready"]:
+    signal_world.note_ready(root)
     branch = subprocess.check_output(["git", "-C", os.environ["WAIT_REPO"],
                                       "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
     (root / "ready-branch").write_text(branch)
@@ -281,7 +296,10 @@ class WaitCLITests(unittest.TestCase):
 
     def gh_calls(self, t):
         log = t / "calls.log"
-        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        # `gh pr comment --body-file` names a fresh temporary file on every run (the signal's marker comment).
+        return [["<body file>" if i and call[i - 1] == "--body-file" else arg for i, arg in enumerate(call)]
+                for call in calls]
 
     def run_loop_cli(self, t, plans, extra, *, remove=(), **kwargs):
         repo, evidence, env, cli = self.prepare(t, plans, **kwargs)
@@ -385,7 +403,7 @@ class WaitCLITests(unittest.TestCase):
                              (result["phase"], result["nonce"], result["pr"], result["repo"]))
             self.assertEqual(("", False), (result["wait_kind"], result["person_handoff"]))
             self.assertEqual(events[-1]["message"], result["reason"])
-            self.assertEqual(["2"], (t / "ready.log").read_text().splitlines())
+            self.assertEqual([str(2 + PREPARE_READ)], (t / "ready.log").read_text().splitlines())
 
     def test_pr_loop_task_a_blocker_publishes_draft_blocked_with_the_gate_reason_and_judged_head(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -418,7 +436,7 @@ class WaitCLITests(unittest.TestCase):
 
     def reset_fake_gh(self, t, repo):
         for name in ("ready", "ready-branch", "ready.log", "views.log", "graphql.log", "workflow-queries.log",
-                     "calls.log"):
+                     "calls.log", signal_world.STATE_FILE):
             (t / name).unlink(missing_ok=True)
         (repo / ".pr-ready/7/wait-status.json").unlink(missing_ok=True)
 
@@ -488,7 +506,7 @@ class WaitCLITests(unittest.TestCase):
             proc, events, _ = self.run_gate(t, [plan(PENDING), plan(PASS)])
             self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
             self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
-            self.assertEqual(["2"], (t / "ready.log").read_text().splitlines())
+            self.assertEqual([str(2 + PREPARE_READ)], (t / "ready.log").read_text().splitlines())
             self.assertEqual({"reviewThreads", "comments", "reviews"}, set((t / "graphql.log").read_text().split()))
 
     def test_restore_precedes_ready_and_no_switch_follows(self):
@@ -575,7 +593,7 @@ class WaitCLITests(unittest.TestCase):
             proc = subprocess.run(cli, env=env, capture_output=True, text=True, timeout=20)
             events = [json.loads(line) for line in proc.stdout.splitlines()]
             self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
-            self.assertEqual(["3"], (t / "ready.log").read_text().splitlines(),
+            self.assertEqual([str(3 + PREPARE_READ)], (t / "ready.log").read_text().splitlines(),
                              "Ready must wait until the pending exemption becomes terminal")
             self.assertEqual(["WAITING-CI", "WAITING-CI", "READY"], [e["status"] for e in events])
 
@@ -707,7 +725,7 @@ class WaitCLITests(unittest.TestCase):
             proc, events, _ = self.run_gate(t, [plan(PENDING), plan(PASS), plan(PENDING), plan(PASS)])
             self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
             self.assertEqual(["WAITING-CI", "WAITING-CI", "READY"], [e["status"] for e in events])
-            self.assertEqual(["4"], (t / "ready.log").read_text().splitlines())
+            self.assertEqual([str(4 + PREPARE_READ)], (t / "ready.log").read_text().splitlines())
 
     def test_final_preflight_rechecks_all_pins(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -720,7 +738,8 @@ class WaitCLITests(unittest.TestCase):
             self.assertEqual(2, proc.returncode, proc.stdout)
             self.assertTrue(events[-1]["ready_invoked"])
             self.assertIn("requires reevaluation", " ".join(events[-1]["errors"]))
-            self.assertEqual(["1"], (t / "ready.log").read_text().splitlines())
+            self.assertEqual([str(1 + PREPARE_READ)], (t / "ready.log").read_text().splitlines())
+            self.assert_nothing_signed(t)
 
     def test_explicit_timeout_checkpoints_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -766,7 +785,7 @@ class WaitCLITests(unittest.TestCase):
                          plan(PASS, {**PASS, "name": "image"},
                               runs=[workflow(status="completed", conclusion="success")])]
             proc, events, _ = self.run_gate(t, scenarios)
-            self.assertEqual(["5"], (t / "ready.log").read_text().splitlines(),
+            self.assertEqual([str(5 + PREPARE_READ)], (t / "ready.log").read_text().splitlines(),
                              "Ready must wait for workflow completion and delayed dependent jobs")
             self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
             self.assertEqual(["WAITING-CI"] * 4 + ["READY"], [e["status"] for e in events])
@@ -782,7 +801,7 @@ class WaitCLITests(unittest.TestCase):
                                                plan(PASS, runs=[done])])
             self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
             self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
-            self.assertEqual(["3"], (t / "ready.log").read_text().splitlines())
+            self.assertEqual([str(3 + PREPARE_READ)], (t / "ready.log").read_text().splitlines())
 
     def test_new_workflow_run_cannot_hide_an_earlier_active_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -793,7 +812,7 @@ class WaitCLITests(unittest.TestCase):
             proc, events, _ = self.run_gate(t, [plan(PASS, runs=[old]),
                 plan(PASS, runs=[new_done, old]), plan(PASS, runs=[new_done, done])])
             self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
-            self.assertEqual(["3"], (t / "ready.log").read_text().splitlines())
+            self.assertEqual([str(3 + PREPARE_READ)], (t / "ready.log").read_text().splitlines())
             self.assertEqual(["WAITING-CI", "WAITING-CI", "READY"], [e["status"] for e in events])
 
     def test_rerun_cannot_hide_an_earlier_active_attempt(self):
@@ -805,7 +824,7 @@ class WaitCLITests(unittest.TestCase):
                 plan(PASS, runs=[rerun_done], attempts={"11/attempts/1": workflow()}),
                 plan(PASS, runs=[rerun_done], attempts={"11/attempts/1": old_done})])
             self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
-            self.assertEqual(["3"], (t / "ready.log").read_text().splitlines())
+            self.assertEqual([str(3 + PREPARE_READ)], (t / "ready.log").read_text().splitlines())
             self.assertEqual(["WAITING-CI", "WAITING-CI", "READY"], [e["status"] for e in events])
             self.assertIn("11/attempts/1", (t / "workflow-queries.log").read_text())
 
@@ -890,7 +909,8 @@ class WaitCLITests(unittest.TestCase):
             self.assertEqual(2, proc.returncode, proc.stdout)
             self.assertTrue(events[-1]["ready_invoked"])
             self.assertIn("post-action verification failed", " ".join(events[-1]["errors"]))
-            self.assertEqual(["1"], (t / "ready.log").read_text().splitlines())
+            self.assertEqual([str(1 + PREPARE_READ)], (t / "ready.log").read_text().splitlines())
+            self.assert_nothing_signed(t)
 
     def test_wait_requires_worktree_and_bounded_poll_interval(self):
         for extra in (("--wait",), ("--wait", "--worktree", ".", "--poll-interval", "61"),
@@ -900,6 +920,188 @@ class WaitCLITests(unittest.TestCase):
                 "--pr", "7", "--evidence", "unused.json", *extra], capture_output=True, text=True)
             self.assertEqual(2, proc.returncode)
             self.assertIn("error:", proc.stderr)
+
+    # ---- the pr-ready-verified signal around `gh pr ready` (--wait): see also test_cli_mock.ReadySignalTests ----
+
+    LABEL = signal_world.LABEL
+
+    def signal_calls(self, t):
+        return signal_world.calls(t)
+
+    def assert_nothing_signed(self, t):
+        """No comment and no label write was made: a Ready that failed its post-action verification is never signed."""
+        log = self.signal_calls(t)
+        for write in ("comment", "add-label"):
+            self.assertNotIn(write, log)
+        world = signal_world.World.load(t)
+        self.assertEqual([], [e for e in world.s["events"] if e["event"] in ("commented", "labeled")])
+
+    def run_in_process(self, t, plans, *, adjust=None, extra=()):
+        """The wait CLI run by this process, so that the sleeps of the signal's read-back can be counted and are not slept."""
+        repo, evidence, env, cli = self.prepare(t, plans, adjust=adjust)
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env), mock.patch.object(sys, "argv", cli[1:] + list(extra)), \
+                contextlib.redirect_stdout(out), mock.patch("time.sleep") as sleep:
+            code = cli_mock.gate.main()
+        events = [json.loads(line) for line in out.getvalue().splitlines()]
+        status = json.loads((repo / ".pr-ready/7/wait-status.json").read_text())
+        self.assertEqual(events[-1], status)
+        return code, events, [c.args[0] for c in sleep.call_args_list]
+
+    def test_missing_label_blocks_at_the_first_poll_without_waiting_for_ci(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            signal_world.World().label_state("missing").save(t)
+            task, adjust = self.loop_task(t)
+            proc, events, repo = self.run_gate(t, [plan(PENDING, LINT), plan(PASS, LINT)], adjust=adjust,
+                                               extra=("--pr-loop-task", str(task)))
+            self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["DRAFT-BLOCKED"], [e["status"] for e in events], "no WAITING-CI: CI is not awaited")
+            self.assertEqual((False, 0), (events[-1]["ready_invoked"], events[-1]["polls"]))
+            (reason,) = events[-1]["errors"]
+            self.assertIn(f"The repository has no {self.LABEL} label", reason)
+            self.assertIn("Ready not invoked", reason)
+            for name in ("views.log", "graphql.log", "workflow-queries.log", "ready.log", "ready"):
+                self.assertFalse((t / name).exists(), name)
+            self.assertEqual(["label-exists"], self.signal_calls(t))
+            result = json.loads(task.with_name("result.json").read_text())
+            self.assertEqual("DRAFT-BLOCKED", result["outcome"])
+            self.assertIn(f"The repository has no {self.LABEL} label", result["reason"])
+
+    def test_the_label_present_is_the_control_of_the_missing_label_test(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            proc, events, _ = self.run_gate(t, [plan(PENDING, LINT), plan(PASS, LINT)])
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(["WAITING-CI", "READY"], [e["status"] for e in events])
+
+    def test_a_label_lookup_that_fails_is_a_pr_loop_blocker_not_a_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            signal_world.World().label_state("error").save(t)
+            task, adjust = self.loop_task(t)
+            proc, events, _ = self.run_gate(t, [plan(PASS, LINT)], adjust=adjust, extra=("--pr-loop-task", str(task)))
+            self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+            self.assertEqual("DRAFT-BLOCKED", events[-1]["status"])
+            self.assertIn("(Ready not invoked)", events[-1]["errors"][0])
+            self.assertEqual("DRAFT-BLOCKED", json.loads(task.with_name("result.json").read_text())["outcome"])
+            self.assertFalse((t / "ready").exists())
+
+    def test_missing_label_blocks_before_ready_when_it_disappears_during_the_wait(self):
+        # The first poll sees the label; it is deleted before the final preflight. Only the check right before
+        # `gh pr ready` can notice (the check that matters most is the one nearest to the mutation).
+        hook = ("import json\nf = pathlib.Path(os.environ['FAKE_GH_STATE']) / " + repr(signal_world.STATE_FILE) + "\n"
+                "w = json.loads(f.read_text())\nw['flags']['label'] = 'missing'\nf.write_text(json.dumps(w))\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            signal_world.World().save(t)
+            proc, events, _ = self.run_gate(t, [plan(PASS, LINT)], hook=hook)
+            self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual("DRAFT-BLOCKED", events[-1]["status"])
+            self.assertFalse(events[-1]["ready_invoked"])
+            self.assertIn(f"The {self.LABEL} signal could not be prepared (Ready not invoked)", events[-1]["errors"][0])
+            self.assertIn(f"the repository has no {self.LABEL} label", events[-1]["errors"][0])
+            self.assertFalse((t / "ready").exists(), "gh pr ready must not run")
+            self.assertEqual(2, self.signal_calls(t).count("label-exists"), "once at the start, once before Ready")
+            self.assert_nothing_signed(t)
+
+    def test_a_stale_label_is_removed_before_ready_and_a_failed_removal_blocks(self):
+        for removal_fails in (False, True):
+            with self.subTest(removal_fails=removal_fails), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                world = signal_world.World()
+                world.signed_ready()
+                world.to_draft()  # the label from the earlier Ready epoch stays on the Draft
+                if removal_fails:
+                    world.fail("remove-label")
+                world.save(t)
+                proc, events, _ = self.run_gate(t, [plan(PASS, LINT)])
+                log = self.signal_calls(t)
+                if not removal_fails:
+                    self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+                    self.assertLess(log.index("remove-label"), log.index("ready"))
+                    self.assertEqual("READY", events[-1]["status"])
+                    final = signal_world.World.load(t)
+                    self.assertEqual(["labeled", "unlabeled", "labeled"],
+                                     [e["event"] for e in final.s["events"] if e["event"] in ("labeled", "unlabeled")])
+                    continue
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual("DRAFT-BLOCKED", events[-1]["status"])
+                self.assertFalse(events[-1]["ready_invoked"])
+                self.assertIn(f"The {self.LABEL} signal could not be prepared (Ready not invoked)", events[-1]["errors"][0])
+                self.assertNotIn("ready", log)
+                self.assertFalse((t / "ready").exists())
+
+    def test_ready_writes_the_signal_in_order_and_only_then_reports_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            proc, events, repo = self.run_gate(t, [plan(PASS, LINT)])
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            (ready,) = events
+            self.assertEqual("READY", ready["status"])
+            self.assertTrue(ready["ready_invoked"])
+            sha = ready["head_sha"]
+            self.assertEqual({"label": self.LABEL, "head_sha": sha, "producer": "pr-ready"}, ready["ready_signal"])
+            log = self.signal_calls(t)
+            self.assertEqual("label-exists", log[0], "the label is checked before any poll")
+            self.assertEqual(["label-exists", "user", "pr-view"], log[log.index("ready") - 3:log.index("ready")])
+            # gh pr ready < the post-action read < the comment < the label < the read-back; READY comes last.
+            self.assertEqual(["ready", "pr-view", "comment", "add-label", "pr-view", "timeline"], log[log.index("ready"):])
+            world = signal_world.World.load(t)
+            read = signal_world.ready_signal.assess(sha, world.view_labels(), world.s["events"], signal_world.VIEWER)
+            self.assertEqual(("valid", "pr-ready"), (read.state, read.producer))
+            status = json.loads((repo / ".pr-ready/7/wait-status.json").read_text())
+            self.assertEqual(ready["ready_signal"], status["ready_signal"])
+
+    def test_a_signal_that_cannot_be_written_is_draft_blocked_with_ready_invoked(self):
+        # label_write_failure_is_draft_blocked: GitHub accepts Ready and then refuses the comment or the label.
+        for failing in ("add-label", "comment"):
+            with self.subTest(failing), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                signal_world.World().fail(failing).save(t)
+                task, adjust = self.loop_task(t)
+                proc, events, _ = self.run_gate(t, [plan(PASS, LINT)], adjust=adjust,
+                                                extra=("--pr-loop-task", str(task)))
+                self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
+                self.assertEqual(["DRAFT-BLOCKED"], [e["status"] for e in events], "READY is never reported")
+                self.assertTrue(events[-1]["ready_invoked"])
+                (reason,) = events[-1]["errors"]
+                self.assertIn(f"Ready invoked and verified, but the {self.LABEL} signal was not confirmed", reason)
+                self.assertIn("HTTP 502", reason)
+                self.assertTrue(reason.endswith("the PR is Ready without the signal; convert it to Draft and run pr-ready "
+                                                "again."), reason)
+                self.assertEqual([str(1 + PREPARE_READ)], (t / "ready.log").read_text().splitlines())
+                self.assertEqual([], signal_world.World.load(t).label_names())
+                self.assertEqual(failing == "add-label", "add-label" in self.signal_calls(t))
+                result = json.loads(task.with_name("result.json").read_text())
+                self.assertEqual("DRAFT-BLOCKED", result["outcome"])
+                self.assertEqual(self.pr_head, result["head_sha"])
+                self.assertEqual(reason[:600], result["reason"])
+
+    def test_a_signal_that_never_reads_back_is_draft_blocked_after_the_bound(self):
+        interval, tries = signal_world.ready_signal.READ_INTERVAL, signal_world.ready_signal.READ_TRIES
+        for lag, ok in ((tries - 1, True), (tries, False)):
+            with self.subTest(lag=lag), tempfile.TemporaryDirectory() as tmp:
+                t = Path(tmp)
+                world = signal_world.World()
+                world.s["flags"]["lag"] = lag
+                world.save(t)
+                task, adjust = self.loop_task(t)
+                code, events, sleeps = self.run_in_process(t, [plan(PASS, LINT)], adjust=adjust,
+                                                           extra=("--pr-loop-task", str(task)))
+                self.assertEqual([interval] * (tries - 1), sleeps)
+                self.assertEqual(tries, self.signal_calls(t).count("timeline"))
+                if ok:
+                    self.assertEqual((0, ["READY"]), (code, [e["status"] for e in events]))
+                    self.assertEqual("READY", json.loads(task.with_name("result.json").read_text())["outcome"])
+                    continue
+                self.assertEqual((2, ["DRAFT-BLOCKED"]), (code, [e["status"] for e in events]), "READY is never reported")
+                self.assertTrue(events[-1]["ready_invoked"])
+                self.assertIn(f"does not read back as valid after {tries} reads", events[-1]["errors"][0])
+                self.assertTrue((t / "ready").exists())
+                result = json.loads(task.with_name("result.json").read_text())
+                self.assertEqual(("DRAFT-BLOCKED", events[-1]["errors"][0][:600]), (result["outcome"], result["reason"]))
 
 
 RECORD = "docs/evidence/x/y.md"
@@ -1178,7 +1380,7 @@ class RestoreGuardTests(unittest.TestCase):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
                 t = Path(tmp)
                 repo, env, cli = self.restoring_pr(t, [plan(PASS)])
-                self.hook(t, 3, move)  # view 3 is the post-Ready read
+                self.hook(t, 3 + PREPARE_READ, move)  # view 3 is the signal's prepare read, view 4 the post-Ready read
                 proc, events = self.run_cli(cli, env)
                 self.assertEqual("main", (t / "hook-branch").read_text(), "the move must follow Ready")
                 self.assertEqual(2, proc.returncode, proc.stdout + proc.stderr)
@@ -1190,6 +1392,8 @@ class RestoreGuardTests(unittest.TestCase):
                 self.assertEqual(1, len((t / "ready.log").read_text().splitlines()))
                 self.assertEqual("main", (t / "ready-branch").read_text(), "Ready ran on the restored branch")
                 self.assertEqual(branch_after, git(repo, "branch", "--show-current"))
+                self.assertNotIn("comment", signal_world.calls(t), "an unverified Ready is never signed")
+                self.assertNotIn("add-label", signal_world.calls(t), "an unverified Ready is never signed")
 
 
 class SecretScanWaitTests(unittest.TestCase):
