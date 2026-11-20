@@ -2,12 +2,12 @@
 
 ## Issue #394：Go engine 送出單一 `{{ name }}` 形式的 `password.initial`
 
-目前狀態：**PASS**。驗收日期 2026-11-19，candidate `9c0e2772898eff00ae98777dc3c877f7d5609ff6`，tree `a2c7a898d91bced18828712f23088940d1613d2f`。
+目前狀態：**PASS**。驗收日期 2026-11-20，candidate `c58edf7e4c027e37ccd363b56b5d80eeafd62bfa`，tree `c2306ed5384e4207cfd707451295c82b3e72b1ce`（已合併 main `f9937741`）。
 
 - **範圍**：`pilot reconcile --component freeipa-identity --engine golang` 對 `password.initial` 恰好是一個 `{{ name }}` 的使用者，以這次執行的變數（帶 `-e @.vault/main.yaml` 的 `ansible-inventory --list`）解析並送出；其他寫法與無法證明的值維持 `password_value_unsupported`。
 - **Target**：拋棄式 `vm-target` VM：一台 FreeIPA 4.13.4 server（AlmaLinux 9.8）與一台 enrolled client（Ubuntu 24.04）；只在這裡實跑，沒有任何正式環境。
-- **結果**：`TestLiveGoApplyDriver` 的 A1、A15、A23 共 17／17 arm 通過：Go engine 以加密 vault 的值建立使用者並以 kinit 證明（錯誤的值失敗）；Ansible engine 從同一個範本設出同一個密碼（A23(f)）；之後的 Ansible engine 完整 run 在 users／groups 區段沒有變更；6 個觸發都是 exit 3、0 寫入；混合 run 通過。前一個 candidate 的較廣 arm（A2、A10–A22、A16、A17）與一個測試本身的錯誤寫在 record 的失敗路徑。
-- **已知限制**：只驗證 ansible-core 2.19.2；live run 在 candidate `9c0e2772`，最後的 head 另有一個 Go 差異（vars 端的 `__ansible_unsafe` marker，不論是 `!unsafe` 字串或字面 mapping，以 `unsafe-marker` 擋下、不送），只由 native-tool 測試證明（真實 ansible-core 2.19.2 oracle 與真實 CLI 入口加假 FreeIPA），沒有新的 live run；其他 roster 欄位與 run 輸入見 #397、#398。
+- **結果**：`TestLiveGoApplyDriver` 的 A1、A15、A23 共 19／19 arm 通過、0 skip：Go engine 以加密 vault 的值建立使用者並以 kinit 證明（錯誤的值失敗）；Ansible engine 以 main 的 identity playbook 從同一個範本設出同一個密碼（A23(f)）；之後的 Ansible engine 完整 run 在 users／groups 區段沒有變更；8 個觸發（含 vars 端字面的 `{__ansible_unsafe: ...}` mapping 與 `!unsafe` 字串，原因 `unsafe-marker`）都是 exit 3、0 寫入；混合 run 通過。同一個 candidate 前兩次執行因 harness 環境（另一個 session 的 driver 共用寫死的 `/tmp/p26cp`；`bwrap` 裡 ssh 設定的擁有者）在 A1 失敗，與更早 candidate 的較廣 arm 一起寫在 record 的失敗路徑。
+- **已知限制**：只驗證 ansible-core 2.19.2；driver 在私有 `/tmp` 與 ssh client 設定的複本裡執行；#165 的 `ServerDeclared`、`AdminPasswordProvided` 讀 marker 的行為沒有改（#358）；其他 roster 欄位與 run 輸入見 #397、#398。
 
 候選、各 arm 的事實、失敗路徑與限制見 [Issue #394 驗收紀錄](issue-394.md)。
 
