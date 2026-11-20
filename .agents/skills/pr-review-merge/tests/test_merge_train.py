@@ -1307,6 +1307,121 @@ class ZeroChecksTests(TrainHarness):
         self.assertIn(('merge', 42, self.reviewed), self.gh.writes)
         self.assertGreaterEqual(self.gh.polls[42], 2, 'the grace was waited out first')
 
+    def test_enqueue_records_the_live_base_the_no_ci_decision_was_made_on(self):
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        entry = merge_train.load_entry(REPO, 42)
+        self.assertEqual(self.gh.branch_head(REPO, 'main'), entry['base_at_enqueue'])
+        # A gate result without a live base records None, which the train reads as "the base moved".
+        self.setUp()
+        gate = {'decision': 'MERGE', 'head_sha': self.reviewed, 'base_sha': self.fork,
+                'checks': NO_CHECKS_AT_ALL}
+        merge_train.enqueue(REPO, 42, dict(self.evidence(), no_ci_rationale=NO_CI_RATIONALE), gate, client=self.gh)
+        self.assertIsNone(merge_train.load_entry(REPO, 42)['base_at_enqueue'])
+
+    def assertWaitsForChecksOnTheNewHead(self, reason):
+        self.assertIn('no-CI decision', reason['reason'])
+        self.assertIn('waits for checks on this HEAD', reason['reason'])
+        self.assertStillQueued()
+
+    def test_a_zero_check_pr_waits_when_main_adds_a_workflow_and_the_train_integrates_it(self):
+        # kjelly/pilot#389 round 3: queued with no checks and the rationale, then main gains a workflow
+        # that applies to the PR. The integrated HEAD has no checks past the grace: it must not merge.
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        self.advance_main('.github/workflows/ci.yml', 'name: CI\non: [pull_request]\njobs: {}\n')
+        self.gh.checks[42] = [[]]
+        entry_before = merge_train.load_entry(REPO, 42)
+        reason = self.run_waiting()
+        self.assertWaitsForChecksOnTheNewHead(reason)
+        head = self.gh.head(42)
+        self.assertNotEqual(self.reviewed, head, 'the train integrated the base first')
+        self.assertIn('.github/workflows/ci.yml', git(self.origin, 'ls-tree', '-r', '--name-only', head))
+        entry = merge_train.load_entry(REPO, 42)
+        self.assertEqual(0, entry['errors'], 'nothing is counted')
+        self.assertEqual(entry_before['entry_id'], entry['entry_id'])
+        self.assertEqual([head], entry['train_commits'][-1:])
+        self.assertFalse(any(w[0] in ('merge', 'draft', 'label-') for w in self.gh.writes), self.gh.writes)
+
+    def test_a_zero_check_pr_waits_when_the_base_moved_without_a_workflow_too(self):
+        # The train cannot tell what a moved base changed about CI: the rule is the HEAD and base decided on.
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        self.advance_main()
+        self.gh.checks[42] = [[]]
+        self.assertWaitsForChecksOnTheNewHead(self.run_waiting())
+
+    def test_each_half_of_the_zero_check_condition_is_enough_to_wait(self):
+        # Isolated: the base alone (HEAD is the enqueued HEAD, the live tip differs from the recorded one),
+        # then the HEAD alone (same live tip, HEAD is a commit the train pushed, not the enqueued one).
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        entry = merge_train.load_entry(REPO, 42)
+        entry['base_at_enqueue'] = self.reviewed
+        merge_train.save_entry(REPO, 42, entry)
+        self.gh.checks[42] = [[]]
+        self.assertWaitsForChecksOnTheNewHead(self.run_waiting())
+        self.setUp()
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        entry = merge_train.load_entry(REPO, 42)
+        entry['enqueued_head'], entry['train_commits'] = self.fork, [self.reviewed]
+        merge_train.save_entry(REPO, 42, entry)
+        self.gh.checks[42] = [[]]
+        self.assertWaitsForChecksOnTheNewHead(self.run_waiting())
+
+    def test_a_zero_check_entry_without_the_recorded_base_counts_as_moved(self):
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        entry = merge_train.load_entry(REPO, 42)
+        del entry['base_at_enqueue']
+        merge_train.save_entry(REPO, 42, entry)
+        self.gh.checks[42] = [[]]
+        self.assertWaitsForChecksOnTheNewHead(self.run_waiting())
+
+    def test_a_zero_check_pr_still_on_its_head_and_base_goes_on_to_the_gate(self):
+        # The workflow-free positive case: nothing moved since the no-CI decision, the gate reads the tree
+        # (no workflow) and merges.
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        self.gh.checks[42] = [[]]
+        out = self.train(registration_grace=300).run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        self.assertIn('tree_entries', self.gh.calls, 'the gate read the HEAD tree')
+
+    def test_a_workflow_in_the_tree_stops_the_merge_even_when_nothing_moved(self):
+        # The tree already has a workflow (the gate saw checks==0 for another reason): the gate refuses the
+        # rationale, the PR leaves the queue with the reason and is never merged.
+        self.advance_main('.github/workflows/ci.yml', 'name: CI\non: [pull_request]\njobs: {}\n')
+        git(self.dev, 'fetch', '-q', 'origin')
+        git(self.dev, 'merge', '-q', '--no-edit', 'origin/main')
+        self.reviewed = git(self.dev, 'rev-parse', 'HEAD')
+        git(self.dev, 'push', '-q', 'origin', 'HEAD:refs/heads/feature')
+        self.gh.prs[42]['base'] = self.gh.branch_head(REPO, 'main')
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        self.gh.checks[42] = [[]]
+        out = self.train(registration_grace=300).run()
+        self.assertEqual(['DONE'], [out['status']], out)
+        self.assertFalse(any(w[0] == 'merge' for w in self.gh.writes), self.gh.writes)
+        self.assertIn('GitHub Actions workflows', ' '.join(out['results'][0].get('reasons', [])), out)
+
+    def test_the_bounced_counterexample_with_the_real_adapter_never_merges(self):
+        # The round-3 counterexample (kjelly/pilot#389), replayed: the gate decides MERGE with zero checks
+        # read through gh_runtime.pr_checks over the recorded capture, the PR is enqueued from that gate
+        # result, main adds a workflow, and the train runs over the same capture.
+        import gh_runtime
+        from test_gh_reads import API
+        zero = API['pr_checks']['zero_checks']
+        run = lambda *a, **kw: subprocess.CompletedProcess(['gh'], zero['rc'], zero['stdout'], zero['stderr'])
+        self.gh.pr_checks = lambda repo, number: gh_runtime.pr_checks(repo, number)
+        evidence = dict(self.evidence(), no_ci_rationale=NO_CI_RATIONALE)
+        with mock.patch.object(gh_runtime, 'run_gh', side_effect=run):
+            gate = review_gate.evaluate(REPO, 42, evidence, client=self.gh)
+        self.assertEqual('MERGE', gate['decision'], gate)
+        self.assertEqual(0, sum(gate['checks'].values()), gate)
+        merge_train.enqueue(REPO, 42, evidence, gate, client=self.gh)
+        self.advance_main('.github/workflows/ci.yml',
+                          'name: CI\non: [push, pull_request]\njobs:\n  tests:\n    runs-on: ubuntu-latest\n'
+                          '    steps:\n      - run: exit 1\n')
+        with mock.patch.object(gh_runtime, 'run_gh', side_effect=run):
+            out = self.train(registration_grace=300).run()
+        self.assertEqual([(42, 'WAITING')], [(r['pr'], r['outcome']) for r in out['results']], out)
+        self.assertFalse(any(w[0] == 'merge' for w in self.gh.writes), self.gh.writes)
+        self.assertStillQueued()
+
     def test_a_pr_enqueued_with_no_checks_and_no_rationale_is_the_gates_decision(self):
         self.queue_with(NO_CHECKS_AT_ALL)
         self.gh.checks[42] = [[]]

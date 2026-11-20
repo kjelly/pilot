@@ -240,7 +240,7 @@ Without `--execute`, the actor performs a dry run. **Run with `--execute` when t
 
 Actor **reruns the live gate immediately before action**, never trusts a saved decision, serializes writes, and on MERGE queues the PR for the merge train instead of merging; the train merges with `--match-head-commit` after its own live gate. Both refuse GitHub merge-queue branches (because `gh pr merge` can silently enqueue or enable auto-merge), refuse stale SHA, and never treat a successful command as proof of merged or enqueued status. On Draft it posts concrete findings before converting, and verifies the remote `isDraft` afterward.
 
-Review CI with `gh pr checks --json name,state,bucket,link,workflow` plus live PR metadata, review threads (GraphQL pagination), and active base-branch rules. Unknown states **fail closed** into `WAITING`. Missing/empty CI alone is not success; on a branch without required status checks require an explicit no-CI rationale and supporting test evidence; on a branch that requires them no rationale helps (`WAITING`, handed to a person).
+Review CI with `gh pr checks --json name,state,bucket,link,workflow` plus live PR metadata, review threads (GraphQL pagination), and active base-branch rules. Unknown states **fail closed** into `WAITING`. Missing/empty CI alone is not success; on a branch without required status checks require an explicit no-CI rationale and supporting test evidence; on a branch that requires them no rationale helps (`WAITING`, handed to a person), and no rationale helps a HEAD whose tree has GitHub Actions workflows (`WAITING` for their checks).
 
 ## 5. Iteration / PR dependencies
 

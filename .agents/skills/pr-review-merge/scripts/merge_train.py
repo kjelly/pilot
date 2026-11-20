@@ -3,8 +3,9 @@
 
 Enqueue (`apply_decision.py --execute` on a MERGE gate): the gate-checked review evidence is saved
 in the train's state directory, with the HEAD the review covers (`reviewed_head`), the HEAD the
-gate saw (`enqueued_head`), an `entry_id` that names this enqueue and the number of checks the gate saw
-(`checks_at_enqueue`), and the PR gets the `merge-queue` label.
+gate saw (`enqueued_head`), an `entry_id` that names this enqueue, the number of checks the gate saw
+(`checks_at_enqueue`) and the live base tip it decided on (`base_at_enqueue`), and the PR gets the
+`merge-queue` label.
 
 Process (this script; one consumer per repository and host, from a timer or by hand): take the PR
 whose label was added first. The PR's HEAD must be the enqueued HEAD or a commit this train pushed
@@ -22,8 +23,11 @@ outside the train, and a gate result only a person can change (an unresolved app
 change, a disputed finding, a failing check the reviewer confirmed unrelated, a merge state that is
 not clean for another reason, a comparison GitHub cut) dequeue it: Ready, with the reasons in a
 comment, and the run goes on with the next PR. Transient states (CI that is pending, no check on HEAD
-after `registration_grace` for a PR that was enqueued with checks (CI has not started: only a PR
-enqueued with none goes on to the gate, which decides the no-CI case), a base that keeps moving,
+after `registration_grace` for a PR that was enqueued with checks (CI has not started), or for a
+PR that was enqueued with none but is no longer on the HEAD and the live base the gate decided
+that no-CI case on (`base_at_enqueue`: an integration or a base that moved can bring a workflow the
+rationale never covered, so the train waits for checks on the new HEAD; only a PR still on that HEAD
+and base goes on to the gate, which decides the no-CI case), a base that keeps moving,
 mergeability GitHub has not computed, an API or infrastructure failure, a secret scan that could not
 run) leave it enqueued and stop this run.
 
@@ -226,7 +230,10 @@ def enqueue(repo: Repo, number: int, evidence: dict[str, Any], gate: dict[str, A
               "reviewed_head": reviewed, "enqueued_head": gate["head_sha"], "train_commits": [], "errors": 0,
               "reviewed_base": gate.get("base_sha"), "live_base": gate.get("live_base_sha"),
               "alignment": gate.get("alignment"), "evidence": evidence,
-              "checks_at_enqueue": _check_count(gate)}
+              "checks_at_enqueue": _check_count(gate),
+              # The live base tip the no-CI decision (checks_at_enqueue == 0) was made on; None when the
+              # gate result carries none, which the train reads as "the base moved".
+              "base_at_enqueue": gate.get("live_base_sha")}
     save_entry(repo, number, record)
     client.edit_label(repo, number, QUEUE_LABEL, add=True)
     out = {"outcome": "ENQUEUED", "pr": number, "reviewed_head": reviewed, "enqueued_head": gate["head_sha"]}
@@ -709,12 +716,23 @@ class Train:
         # aligned: HEAD contains the live tip.
         state = self.wait_ci(number, view["headRefOid"], view["baseRefName"], align["live_base_sha"])
         # No check registered within the grace: only a PR the gate queued with no checks at all (the no-CI
-        # rationale) goes on to the gate. For any other PR, CI has not started on HEAD yet (the train just
-        # pushed it, or GitHub Actions is late): the gate would read that as missing CI and dequeue it.
-        if state == "no-checks" and entry.get("checks_at_enqueue") != 0:
-            return self.waiting(number, f"GitHub reports no checks for HEAD {view['headRefOid'][:12]} "
-                                f"{self.registration_grace:g} s after the train started waiting; CI has not "
-                                "started on it, and it stays enqueued")
+        # rationale) goes on to the gate, and only on the HEAD and the live base that decision was made on.
+        # For any other PR, CI has not started on HEAD yet (the train just pushed it, or GitHub Actions is
+        # late): the gate would read that as missing CI and dequeue it. A zero-check PR whose HEAD or base
+        # changed since may now have a workflow the rationale never covered, so it waits for checks on the
+        # new HEAD instead of merging an untested one.
+        if state == "no-checks":
+            if entry.get("checks_at_enqueue") != 0:
+                return self.waiting(number, f"GitHub reports no checks for HEAD {view['headRefOid'][:12]} "
+                                    f"{self.registration_grace:g} s after the train started waiting; CI has not "
+                                    "started on it, and it stays enqueued")
+            if view["headRefOid"] != entry["enqueued_head"] or \
+                    align["live_base_sha"] != entry.get("base_at_enqueue"):
+                return self.waiting(number, f"GitHub reports no checks for HEAD {view['headRefOid'][:12]} "
+                                    f"{self.registration_grace:g} s after the train started waiting, and the "
+                                    "no-CI decision for this PR was made on another HEAD or live base "
+                                    f"(`{entry['enqueued_head'][:12]}` on `{str(entry.get('base_at_enqueue'))[:12]}`): "
+                                    "the train waits for checks on this HEAD, and it stays enqueued")
         if state in ("base-moved", "left"):
             return NEXT
         if state == "head-moved":

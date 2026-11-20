@@ -80,7 +80,8 @@ Notes on the table:
   for), `train_commits` (every commit the train pushed to the PR branch) and `errors` (consecutive
   ERROR runs), `checks_at_enqueue` (how many checks the gate saw when it decided MERGE, 0 for a PR
   with none, null when the gate result had no counts; an entry from before the field existed has none
-  and counts as a PR whose CI is expected). An entry without an `entry_id`, written by a version before this one, is not trusted:
+  and counts as a PR whose CI is expected) and `base_at_enqueue` (the live base tip the gate decided
+  on; null when the gate result had none, and an entry without it counts as "the base moved"). An entry without an `entry_id`, written by a version before this one, is not trusted:
   the PR leaves the queue with "no saved review evidence" and `pr-review-merge` enqueues it again.
 - **Binding.** The train works only on a PR whose HEAD is `enqueued_head` or one of `train_commits`.
   It checks this before it integrates, and again in the final step with a fresh read of the HEAD.
@@ -241,8 +242,15 @@ The consumer takes the oldest PR in the queue and:
    - a PR enqueued with checks (`checks_at_enqueue` above zero, or an entry that does not record it):
      WAITING. CI has not started on HEAD (the train just pushed it, or Actions is late); the PR stays
      enqueued, nothing is counted, commented or dequeued, and the run stops. The next run looks again.
-   - a PR enqueued with no checks at all (`checks_at_enqueue` is 0): step 5, where the gate decides
-     (the no-CI rationale, or the required-checks hand-off).
+   - a PR enqueued with no checks at all (`checks_at_enqueue` is 0), still on `enqueued_head` and with
+     the live base equal to `base_at_enqueue` (nothing was integrated or moved since the no-CI decision):
+     step 5, where the gate decides (the no-CI rationale, which it accepts only for a HEAD tree without
+     GitHub Actions workflows, or the required-checks hand-off).
+   - a PR enqueued with no checks at all, but on another HEAD (the train integrated the base) or with a
+     live base that is not `base_at_enqueue` (or an entry that records no base): WAITING. The no-CI
+     decision was made on another HEAD and base, and main may have brought a workflow that applies; the
+     PR stays enqueued, nothing is counted, commented or dequeued, and the train waits for checks on this
+     HEAD (a PR whose HEAD never registers any is a person's: remove the label, or push a change).
    - The base moved: back to step 3.
    - HEAD changed outside the train: leave the queue, so a new review is needed.
    - Label removed, PR closed or made Draft: back to step 1.

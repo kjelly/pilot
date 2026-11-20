@@ -578,6 +578,14 @@ class WaitKinds:
         return "transient" if any(r in self.transient for r in reasons) else "person"
 
 
+def actions_workflows(entries: dict[str, Any]) -> list[str]:
+    """The GitHub Actions workflow files in a Git tree (path -> entry): `.github/workflows/*.yml` or
+    `*.yaml`, directly in that directory (GitHub does not read subdirectories)."""
+    prefix = ".github/workflows/"
+    return sorted(path for path in entries if path.startswith(prefix) and "/" not in path[len(prefix):]
+                  and path.endswith((".yml", ".yaml")))
+
+
 def evaluate(repo: Repo, number: int, evidence: dict[str, Any], *, client: Any = None,
              worktree: Any = None, secret_files: Sequence[Any] = ()) -> dict[str, Any]:
     """The live gate. A WAITING result also carries `wait_kind`: `transient` or `person` (WaitKinds), and
@@ -857,8 +865,25 @@ def _evaluate(repo: Repo, number: int, evidence: dict[str, Any], client: Any, wo
     if no_ci_at is not None and not required_checks:
         # The branch rules do not require checks, or could not be read (fail closed).
         rationale = evidence.get("no_ci_rationale")
+        no_ci_gap = "No GitHub CI: requires a concrete no-CI rationale and passing test evidence"
         if not isinstance(rationale, str) or len(rationale.strip()) < 20 or not tested:
-            missing.insert(no_ci_at, "No GitHub CI: requires a concrete no-CI rationale and passing test evidence")
+            missing.insert(no_ci_at, no_ci_gap)
+        else:
+            # A rationale says no CI applies; a HEAD whose tree has GitHub Actions workflows says it might
+            # (main can add one after the rationale was written). Zero checks on such a HEAD are CI that has
+            # not reported, not CI that does not exist, so the rationale cannot exempt it.
+            try:
+                workflows = actions_workflows(client.tree_entries(repo, result["head_sha"]))
+            except (GitHubError, ValueError, KeyError) as exc:
+                missing.insert(no_ci_at, kinds.later(
+                    f"Unable to read the HEAD tree to check that no GitHub Actions workflow applies: {exc}"))
+            else:
+                if workflows:
+                    missing.insert(no_ci_at, no_ci_gap)
+                    missing.insert(no_ci_at + 1, (
+                        "A no-CI rationale cannot exempt a HEAD whose tree has GitHub Actions workflows "
+                        f"({', '.join(workflows[:5])}{', ...' if len(workflows) > 5 else ''}): GitHub returned no "
+                        "checks for it, so wait for the workflow runs on this HEAD"))
 
     decision = view.get("reviewDecision")
     if decision == "CHANGES_REQUESTED":

@@ -623,6 +623,106 @@ class PersonHandoffTests(unittest.TestCase):
             self.assertEqual(labelled, comment.called)
 
 
+WORKFLOW_GAP = 'No GitHub CI: requires a concrete no-CI rationale and passing test evidence'
+WORKFLOW_REASON = 'A no-CI rationale cannot exempt a HEAD whose tree has GitHub Actions workflows'
+BLOB = ('100644', 'c' * 40)
+
+
+class NoCIWorkflowTests(unittest.TestCase):
+    """The no-CI rationale says no CI applies. A HEAD tree with GitHub Actions workflows says it may (main can
+    add one after the rationale was written), so zero checks on it are CI that has not reported: the rationale
+    cannot exempt it (kjelly/pilot#389 round 3). Every case is the rationale-accepting evidence plus only the
+    tree (or the rules) it declares."""
+    RATIONALE = 'The repository has no CI workflow for this docs-only change'
+
+    def gate(self, paths=(), rules=None, tree_error=None, checks=()):
+        f = Fake()
+        f.c = list(checks)
+        f.r = list(rules or [])
+        f.trees[H] = {path: BLOB for path in ('README.md', 'pkg/a.go', *paths)}
+        f.tree_error = tree_error
+        e = sample()
+        e['no_ci_rationale'] = self.RATIONALE
+        return evaluate(REPO, 42, e, client=f), f
+
+    def test_a_tree_without_a_workflow_merges_on_the_rationale(self):
+        result, f = self.gate()
+        self.assertEqual('MERGE', result['decision'], result['reasons'])
+        self.assertIn(('tree_entries', H), f.calls)
+
+    def test_a_workflow_in_the_tree_refuses_the_rationale(self):
+        for path in ('.github/workflows/ci.yml', '.github/workflows/release.yaml', '.github/workflows/.yml'):
+            with self.subTest(path=path):
+                result, _ = self.gate([path])
+                self.assertEqual('WAITING', result['decision'], result['reasons'])
+                self.assertEqual(WORKFLOW_GAP, result['reasons'][0])
+                self.assertTrue(result['reasons'][1].startswith(WORKFLOW_REASON), result['reasons'])
+                self.assertIn(path, result['reasons'][1])
+                self.assertEqual(2, len(result['reasons']), result['reasons'])
+                # Unregistered: not a hand-off (the PR stays listable), and nothing says "later".
+                self.assertEqual(('person', False), (result['wait_kind'], result['person_handoff']))
+
+    def test_files_that_are_not_actions_workflows_do_not_count(self):
+        for path in ('.github/workflows/sub/x.yml', 'docs/x.yml', '.github/ci.yml', 'workflows/ci.yml',
+                     '.github/workflows/readme.md', '.github/workflows/ci.yml.disabled',
+                     'tools/.github/workflows/ci.yml', '.github/workflowsx/ci.yml'):
+            with self.subTest(path=path):
+                result, _ = self.gate([path])
+                self.assertEqual('MERGE', result['decision'], result['reasons'])
+
+    def test_an_unreadable_tree_is_transient_and_never_merges(self):
+        for error in (GitHubError('gh api trees failed (1): HTTP 502'),
+                      GitHubError('Complete Git tree unavailable (truncated or invalid response)'),
+                      ValueError('tree_entries needs a full lowercase commit SHA'), KeyError('tree')):
+            with self.subTest(error=error):
+                result, _ = self.gate(tree_error=error)
+                self.assertEqual('WAITING', result['decision'], result['reasons'])
+                self.assertEqual(1, len(result['reasons']), result['reasons'])
+                self.assertIn('Unable to read the HEAD tree', result['reasons'][0])
+                self.assertEqual(('transient', False), (result['wait_kind'], result['person_handoff']))
+
+    def test_required_checks_still_hand_off_with_only_the_person_reason(self):
+        for paths in ((), ('.github/workflows/ci.yml',)):
+            with self.subTest(paths=paths):
+                result, f = self.gate(paths, rules=[{'type': 'required_status_checks'}])
+                self.assertEqual('WAITING', result['decision'], result['reasons'])
+                self.assertEqual([_REQUIRED_CHECKS], result['reasons'])
+                self.assertEqual(('person', True), (result['wait_kind'], result['person_handoff']))
+                self.assertNotIn(('tree_entries', H), f.calls, 'the tree is read only for a rationale that would be accepted')
+
+    def test_an_insufficient_rationale_does_not_read_the_tree(self):
+        f = Fake(); f.c = []
+        e = sample(); e['no_ci_rationale'] = 'too short'
+        result = evaluate(REPO, 42, e, client=f)
+        self.assertEqual([WORKFLOW_GAP], result['reasons'])
+        self.assertEqual([], [c for c in f.calls if c[0] == 'tree_entries'])
+        f = Fake(); f.c = []
+        e = sample(); e['no_ci_rationale'] = self.RATIONALE
+        e['tests'][0].update(status='SKIPPED', reason='no runner on this host today')
+        result = evaluate(REPO, 42, e, client=f)
+        self.assertEqual([WORKFLOW_GAP], result['reasons'])
+        self.assertEqual([], [c for c in f.calls if c[0] == 'tree_entries'])
+
+    def test_checks_that_ran_never_read_the_tree_or_change(self):
+        for paths in ((), ('.github/workflows/ci.yml',)):
+            with self.subTest(paths=paths):
+                result, f = self.gate(paths, checks=[{'name': 'test', 'bucket': 'pass', 'state': 'SUCCESS'}])
+                self.assertEqual('MERGE', result['decision'], result['reasons'])
+                self.assertNotIn(('tree_entries', H), f.calls)
+        failing = [{'name': 'test', 'bucket': 'fail', 'state': 'FAILURE', 'link': 'u'}]
+        result, f = self.gate(('.github/workflows/ci.yml',), checks=failing)
+        self.assertEqual('DRAFT', result['decision'], result['reasons'])
+        self.assertFalse(any('rationale' in r for r in result['reasons']), result['reasons'])
+
+    def test_the_other_reasons_keep_their_order_around_the_workflow_reason(self):
+        f = Fake(); f.c = []; f.trees[H] = {'.github/workflows/ci.yml': BLOB}; f.v['reviewDecision'] = 'REVIEW_REQUIRED'
+        e = sample(); e['no_ci_rationale'] = self.RATIONALE
+        result = evaluate(REPO, 42, e, client=f)
+        self.assertEqual(WORKFLOW_GAP, result['reasons'][0])
+        self.assertTrue(result['reasons'][1].startswith(WORKFLOW_REASON))
+        self.assertEqual('Human approval required by repository rules', result['reasons'][2])
+
+
 class RequiredChecksTests(unittest.TestCase):
     """No GitHub checks: the no-CI rationale gap applies only on a branch without required checks. On one
     that requires them, the branch protection is what waits for a person, whatever the evidence says."""
