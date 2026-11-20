@@ -107,7 +107,8 @@ dispatches an agent nor ends the run. An agent that is still working when
 GitHub shows the next phase is given the phase timeout to return to its prompt;
 a PR can therefore take up to about twice `--phase-timeout` in one phase. Every
 exhausted wait stops the runner without sending a command and retains the
-panes and the checkout.
+panes and the checkout. The runner reads the finished agent's result before it
+moves on, and stops on a blocker even when GitHub already shows the next phase.
 
 ## Command map
 

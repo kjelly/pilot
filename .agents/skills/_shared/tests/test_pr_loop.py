@@ -6,6 +6,7 @@ and every wait runs on a fake clock. The pane screens and PR views are synthetic
 """
 import ast
 import json
+import re
 import shlex
 import stat
 import subprocess
@@ -381,6 +382,8 @@ class Fleet:
         self.checkouts = []
         self.busy = {}      # role -> seconds an agent stays busy after it was given a task
         self.statuses = {}  # role -> the (dead, in_mode, foreground) answers; the last one repeats
+        self.on_submit = {}  # role -> callable run right after that role's agent is given a task
+        self.on_handoff = {}  # role -> callable run when the runner waits for that role's agent to hand over
 
     def new_agent(self, executable, _checkout, number, phase):
         return FakeAgent(self, executable, number, phase)
@@ -411,12 +414,16 @@ class FakeAgent:
                 raise pr_loop.Stop(f"agent did not return to its input prompt in {self.pane}")
             self.fleet.clock.sleep(self.busy)
             self.busy = 0
+        if allow_exit and self.role in self.fleet.on_handoff:
+            self.fleet.on_handoff[self.role]()  # what the agent publishes before it returns to its prompt
         return True
 
     def submit(self, text):
         self.fleet.submits.append((self.role, text))
         self.fleet.submit_times.append(self.fleet.clock.now)
         self.busy = self.fleet.busy.get(self.role, 0)
+        if self.role in self.fleet.on_submit:
+            self.fleet.on_submit[self.role]()
 
     def close(self):
         self.fleet.closed.append(self.role)
@@ -433,8 +440,10 @@ class FakeCheckout:
         index = len(self.fleet.tasks) + 1
         task = dict(version=1, repo=f"{repo.owner}/{repo.name}", pr=number, phase=phase, nonce="b" * 32,
                     start_head=head)
-        self.fleet.tasks.append(SimpleNamespace(phase=phase, head=head, task=task))
-        return self.fleet.directory / f"task-{index}.json", task
+        path = self.fleet.directory / f"task-{index}" / "task.json"   # one directory per dispatch, as in Checkout
+        path.parent.mkdir()
+        self.fleet.tasks.append(SimpleNamespace(phase=phase, head=head, task=task, path=path))
+        return path, task
 
     def clean_up(self):
         self.cleaned = True
@@ -544,7 +553,8 @@ class MaxActionsTests(RunPRCase):
         self.assertEqual(1, len(self.fleet.agents), "the refused dispatch started no agent")
 
     def test_the_same_run_with_a_larger_limit_dispatches_twice(self):
-        self.run_batch(["ready"] * 3 + ["draft"] * 3 + ["merged"] * 2, max_actions=2)
+        # (a handoff reads the PR once more, to judge the result, before the next role's confirming read)
+        self.run_batch(["ready"] * 3 + ["draft"] * 4 + ["merged"] * 2, max_actions=2)
         self.assertEqual(["ready", "draft"], self.roles())
 
 
@@ -559,7 +569,7 @@ class PhaseTimeoutTests(RunPRCase):
 
     def test_a_change_inside_the_timeout_completes(self):
         # The same run, but GitHub confirms the next phase at the last read the budget allows.
-        self.run_batch(["draft"] * 11 + ["ready"] * 3 + ["merged"] * 2, phase_timeout=100, poll_interval=10)
+        self.run_batch(["draft"] * 11 + ["ready"] * 4 + ["merged"] * 2, phase_timeout=100, poll_interval=10)
         self.assertEqual(["draft", "ready"], self.roles())
 
 
@@ -608,7 +618,7 @@ class ConfirmReadTests(RunPRCase):
     def test_the_prompt_template_and_the_task_path_are_pasted(self):
         self.run_batch(["draft"] * 3 + ["merged"] * 2)
         (role, text), = self.fleet.submits
-        path = str(self.fleet.directory / "task-1.json")
+        path = str(self.fleet.directory / "task-1" / "task.json")
         self.assertEqual(("draft", "/pr-ready 7 --pr-loop-task=" + json.dumps(path)), (role, text))
 
 
@@ -679,7 +689,7 @@ class HandoffTests(RunPRCase):
 
     def test_the_previous_agent_gets_the_phase_timeout_a_new_one_the_startup_timeout(self):
         self.fleet.busy["ready"] = 90   # longer than --startup-timeout, shorter than --phase-timeout
-        self.run_batch(["ready"] * 3 + ["draft"] * 3 + ["merged"] * 2, phase_timeout=3600, startup_timeout=60)
+        self.run_batch(["ready"] * 3 + ["draft"] * 4 + ["merged"] * 2, phase_timeout=3600, startup_timeout=60)
         self.assertEqual(["ready", "draft"], self.roles())
         self.assertEqual([("ready", 60, False),     # the prompt of the agent that was just started
                           ("ready", 3600, True),    # it hands over: it was working
@@ -707,11 +717,177 @@ class HandoffTests(RunPRCase):
         self.fleet.busy["ready"] = 0
         with patch.object(FakeAgent, "wait_for_prompt", autospec=True,
                           side_effect=lambda agent, timeout, *, allow_exit=False: False if allow_exit else True):
-            self.run_batch(["ready"] * 3 + ["draft"] * 3 + ["ready"] * 3 + ["merged"] * 2)
+            self.run_batch(["ready"] * 3 + ["draft"] * 4 + ["ready"] * 4 + ["merged"] * 2)
         self.assertEqual(["ready", "draft", "ready"], self.roles())
         self.assertEqual(["ready", "draft", "ready"], [agent.role for agent in self.fleet.agents],
                          "the exited ready agent was not reused")
         self.assertEqual(["ready", "draft", "ready"], self.fleet.closed)
+
+
+class HandoffResultTests(RunPRCase):
+    """The runner reads the finished agent's result before it moves on: a blocker stops the run even when GitHub
+    already shows the next phase. Results are written by the real producer (pr_loop_result.write_result)."""
+
+    def publish(self, role, outcome, head=HEAD, **fields):
+        """What the skill of `role` publishes for the task it was last given."""
+        record = [t for t in self.fleet.tasks if t.phase == role][-1]
+        write_result(record.path, record.task, outcome=outcome, head=head, reason="synthetic reason", **fields)
+
+    def agent_publishes(self, role, outcome, *, when, head=HEAD, **fields):
+        """Make the `role` agent publish `outcome` at `when`: "submit" (right after the task is pasted) or
+        "handoff" (only once the runner waits for it to return to its prompt)."""
+        hooks = {"submit": self.fleet.on_submit, "handoff": self.fleet.on_handoff}[when]
+        hooks[role] = lambda: self.publish(role, outcome, head, **fields)
+
+    # Three reads dispatch the first role (two polls and the confirming read), two more believe the next phase;
+    # the surplus reads of that phase are the handoff's own fresh read and the next role's confirming read.
+    DRAFT_THEN_READY = ["draft"] * 3 + ["ready"] * 4
+    READY_THEN_DRAFT = ["ready"] * 3 + ["draft"] * 4
+    READY_THEN_MERGED = ["ready"] * 3 + ["merged"] * 2
+
+    def stops_before_the_next_role(self, outcome, items, role, *, kind=""):
+        message = self.stops(re.escape(f"PR #7 {outcome}{kind} at {HEAD[:12]}: synthetic reason"), items)
+        self.assertEqual(f"PR #7: PR #7 {outcome}{kind} at {HEAD[:12]}: synthetic reason", message)
+        self.assertEqual([role], self.roles(), "the next role was never dispatched")
+        self.assertEqual([role], [agent.role for agent in self.fleet.agents], "the next role was never started")
+        self.assertEqual([], self.fleet.closed, "the panes are retained for inspection")
+        self.assertFalse(self.fleet.checkouts[0].cleaned)
+        self.assertNotIn("PR #7: merged", self.told)
+
+    # -- the reviewer's scenario: GitHub already shows Ready when the Draft gate's blocker arrives -------------
+
+    def test_a_blocker_published_before_the_handoff_stops_before_ready_is_dispatched(self):
+        self.agent_publishes("draft", "DRAFT-BLOCKED", when="submit")
+        self.stops_before_the_next_role("DRAFT-BLOCKED", self.DRAFT_THEN_READY, "draft")
+
+    def test_a_blocker_that_appears_only_when_the_agent_returns_to_its_prompt_stops(self):
+        # The agent publishes just before it returns to its prompt: reading the result before the wait misses it.
+        self.agent_publishes("draft", "DRAFT-BLOCKED", when="handoff")
+        self.stops_before_the_next_role("DRAFT-BLOCKED", self.DRAFT_THEN_READY, "draft")
+
+    def test_the_handoff_wait_comes_first_and_the_result_is_read_after_a_fresh_read_of_the_pr(self):
+        self.agent_publishes("draft", "DRAFT-BLOCKED", when="handoff")
+        self.stops_before_the_next_role("DRAFT-BLOCKED", self.DRAFT_THEN_READY, "draft")
+        # 2 reads to dispatch + confirm, 2 reads of the next phase, then one fresh read for the result's head.
+        self.assertEqual(6, self.world.reads)
+        self.assertEqual([("draft", 60, False), ("draft", 100, True)], self.fleet.waits)
+
+    def test_every_handoff_stops_on_a_blocker_at_the_current_head(self):
+        cases = (
+            ("draft to ready", self.DRAFT_THEN_READY, "draft", "DRAFT-BLOCKED", {}, ""),
+            ("draft to ready, interrupted", self.DRAFT_THEN_READY, "draft", "WAIT-INTERRUPTED", {}, ""),
+            ("draft to ready, error", self.DRAFT_THEN_READY, "draft", "ERROR", {}, ""),
+            ("ready to draft, waiting", self.READY_THEN_DRAFT, "ready", "WAITING", {"wait_kind": "person"}, " (person)"),
+            ("ready to draft, skip", self.READY_THEN_DRAFT, "ready", "SKIP", {}, ""),
+            ("ready to draft, error", self.READY_THEN_DRAFT, "ready", "ERROR", {}, ""),
+            ("ready to merged, error", self.READY_THEN_MERGED, "ready", "ERROR", {}, ""),
+            ("ready to merged, waiting", self.READY_THEN_MERGED, "ready", "WAITING", {"wait_kind": "transient"},
+             " (transient)"))
+        for name, items, role, outcome, fields, kind in cases:
+            with self.subTest(name):
+                self.setUp()   # a fresh fleet per case
+                self.agent_publishes(role, outcome, when="handoff", **fields)
+                self.stops_before_the_next_role(outcome, items, role, kind=kind)
+
+    def test_a_blocker_does_not_become_harmless_because_the_pr_is_merged(self):
+        self.agent_publishes("ready", "ERROR", when="handoff")
+        self.stops_before_the_next_role("ERROR", self.READY_THEN_MERGED, "ready")
+
+    def test_a_blocker_stops_when_the_previous_agent_is_gone(self):
+        self.agent_publishes("draft", "DRAFT-BLOCKED", when="submit")
+        with patch.object(FakeAgent, "wait_for_prompt", autospec=True,
+                          side_effect=lambda agent, timeout, *, allow_exit=False: False if allow_exit else True):
+            message = self.stops(f"PR #7 DRAFT-BLOCKED at {HEAD[:12]}", self.DRAFT_THEN_READY)
+        self.assertTrue(message.startswith("PR #7: "))
+        self.assertEqual(["draft"], self.roles(), "ready was never dispatched")
+        self.assertEqual(["draft"], [agent.role for agent in self.fleet.agents])
+        self.assertEqual(["draft"], self.fleet.closed, "the gone agent was closed, nothing else was started")
+
+    # -- the head that judges the result is the one of a FRESH read -------------------------------------------
+
+    def test_the_fresh_head_makes_a_result_current(self):
+        # The PR was repaired while the previous agent finished: the blocker judges the HEAD GitHub has now.
+        self.agent_publishes("draft", "DRAFT-BLOCKED", when="handoff", head=NEW)
+        items = ["draft"] * 3 + [("ready", HEAD)] * 2 + [("ready", NEW)] * 2
+        message = self.stops(f"PR #7 DRAFT-BLOCKED at {NEW[:12]}: synthetic reason", items)
+        self.assertEqual(f"PR #7: PR #7 DRAFT-BLOCKED at {NEW[:12]}: synthetic reason", message)
+        self.assertEqual(["draft"], self.roles())
+
+    def test_a_blocker_of_the_head_that_is_gone_is_ignored(self):
+        # The control of the test above, mirrored: the result judges the stale HEAD, the fresh read has moved on.
+        self.agent_publishes("draft", "DRAFT-BLOCKED", when="handoff", head=HEAD)
+        items = ["draft"] * 3 + [("ready", HEAD)] * 2 + [("ready", NEW)] * 2 + [("merged", NEW)] * 2
+        self.run_batch(items)
+        self.assertEqual(["draft", "ready"], self.roles())
+
+    # -- successes and silence are not blockers ----------------------------------------------------------------
+
+    def test_a_delayed_ready_result_lets_the_run_go_on(self):
+        self.agent_publishes("draft", "READY", when="handoff")
+        self.run_batch(self.DRAFT_THEN_READY + ["merged"] * 2)
+        self.assertEqual(["draft", "ready"], self.roles())
+        self.assertIn("PR #7: merged", self.told)
+
+    def test_an_enqueued_result_lets_the_run_go_on(self):
+        self.agent_publishes("ready", "ENQUEUED", when="handoff")
+        self.run_batch(["ready"] * 3 + ["queued"] * 2 + ["merged"] * 2)
+        self.assertEqual(["ready"], self.roles())
+        self.assertIn("PR #7: waiting for merge train", self.told)
+        self.assertIn("PR #7: merged", self.told)
+
+    def test_a_draft_result_lets_the_run_go_on(self):
+        self.agent_publishes("ready", "DRAFT", when="handoff")
+        self.run_batch(self.READY_THEN_DRAFT + ["merged"] * 2)
+        self.assertEqual(["ready", "draft"], self.roles())
+
+    def test_a_merged_result_lets_the_run_complete(self):
+        self.agent_publishes("ready", "MERGED", when="handoff")
+        self.run_batch(self.READY_THEN_MERGED)
+        self.assertEqual(["ready"], self.roles())
+        self.assertIn("PR #7: merged", self.told)
+        self.assertEqual(["ready"], self.fleet.closed)
+
+    def test_a_handoff_without_a_result_goes_on_and_still_reads_the_pr_again(self):
+        self.run_batch(self.DRAFT_THEN_READY + ["merged"] * 2)
+        self.assertEqual(["draft", "ready"], self.roles())
+        self.assertEqual(10, self.world.reads, "a fresh read at each of the two handoffs")
+
+    # -- a result that cannot be trusted stops the handoff too ---------------------------------------------------
+
+    def result_file(self, role):
+        return [t for t in self.fleet.tasks if t.phase == role][-1].path.with_name("result.json")
+
+    def test_a_result_that_is_not_valid_stops_the_handoff(self):
+        task_of = lambda: [t for t in self.fleet.tasks if t.phase == "draft"][-1].task
+        cases = (
+            ("foreign", "skill result does not belong to this dispatch",
+             lambda: dict(task_of(), nonce="d" * 32, head_sha=HEAD, outcome="READY", reason="", wait_kind="",
+                          person_handoff=False)),
+            ("another phase's outcome", "invalid skill result",
+             lambda: dict(task_of(), head_sha=HEAD, outcome="ENQUEUED", reason="", wait_kind="",
+                          person_handoff=False)),
+            ("no outcome", "invalid skill result",
+             lambda: dict(task_of(), head_sha=HEAD, outcome=None, reason="", wait_kind="", person_handoff=False)))
+        for name, message, body in cases:
+            with self.subTest(name):
+                self.setUp()
+                self.fleet.on_handoff["draft"] = lambda body=body: self.result_file("draft").write_text(
+                    json.dumps(body()), encoding="utf-8")
+                self.stops(message, self.DRAFT_THEN_READY)
+                self.assertEqual(["draft"], self.roles(), "ready was never dispatched")
+
+    def test_a_result_over_the_size_limit_stops_the_handoff(self):
+        self.fleet.on_handoff["draft"] = lambda: self.result_file("draft").write_text("x" * 5000)
+        self.stops("skill result exceeded the size limit", self.DRAFT_THEN_READY)
+        self.assertEqual(["draft"], self.roles())
+
+    def test_a_fresh_read_that_fails_stops_the_handoff_without_dispatching(self):
+        boom = pr_loop.GitHubError("boom")
+        self.stops("GitHub read failed 3 consecutive times; no command sent: boom",
+                   ["draft"] * 3 + ["ready"] * 2 + [boom, boom, boom])
+        self.assertEqual(["draft"], self.roles())
+        self.assertEqual(["draft"], [agent.role for agent in self.fleet.agents],
+                         "the failed read came before the next role was started, not at its confirming read")
 
 
 class ImportsTests(unittest.TestCase):
@@ -1248,6 +1424,24 @@ class ProgramTests(unittest.TestCase):
         ((_, task),) = self.pastes()
         result = json.loads(task.with_name("result.json").read_text())
         self.assertEqual(("DRAFT-BLOCKED", HEAD, task.parent.name), (result["outcome"], result["head_sha"], result["nonce"]))
+        self.assertEqual(0, self.env.tmux()["cli"][0]["rc"])
+
+    def test_a_blocker_that_arrives_as_github_shows_ready_stops_before_the_ready_agent_starts(self):
+        # pr_gate marks the PR Ready and then publishes DRAFT-BLOCKED (post-action verification found a newly
+        # active workflow): GitHub already shows Ready when the blocker is on disk. A Ready agent that would
+        # merge the PR is scripted, so that a runner that ignores the blocker is seen to report success.
+        self.env.set_pane("%1", enter=[{"gh": {"set_view": pr_view_json("ready")},
+                                        "result": {"outcome": "DRAFT-BLOCKED", "reason": "a workflow became active after Ready"}}])
+        self.env.set_pane("%2", enter=[{"gh": {"set_view": pr_view_json("merged")}}])
+        proc = self.run_program("--phase-timeout", "5")
+        self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
+        self.assertRegex(proc.stderr, rf"^pr-loop: PR #7: PR #7 DRAFT-BLOCKED at {HEAD[:12]}: "
+                                      r"a workflow became active after Ready\n$")
+        self.assertEqual(1, len(self.env.tmux_calls("new-session")), "the Ready phase was never dispatched")
+        self.assertEqual(1, len(self.pastes()))
+        self.assertNotIn("PR #7: merged", proc.stdout)
+        self.assertEqual([], self.env.tmux_calls("kill-pane"), "the pane is retained")
+        self.assertTrue(self.managed_checkout(proc).exists())
         self.assertEqual(0, self.env.tmux()["cli"][0]["rc"])
 
     def test_a_dry_run_reports_the_phase_and_touches_neither_tmux_nor_the_clone(self):

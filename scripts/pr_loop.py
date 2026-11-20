@@ -301,6 +301,10 @@ class Batch:
                     if not agent.wait_for_prompt(self.args.phase_timeout, allow_exit=True):
                         agent.close()
                         del agents[role]
+                    # The agent publishes its result before it returns to its prompt, and GitHub may already show
+                    # the next phase (a gate can mark the PR Ready and then report a blocker): read the result
+                    # against a fresh HEAD before another role starts or the PR is reported done.
+                    check_result(task_path, task, head_of(self.read(number)))
                     active = None
                 if phase == "merged":
                     for agent in agents.values():
