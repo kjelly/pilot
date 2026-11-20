@@ -365,6 +365,7 @@
               - --no-ntp
               - --no-dns-sshfp
               - --force-join
+            expand_argument_vars: false  # the secret in argv must reach the installer unchanged (AGENTS.md 4.5 item 15)
           changed_when: true
           no_log: true
           tags: [C3]

@@ -544,6 +544,7 @@
     - name: "FreeIPA — run ipa-server-install (native; first run is 8–12 min)"
       ansible.builtin.command:
         argv: "{{ ipa_install_args }}"
+        expand_argument_vars: false  # the secret in argv must reach the installer unchanged (AGENTS.md 4.5 item 15)
         creates: "{{ ipa_config_marker }}"
       vars:
         ipa_install_base_args:

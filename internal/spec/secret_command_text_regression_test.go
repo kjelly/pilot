@@ -28,21 +28,33 @@ import (
 //
 // stdin is the only route that keeps a secret byte for byte. An argv element
 // is not safe either (issue #118 review of this lint's first version):
-// ansible.builtin.command defaults expand_argument_vars to true, so `$HOME`
-// (any `$name`) in an argv element is expanded before exec (`$(...)` is not
-// run; ansible-core 2.19.2), and any local user can read the element in
-// /proc/<pid>/cmdline. This lint therefore flags a secret in the command text
-// of a shell, command, raw, expect or script task and in the argv of a command
-// task, and requires no_log: true on every task that passes a secret on stdin.
-// The only argv exemption is the FreeIPA installers (ipa-server-install,
-// ipa-replica-install, ipa-client-install): they take the admin password only
-// as an option, and moving them to stdin is tracked separately (their argv
-// still goes through expand_argument_vars). The argv program check reads only
-// the first element of a Jinja-list argv.
+// ansible.builtin.command defaults expand_argument_vars to true, and
+// run_command then applies os.path.expandvars and os.path.expanduser to every
+// argv element (a free-form string or cmd is split first, then expanded the
+// same way): `$NAME` and `${NAME}` of any variable set in the module's
+// environment (the remote environment, `environment:` included) and a leading
+// `~`, `~/` or `~user` are replaced (ansible-core 2.19.2 and 2.20.1). Unset
+// names, `$$`, `$(...)` and backticks are left alone. Any local user can also
+// read an argv element in /proc/<pid>/cmdline. This lint therefore flags a
+// secret in the command text of a shell, command, raw, expect or script task
+// and in the argv of a command task, and requires no_log: true on every task
+// that passes a secret on stdin.
 //
-// TestRegression_FreeIPAKinitTasksPassPasswordUnchanged is the runtime
-// counterpart: it finds every task that passes a secret on stdin and runs it
-// with real ansible-playbook and a fake program.
+// The one argv exemption is the FreeIPA installers (ipa-server-install,
+// ipa-replica-install, ipa-client-install): they take the admin password only
+// as an option, so it has to be in argv. Issue #359: that exemption holds only
+// when the task sets expand_argument_vars to the YAML boolean false (in the
+// module mapping, which wins, or under `args:`) and no_log: true; otherwise the
+// installer is told a different password than the one declared. The argv
+// program check reads only the first element of a Jinja-list argv. A
+// non-installer argv secret stays flagged whatever it sets: the flag does not
+// hide /proc/<pid>/cmdline.
+//
+// TestRegression_FreeIPAKinitTasksPassPasswordUnchanged and
+// TestRegression_FreeIPAInstallerArgvPassesPasswordUnchanged are the runtime
+// counterparts: they find every task that passes a secret on stdin, or in the
+// argv of an installer, and run it with real ansible-playbook and a fake
+// program.
 //
 // What the lint does not see: a secret that reaches a task through a variable
 // whose name does not look secret and that is set outside the task (play
@@ -72,7 +84,8 @@ var (
 	secretIdentRe = regexp.MustCompile(`(?i)password|passwd|secret|(^|_)pass($|_)|(^|_)pwd($|_)|token|api_?key|(^|_)psk($|_)|passphrase|credential|(^|_)(private|signing|master)_key($|_)|(^|_)otp($|_)`)
 	// Names of files that hold a secret are not the secret.
 	secretPathIdentRe = regexp.MustCompile(`(?i)_(file|path|dir)$`)
-	// installerProgramRe is the programs whose argv may carry a secret: the
+	// installerProgramRe is the programs whose argv may carry a secret, when
+	// the task also sets expand_argument_vars: false and no_log: true: the
 	// three FreeIPA installers AGENTS.md 4.5 item 15 names.
 	installerProgramRe = regexp.MustCompile(`^ipa-(server|replica|client)-install$`)
 )
@@ -232,24 +245,54 @@ func argvProgram(v any, vars map[string]any, depth int) string {
 	return ""
 }
 
-// argvSecrets returns the secret-looking variables the argv of a command
-// task reads, directly or through the task's own vars: block. The FreeIPA
-// installers are the one exemption (see the header comment).
-func argvSecrets(task map[string]any) []string {
+// commandArgv returns the argv of a command task's module mapping.
+func commandArgv(task map[string]any) (any, bool) {
 	_, raw := secretTaskModule(task)
 	args, ok := raw.(map[string]any)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	argv, ok := args["argv"]
+	return argv, ok
+}
+
+// argvSecrets returns the secret-looking variables the argv of a command
+// task reads, directly or through the task's own vars: block, whatever the
+// program is. isInstallerArgv says whether the task is one of the FreeIPA
+// installers that may carry one (with expand_argument_vars: false and
+// no_log: true).
+func argvSecrets(task map[string]any) []string {
+	argv, ok := commandArgv(task)
 	if !ok {
 		return nil
 	}
-	vars := taskVars(task)
-	if installerProgramRe.MatchString(path.Base(argvProgram(argv, vars, 0))) {
-		return nil
+	return secretsThroughVars(valueText(argv), taskVars(task))
+}
+
+// isInstallerArgv reports whether the program of the task's argv is one of
+// the FreeIPA installers (the first element only, also through the task's
+// vars: block).
+func isInstallerArgv(task map[string]any) bool {
+	argv, ok := commandArgv(task)
+	return ok && installerProgramRe.MatchString(path.Base(argvProgram(argv, taskVars(task), 0)))
+}
+
+// expandArgumentVarsDisabled reports whether the task sets expand_argument_vars
+// to the YAML boolean false: in the module mapping, which wins when both are
+// given (ansible-core 2.19.2), or else under `args:`. A string "false", a
+// template or a missing key is not it: the lint cannot tell what those
+// evaluate to.
+func expandArgumentVarsDisabled(task map[string]any) bool {
+	const key = "expand_argument_vars"
+	if _, raw := secretTaskModule(task); raw != nil {
+		if mod, ok := raw.(map[string]any); ok {
+			if v, set := mod[key]; set {
+				return v == false
+			}
+		}
 	}
-	return secretsThroughVars(valueText(argv), vars)
+	args, _ := task["args"].(map[string]any)
+	return args[key] == false
 }
 
 // stdinSecrets returns the secret-looking variables the stdin of a command
@@ -295,10 +338,16 @@ type secretScan struct {
 	text, argv, stdinNoLog map[string]*secretSite
 	// stdin counts the tasks that pass a secret on stdin, no_log or not.
 	stdin map[string]*secretSite
+	// installerArgv counts the FreeIPA installer tasks that carry a secret in
+	// their argv, which is allowed; installerNoExpand and installerNoLog are
+	// the ones among them that lack expand_argument_vars: false or no_log:
+	// true.
+	installerArgv, installerNoExpand, installerNoLog map[string]*secretSite
 }
 
 func newSecretScan() *secretScan {
-	return &secretScan{text: map[string]*secretSite{}, argv: map[string]*secretSite{}, stdinNoLog: map[string]*secretSite{}, stdin: map[string]*secretSite{}}
+	return &secretScan{text: map[string]*secretSite{}, argv: map[string]*secretSite{}, stdinNoLog: map[string]*secretSite{}, stdin: map[string]*secretSite{},
+		installerArgv: map[string]*secretSite{}, installerNoExpand: map[string]*secretSite{}, installerNoLog: map[string]*secretSite{}}
 }
 
 func addSite(sites map[string]*secretSite, key string, secrets []string) {
@@ -323,7 +372,17 @@ func (sc *secretScan) add(file string, task map[string]any) {
 		}
 	}
 	if secrets := argvSecrets(task); len(secrets) > 0 {
-		addSite(sc.argv, key, secrets)
+		if isInstallerArgv(task) {
+			addSite(sc.installerArgv, key, secrets)
+			if !expandArgumentVarsDisabled(task) {
+				addSite(sc.installerNoExpand, key, secrets)
+			}
+			if task["no_log"] != true {
+				addSite(sc.installerNoLog, key, secrets)
+			}
+		} else {
+			addSite(sc.argv, key, secrets)
+		}
 	}
 	if secrets := stdinSecrets(task); len(secrets) > 0 {
 		addSite(sc.stdin, key, secrets)
@@ -376,12 +435,19 @@ func secretSiteProblems(sites map[string]*secretSite, allow map[string]int) []st
 }
 
 // secretScanProblems is every problem of a scan: text sites against the
-// ratchet allowlist, argv sites and stdin tasks without no_log with no
-// allowlist at all.
+// ratchet allowlist, argv sites, installer argv sites without
+// expand_argument_vars: false or no_log: true, and stdin tasks without no_log
+// with no allowlist at all.
 func secretScanProblems(sc *secretScan, allow map[string]int) []string {
 	problems := secretSiteProblems(sc.text, allow)
 	for k, site := range sc.argv {
 		problems = append(problems, fmt.Sprintf("%s puts %v into an argv element (%d tasks); pass it as stdin (expand_argument_vars expands it, /proc/<pid>/cmdline shows it)", k, site.secrets, site.tasks))
+	}
+	for k, site := range sc.installerNoExpand {
+		problems = append(problems, fmt.Sprintf("%s: an installer argv secret must set expand_argument_vars: false (and no_log: true); %v in the argv of an installer is rewritten (%d tasks): $NAME, ${NAME} and a leading ~ are expanded", k, site.secrets, site.tasks))
+	}
+	for k, site := range sc.installerNoLog {
+		problems = append(problems, fmt.Sprintf("%s: an installer argv secret must set no_log: true (and expand_argument_vars: false); %v in the argv of an installer would be printed by a failure (%d tasks)", k, site.secrets, site.tasks))
 	}
 	for k, site := range sc.stdinNoLog {
 		problems = append(problems, fmt.Sprintf("%s passes %v on stdin without no_log: true (%d tasks); a failure would print it", k, site.secrets, site.tasks))
@@ -427,16 +493,31 @@ func TestSecretCommandTextScanClassifiesSites(t *testing.T) {
 		cmd("argv through vars", map[string]any{"argv": "{{ tool_args }}"}),
 		cmd("argv through two vars", map[string]any{"argv": "{{ more_args }}"}),
 		cmd("argv no secret", map[string]any{"argv": []any{"kinit", "admin@{{ ipa_realm }}"}, "stdin": "{{ ipa_admin_password }}"}),
+		// The installers may carry a secret in argv, but only with
+		// expand_argument_vars: false and no_log: true (issue #359).
 		cmd("installer list", map[string]any{"argv": []any{"ipa-client-install", "-U", "--password={{ ipa_enroll_password }}"}}),
-		cmd("installer path", map[string]any{"argv": []any{"/usr/sbin/ipa-replica-install", "--password={{ ipa_enroll_password }}"}}),
-		cmd("installer jinja", map[string]any{"argv": "{{\n  ['ipa-server-install', '-U', '-p', ipa_dm_password]\n  }}"}),
+		cmd("installer path", map[string]any{"argv": []any{"/usr/sbin/ipa-replica-install", "--password={{ ipa_enroll_password }}"}, "expand_argument_vars": false}),
+		cmd("installer jinja", map[string]any{"argv": "{{\n  ['ipa-server-install', '-U', '-p', ipa_dm_password]\n  }}", "expand_argument_vars": false}),
 		cmd("installer through vars", map[string]any{"argv": "{{ install_args }}"}),
+		cmd("installer flag missing", map[string]any{"argv": []any{"ipa-client-install", "--password={{ ipa_enroll_password }}"}}),
+		cmd("installer flag true", map[string]any{"argv": []any{"ipa-client-install", "--password={{ ipa_enroll_password }}"}, "expand_argument_vars": true}),
+		cmd("installer flag string", map[string]any{"argv": []any{"ipa-client-install", "--password={{ ipa_enroll_password }}"}, "expand_argument_vars": "false"}),
+		cmd("installer flag template", map[string]any{"argv": []any{"ipa-client-install", "--password={{ ipa_enroll_password }}"}, "expand_argument_vars": "{{ no_expand | default(false) }}"}),
+		cmd("installer flag under args", map[string]any{"argv": []any{"ipa-client-install", "--password={{ ipa_enroll_password }}"}}),
+		cmd("installer module flag wins", map[string]any{"argv": []any{"ipa-client-install", "--password={{ ipa_enroll_password }}"}, "expand_argument_vars": true}),
+		cmd("installer flag through vars", map[string]any{"argv": "{{ install_args }}", "expand_argument_vars": false}),
+		cmd("installer no no_log", map[string]any{"argv": []any{"ipa-server-install", "-p", "{{ ipa_dm_password }}"}, "expand_argument_vars": false}),
+		cmd("installer templated no_log", map[string]any{"argv": []any{"ipa-server-install", "-p", "{{ ipa_dm_password }}"}, "expand_argument_vars": false}),
+		cmd("installer safe", map[string]any{"argv": []any{"ipa-server-install", "-p", "{{ ipa_dm_password }}"}, "expand_argument_vars": false}),
+		cmd("installer no secret", map[string]any{"argv": []any{"ipa-client-install", "--uninstall", "-U"}}),
 		cmd("installer name only later", map[string]any{"argv": []any{"kinit", "ipa-server-install", "{{ ipa_admin_password }}"}}),
 		cmd("installer jinja later", map[string]any{"argv": "{{ ['kinit', 'ipa-client-install', ipa_admin_password] }}"}),
 		cmd("installer stdin", map[string]any{"argv": []any{"ipa-client-install", "-U"}, "stdin": "{{ ipa_enroll_password }}"}),
 		// Only the three named installers are exempt.
 		cmd("other installer", map[string]any{"argv": []any{"ipa-ca-install", "-p", "{{ ipa_dm_password }}"}}),
 		cmd("other installer jinja", map[string]any{"argv": "{{ ['ipa-dns-install', '-a', ipa_admin_password] }}"}),
+		// The flag does not make another program's argv acceptable.
+		cmd("non-installer with flag", map[string]any{"argv": []any{"tool", "--password={{ api_token }}"}, "expand_argument_vars": false}),
 
 		// stdin must be no_log.
 		cmd("stdin with no_log", map[string]any{"argv": []any{"kinit", "admin"}, "stdin": "{{ ipa_admin_password }}"}),
@@ -472,6 +553,20 @@ func TestSecretCommandTextScanClassifiesSites(t *testing.T) {
 	setTask("stdin through vars", map[string]any{"vars": map[string]any{"pw": "{{ ipa_admin_password }}"}})
 	setTask("stdin json", map[string]any{"no_log": true})
 	setTask("installer stdin", map[string]any{"no_log": true})
+	setTask("installer path", map[string]any{"no_log": true})
+	setTask("installer jinja", map[string]any{"no_log": true})
+	setTask("installer flag missing", map[string]any{"no_log": true})
+	setTask("installer flag true", map[string]any{"no_log": true})
+	setTask("installer flag string", map[string]any{"no_log": true})
+	setTask("installer flag template", map[string]any{"no_log": true})
+	setTask("installer flag under args", map[string]any{"no_log": true, "args": map[string]any{"expand_argument_vars": false}})
+	setTask("installer module flag wins", map[string]any{"no_log": true, "args": map[string]any{"expand_argument_vars": false}})
+	setTask("installer flag through vars", map[string]any{"no_log": true, "vars": map[string]any{
+		"install_args": "{{ ['ipa-server-install', '-p', ipa_dm_password] }}",
+	}})
+	setTask("installer templated no_log", map[string]any{"no_log": "{{ hide }}"})
+	setTask("installer safe", map[string]any{"no_log": true})
+	setTask("non-installer with flag", map[string]any{"no_log": true})
 	// A no_log that is not the literal true does not count.
 	setTask("argv no secret", map[string]any{"no_log": "{{ hide }}"})
 
@@ -511,6 +606,40 @@ func TestSecretCommandTextScanClassifiesSites(t *testing.T) {
 			"f.yml::installer jinja later":     "1 [ipa_admin_password]",
 			"f.yml::other installer":           "1 [ipa_dm_password]",
 			"f.yml::other installer jinja":     "1 [ipa_admin_password]",
+			"f.yml::non-installer with flag":   "1 [api_token]",
+		}},
+		{"installer argv", sc.installerArgv, map[string]string{
+			"f.yml::installer list":              "1 [ipa_enroll_password]",
+			"f.yml::installer path":              "1 [ipa_enroll_password]",
+			"f.yml::installer jinja":             "1 [ipa_dm_password]",
+			"f.yml::installer through vars":      "1 [ipa_dm_password]",
+			"f.yml::installer flag missing":      "1 [ipa_enroll_password]",
+			"f.yml::installer flag true":         "1 [ipa_enroll_password]",
+			"f.yml::installer flag string":       "1 [ipa_enroll_password]",
+			"f.yml::installer flag template":     "1 [ipa_enroll_password]",
+			"f.yml::installer flag under args":   "1 [ipa_enroll_password]",
+			"f.yml::installer module flag wins":  "1 [ipa_enroll_password]",
+			"f.yml::installer flag through vars": "1 [ipa_dm_password]",
+			"f.yml::installer no no_log":         "1 [ipa_dm_password]",
+			"f.yml::installer templated no_log":  "1 [ipa_dm_password]",
+			"f.yml::installer safe":              "1 [ipa_dm_password]",
+		}},
+		// Without expand_argument_vars set to the YAML boolean false.
+		{"installer without the flag", sc.installerNoExpand, map[string]string{
+			"f.yml::installer list":             "1 [ipa_enroll_password]",
+			"f.yml::installer through vars":     "1 [ipa_dm_password]",
+			"f.yml::installer flag missing":     "1 [ipa_enroll_password]",
+			"f.yml::installer flag true":        "1 [ipa_enroll_password]",
+			"f.yml::installer flag string":      "1 [ipa_enroll_password]",
+			"f.yml::installer flag template":    "1 [ipa_enroll_password]",
+			"f.yml::installer module flag wins": "1 [ipa_enroll_password]",
+		}},
+		// Without no_log: true.
+		{"installer without no_log", sc.installerNoLog, map[string]string{
+			"f.yml::installer list":             "1 [ipa_enroll_password]",
+			"f.yml::installer through vars":     "1 [ipa_dm_password]",
+			"f.yml::installer no no_log":        "1 [ipa_dm_password]",
+			"f.yml::installer templated no_log": "1 [ipa_dm_password]",
 		}},
 		{"stdin", sc.stdin, map[string]string{
 			"f.yml::argv option":        "1 [ipa_admin_password]",
@@ -539,11 +668,13 @@ func TestSecretCommandTextScanClassifiesSites(t *testing.T) {
 		}
 	}
 	problems := secretScanProblems(sc, allow)
-	var textProblems, argvProblems, stdinProblems []string
+	var textProblems, argvProblems, stdinProblems, installerProblems []string
 	for _, p := range problems {
 		switch {
 		case strings.Contains(p, "argv element"):
 			argvProblems = append(argvProblems, p)
+		case strings.Contains(p, "an installer argv secret must set"):
+			installerProblems = append(installerProblems, p)
 		case strings.Contains(p, "without no_log"):
 			stdinProblems = append(stdinProblems, p)
 		default:
@@ -553,8 +684,41 @@ func TestSecretCommandTextScanClassifiesSites(t *testing.T) {
 	if len(textProblems) != 2 || !strings.Contains(textProblems[0], `"f.yml::shell printf" counts 2 tasks, 1 remain`) || !strings.Contains(textProblems[1], "f.yml::copied: 2 tasks") {
 		t.Errorf("text problems = %q", textProblems)
 	}
-	if len(argvProblems) != 9 || len(stdinProblems) != 2 {
+	if len(argvProblems) != 10 || len(stdinProblems) != 2 {
 		t.Errorf("argv problems = %q, stdin problems = %q", argvProblems, stdinProblems)
+	}
+	// 7 installer tasks lack the flag and 4 lack no_log: one problem per
+	// task and per missing option, each naming both options to set.
+	if len(installerProblems) != 11 {
+		t.Errorf("installer problems = %q", installerProblems)
+	}
+	for _, p := range installerProblems {
+		if !strings.Contains(p, "expand_argument_vars: false") || !strings.Contains(p, "no_log: true") {
+			t.Errorf("installer problem does not name both options: %q", p)
+		}
+	}
+	wantInstaller := map[string]bool{
+		"f.yml::installer list: an installer argv secret must set expand_argument_vars: false":      true,
+		"f.yml::installer list: an installer argv secret must set no_log: true":                     true,
+		"f.yml::installer flag true: an installer argv secret must set expand_argument_vars: false": true,
+		"f.yml::installer no no_log: an installer argv secret must set no_log: true":                true,
+	}
+	for _, p := range installerProblems {
+		for w := range wantInstaller {
+			if strings.HasPrefix(p, w) {
+				delete(wantInstaller, w)
+			}
+		}
+	}
+	if len(wantInstaller) != 0 {
+		t.Errorf("installer problems lack %v: %q", wantInstaller, installerProblems)
+	}
+	for _, ok := range []string{"installer path", "installer jinja", "installer flag under args", "installer flag through vars", "installer safe", "installer no secret"} {
+		for _, p := range problems {
+			if strings.HasPrefix(p, "f.yml::"+ok+" puts") || strings.HasPrefix(p, "f.yml::"+ok+":") {
+				t.Errorf("%s is compliant and must not be flagged: %q", ok, p)
+			}
+		}
 	}
 }
 
@@ -591,6 +755,11 @@ var stdinHostilePasswords = []string{
 	"{{ not_jinja }}", // the task must add no templating of its own
 	"all$HOME\"'\\%`id`$(id) \t end",
 }
+
+// playScopedTaskKeys are the task keys that depend on the play a task came
+// from (conditions, tags, privilege escalation, loops); the runtime tests drop
+// them when they run a copy of the task.
+var playScopedTaskKeys = []string{"when", "tags", "become", "become_user", "run_once", "delegate_to", "loop", "with_items"}
 
 // stdinCase says how to run one task that passes a secret on stdin.
 type stdinCase struct {
@@ -696,6 +865,16 @@ var stdinCases = map[string]stdinCase{
 // stdin, keyed like the lint's sites. Several tasks may share a key.
 func stdinTasks(t *testing.T, root string) map[string][]map[string]any {
 	t.Helper()
+	return tasksPassingSecrets(t, root, stdinSecrets)
+}
+
+// tasksPassingSecrets returns every task under root/playbooks for which
+// secrets finds a secret, keyed like the lint's sites ("<path>::<task
+// name>"). Several tasks may share a key. The runtime tests use the lint's
+// own finders (stdinSecrets, argvSecrets) so that they cover exactly the
+// tasks it reports.
+func tasksPassingSecrets(t *testing.T, root string, secrets func(map[string]any) []string) map[string][]map[string]any {
+	t.Helper()
 	found := map[string][]map[string]any{}
 	err := filepath.WalkDir(filepath.Join(root, "playbooks"), func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || (filepath.Ext(p) != ".yml" && filepath.Ext(p) != ".yaml") {
@@ -703,7 +882,7 @@ func stdinTasks(t *testing.T, root string) map[string][]map[string]any {
 		}
 		rel, _ := filepath.Rel(root, p)
 		walkTaskMaps(loadYAML(t, p), func(task map[string]any) {
-			if len(stdinSecrets(task)) > 0 {
+			if len(secrets(task)) > 0 {
 				name, _ := task["name"].(string)
 				key := filepath.ToSlash(rel) + "::" + name
 				found[key] = append(found[key], task)
@@ -790,8 +969,7 @@ func runStdinTask(t *testing.T, task map[string]any, c stdinCase, program string
 		run.passwords = append(run.passwords, password)
 		cp := map[string]any{}
 		for k, v := range task {
-			switch k {
-			case "when", "tags", "become", "become_user", "run_once", "delegate_to", "loop", "with_items":
+			if slices.Contains(playScopedTaskKeys, k) {
 				continue
 			}
 			cp[k] = v
