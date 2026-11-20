@@ -1,5 +1,20 @@
 # FreeIPA Go reconcile 最新驗收
 
+## Phase 3a：HBAC 組件的 playbook 變更（PR #396）
+
+目前狀態：**PASS（playbook 的部分）**。驗收日期 2026-11-20，candidate `5882eabaa996468ffa7a68c2e41ad368026c0046`，tree `f3522e1387bf8d145c6480d222b2e5f50f99b739`（已合併 main `f9cbd198`）。機器產生的 record 由 pilot 寫出，指標如下：
+
+| Record | Tested commit | Outcome | Finished (UTC) | Verify |
+|---|---|---|---|---|
+| [pr-396.md](pr-396.md) | `5882eabaa996468ffa7a68c2e41ad368026c0046` | success | 2026-11-20 08:32 | PASS 24/0/0 |
+
+- **範圍**：`freeipa-identity-apply.yml` 新增選用的 `-e pilot_identity_hbac_engine=go`、`-e pilot_identity_cache_settle=defer` 與對應 gate，並與 main 的憑證拆分（#142／#216）合併。Go 的 HBAC writer、lockdown 與 `ExecuteHBAC` 在這個 candidate **沒有接到任何入口**，不能在 VM 上證明，沒有造假的 driver。
+- **Target**：兩台拋棄式 `vm-target` VM：FreeIPA 4.13.4 server（AlmaLinux 9.8）與一台 enrolled client（Ubuntu 24.04.4）；沒有任何正式環境。
+- **結果**：預設模式的正式鏈 L1–L6 全部通過（L3 `changed=0`、L4 `changed=70`、`freeipa-identity.md` 24/0/0、L6 `changed=0`），並在 `-v` 下建立帶 `password.initial` 的使用者、輸出 0 筆秘密；手動的 go 模式：run 1（`defer`）不建立也不改名冊的 HBAC 物件、`allow_all` 仍啟用、grant rule 照建、不刷新 SSSD（`acked=false refreshed=false`），run 2（`--tags client-cache`）刷新並 acknowledge（`acked=true`，義務結清），再跑 run 1 為 `changed=0`；8 個 gate 負向案例與 4 個帶 tag 的負向案例都在變更之前以 rc 2 失敗、FreeIPA 狀態不變；`--tags hbac`／`C13`／`C14`／`--skip-tags client-cache` 在 go 模式不動名冊 HBAC，預設模式的同一個 tag 會改回漂移。
+- **已知限制**：Go 的 HBAC 階段、H1–H8 stage、lockdown 證明與回滾、K9／K10、混合 run 的 transaction 與結束碼、登入 oracle 都不在這份 record（P3-5、P3-6）；手動執行不是正式鏈；只驗證 ansible-core 2.19.2 與單一 server。
+
+候選、手動執行的逐項結果、失敗路徑與限制見 [PR #396 驗收紀錄](pr-396.md)。
+
 ## Issue #394：Go engine 送出單一 `{{ name }}` 形式的 `password.initial`
 
 目前狀態：**PASS**。驗收日期 2026-11-20，candidate `c58edf7e4c027e37ccd363b56b5d80eeafd62bfa`，tree `c2306ed5384e4207cfd707451295c82b3e72b1ce`（已合併 main `f9937741`）。
