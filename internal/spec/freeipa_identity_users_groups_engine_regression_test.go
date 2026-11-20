@@ -538,15 +538,22 @@ func engineVars() map[string]any {
 			map[string]any{"name": "team-b", "desc": "Team B", "membership": map[string]any{"authoritative": true, "users": []any{"u1"}, "groups": []any{"team-a"}}},
 			map[string]any{"name": "team-old", "desc": "Changed description", "membership": map[string]any{"authoritative": true, "users": []any{"u1"}, "groups": []any{}}},
 		},
+		// The playbook splits the users (issue #216): the users without the keys that carry a
+		// credential for every task that prints its loop item, the users that declare a password,
+		// whole, for the two password tasks, and the users marked absent.
 		"ipa_active_users": []any{
-			map[string]any{"name": "u1", "first": "User", "last": "One", "enabled": true, "password": engineFixturePassword, "preserve_existing": true, "force_password": false,
+			map[string]any{"name": "u1", "first": "User", "last": "One", "enabled": true,
 				"ssh_keys": []any{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEngineTestKeyOne u1"}},
 			map[string]any{"name": "u2", "first": "User", "last": "Two", "enabled": false, "ssh_keys": []any{}},
 			map[string]any{"name": "u3", "first": "User", "last": "Three", "enabled": true,
 				"ssh_keys": []any{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEngineTestKeyThree u3"}},
 		},
-		"ipa_users":  []any{map[string]any{"name": "gone", "state": "absent"}},
-		"ipa_groups": []any{map[string]any{"name": "team-retired", "state": "absent"}},
+		"ipa_active_user_credentials": []any{
+			map[string]any{"name": "u1", "first": "User", "last": "One", "enabled": true, "password": engineFixturePassword, "preserve_existing": true, "force_password": false,
+				"ssh_keys": []any{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEngineTestKeyOne u1"}},
+		},
+		"ipa_absent_users": []any{map[string]any{"name": "gone", "state": "absent"}},
+		"ipa_groups":       []any{map[string]any{"name": "team-retired", "state": "absent"}},
 	}
 }
 

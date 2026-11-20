@@ -121,7 +121,7 @@ func TestRegression_IdentitySecretCIRequiresAnsible(t *testing.T) {
 		t.Fatal("identity-secret-test must require Ansible")
 	}
 	selected := regexp.MustCompile(strings.ReplaceAll(string(m[1]), "$$", "$"))
-	for _, name := range []string{"IdentitySecretInputContract", "IdentitySecretCIRequiresAnsible", "IdentitySecretInputsRuntime", "IdentitySecretDriftProbeAdminPassword", "IdentityPasswordResetFollowsRosterSchema", "IdentityPasswordLookupFailureSetsNothing", "IdentityPasswordCheckModeSetsNothing", "IdentityPasswdFailureFailsTheRun", "FreeIPAKinitTasksPassPasswordUnchanged", "NoSecretInCommandText", "FreeIPANFSServerAdminPasswordDriftGate", "FreeIPANFSServerAdminPasswordGateIsVisible"} {
+	for _, name := range []string{"IdentitySecretInputContract", "IdentitySecretCIRequiresAnsible", "IdentitySecretInputsRuntime", "IdentitySecretFillResultStaysOutOfOutput", "IdentitySecretUserLoopsStayOutOfOutput", "IdentitySecretDriftProbeAdminPassword", "IdentityPasswordResetFollowsRosterSchema", "IdentityPasswordLookupFailureSetsNothing", "IdentityPasswordCheckModeSetsNothing", "IdentityPasswdFailureFailsTheRun", "FreeIPAKinitTasksPassPasswordUnchanged", "NoSecretInCommandText", "FreeIPANFSServerAdminPasswordDriftGate", "FreeIPANFSServerAdminPasswordGateIsVisible"} {
 		if !selected.MatchString("TestRegression_" + name) {
 			t.Errorf("required-Ansible recipe omits %s", name)
 		}
@@ -302,7 +302,7 @@ else cat "$IDENTITY_TEST_DIR/new"; fi
 			if mode == "password-failure" {
 				t.Setenv("IDENTITY_API_FAIL_USER", "user0")
 			}
-			vars := map[string]any{"ipa_active_users": users, "identity_admin_password": unsafeString(adminPassword), "identity_admin_principal": "admin", "ipa_realm": "IPA.PILOT.INTERNAL"}
+			vars := map[string]any{"ipa_active_user_credentials": users, "identity_admin_password": unsafeString(adminPassword), "identity_admin_principal": "admin", "ipa_realm": "IPA.PILOT.INTERNAL"}
 			args := []string{}
 			switch mode {
 			case "check":
