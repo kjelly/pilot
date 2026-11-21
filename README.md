@@ -87,8 +87,8 @@ the default branch that `origin` itself reports
 `origin`'s (otherwise run `git pull --ff-only` yourself: the runner never updates
 the checkout); and the default branch has the two helpers named below. It also
 refuses while another runner holds the checkout's lock (the file
-`git rev-parse --git-path pilot-pr-loop.lock` names) and while an agent pane of
-an earlier run (session `pilot-pr-*`) is still alive in the checkout.
+`git rev-parse --git-path pilot-pr-loop.lock` names) and while a live agent pane
+of an earlier run is still in the checkout (see below).
 
 The runner uses the Python 3 standard library. Install `git`, authenticated
 `gh`, `tmux`, and the coding agents, with `claude` and `codex` as defaults.
@@ -100,27 +100,67 @@ be running.
 
 The runner starts agents automatically in the checkout, which it has verified to
 be on the default branch of `origin` at its tip. An agent process is reused for
-its role while the same PR moves between Draft and Ready. After GitHub confirms
-the merge, the runner closes that PR's agent panes and starts new processes for
-the next PR. Before every dispatch it checks that the checkout is back on the
-branch and commit it started on, clean, with no git operation in progress, and
-otherwise stops without dispatching. A gate that reports a blocker, a
-current-HEAD `needs-person` hand-off, a Ready PR without a valid signal (below),
-or a timeout stops the batch and keeps the agent panes open for inspection. The
-runner prints each pane and its session (`pilot-pr-*`) when it starts the agent,
-and where the task files are when it stops.
+its role while the same PR moves between Draft and Ready. Before every dispatch
+it checks that the checkout is back on the branch and commit it started on,
+clean, with no git operation in progress, and otherwise stops without
+dispatching. A gate that reports a blocker, a current-HEAD `needs-person`
+hand-off, a Ready PR without a valid signal (below), or a timeout stops the batch
+and keeps the agent windows open for inspection. The runner prints where the task
+files are when it stops.
+
+The agents run as windows of one tmux session that belongs to the checkout, never
+in one of your own sessions. Its name is `pilot-pr-<directory name>-<8 hex>`: the
+checkout's directory name with every run of characters other than letters,
+digits, `_` and `-` replaced by `-`, leading and trailing `-` removed, cut to at
+most 24 characters (`checkout` when nothing is left), then the first 8 hex
+digits of the SHA-256 of the checkout's full path. The name is the same on every run in that checkout and
+differs between checkouts, also between two with the same directory name. Each
+agent has one window, named `<PR>-<phase>` (for example `371-draft`). At the
+start the runner prints `Agents run as windows of tmux session <session>; watch
+them read-only with: tmux attach -r -t <session>`, and for each agent `PR #N
+<phase> agent: %<id> in window <PR>-<phase> of tmux session <session>`; a dry
+run prints `would start the agents in tmux session <session>` and calls no tmux.
+
+The first agent creates the session and every later agent adds a window to it.
+Agents the runner is done with (those of a merged PR, or one that exited and was
+replaced) are closed only after the next agent has been started, and the last
+ones when the run ends, so the session lasts for the whole batch. It ends with its
+last window, and a client attached to it is then detached (tmux's default). Watch
+from another terminal with `tmux attach -r -t <session>`, which is read-only.
+Inside tmux that command fails (`sessions should be nested with care`): use
+`tmux switch-client -t <session>` or `prefix s` instead. These are not read-only:
+what you type in an agent's window reaches the agent, so look and do not type.
+Agents run with the environment of the tmux server, except that every agent gets
+the runner's own value of each name in tmux's `update-environment` list
+(`tmux show-options -gv update-environment`; `SSH_AUTH_SOCK` and `DISPLAY` are
+among them) that the runner has, so the agents use the runner's agent socket and
+not one left by an earlier run or by the last client to attach. Those values are
+socket paths and display names, not secrets, and they appear for a moment in the
+arguments of the tmux command: do not add a name that carries a secret to
+`update-environment`. The session handling was verified on tmux 3.8 only.
 
 The runner never deletes, resets, cleans or stashes anything in the checkout, and
-it never deletes the task files; any agent pane still open when it stops stays
-open. An agent that was interrupted may leave the checkout on a PR branch or with
-uncommitted work; the next run refuses it until you have put it right. Nothing
-else may use the checkout while the runner runs: the agents switch it to PR
-branches, and your own agent sessions in that directory are not protected by the
-lock. A second runner on the same checkout refuses, and so does a run that finds
-a pane kept from an earlier run still alive there, so close those panes before
-the next run. For a long-lived setup, use a dedicated checkout that you trust
-once: a second clone, or a linked worktree when your primary checkout is not on
-the default branch. The runner no longer creates or uses the clones under
+it never deletes the task files. It closes only panes it started in this run, one
+pane at a time (`kill-pane`, so a pane you split off in an agent's window
+survives), and it never kills, renames or reuses a window or a session it did not
+start in this run: the dead windows of an earlier run stay where they are. A stop
+keeps the agent windows open. Close one with `tmux kill-pane -t %N` (`%N` is the
+pane ID the runner printed), or the whole session with
+`tmux kill-session -t =<session>` when nothing in it still runs; the `=` is
+required, because without it tmux may pick another session whose name starts the
+same. A live pane in the checkout in any session whose name starts with
+`pilot-pr-` refuses the next run with `pr-loop: agent pane %N (session <session>)
+is still running in <checkout>; inspect and close it before starting the runner
+again`, and so does a window you open in the runner's session with its working
+directory in the checkout. Dead panes do not: after a stop that left only dead
+windows, the next run adds new windows to the same session. An agent that was interrupted may leave the checkout
+on a PR branch or with uncommitted work; the next run refuses it until you have
+put it right. Nothing else may use the checkout while the runner runs: the agents
+switch it to PR branches, and your own agent sessions in that directory are not
+protected by the lock. A second runner on the same checkout refuses. For a
+long-lived setup, use a dedicated checkout that you trust once: a second clone,
+or a linked worktree when your primary checkout is not on the default branch. The
+runner no longer creates or uses the clones under
 `$XDG_STATE_HOME/pilot/pr-loop/batch-*` (by default
 `~/.local/state/pilot/pr-loop/batch-*`); delete old ones by hand.
 
@@ -130,9 +170,10 @@ default to `/pr-ready {pr}` and `$pr-review-merge {pr}`; you can set them with
 the native skill syntax. Add `--dry-run` to see PR states before starting any
 agent: it prints `PR #N: <phase>` for each PR, then inspects the checkout the same
 way, read-only (no lock, no write, no tmux), and prints
-`Checkout: <path> (<branch> at <sha12>)`, or `pr-loop: <reason>` and exit status 1
-for a refused checkout. It does not check whether another runner holds the lock
-or whether a pane from an earlier run is still open, and only a real run notices
+`Checkout: <path> (<branch> at <sha12>)` and the session name above, or
+`pr-loop: <reason>` and exit status 1 for a refused checkout. It does not check
+whether another runner holds the lock or whether a pane from an earlier run is
+still open, and only a real run notices
 a tracked `.gitignore` that overrides the exclude lines below. The phase timeout
 defaults to 7200 seconds.
 
@@ -142,8 +183,7 @@ it. The runner keeps `/.pr-loop/` and `/.pr-ready/` out of `git status`: for a
 path that git does not already ignore, it appends the line to the checkout's git
 exclude file (found with `git rev-parse --git-path info/exclude`) and prints
 `Added ... to <file>`, and it refuses to start when git still does not ignore
-them. Agents run with the environment of the tmux server when one is already
-running, not with the environment of the shell that started the runner.
+them.
 
 Both agents must already trust the checkout: start each of them there once
 yourself and answer its trust dialog. The runner stops at a trust dialog only
@@ -187,7 +227,7 @@ dispatches an agent nor ends the run. An agent that is still working when
 GitHub shows the next phase is given the phase timeout to return to its prompt;
 a PR can therefore take up to about twice `--phase-timeout` in one phase. Every
 exhausted wait stops the runner without sending a command and keeps the
-panes open. The runner reads the finished agent's result before it
+agent windows open. The runner reads the finished agent's result before it
 moves on, and stops on a blocker even when GitHub already shows the next phase.
 
 ## Command map

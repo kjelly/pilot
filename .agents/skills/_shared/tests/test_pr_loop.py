@@ -1748,7 +1748,10 @@ class DocumentationTests(unittest.TestCase):
     its agents in the operator's own checkout (class `ephemeral-agent-workspace`, kjelly/pilot#423). The words of the
     design it replaced (a managed clone, a trust dialog the operator answers in the printed session, `.git/info/exclude`)
     must not come back, and the README must say what `--checkout` defaults to and what the runner does in a directory
-    the agents do not trust. Text is compared with its white space collapsed: the README is hard-wrapped."""
+    the agents do not trust. They must also say where the agents run (kjelly/pilot#425): one tmux session per checkout, one
+    window per agent, how to watch it and how to close what a stop keeps, and say it the way the code does (the lines the
+    runner prints are read from the code, not copied). Text is compared with its white space collapsed: the README is
+    hard-wrapped."""
     HEADING = "## Process a batch of pull requests"
     SKILLS = ("pr-ready", "pr-review-merge")
     EXCLUDE_FILE = "git rev-parse --git-path info/exclude"
@@ -1756,11 +1759,23 @@ class DocumentationTests(unittest.TestCase):
     # recognise a screen whose options are numbered (`CHOICE`) and waits instead of typing into it; it takes a dialog
     # whose options are not numbered (claude's) for the input prompt.
     STALE = ("Managed checkout", "answer it in the printed tmux session", ".git/info/exclude",
-             "cannot recognise a trust dialog", "cannot recognize a trust dialog")
+             "cannot recognise a trust dialog", "cannot recognize a trust dialog",
+             # the session design of before kjelly/pilot#425: one session per agent, a PR's panes closed at its merge
+             "closes that PR's agent panes", "prints each pane and its session", "close those panes before the next run",
+             "(session `pilot-pr-*`)", "(sessions pilot-pr-*)")
     # What the README section must say: the option and its default (the runner's own words), the way to update a stale
     # checkout, where the ignore lines go, and what the runner does in a directory the agents do not trust.
     README_SAYS = ("--checkout DIR", pr_loop.CHECKOUT_DEFAULT, "git pull --ff-only", EXCLUDE_FILE,
-                   "must already trust the checkout", "stops at a trust dialog only when its options are numbered")
+                   "must already trust the checkout", "stops at a trust dialog only when its options are numbered",
+                   # where the agents run (kjelly/pilot#425): the name rule (the cut is the code's constant), how to watch
+                   # (from outside tmux, and from inside it, where that fails), how to close what a stop keeps (the `=`
+                   # matters), the environment the windows get, and the one tmux version this was verified on
+                   "pilot-pr-<directory name>-<8 hex>", f"at most {pr_loop.SESSION_LABEL_MAX} characters",
+                   "tmux attach -r -t", "sessions should be nested with care", "tmux switch-client -t", "prefix s",
+                   "tmux kill-pane -t %N", "tmux kill-session -t =", "update-environment", "verified on tmux 3.8")
+    # What the runner's docstring says about the session, which `--help` shows
+    DOCSTRING_SAYS = ("pilot-pr-<directory name>-<8 hex>", "tmux attach -r -t",
+                      "never kills, renames or reuses a window or a session it did not create in this process")
 
     @staticmethod
     def flat(text):
@@ -1784,8 +1799,36 @@ class DocumentationTests(unittest.TestCase):
         return found
 
     @classmethod
-    def missing(cls, section):
-        return [f"does not say {phrase!r}" for phrase in cls.README_SAYS if phrase not in section]
+    def missing(cls, section, phrases=None):
+        phrases = cls.README_SAYS if phrases is None else phrases
+        return [f"does not say {phrase!r}" for phrase in phrases if phrase not in cls.flat(section)]
+
+    @staticmethod
+    def printed_by_the_runner():
+        """What the runner prints about its session, read from the code with placeholders for what varies: the line a real
+        run prints at the start, the line a dry run prints, the line of each agent, and the refusal for a live pane."""
+        told = []
+        with patch.object(pr_loop, "tell", told.append):
+            for dry_run in (False, True):
+                where = SimpleNamespace(dry_run=dry_run, path=Path("/x/checkout"), branch="refs/heads/main", head="0" * 40,
+                                        would_add=[], lock_path="/x/lock", exclude="/x/exclude", session="<session>")
+                pr_loop.Checkout.announce(where)
+            wait = subprocess.CompletedProcess([], 0, "%12\n", "")
+            with patch.object(pr_loop, "run", return_value=wait), patch.object(pr_loop, "command", return_value=""), \
+                 patch.object(pr_loop.shutil, "which", return_value="/x/bin/claude"):
+                pr_loop.Agent("claude", SimpleNamespace(path=Path("/x/checkout"), session="<session>"), 7, "draft")
+        by_word = {word: [line for line in told if word in line] for word in ("Agents run as", "would start", "agent: %")}
+        agent = by_word["agent: %"][0].replace("PR #7 draft agent: %12 in window 7-draft", "PR #N <phase> agent: %<id> in window "
+                                                                                           "<PR>-<phase>")
+        with tempfile.TemporaryDirectory() as top:
+            row = subprocess.CompletedProcess([], 0, f"pilot-pr-x-0123abcd|%3|0|{top}\n", "")
+            with patch.object(pr_loop, "run", return_value=row):
+                try:
+                    pr_loop.check_panes(top)
+                except pr_loop.Stop as exc:
+                    refusal = f"pr-loop: {exc}".replace(top, "<checkout>").replace("pilot-pr-x-0123abcd", "<session>")
+                    refusal = refusal.replace("%3", "%N")
+        return [by_word["Agents run as"][0], by_word["would start"][0], agent, refusal]
 
     @classmethod
     def skill_lines(cls, name):
@@ -1804,6 +1847,39 @@ class DocumentationTests(unittest.TestCase):
     def test_the_runners_docstring_describes_the_checkout_the_agents_start_in(self):
         self.assertGreater(len(self.flat(pr_loop.__doc__ or "")), 500, "the docstring is missing: nothing was scanned")
         self.assertEqual([], self.stale(pr_loop.__doc__), "the module docstring of scripts/pr_loop.py")
+
+    def test_the_runners_docstring_describes_the_session(self):
+        self.assertEqual([], self.missing(pr_loop.__doc__, self.DOCSTRING_SAYS), "the module docstring of scripts/pr_loop.py")
+
+    def test_the_readme_quotes_the_lines_the_runner_prints(self):
+        section = self.section((ROOT / "README.md").read_text())
+        self.assertIsNotNone(section)
+        lines = self.printed_by_the_runner()
+        self.assertEqual(4, len(lines))
+        self.assertEqual(["Agents run as windows of tmux session <session>; watch them read-only with: tmux attach -r -t "
+                          "<session>", "would start the agents in tmux session <session>",
+                          "PR #N <phase> agent: %<id> in window <PR>-<phase> of tmux session <session>",
+                          "pr-loop: agent pane %N (session <session>) is still running in <checkout>; inspect and close it "
+                          "before starting the runner again"], lines, "what the code prints, with placeholders")
+        self.assertEqual([], self.missing(section, lines), "README.md, section 'Process a batch of pull requests'")
+
+    def test_the_check_fails_when_the_readme_quotes_something_the_runner_does_not_print(self):
+        lines = self.printed_by_the_runner()
+        section = "The runner prints " + "; ".join(f"`{line}`" for line in lines) + "."
+        self.assertEqual([], self.missing(section, lines), "control: a section that quotes every line is accepted")
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertEqual([f"does not say {line!r}"], self.missing(section.replace(line, "..."), lines))
+        reworded = section.replace("watch them read-only with", "watch them with")
+        self.assertEqual(1, len(self.missing(reworded, lines)), "a line the code no longer prints that way is caught")
+
+    def test_the_check_fails_when_the_docstring_stops_saying_what_it_must(self):
+        text = "The runner " + ", ".join(self.DOCSTRING_SAYS) + "."
+        self.assertEqual([], self.missing(text, self.DOCSTRING_SAYS), "control: a text that says all of it is accepted")
+        for phrase in self.DOCSTRING_SAYS:
+            with self.subTest(phrase=phrase):
+                self.assertEqual([f"does not say {phrase!r}"],
+                                 self.missing(text.replace(phrase, "..."), self.DOCSTRING_SAYS))
 
     def test_the_two_skills_name_the_checkouts_git_exclude_file(self):
         for name in self.SKILLS:
@@ -1837,7 +1913,15 @@ class DocumentationTests(unittest.TestCase):
                  "still tells the operator to answer a trust dialog within --startup-timeout"),
                 ("a reworded sentence that names the dialog", "The agent may ask whether you trust the folder, "
                  "so wait for it for up to --startup-timeout seconds.",
-                 "still tells the operator to answer a trust dialog within --startup-timeout")):
+                 "still tells the operator to answer a trust dialog within --startup-timeout"),
+                ("the old merge sentence", "After GitHub confirms the merge, the runner closes that PR's agent panes and "
+                 "starts new processes.", "still says \"closes that PR's agent panes\""),
+                ("the old print sentence, wrapped", "The runner prints each pane\nand its session when it starts the agent.",
+                 "still says 'prints each pane and its session'"),
+                ("the old session wording", "an earlier run (session `pilot-pr-*`) is still alive",
+                 "still says '(session `pilot-pr-*`)'"),
+                ("the old close advice", "so close those panes before the next run.",
+                 "still says 'close those panes before the next run'")):
             with self.subTest(case=case):
                 self.assertIn(expected, "; ".join(self.stale(text)))
 
