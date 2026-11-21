@@ -97,10 +97,14 @@ class ActorHarness(DeliveryTests):
             # Nothing here may reach the real `gh`: the actor must not read the listing, and if it did,
             # it would read this one.
             mock.patch.object(gh_runtime, 'labeled_open_prs', self.gh.labeled_open_prs),
+            # The actor reads the PR's Ready signal and takes its label off a PR it drafts, through the fake too.
+            mock.patch.object(apply_decision, 'gh_runtime', self.gh),
+            mock.patch.object(apply_decision, 'edit_label', self.gh.edit_label),
         ]
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
+        self.sign()   # the PR got to Ready through pr-ready: the actor acts on it
 
     def run_gh(self, args, *, input_text=None, check=True):
         """The two `gh` writes the actor's Draft path makes directly."""

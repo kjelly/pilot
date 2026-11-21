@@ -1,7 +1,7 @@
 """The real `gh_runtime` read wrappers fed with answers recorded from real `gh` (AGENTS.md section 5.6).
 
 `subprocess.run` is replaced by a replay of fixtures/github_api.json (`pr_checks`, `issue_comments`,
-`user`), so `run_gh` and the wrappers run unchanged. The train's and the gate's tests use fake clients,
+`user`, `labels`, `timeline`), so `run_gh` and the wrappers run unchanged. The train's and the gate's tests use fake clients,
 and the integration tests' fake gh executable is only as truthful as this replay: a PR with no check at all
 is answered by real gh with rc 1, empty stdout and a stderr line (never `[]`), which the adapter must read
 as "no checks" while every other empty answer stays a GitHubError.
@@ -153,6 +153,114 @@ class ViewerReplay(unittest.TestCase):
         capture = dict(API['user']['ok'], stdout='{"id":1,"type":"User"}\n')
         with replay(capture), self.assertRaises(GitHubError):
             gh_runtime.viewer_login(REPO)
+
+
+def argv_of(run):
+    return run.call_args.args[0]
+
+
+class LabelReplay(unittest.TestCase):
+    """`label_exists` against the recorded 200 and 404 of `gh api repos/.../labels/<name>`."""
+    LABEL = 'pr-ready-verified'
+
+    def exists(self, capture, label=None):
+        with replay(capture) as run:
+            return gh_runtime.label_exists(REPO, label or self.LABEL), run
+
+    def test_the_recorded_label_is_found(self):
+        capture = API['labels']['exists']
+        self.assertEqual((0, ''), (capture['rc'], capture['stderr']))
+        found, run = self.exists(capture)
+        self.assertIs(True, found)
+        self.assertEqual(['gh', 'api', 'repos/kjelly/pilot/labels/pr-ready-verified'], argv_of(run))
+        self.assertEqual(self.LABEL, json.loads(capture['stdout'])['name'])
+
+    def test_the_recorded_404_is_a_missing_label_not_an_error(self):
+        capture = API['labels']['missing']
+        self.assertEqual((1, 'gh: Not Found (HTTP 404)\n'), (capture['rc'], capture['stderr']))
+        found, _ = self.exists(capture, 'this-label-does-not-exist-421')
+        self.assertIs(False, found)
+
+    def test_only_the_exact_recorded_404_is_a_missing_label(self):
+        missing = API['labels']['missing']
+        cases = {
+            'an extra stderr line': dict(missing, stderr=missing['stderr'] + 'HTTP 502: Bad Gateway\n'),
+            'rc 2': dict(missing, rc=2),
+            'another status in the body': dict(missing, stdout=missing['stdout'].replace('404', '403')),
+            'another message in the body': dict(missing, stdout=missing['stdout'].replace('Not Found', 'Nope')),
+            'a body that is no JSON': dict(missing, stdout='Not Found'),
+            'an empty body': dict(missing, stdout=''),
+            'a transport failure': dict(missing, stdout='', stderr='gh: HTTP 502: Bad Gateway\n'),
+            'a rate limit': dict(missing, stderr='gh: API rate limit exceeded (HTTP 403)\n'),
+            'the recorded authentication failure': API['user']['auth_failure'],
+        }
+        for name, capture in cases.items():
+            with self.subTest(name), self.assertRaises(GitHubError):
+                self.exists(capture, 'this-label-does-not-exist-421')
+
+    def test_an_answer_that_is_not_that_label_is_an_error(self):
+        exists = API['labels']['exists']
+        cases = {
+            'another label': exists['stdout'].replace('"name":"pr-ready-verified"', '"name":"pr-ready-verified-2"'),
+            'another case': exists['stdout'].replace('"name":"pr-ready-verified"', '"name":"PR-Ready-Verified"'),
+            'no JSON': 'ok',
+            'a list': '[]',
+            'an object without a name': '{"id":1}',
+        }
+        for name, stdout in cases.items():
+            with self.subTest(name), self.assertRaises(GitHubError):
+                self.exists(dict(exists, stdout=stdout))
+
+    def test_the_label_name_is_quoted_into_the_endpoint(self):
+        _, run = self.exists(dict(API['labels']['exists'], stdout='{"name":"a b/c"}'), 'a b/c')
+        self.assertEqual('repos/kjelly/pilot/labels/a%20b%2Fc', argv_of(run)[-1])
+
+    def test_a_host_repository_is_queried_on_its_host(self):
+        with replay(API['labels']['exists']) as run:
+            gh_runtime.label_exists(Repo.parse('ghe.example.com/o/r'), self.LABEL)
+        self.assertEqual(['gh', 'api', '--hostname', 'ghe.example.com', 'repos/o/r/labels/pr-ready-verified'],
+                         argv_of(run))
+
+
+class TimelineReplay(unittest.TestCase):
+    """`timeline_events` against the recorded five-page timeline of the merged kjelly/pilot#419."""
+    capture = API['timeline']['pr_419_paged']
+
+    def events(self, capture):
+        with replay(capture) as run:
+            return gh_runtime.timeline_events(REPO, 419), run
+
+    def test_the_pages_are_flattened_in_order(self):
+        pages = json.loads(self.capture['stdout'])
+        self.assertEqual(5, len(pages), 'the capture is a real multi-page answer')
+        self.assertTrue(any(page == [] for page in pages), 'an empty page is part of the real answer')
+        events, run = self.events(self.capture)
+        self.assertEqual([event for page in pages for event in page], events)
+        self.assertEqual(['ready_for_review', 'commented', 'convert_to_draft', 'commented', 'ready_for_review',
+                          'labeled', 'commented', 'unlabeled'], [event['event'] for event in events])
+        self.assertEqual(['gh', 'api', '--paginate', '--slurp', 'repos/kjelly/pilot/issues/419/timeline?per_page=100'],
+                         argv_of(run))
+
+    def test_a_pr_without_events_is_an_empty_list(self):
+        self.assertEqual([], self.events(dict(self.capture, stdout='[[]]'))[0])
+        self.assertEqual([], self.events(dict(self.capture, stdout='[]'))[0])
+
+    def test_a_failed_call_is_an_error(self):
+        with self.assertRaises(GitHubError):
+            self.events(API['user']['auth_failure'])
+
+    def test_anything_that_is_not_a_list_of_pages_of_events_is_an_error(self):
+        for name, stdout in {'an object': '{}', 'a page that is no list': '[{"event":"labeled"}]',
+                             'an entry that is no object': '[["labeled"]]', 'null': 'null', 'no JSON': 'x',
+                             'a null entry': '[[null]]'}.items():
+            with self.subTest(name), self.assertRaises(GitHubError):
+                self.events(dict(self.capture, stdout=stdout))
+
+    def test_a_host_repository_is_queried_on_its_host(self):
+        with replay(self.capture) as run:
+            gh_runtime.timeline_events(Repo.parse('ghe.example.com/o/r'), 5)
+        self.assertEqual(['gh', 'api', '--hostname', 'ghe.example.com', '--paginate', '--slurp',
+                          'repos/o/r/issues/5/timeline?per_page=100'], argv_of(run))
 
 
 if __name__ == '__main__':

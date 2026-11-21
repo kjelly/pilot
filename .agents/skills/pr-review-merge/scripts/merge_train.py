@@ -47,6 +47,14 @@ and the run looks at the PR again (`RETRY`). `tests/test_merge_train_guard.py` c
 write in the class. After the merge is read back as MERGED the saved entry is dropped and the label is
 removed, both inside that guard and neither able to change the outcome.
 
+The train needs no Ready signal and never reads one. The actor refuses a PR without a valid signal before it
+saves the entry and labels the PR, so the saved entry (`enqueued_head`, plus the commits in `train_commits`) is
+what the train trusts; the integration commits it pushes itself would make a signal bound to the enqueued HEAD
+stale, and a PR queued before the signal existed is merged as it was queued. The one thing it does with the
+signal's label is take it off a PR it returned to Draft (hygiene: the PR is Ready again only through pr-ready,
+which signs it afresh); that never changes an outcome. `review_gate.evaluate`, which the train calls on its own
+commits, reads no signal either (tests/test_merge_train.py `NoSignalRequirementTests`).
+
 Every git command has a time limit (`--fetch-timeout`, `--push-timeout`, `--git-timeout`) and runs in
 its own process group: on expiry the group gets SIGTERM (git removes its lock files), then SIGKILL.
 A stalled network call therefore holds neither the consumer lock nor the mutation lock for longer.
@@ -591,6 +599,13 @@ class Train:
             raise GitHubError("gh pr view did not report the PR's labels")
         return any(isinstance(label, dict) and label.get("name") == QUEUE_LABEL for label in labels)
 
+    @staticmethod
+    def _shows_label(view: dict[str, Any], name: str) -> bool:
+        """Whether a PR view lists the label `name` (a read: a view without labels shows none)."""
+        labels = view.get("labels")
+        return isinstance(labels, list) and any(isinstance(label, dict) and label.get("name") == name
+                                                for label in labels)
+
     def label_gone(self, number: int, entry: dict[str, Any] | None) -> dict[str, Any] | _Signal:
         """Removing the label withdraws the PR: drop the saved entry and touch nothing on GitHub. The
         entry dropped is the one that was read: an entry enqueued since survives."""
@@ -1012,6 +1027,15 @@ class Train:
                         # Only a confirmed Draft takes the PR out of the queue, and only then the label goes.
                         self.client.edit_label(self.repo, number, QUEUE_LABEL, add=False)
                         drop_entry(self.repo, number)
+                        if self._shows_label(after, review_gate.READY_LABEL):
+                            # Housekeeping after the Draft stands: it never changes the outcome (a failure is
+                            # logged, never an infrastructure failure), and pr-ready removes the label again
+                            # before the PR is Ready.
+                            try:
+                                self.client.edit_label(self.repo, number, review_gate.READY_LABEL, add=False)
+                            except GitHubError as exc:
+                                self.log.append(f"#{number}: returned to Draft, but the "
+                                                f"`{review_gate.READY_LABEL}` label could not be removed: {exc}")
                 else:
                     self.log.append(f"#{number}: the Draft comment for HEAD {head[:12]} was posted, then "
                                     f"{CHANGED[held.reason]}: voided; the PR was not converted")

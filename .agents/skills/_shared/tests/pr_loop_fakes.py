@@ -5,7 +5,9 @@ NOTHING here may reach the developer's real tmux server or real GitHub. `FakeEnv
 `claude` and `codex` first on PATH and refuses to continue unless `shutil.which` resolves every one of them to
 the fakes; the fake `tmux` and `gh` also refuse to run without their own state file. The screens, pane states
 and PR views they serve are SYNTHETIC: they are written for these tests, not captured from a real tmux,
-agent or GitHub session, and they only claim to exercise the parsing rules of scripts/pr_loop.py.
+agent or GitHub session, and they only claim to exercise the parsing rules of scripts/pr_loop.py. The one
+exception is the Ready signal's GitHub state (`signal_world`): it is `ready_signal_world.World`, which builds the
+timeline events and labels in the shapes of the reduced real captures of kjelly/pilot#419.
 """
 import json
 import os
@@ -17,10 +19,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from gitrepo import hermetic_env
+import ready_signal_world as rw
 
 HERE = Path(__file__).resolve().parent
 SKILLS = HERE.parents[1]
 RESULT_CLI = SKILLS / "_shared" / "scripts" / "pr_loop_result.py"
+SIGNAL_MODULE = SKILLS / "_shared" / "scripts" / "ready_signal.py"
+# The two helpers a managed checkout's default branch must carry (scripts/pr_loop.py `Checkout`).
+HELPER_PATHS = (".agents/skills/_shared/scripts/pr_loop_result.py", ".agents/skills/_shared/scripts/ready_signal.py")
+LOGIN = "reviewer"  # what the fake `gh api user` answers
 HEAD = "a" * 40
 URL = "https://github.com/acme/demo/pull/7"
 # The fakes run with `python -S`: they need nothing but the standard library.
@@ -78,6 +85,8 @@ def act(state, pane, action):
             gh["seq"] = []
         if "set_seq" in change:
             gh["seq"] = change["set_seq"]
+        if "set_timeline" in change:
+            gh["timeline"] = change["set_timeline"]
         with open(gh_path + ".tmp", "w") as stream:
             json.dump(gh, stream)
         os.replace(gh_path + ".tmp", gh_path)
@@ -192,6 +201,8 @@ if args[:2] == ["pr", "view"]:
     done(0, json.dumps(step["view"]))
 if args[:1] == ["api"] and args[-1] == "user":
     done(0, json.dumps({"login": state["login"]}))
+if args[:1] == ["api"] and args[-1].split("?")[0].endswith("/timeline") and "--slurp" in args:
+    done(0, json.dumps([state.get("timeline", [])]))
 if args[:1] == ["api"] and args[-1].endswith("/comments?per_page=100"):
     pages = [[{"body": c["body"], "user": {"login": c["login"]}} for c in state["comments"]]]
     done(0, json.dumps(pages))
@@ -208,11 +219,28 @@ AGENT_STUB = SHEBANG + "# Only here so that shutil.which finds an agent executab
 
 
 def pr_view_json(phase="draft", number=7, head=HEAD, url=URL, labels=()):
-    """A `gh pr view` document for one phase. Synthetic."""
+    """A `gh pr view` document for one phase. Synthetic. `labels` are names, or label objects as given."""
     state = {"merged": "MERGED", "closed": "CLOSED"}.get(phase, "OPEN")
     names = list(labels) + (["merge-queue"] if phase == "queued" else [])
     return {"number": number, "url": url, "state": state, "isDraft": phase == "draft", "headRefOid": head,
-            "labels": [{"name": name} for name in names]}
+            "labels": [name if isinstance(name, dict) else {"name": name} for name in names]}
+
+
+def signal_world(head=HEAD, *, signed=True, **kwargs):
+    """The signal-relevant GitHub state of a PR that went Draft -> Ready as the fake `gh` account `LOGIN`: with
+    `signed` also the producer's marker comment and label, otherwise just the Ready transition. Keyword arguments
+    go to `World.signed_ready` (`producer`, `actor`)."""
+    world = rw.World(head=head, viewer=LOGIN)
+    if signed:
+        world.signed_ready(**kwargs)
+    else:
+        world.ready()
+    return world
+
+
+def ready_view(world, **fields):
+    """The `gh pr view` document of the Ready PR `world` describes: its HEAD and the labels it shows."""
+    return dict(pr_view_json("ready", head=world.s["head"], labels=world.view_labels()), **fields)
 
 
 class FakeTime:
@@ -252,7 +280,7 @@ class FakeEnv:
         self.git_env = hermetic_env(self.home)
         self.make_remote(remote_files)
         self.write_tmux(log=[], fail={}, panes={}, buffers={}, sessions=[], cli=[], new_session=[], next=0)
-        self.write_gh(calls=[], seq=[], view=pr_view_json(), login="reviewer", comments=[], clone_exit=0)
+        self.write_gh(calls=[], seq=[], view=pr_view_json(), login=LOGIN, comments=[], clone_exit=0, timeline=[])
         env = dict(self.git_env, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                    FAKE_TMUX_STATE=str(self.tmux_path), FAKE_GH_STATE=str(self.gh_path),
                    FAKE_GH_REMOTE=str(self.remote), FAKE_RESULT_CLI=str(RESULT_CLI),
@@ -274,9 +302,9 @@ class FakeEnv:
         return done.stdout.strip()
 
     def make_remote(self, files=None):
-        """A bare repository whose `main` holds `files` (default: the result helper the runner requires)."""
+        """A bare repository whose `main` holds `files` (default: the two helpers the runner requires)."""
         if files is None:
-            files = {".agents/skills/_shared/scripts/pr_loop_result.py": RESULT_CLI.read_text()}
+            files = {HELPER_PATHS[0]: RESULT_CLI.read_text(), HELPER_PATHS[1]: SIGNAL_MODULE.read_text()}
         shutil.rmtree(self.remote, ignore_errors=True)
         work = self.root / "work"
         shutil.rmtree(work, ignore_errors=True)

@@ -380,6 +380,36 @@ def label_added_at(repo: Repo, number: int, label: str) -> str | None:
     return added
 
 
+def timeline_events(repo: Repo, number: int) -> list[dict[str, Any]]:
+    """Every event on the PR's timeline, oldest first. One list gives the order of the label events, the
+    Ready/Draft transitions and the comments, which no per-kind endpoint does (ready_signal.assess)."""
+    endpoint = f"repos/{repo.owner}/{repo.name}/issues/{number}/timeline?per_page=100"
+    result = gh_json(["api", *host_args(repo), "--paginate", "--slurp", endpoint])
+    if not isinstance(result, list) or not all(isinstance(page, list) for page in result):
+        raise GitHubError("gh api --paginate --slurp did not return pages")
+    events = [event for page in result for event in page]
+    if not all(isinstance(event, dict) for event in events):
+        raise GitHubError("Invalid timeline event entry")
+    return events
+
+
+def label_exists(repo: Repo, label: str) -> bool:
+    """True when the repository has `label`; False only for GitHub's exact 404 (`_not_found`); anything else raises.
+
+    A label is never created here: it is a one-time maintainer action (ready_signal.prepare says so).
+    """
+    endpoint = f"repos/{repo.owner}/{repo.name}/labels/{quote(label, safe='')}"
+    cp = run_gh(["api", *host_args(repo), endpoint], check=False)
+    if cp.returncode != 0:
+        if _not_found(cp):
+            return False
+        raise GitHubError(f"gh api label {label} failed ({cp.returncode}): {cp.stderr.strip()[:300]}")
+    data = parse_json(cp.stdout, "label")
+    if not isinstance(data, dict) or data.get("name") != label:
+        raise GitHubError(f"GitHub did not answer with the label {label!r}")
+    return True
+
+
 def issue_comments(repo: Repo, number: int) -> list[dict[str, Any]]:
     """Every conversation comment on the PR, oldest first: `[{"body": str, "login": str}]`."""
     endpoint = f"repos/{repo.owner}/{repo.name}/issues/{number}/comments?per_page=100"
