@@ -297,7 +297,7 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 	fmt.Printf("\nverdict: **%s**  (pass=%d fail=%d skip=%d)\n", verdict, pass, fail, skip)
 	if fail > 0 {
 		if err := delivery.RetryTransientEvidence(ctx, func(c context.Context) error {
-			return writer.Finish(c, store.RunFinished{Outcome: "failure", ExitCode: 1})
+			return finishVerifyRun(c, writer, store.RunFinished{Outcome: "failure", ExitCode: 1})
 		}); err != nil {
 			return fmt.Errorf("finalize verification evidence: %w", err)
 		}
@@ -305,12 +305,19 @@ func runVerifyOne(cmd *cobra.Command, specPathArg string) error {
 		return fmt.Errorf("verification failed: %d rows", fail)
 	}
 	if err := delivery.RetryTransientEvidence(ctx, func(c context.Context) error {
-		return writer.Finish(c, store.RunFinished{Outcome: "success", ExitCode: 0})
+		return finishVerifyRun(c, writer, store.RunFinished{Outcome: "success", ExitCode: 0})
 	}); err != nil {
 		return fmt.Errorf("finalize verification evidence: %w", err)
 	}
 	finalized = true
 	return nil
+}
+
+// finishVerifyRun closes a verification run's evidence stream; runVerifyOne
+// wraps it in delivery.RetryTransientEvidence. It is a variable so tests can
+// make the store fail transiently on the final write (issue #343).
+var finishVerifyRun = func(ctx context.Context, writer *store.RunWriter, finish store.RunFinished) error {
+	return writer.Finish(ctx, finish)
 }
 
 func verifyVaultArguments() ([]string, error) {
