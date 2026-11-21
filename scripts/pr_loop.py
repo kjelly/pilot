@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Run Pilot's Draft/Ready PR skills in order using managed tmux panes.
 
+The agents start in YOUR checkout, not in a clone of their own: the root of the git work tree the runner is started
+in, or the directory named by --checkout. Start the agents there once yourself, so that they already trust it: the
+runner cannot answer a trust dialog. The checkout must be clean, on the default branch of origin, at origin's tip, and
+its origin must be --repo, or the runner refuses before it reads GitHub. The runner never deletes, resets, cleans or
+stashes anything in it; the task files it writes stay under the checkout's task directory (ignored by git), and the
+agent panes it started stay open when it stops.
+
 The runner dispatches the Ready skill (pr-review-merge) only for a PR that carries a valid Ready signal at its
 current HEAD and for its latest Ready transition (`ready_signal.assess`): proof that pr-ready (or issue-to-pr's mark_ready.py) verified and signed it. A
 Ready PR without one is `unverified` and is never acted on; the runner carries a signal across nothing (neither a
@@ -10,15 +17,17 @@ nothing to GitHub.
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import json
 import math
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -28,6 +37,7 @@ from urllib.parse import urlsplit
 sys.dont_write_bytecode = True
 SKILLS = Path(__file__).resolve().parents[1] / ".agents/skills"
 sys.path[:0] = [str(SKILLS / skill / "scripts") for skill in ("pr-review-merge", "_shared")]
+from checkout_preflight import HEX, GitError, check_dirty, check_in_progress
 from gh_runtime import GitHubError, Repo, issue_comments, pr_view, timeline_events, viewer_login
 from list_ready import QUEUE_LABEL
 from needs_person import LABEL as PERSON_LABEL, latest_marker
@@ -41,6 +51,11 @@ import ready_signal  # only LABEL, assess and SignalError: this runner reads the
 STABLE_POLLS = 2
 READ_ATTEMPTS = 3
 
+# What `--checkout` defaults to, in the words of its help text and of the README.
+CHECKOUT_DEFAULT = "the root of the git work tree that contains the current directory"
+LOCK_NAME = "pilot-pr-loop.lock"
+PANE_SESSION_PREFIX = "pilot-pr-"
+
 
 class Stop(RuntimeError):
     pass
@@ -50,13 +65,32 @@ def tell(message):
     print(message, flush=True)
 
 
-def command(*args, cwd=None, data=None):
+def run(args, *, cwd=None, data=None, env=None, timeout=120):
+    """One subprocess, whatever it exits with; a command that outlives `timeout` is a Stop."""
     options = {"input": data} if data is not None else {"stdin": subprocess.DEVNULL}
-    proc = subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          timeout=120, check=False, **options)
+    try:
+        return subprocess.run(args, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=timeout, check=False, **options)
+    except subprocess.TimeoutExpired:
+        raise Stop(f"{' '.join(args[:2])} timed out after {timeout} seconds") from None
+
+
+def command(*args, cwd=None, data=None):
+    proc = run(args, cwd=cwd, data=data)
     if proc.returncode != 0:
         raise Stop(f"{' '.join(args[:2])} failed ({proc.returncode}): {proc.stderr.strip()[:500]}")
     return proc.stdout
+
+
+def git(cwd, *args, ok=(0,), env=None):
+    """One READ-ONLY git call in `cwd`: no opportunistic index refresh, no credential prompt, one locale. A status
+    outside `ok` is a Stop (`ok=None`: the caller judges the result). Every git call of this runner goes through
+    here, and tests/test_pr_loop.py::ImportsTests lists the subcommands it may name."""
+    proc = run(["git", *args], cwd=cwd, env=dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
+                                                  LC_ALL="C", **(env or {})))
+    if ok is not None and proc.returncode not in ok:
+        raise Stop(f"git {args[0]} failed ({proc.returncode}): {proc.stderr.strip()[:500]}")
+    return proc
 
 
 def state_of(view):
@@ -128,49 +162,309 @@ def observe(repo, number, account=None):
     return view, phase, detail
 
 
+def repo_identity(repo):
+    """`host/owner/name` of the repository the runner drives (the host defaults to github.com)."""
+    return f"{repo.host or 'github.com'}/{repo.owner}/{repo.name}"
+
+
+def check_pr_url(view, repo):
+    """The PR a view describes must be this repository's pull request, on its host, by its number: the URL is read
+    before every dispatch, whatever the checkout is."""
+    url = urlsplit(view.get("url", ""))
+    host = repo.host or "github.com"
+    path = f"/{repo.owner}/{repo.name}"
+    if url.scheme != "https" or url.netloc.casefold() != host.casefold() or \
+       url.path.casefold() != f"{path}/pull/{view['number']}".casefold() or url.query or url.fragment:
+        raise Stop("GitHub returned an unexpected PR URL")
+
+
+def resolve_checkout(repo, directory=None):
+    """The checkout, resolved once to one absolute path: the root of the work tree of the current directory, or
+    `directory`, which must be that root itself (the agents start in it, literally)."""
+    if directory is None:
+        done = git(os.getcwd(), "rev-parse", "--show-toplevel", ok=None)
+        if done.returncode != 0:
+            raise Stop("the current directory is not inside a git work tree; start the runner in a checkout of "
+                       f"{repo_identity(repo)} or pass --checkout DIR")
+        return Path(done.stdout.strip()).resolve()
+    given = Path(directory).expanduser()
+    if not given.is_dir():
+        raise Stop(f"--checkout {directory} is not a directory")
+    done = git(given, "rev-parse", "--show-toplevel", ok=None)
+    if done.returncode != 0:
+        raise Stop(f"--checkout {directory} is not a git work tree")
+    top = Path(done.stdout.strip()).resolve()
+    if top != given.resolve():
+        raise Stop(f"--checkout {directory} is not the root of its git work tree {top}; pass {top}")
+    return top
+
+
+_NAME = r"[A-Za-z0-9_.-]+"
+_PATH = re.compile(rf"/(?P<owner>{_NAME})/(?P<name>{_NAME}?)(?:\.git)?/?")
+_SCP = re.compile(rf"(?:[^@/:\s]+@)?(?P<host>[A-Za-z0-9.-]+):(?P<owner>{_NAME})/(?P<name>{_NAME}?)(?:\.git)?/?")
+_HOST = re.compile(r"[A-Za-z0-9.-]+")
+
+
+def origin_repo(url):
+    """`(host, owner, name)` of a remote URL in one of the forms GitHub hands out (`https://[user@]host[:port]/o/n`,
+    `ssh://[user@]host[:port]/o/n`, `[user@]host:o/n`, each with an optional `.git` and trailing `/`), else None. The
+    userinfo, which may be a token, is never returned; neither is anything that is not a plain host or name."""
+    if "://" in url:
+        try:
+            parts = urlsplit(url)
+            host, _ = parts.hostname, parts.port
+        except ValueError:
+            return None
+        if parts.scheme not in ("https", "ssh") or parts.query or parts.fragment or not host or \
+           not _HOST.fullmatch(host):
+            return None
+        found = _PATH.fullmatch(parts.path)
+        return (host, found["owner"], found["name"]) if found else None
+    found = _SCP.fullmatch(url)
+    return (found["host"].lower(), found["owner"], found["name"]) if found else None
+
+
+def redact(text, urls):
+    """`text` without any of the configured remote URLs and without the userinfo of any URL: a token may sit in a
+    remote's URL, and git can quote a URL back."""
+    for url in sorted(filter(None, urls), key=len, reverse=True):
+        text = text.replace(url, "<origin>")
+    return re.sub(r"(?<=://)[^/@\s]+@", "<redacted>@", text)
+
+
+def lock_checkout(top, path):
+    """Take the checkout's lock, for the life of the process: the descriptor of an exclusive `flock` on `path`, which
+    is never deleted (the kernel drops the lock when the runner dies, however it dies) and is not inherited by the
+    commands the runner starts. Anything but \"somebody else holds it\" is a refusal too: an unknown lock is no lock."""
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        raise Stop(f"cannot lock the checkout {top} ({path}): {exc.strerror or exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Stop(f"cannot lock the checkout {top} ({path}): not a regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+            raise Stop(f"another pr_loop runner is using the checkout {top} (lock {path}); "
+                       "wait for it to finish or stop it") from None
+        raise Stop(f"cannot lock the checkout {top} ({path}): {exc.strerror or exc}") from exc
+    except Stop:
+        os.close(fd)
+        raise
+    return fd
+
+
+_PANE = re.compile(r"(?P<session>.*)\|(?P<pane>%\d+)\|(?P<dead>[01])\|(?P<path>.*)")
+
+
+def check_panes(top):
+    """A pane an earlier run kept (`pilot-pr-*`, still alive) in the checkout is a second user of it: the lock died with
+    that run, the pane did not. Panes of other sessions, dead panes and panes elsewhere are not the runner's business."""
+    done = run(["tmux", "list-panes", "-a", "-F", "#{session_name}|#{pane_id}|#{pane_dead}|#{pane_current_path}"])
+    if done.returncode != 0:
+        if "no server running" in done.stderr or re.search(r"error connecting to .* \(No such file or directory\)",
+                                                           done.stderr):
+            return  # no tmux server, so no pane
+        raise Stop(f"tmux list-panes failed ({done.returncode}): {done.stderr.strip()[:500]}")
+    inside = os.path.realpath(top)
+    for line in done.stdout.splitlines():
+        found = _PANE.fullmatch(line)
+        if not found:
+            raise Stop("tmux list-panes returned a line that cannot be read")
+        where = os.path.realpath(found["path"]) if found["path"] else None
+        if found["dead"] == "0" and found["session"].startswith(PANE_SESSION_PREFIX) and where and \
+           (where == inside or where.startswith(inside + os.sep)):
+            raise Stop(f"agent pane {found['pane']} (session {found['session']}) is still running in {top}; "
+                       "inspect and close it before starting the runner again")
+
+
+def printable(text):
+    return "".join(char if char.isprintable() else "?" for char in text)
+
+
 class Checkout:
-    def __init__(self, view, repo):
-        url = urlsplit(view.get("url", ""))
-        host = repo.host or "github.com"
-        path = f"/{repo.owner}/{repo.name}"
-        if url.scheme != "https" or url.netloc.casefold() != host.casefold() or \
-           url.path.casefold() != f"{path}/pull/{view['number']}".casefold() or url.query or url.fragment:
-            raise Stop("GitHub returned an unexpected PR URL")
-        root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "pilot" / "pr-loop"
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.path = Path(tempfile.mkdtemp(prefix="batch-", dir=root.resolve()))
-        tell(f"Managed checkout: {self.path}")
-        command("gh", "repo", "clone", f"https://{host}{path}", str(self.path))
-        remote_ref = self.git("symbolic-ref", "refs/remotes/origin/HEAD")
-        prefix = "refs/remotes/origin/"
-        if not remote_ref.startswith(prefix):
-            raise Stop("cannot verify the origin default branch")
-        self.branch = "refs/heads/" + remote_ref[len(prefix):]
-        self.head = self.git("rev-parse", "--verify", remote_ref + "^{commit}")
-        self.verify()
+    """The operator's own checkout, inspected once at startup and verified again before every dispatch. Everything
+    here READS it, except two things: the lock file in its git directory and, only when git does not ignore the task
+    and evidence directories yet, two lines appended to its git exclude file. `dry_run` inspects without either (and
+    without tmux); a refusal is a Stop."""
+
+    def __init__(self, repo, directory=None, *, dry_run=False):
+        self.repo, self.dry_run, self.lock_fd, self.would_add = repo, dry_run, None, []
+        self.path = resolve_checkout(repo, directory)
+        self.lock_path = self.git_path(LOCK_NAME)
+        if not dry_run:
+            self.lock_fd = lock_checkout(self.path, self.lock_path)
+        try:
+            self.inspect()
+        except BaseException:
+            self.release()  # a refusal does not keep the lock
+            raise
+
+    def release(self):
+        """Give the lock back (the lock file stays): only a refusal needs it, a run keeps the lock until it ends."""
+        if self.lock_fd is not None:
+            os.close(self.lock_fd)
+            self.lock_fd = None
+
+    def inspect(self):
+        if not self.dry_run:
+            check_panes(self.path)
+        self.check_origin()
+        self.check_operation()
+        self.check_clean()
+        branch, tip = self.origin_head()
+        ref, sha = self.current()
+        if ref != f"refs/heads/{branch}":
+            if ref is None:
+                raise Stop(f"checkout {self.path} has a detached HEAD at {(sha or '')[:12]}; check out {branch}, "
+                           "the default branch of origin")
+            raise Stop(f"checkout {self.path} is on {ref.removeprefix('refs/heads/')}, not on {branch}, the default "
+                       "branch of origin")
+        self.check_tip(branch, tip)
+        self.branch, self.head = ref, sha
         # Both helpers are run from this checkout by the skills it hosts: a default branch that predates either
         # would leave the agent unable to report or to sign, and the run would wait for its phase timeout.
         for helper in ("pr_loop_result.py", "ready_signal.py"):
-            self.git("cat-file", "-e", f"HEAD:.agents/skills/_shared/scripts/{helper}")
-        info = self.path / ".git/info"
-        info.mkdir(parents=True, exist_ok=True)
-        with (info / "exclude").open("a", encoding="utf-8") as stream:
-            stream.write(f"\n/.pr-ready/\n/{TASK_DIR}/\n")
-        # `git check-ignore -q` with several paths succeeds when ANY is ignored: ask for each path itself.
-        for probe in (f"{TASK_DIR}/{'0' * 32}/task.json", ".pr-ready/probe"):
-            try:
-                self.git("check-ignore", "-q", "--", probe)
-            except Stop:
-                raise Stop(f"managed checkout does not ignore {TASK_DIR}/ and .pr-ready/") from None
+            where = f".agents/skills/_shared/scripts/{helper}"
+            if git(self.path, "cat-file", "-e", f"HEAD:{where}", ok=(0, 128)).returncode != 0:
+                raise Stop(f"origin's default branch {branch} at {tip[:12]} lacks {where}; "
+                           "the skills it hosts could not report or sign")
+        self.ignore_task_files()
 
-    def git(self, *args):
-        return command("git", *args, cwd=self.path).strip()
+    def git_path(self, name):
+        raw = git(self.path, "rev-parse", "--git-path", name).stdout.strip()
+        return Path(raw) if os.path.isabs(raw) else self.path / raw
+
+    def config_values(self, key):
+        done = git(self.path, "config", "--get-all", "-z", key, ok=(0, 1))
+        return done.stdout.split("\0")[:-1]
+
+    def check_origin(self):
+        """origin is the repository the runner drives: one URL (git fetches from the first and pushes to all of them), and
+        every push URL too. Only the host, owner and name are ever quoted, never a URL."""
+        identity = repo_identity(self.repo)
+        wanted = tuple(part.casefold() for part in identity.split("/"))
+        urls = self.config_values("remote.origin.url")
+        if not urls:
+            raise Stop(f"checkout {self.path} has no origin remote")
+        if len(urls) > 1:
+            raise Stop(f"origin of {self.path} has {len(urls)} URLs; the runner needs exactly one, of {identity}")
+        for fetch, values in ((True, urls), (False, self.config_values("remote.origin.pushurl"))):
+            for value in values:
+                found = origin_repo(value)
+                if found is None:
+                    raise Stop(f"origin of {self.path} is not a URL of {identity}" if fetch else
+                               f"a push URL of origin of {self.path} is not a URL of {identity}")
+                if tuple(part.casefold() for part in found) != wanted:
+                    raise Stop(f"origin of {self.path} {'is' if fetch else 'pushes to'} {'/'.join(found)}, "
+                               f"not {identity}")
+
+    def check_operation(self, suffix=""):
+        try:
+            busy = check_in_progress(self.path)
+        except GitError as exc:
+            raise Stop(str(exc)) from exc
+        if busy:
+            raise Stop(f"a git operation is in progress in {self.path} ({', '.join(busy[0]['paths'])}); "
+                       f"finish or abort it{suffix}")
+
+    def check_clean(self, suffix=""):
+        try:
+            dirty = check_dirty(self.path)
+        except GitError as exc:
+            raise Stop(str(exc)) from exc
+        if dirty:
+            names = [re.sub(r"^[ MADRCUT?!]{2} ", "", entry) for entry in dirty[0]["paths"][:3]]
+            raise Stop(f"checkout {self.path} has uncommitted changes or untracked files ({dirty[0]['count']} paths, "
+                       f"e.g. {printable(', '.join(names))}); commit or remove them; the runner never stashes or "
+                       f"discards work{suffix}")
+
+    def current(self):
+        """`(HEAD's branch ref or None when detached, HEAD's commit or None when unborn)`."""
+        ref = git(self.path, "symbolic-ref", "--quiet", "HEAD", ok=(0, 1)).stdout.strip() or None
+        sha = git(self.path, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", ok=(0, 1)).stdout.strip() or None
+        return ref, sha
+
+    def origin_head(self):
+        """`(default branch, tip)` of origin, as origin says it NOW. `refs/remotes/origin/HEAD` is a cache that
+        `git init` plus `git remote add` never sets and a rename leaves wrong."""
+        done = git(self.path, "ls-remote", "--symref", "origin", "HEAD", ok=None)
+        if done.returncode != 0:
+            urls = self.config_values("remote.origin.url") + self.config_values("remote.origin.pushurl")
+            raise Stop(f"cannot read the default branch of origin for {self.path}: git ls-remote failed "
+                       f"({done.returncode}): {redact(done.stderr.strip(), urls)[:300]}")
+        lines = done.stdout.splitlines()
+        refused = Stop("origin did not report its default branch (git ls-remote --symref origin HEAD)")
+        if len(lines) != 2:
+            raise refused
+        branch, tip = re.fullmatch(r"ref: refs/heads/([^\t]+)\tHEAD", lines[0]), re.fullmatch(rf"({HEX.pattern})\tHEAD", lines[1])
+        if not branch or not tip or git(self.path, "check-ref-format", f"refs/heads/{branch[1]}",
+                                        ok=(0, 1)).returncode != 0:
+            raise refused
+        return branch[1], tip[1]
+
+    def check_tip(self, branch, tip):
+        """The skills run from this checkout, so it must be origin's default branch AT origin's tip. Checked at
+        startup only: the merge train moves origin during a batch, and that must not refuse the next PR."""
+        local = git(self.path, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}",
+                    ok=(0, 1)).stdout.strip()
+        if local == tip:
+            return
+        quiet = {"GIT_NO_LAZY_FETCH": "1"}
+        if local and git(self.path, "cat-file", "-e", tip, ok=(0, 1), env=quiet).returncode == 0 and \
+           git(self.path, "merge-base", "--is-ancestor", tip, local, ok=(0, 1), env=quiet).returncode == 0:
+            raise Stop(f"local {branch} at {local[:12]} has commits that origin's {branch} ({tip[:12]}) does not "
+                       "have; the skills must come from origin's default branch")
+        what = f"is at {local[:12]} but" if local else "has no commit but"
+        raise Stop(f"local {branch} {what} origin's {branch} is at {tip[:12]}; run git pull --ff-only in "
+                   f"{self.path} and start the runner again")
+
+    def ignores(self, probe):
+        return git(self.path, "check-ignore", "-q", "--", probe, ok=(0, 1)).returncode == 0
+
+    def ignore_task_files(self):
+        """The task and evidence directories must not count as uncommitted work: append them to the git exclude file
+        when git does not ignore them yet (\"missing\" is judged by git, so an unanchored line of the operator's own
+        counts), then ask git again, since a tracked .gitignore overrides the exclude file. Never removes a line."""
+        # `git check-ignore -q` with several paths succeeds when ANY is ignored: ask for each path itself.
+        probes = ((".pr-ready/probe", "/.pr-ready/"), (f"{TASK_DIR}/{'0' * 32}/task.json", f"/{TASK_DIR}/"))
+        self.exclude = self.git_path("info/exclude")
+        self.would_add = [line for probe, line in probes if not self.ignores(probe)]
+        if self.dry_run or not self.would_add:
+            return
+        self.exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = self.exclude.read_bytes() if self.exclude.exists() else b""
+        with self.exclude.open("a", encoding="utf-8") as stream:
+            stream.write("\n" * bool(existing and not existing.endswith(b"\n")) + "".join(f"{line}\n" for line in self.would_add))
+        tell(f"Added {', '.join(self.would_add)} to {self.exclude}")
+        if not all(self.ignores(probe) for probe, _ in probes):
+            raise Stop(f"{self.path} does not ignore {TASK_DIR}/ and .pr-ready/ even after they were added to "
+                       f"{self.exclude}: a tracked .gitignore overrides it, so the task files would count as "
+                       "uncommitted work")
+        self.would_add = []
+
+    def announce(self):
+        tell(f"Checkout: {self.path} ({self.branch.removeprefix('refs/heads/')} at {self.head[:12]})")
+        if self.dry_run:
+            if self.would_add:
+                tell(f"would add {', '.join(self.would_add)} to {self.exclude}")
+            tell(f"not checked in a dry run: whether another runner holds {self.lock_path}; whether an agent pane "
+                 f"kept from an earlier run is still open in {self.path}")
 
     def verify(self):
-        if self.git("symbolic-ref", "HEAD") != self.branch or self.git("rev-parse", "HEAD") != self.head:
-            raise Stop(f"skill did not restore the checked default branch at {self.head}")
-        if self.git("status", "--porcelain=v1", "--untracked-files=normal"):
-            raise Stop(f"managed checkout contains uncommitted work: {self.path}")
+        """Before every dispatch: back on the branch and commit the run started on, clean, no git operation in
+        progress. The tip of origin is not read again: it moves while a batch runs."""
+        suffix = "; nothing was dispatched"
+        self.check_operation(suffix)
+        ref, sha = self.current()
+        if ref != self.branch or sha != self.head:
+            now = "detached" if ref is None else ref.removeprefix("refs/heads/")
+            raise Stop(f"checkout {self.path} is no longer on {self.branch.removeprefix('refs/heads/')} at "
+                       f"{self.head[:12]} (now {now} at {(sha or '')[:12]}): a skill did not restore it or something "
+                       f"else changed it{suffix}")
+        self.check_clean(suffix)
 
     def task(self, repo, number, phase, head):
         nonce = uuid.uuid4().hex
@@ -185,13 +479,10 @@ class Checkout:
             stream.write(json.dumps(task))
         return path, task
 
-    def clean_up(self):
-        if (self.path / ".pr-ready").exists() or self.git("status", "--porcelain=v1") or \
-           self.git("rev-list", "--max-count=1", "HEAD", "--branches", "--not", "--remotes") or \
-           self.git("stash", "list"):
-            tell(f"Retained checkout and evidence: {self.path}")
-            return
-        shutil.rmtree(self.path)
+    def finish(self):
+        """The run is over: say what it left where. It deletes nothing; the lock goes with the process."""
+        tell(f"Kept: the task files under {self.path / TASK_DIR} and any agent pane that is still open (sessions "
+             f"{PANE_SESSION_PREFIX}*); close the panes before the next run. Nothing in {self.path} was deleted or reset.")
 
 
 PROMPT = re.compile(r"^(?:[›❯](?:\s.*)?|>)$")
@@ -294,13 +585,41 @@ class Batch:
         return self.login
 
     def run(self):
+        if self.args.dry_run:
+            return self.dry_run()
+        # The checkout is inspected before the first PR is read and before an agent is started: a refusal costs nothing.
+        self.checkout = Checkout(self.repo, self.args.checkout)
+        self.checkout.announce()
+        interrupted = False
+        try:
+            for number in self.args.pr:
+                self.drive(number)
+        except KeyboardInterrupt:
+            interrupted = True  # main says what was kept
+            raise
+        finally:
+            if not interrupted:
+                self.checkout.finish()
+
+    def dry_run(self):
+        """The PR phases, then the same inspection of the checkout the real run starts with, read-only: no lock, no
+        tmux, nothing written. A refusal is reported after the phases, so that one run shows both."""
+        refusal, checkout = None, None
+        try:
+            checkout = Checkout(self.repo, self.args.checkout, dry_run=True)
+        except Stop as exc:
+            refusal = exc
         for number in self.args.pr:
-            try:
-                self.run_pr(number)
-            except (Stop, GitHubError, OSError, ValueError, subprocess.SubprocessError) as exc:
-                raise Stop(f"PR #{number}: {exc}") from exc
-        if self.checkout is not None:
-            self.checkout.clean_up()
+            self.drive(number)
+        if refusal is not None:
+            raise refusal
+        checkout.announce()
+
+    def drive(self, number):
+        try:
+            self.run_pr(number)
+        except (Stop, GitHubError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise Stop(f"PR #{number}: {exc}") from exc
 
     def read(self, number):
         """One observation of the PR, `(view, phase, detail)`. A failed GitHub read is retried; a Stop (a PR that
@@ -376,8 +695,7 @@ class Batch:
                 else:
                     if actions >= self.args.max_actions:
                         raise Stop("maximum agent dispatches reached")
-                    if self.checkout is None:
-                        self.checkout = Checkout(view, self.repo)
+                    check_pr_url(view, self.repo)
                     self.checkout.verify()
                     agent = agents.get(phase)
                     if agent is not None and agent.status()[0]:
@@ -421,18 +739,26 @@ def main():
     parser.add_argument("--startup-timeout", type=seconds, default=60, help="seconds waiting for a newly started agent's prompt (default: 60)")
     parser.add_argument("--poll-interval", type=seconds, default=10, help="seconds between GitHub reads (default: 10)")
     parser.add_argument("--max-actions", type=int, default=20, help="maximum dispatches per PR (default: 20)")
-    parser.add_argument("--dry-run", action="store_true", help="show current PR states without starting agents")
+    parser.add_argument("--checkout", metavar="DIR",
+                        help="the checkout the agents start in: the ROOT of a git work tree that is clean, on origin's "
+                             f"default branch at origin's tip, whose origin is --repo (default: {CHECKOUT_DEFAULT})")
+    parser.add_argument("--dry-run", action="store_true", help="show current PR states and whether the checkout would be "
+                                                              "accepted, without starting agents or writing anything")
     args = parser.parse_args()
     if any(n <= 0 for n in args.pr) or len(set(args.pr)) != len(args.pr) or args.max_actions <= 0:
         parser.error("PR numbers must be positive and unique, and --max-actions must be positive")
     if any(not template.strip() or not template.isprintable() for template in (args.draft_command, args.ready_command)):
         parser.error("agent commands must be nonempty single lines")
     os.environ.setdefault("GH_PROMPT_DISABLED", "1")
+    batch = None
     try:
-        Batch(Repo.parse(args.repo), args).run()
+        batch = Batch(Repo.parse(args.repo), args)
+        batch.run()
         return 0
     except KeyboardInterrupt:
-        print("Interrupted; any active panes and checkout were retained.", file=sys.stderr)
+        kept = f"the task files under {batch.checkout.path / TASK_DIR}/ were kept" if batch and batch.checkout else \
+            "nothing was written"
+        print(f"Interrupted; any active panes and {kept}.", file=sys.stderr)
         return 130
     except (Stop, GitHubError, OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"pr-loop: {exc}", file=sys.stderr)

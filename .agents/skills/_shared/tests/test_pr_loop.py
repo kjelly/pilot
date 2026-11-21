@@ -2,17 +2,25 @@
 
 Nothing here touches the developer's tmux server, GitHub or an agent: the tests that need `tmux`, `gh` or an agent
 executable put the fakes of pr_loop_fakes.py first on PATH (FakeEnv refuses to go on unless `which` finds them),
-and every wait runs on a fake clock. The pane screens and PR views are synthetic.
+and every wait runs on a fake clock. The pane screens and PR views are synthetic. git is real: the checkout the
+runner is started in is a real clone of a real bare repository (FakeEnv.make_checkout), and every refusal of it is
+tried on real git state, with the case that must pass beside the case that must stop.
 """
 import ast
+import contextlib
+import hashlib
+import io
 import json
+import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -24,7 +32,8 @@ import pr_loop
 import ready_signal as rs
 import ready_signal_world as rw
 from pr_loop_result import load_task, write_result
-from pr_loop_fakes import HELPER_PATHS, LOGIN, FakeEnv, FakeTime, pr_view_json, ready_view, signal_world
+from pr_loop_fakes import (HELPER_PATHS, LOGIN, NO_SERVER, NO_SOCKET, FakeEnv, FakeTime, pr_view_json, ready_view,
+                           signal_world)
 
 HEAD = "a" * 40
 NEW = "b" * 40
@@ -41,6 +50,7 @@ class PRLoopTests(unittest.TestCase):
             if state == "queued":
                 view_states[number] = "merged"
             return dict(number=number, state="MERGED" if state == "merged" else "OPEN",
+                        url=f"https://github.com/kjelly/pilot/pull/{number}",
                         isDraft=state == "draft", headRefOid=head,
                         labels=[{"name": pr_loop.QUEUE_LABEL}] if state == "queued" else []), state, ""
 
@@ -54,7 +64,10 @@ class PRLoopTests(unittest.TestCase):
             def task(self, _repo, _number, _phase, _head):
                 return Path(tmp) / "task.json", {}
 
-            def clean_up(self):
+            def announce(self):
+                pass
+
+            def finish(self):
                 pass
 
         class Agent:
@@ -85,7 +98,7 @@ class PRLoopTests(unittest.TestCase):
             def close(self):
                 closed.append(self.identity)
 
-        args = SimpleNamespace(pr=[7, 8], dry_run=False, phase_timeout=10, startup_timeout=1,
+        args = SimpleNamespace(pr=[7, 8], dry_run=False, checkout=None, phase_timeout=10, startup_timeout=1,
                                max_actions=5, poll_interval=0.01, ready_agent="codex", draft_agent="claude",
                                ready_command="$pr-review-merge {pr}", draft_command="/pr-ready {pr}")
         with tempfile.TemporaryDirectory() as tmp, patch.object(pr_loop, "observe", side_effect=view), \
@@ -531,8 +544,9 @@ class World:
             item = self.items.pop(0) if self.items else self.phase
         if isinstance(item, BaseException):
             raise item
-        phase, head = item if isinstance(item, tuple) else (item, HEAD)
-        view = pr_view_json("ready" if phase == "unverified" else phase, number=number, head=head)
+        phase, head, *url = item if isinstance(item, tuple) else (item, HEAD)
+        view = pr_view_json("ready" if phase == "unverified" else phase, number=number, head=head,
+                            url=url[0] if url else f"https://github.com/acme/demo/pull/{number}")
         return view, phase, self.DETAIL if phase == "unverified" else ""
 
 
@@ -552,8 +566,8 @@ class Fleet:
     def new_agent(self, executable, _checkout, number, phase):
         return FakeAgent(self, executable, number, phase)
 
-    def new_checkout(self, view, repo):
-        checkout = FakeCheckout(self, view, repo)
+    def new_checkout(self, repo, directory=None, *, dry_run=False):
+        checkout = FakeCheckout(self, repo, directory, dry_run)
         self.checkouts.append(checkout)
         return checkout
 
@@ -594,8 +608,12 @@ class FakeAgent:
 
 
 class FakeCheckout:
-    def __init__(self, fleet, view, repo):
-        self.fleet, self.view, self.verified, self.cleaned = fleet, view, 0, False
+    def __init__(self, fleet, repo, directory, dry_run):
+        self.fleet, self.repo, self.directory, self.dry_run = fleet, repo, directory, dry_run
+        self.verified, self.announced, self.finished = 0, 0, False
+
+    def announce(self):
+        self.announced += 1
 
     def verify(self):
         self.verified += 1
@@ -609,25 +627,30 @@ class FakeCheckout:
         self.fleet.tasks.append(SimpleNamespace(phase=phase, head=head, task=task, path=path))
         return path, task
 
-    def clean_up(self):
-        self.cleaned = True
+    def finish(self):
+        self.finished = True
 
 
 class RunPRCase(unittest.TestCase):
+    real_checkout = False  # True: the real Checkout, on real git (FakeEnv), instead of the fleet's recording fake
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.clock = FakeTime()
         self.fleet = Fleet(self.clock, self.temp.name)
         self.told = []
-        for target, value in (("time", self.clock), ("tell", self.told.append), ("Agent", self.fleet.new_agent),
-                              ("Checkout", self.fleet.new_checkout)):
+        self.env = FakeEnv(self) if self.real_checkout else None
+        patches = [("time", self.clock), ("tell", self.told.append), ("Agent", self.fleet.new_agent)]
+        if not self.real_checkout:
+            patches.append(("Checkout", self.fleet.new_checkout))
+        for target, value in patches:
             patcher = patch.object(pr_loop, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
 
     def args(self, **overrides):
-        values = dict(pr=[7], dry_run=False, phase_timeout=100, startup_timeout=60, max_actions=20,
+        values = dict(pr=[7], dry_run=False, checkout=str(self.env.checkout) if self.env else None, phase_timeout=100, startup_timeout=60, max_actions=20,
                       poll_interval=10, ready_agent="codex", draft_agent="claude",
                       ready_command="$pr-review-merge {pr}", draft_command="/pr-ready {pr}")
         values.update(overrides)
@@ -636,7 +659,10 @@ class RunPRCase(unittest.TestCase):
     def run_batch(self, items=(), phase="merged", **overrides):
         self.world = World(items, phase)
         with patch.object(pr_loop, "observe", self.world.observe):
-            pr_loop.Batch(pr_loop.Repo.parse("acme/demo"), self.args(**overrides)).run()
+            batch = pr_loop.Batch(pr_loop.Repo.parse("acme/demo"), self.args(**overrides))
+            if self.real_checkout:  # the lock of the checkout is given back at the end of the test
+                self.addCleanup(lambda: batch.checkout and batch.checkout.release())
+            batch.run()
 
     def stops(self, pattern, items=(), phase="merged", **overrides):
         with self.assertRaisesRegex(pr_loop.Stop, pattern) as caught:
@@ -665,7 +691,7 @@ class MergeTrainTests(RunPRCase):
         self.assertIn("PR #7: waiting for merge train", self.told)
         self.assertIn("PR #7: merged", self.told)
         self.assertEqual(["ready"], self.fleet.closed, "the panes are closed once GitHub confirms the merge")
-        self.assertTrue(self.fleet.checkouts[0].cleaned)
+        self.assertTrue(self.fleet.checkouts[0].finished, "the run says what it kept")
 
     def test_one_stale_ready_read_after_queued_is_not_a_return_to_ready(self):
         # GitHub can answer one read from before the label was applied.
@@ -702,16 +728,39 @@ class DebounceTests(RunPRCase):
         self.run_batch(["ready"] * 3 + ["merged"] * 2)
         self.assertEqual([start + 10], self.fleet.submit_times, "one poll interval passes before the dispatch")
 
+    def inspected_only(self):
+        """A dry run inspects the checkout (read-only, `dry_run=True`) and reports it; it takes no part in the run."""
+        (checkout,) = self.fleet.checkouts
+        self.assertEqual((True, 0, 1, False), (checkout.dry_run, checkout.verified, checkout.announced,
+                                               checkout.finished))
+
     def test_a_dry_run_reports_after_the_first_read_and_starts_nothing(self):
         self.run_batch(["draft", "ready", "merged"], dry_run=True)
         self.assertEqual(1, self.world.reads)
         self.assertEqual(["PR #7: draft"], self.told)
-        self.assertEqual(([], [], []), (self.fleet.agents, self.fleet.checkouts, self.clock.sleeps))
+        self.assertEqual(([], []), (self.fleet.agents, self.clock.sleeps))
+        self.inspected_only()
 
     def test_a_dry_run_names_why_a_ready_pr_is_unverified(self):
         self.run_batch(["unverified", "ready"], dry_run=True)
         self.assertEqual(["PR #7: unverified (synthetic detail)"], self.told)
-        self.assertEqual(([], [], []), (self.fleet.agents, self.fleet.checkouts, self.clock.sleeps))
+        self.assertEqual(([], []), (self.fleet.agents, self.clock.sleeps))
+        self.inspected_only()
+
+    def test_a_dry_run_reports_every_pr_and_then_the_refusal_of_the_checkout(self):
+        refusal = pr_loop.Stop("checkout /x is not clean")
+        calls = []
+
+        def refused(repo, directory=None, *, dry_run=False):
+            calls.append(dry_run)
+            raise refusal
+        self.world = World(["draft", "ready"], "merged")
+        with patch.object(pr_loop, "Checkout", refused), patch.object(pr_loop, "observe", self.world.observe):
+            with self.assertRaises(pr_loop.Stop) as caught:
+                pr_loop.Batch(pr_loop.Repo.parse("acme/demo"), self.args(pr=[7, 8], dry_run=True)).run()
+        self.assertIs(refusal, caught.exception, "reported as it is, without a PR prefix")
+        self.assertEqual(["PR #7: draft", "PR #8: ready"], self.told, "every PR is reported before the refusal")
+        self.assertEqual([True], calls)
 
 
 class MaxActionsTests(RunPRCase):
@@ -725,6 +774,148 @@ class MaxActionsTests(RunPRCase):
         # (a handoff reads the PR once more, to judge the result, before the next role's confirming read)
         self.run_batch(["ready"] * 3 + ["draft"] * 4 + ["merged"] * 2, max_actions=2)
         self.assertEqual(["ready", "draft"], self.roles())
+
+
+class DispatchChecksTests(RunPRCase):
+    """What runs before EVERY dispatch (not only the first): the PR URL, and the checkout (`verify`)."""
+
+    def test_the_pr_url_is_checked_before_every_dispatch(self):
+        wrong = "https://example.com/acme/demo/pull/7"
+        items = ["ready"] * 3 + [("draft", HEAD, wrong)] * 4
+        message = self.stops("PR #7: GitHub returned an unexpected PR URL", items)
+        self.assertEqual("PR #7: GitHub returned an unexpected PR URL", message)
+        self.assertEqual(["ready"], self.roles(), "the second dispatch never happened")
+        self.assertEqual(["ready"], [agent.role for agent in self.fleet.agents], "and no agent was started for it")
+        # The control: the same run with the URL of this PR dispatches both.
+        self.setUp()
+        self.run_batch(["ready"] * 3 + ["draft"] * 4 + ["merged"] * 2)
+        self.assertEqual(["ready", "draft"], self.roles())
+
+    def test_the_pr_url_is_checked_before_the_first_agent_is_started(self):
+        self.stops("PR #7: GitHub returned an unexpected PR URL", [("ready", HEAD, "https://github.com/acme/other/pull/7")] * 3)
+        self.assertEqual(([], []), (self.fleet.agents, self.fleet.submits))
+        self.assertEqual(0, self.fleet.checkouts[0].verified, "the URL comes before the checkout is looked at")
+
+    def test_the_checkout_is_verified_before_every_dispatch(self):
+        self.run_batch(["ready"] * 3 + ["draft"] * 4 + ["ready"] * 4 + ["merged"] * 2)
+        self.assertEqual(["ready", "draft", "ready"], self.roles())
+        (checkout,) = self.fleet.checkouts
+        self.assertEqual((1, 3, 1), (len(self.fleet.checkouts), checkout.verified, checkout.announced))
+
+    def test_a_checkout_that_fails_verification_stops_before_the_agent_is_started(self):
+        def fail():
+            raise pr_loop.Stop("checkout /x is no longer on main")
+        with patch.object(FakeCheckout, "verify", side_effect=fail):
+            message = self.stops("checkout /x is no longer on main", ["ready"] * 3)
+        self.assertEqual("PR #7: checkout /x is no longer on main", message)
+        self.assertEqual(([], []), (self.fleet.agents, self.fleet.submits))
+
+
+class RealCheckoutBatchTests(RunPRCase):
+    """The Batch with the real Checkout on real git: what the runner does between dispatches and between PRs."""
+    real_checkout = True
+
+    def test_a_checkout_a_skill_left_on_another_branch_stops_the_next_dispatch(self):
+        def a_skill_leaves_a_pr_branch():
+            self.env.git("switch", "-q", "-c", "pr-branch", cwd=self.env.checkout)
+        items = ["ready"] * 3 + [a_skill_leaves_a_pr_branch] + ["draft"] * 4
+        message = self.stops(rf"PR #7: checkout {re.escape(str(self.env.checkout))} is no longer on main at "
+                             rf"{self.env.remote_head[:12]} \(now pr-branch at {self.env.remote_head[:12]}\): a skill "
+                             "did not restore it or something else changed it; nothing was dispatched", items)
+        self.assertTrue(message.startswith("PR #7: "))
+        self.assertEqual(["ready"], self.roles(), "the second role was never dispatched")
+        self.assertEqual(["ready"], [agent.role for agent in self.fleet.agents], "and never started")
+
+    def test_a_stopped_run_leaves_what_a_skill_did_exactly_as_it_is(self):
+        # An interrupted or blocked agent may leave the checkout on a PR branch with commits, edits, untracked and ignored
+        # files and a stash: the runner stops, says so, and touches none of it (no reset, clean, checkout or stash).
+        root = self.env.checkout
+
+        def git(*args):
+            return self.env.git(*args, cwd=root)
+
+        def a_skill_works_on_a_pr_branch():
+            git("switch", "-q", "-c", "pr-branch")
+            (root / "feature.txt").write_text("committed\n")
+            git("add", "feature.txt")
+            git("commit", "-q", "-m", "work")
+            (root / "README.txt").write_text("stashed\n")
+            git("stash", "push", "-q")
+            (root / "README.txt").write_text("edited\n")
+            (root / "untracked.txt").write_text("untracked\n")
+            (root / ".pr-ready/7").mkdir(parents=True)
+            (root / ".pr-ready/7/evidence.json").write_text("ignored\n")
+        self.stops("is no longer on main", ["ready"] * 3 + [a_skill_works_on_a_pr_branch] + ["draft"] * 4)
+        self.assertEqual("pr-branch", git("symbolic-ref", "--short", "HEAD"))
+        self.assertEqual("work", git("log", "-1", "--format=%s"))
+        self.assertEqual(["edited\n", "untracked\n", "ignored\n", "committed\n"],
+                         [(root / name).read_text() for name in ("README.txt", "untracked.txt", ".pr-ready/7/evidence.json",
+                                                                 "feature.txt")])
+        self.assertEqual(1, len(git("stash", "list").splitlines()), "the stash is still there")
+        self.assertTrue(any(root.glob(".pr-loop/*/task.json")), "and so is the task file of the dispatch")
+
+    def test_the_same_run_with_the_checkout_restored_dispatches_both_roles(self):
+        # The control of the test above.
+        self.run_batch(["ready"] * 3 + ["draft"] * 4 + ["merged"] * 2)
+        self.assertEqual(["ready", "draft"], self.roles())
+
+    def test_a_skill_that_leaves_work_behind_stops_the_next_dispatch(self):
+        def a_skill_leaves_a_file():
+            (self.env.checkout / "left-behind.txt").write_text("x")
+        self.stops(r"PR #7: checkout .* has uncommitted changes or untracked files \(1 paths, e.g. left-behind.txt\); "
+                   "commit or remove them; the runner never stashes or discards work; nothing was dispatched",
+                   ["ready"] * 3 + [a_skill_leaves_a_file] + ["draft"] * 4)
+        self.assertEqual(["ready"], self.roles())
+
+    def test_origin_moving_during_the_batch_does_not_refuse_the_next_pr(self):
+        # The merge train moves origin between PRs: the tip is read at startup only.
+        # (each PR: two reads to believe `ready`, the confirming read, two of `merged` and the hand-over's fresh read)
+        items = ["ready"] * 3 + ["merged"] * 3 + [self.env.advance_remote] + ["ready"] * 3 + ["merged"] * 3
+        self.run_batch(items, pr=[7, 8])
+        self.assertEqual(["ready", "ready"], self.roles())
+        self.assertNotEqual(self.env.remote_head, self.env.git("rev-parse", "HEAD", cwd=self.env.checkout),
+                            "origin did move: the checkout is behind it now")
+
+    def test_a_refused_checkout_reads_no_pr_and_starts_nothing(self):
+        (self.env.checkout / "stray.txt").write_text("x")
+        self.world = World(["ready"] * 3)
+        with patch.object(pr_loop, "observe", self.world.observe):
+            with self.assertRaisesRegex(pr_loop.Stop, r"^checkout .* has uncommitted changes or untracked files"):
+                pr_loop.Batch(pr_loop.Repo.parse("acme/demo"), self.args()).run()
+        self.assertEqual((0, [], []), (self.world.reads, self.fleet.agents, self.clock.sleeps))
+        self.assertEqual([], self.env.gh_calls(), "no GitHub call")
+        self.assertEqual([], [call for call in self.env.tmux_calls() if call[0] != "list-panes"], "no tmux session")
+
+    def test_the_run_holds_the_lock_of_the_checkout_while_it_works(self):
+        lock = self.env.checkout / ".git/pilot-pr-loop.lock"
+        self.run_batch(["ready"] * 3 + ["merged"] * 2)
+        batch_lock = os.open(lock, os.O_RDWR)
+        self.addCleanup(os.close, batch_lock)
+        # (the run's own descriptor is still open: the process has not ended)
+        with self.assertRaises(OSError):
+            pr_loop.fcntl.flock(batch_lock, pr_loop.fcntl.LOCK_EX | pr_loop.fcntl.LOCK_NB)
+
+    def test_ctrl_c_keeps_everything_and_says_where(self):
+        def ctrl_c():
+            raise KeyboardInterrupt
+        self.world = World(["ready"] * 3 + [ctrl_c])
+        argv = ["pr_loop.py", "7", "--repo", "acme/demo", "--checkout", str(self.env.checkout), "--poll-interval", "0.01"]
+        errors = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.object(pr_loop, "observe", self.world.observe), \
+             contextlib.redirect_stderr(errors):
+            code = pr_loop.main()
+        self.assertEqual((130, f"Interrupted; any active panes and the task files under {self.env.checkout}/.pr-loop/ were "
+                               "kept.\n"), (code, errors.getvalue()))
+        self.assertFalse([line for line in self.told if line.startswith("Kept:")], "an interrupt prints its own message")
+        self.assertTrue(any(self.env.checkout.glob(".pr-loop/*/task.json")), "the task file of the dispatch is kept")
+        self.assertEqual(self.env.remote_head, self.env.git("rev-parse", "HEAD", cwd=self.env.checkout))
+
+    def test_a_dry_run_reports_the_pr_and_the_checkout_and_holds_no_lock(self):
+        self.run_batch(["draft"], dry_run=True)
+        self.assertEqual("PR #7: draft", self.told[0])
+        self.assertEqual(f"Checkout: {self.env.checkout} (main at {self.env.remote_head[:12]})", self.told[1])
+        self.assertFalse((self.env.checkout / ".git/pilot-pr-loop.lock").exists())
+        self.assertEqual([], self.env.tmux_calls())
 
 
 class PhaseTimeoutTests(RunPRCase):
@@ -812,7 +1003,9 @@ class ReadRetryTests(RunPRCase):
         message = self.stops("GitHub read failed 3 consecutive times; no command sent: boom",
                              [self.boom(), self.boom(), self.boom()])
         self.assertEqual("PR #7: GitHub read failed 3 consecutive times; no command sent: boom", message)
-        self.assertEqual(([], [], []), (self.fleet.submits, self.fleet.agents, self.fleet.checkouts))
+        self.assertEqual(([], []), (self.fleet.submits, self.fleet.agents))
+        (checkout,) = self.fleet.checkouts  # inspected at the start of the run, before the first read
+        self.assertEqual(0, checkout.verified, "and never verified for a dispatch that did not happen")
         self.assertEqual([10, 10], self.clock.sleeps, "no sleep after the last attempt")
 
     def test_a_failing_confirming_read_stops_before_the_task_is_pasted(self):
@@ -844,12 +1037,17 @@ class ReadRetryTests(RunPRCase):
                 self.assertEqual(1, pr_view.call_count, "a verdict about the PR is not a transient failure")
                 self.assertEqual([], self.clock.sleeps)
 
-    def test_a_failed_clone_is_not_retried(self):
-        # Reads are retried; a command that changes something never is.
-        with patch.object(pr_loop, "Checkout", side_effect=pr_loop.Stop("gh repo failed (1): clone")) as checkout:
-            with self.assertRaisesRegex(pr_loop.Stop, "gh repo failed"):
-                self.run_batch(["ready"] * 3)
+    def test_a_refused_checkout_reads_no_pr_and_starts_nothing(self):
+        # The checkout is inspected before the first PR is read, and a refusal is a verdict: it is not retried.
+        self.world = World(["ready"] * 3)
+        with patch.object(pr_loop, "Checkout", side_effect=pr_loop.Stop("checkout /x has no origin remote")) as checkout:
+            with patch.object(pr_loop, "observe", self.world.observe):
+                with self.assertRaises(pr_loop.Stop) as caught:
+                    pr_loop.Batch(pr_loop.Repo.parse("acme/demo"), self.args()).run()
+        self.assertEqual("checkout /x has no origin remote", str(caught.exception), "no PR prefix: no PR was involved")
         self.assertEqual(1, checkout.call_count)
+        self.assertEqual((0, [], [], []), (self.world.reads, self.fleet.agents, self.fleet.submits, self.clock.sleeps))
+        self.assertEqual([], self.fleet.checkouts)
 
 
 class HandoffTests(RunPRCase):
@@ -920,7 +1118,7 @@ class HandoffResultTests(RunPRCase):
         self.assertEqual([role], self.roles(), "the next role was never dispatched")
         self.assertEqual([role], [agent.role for agent in self.fleet.agents], "the next role was never started")
         self.assertEqual([], self.fleet.closed, "the panes are retained for inspection")
-        self.assertFalse(self.fleet.checkouts[0].cleaned)
+        self.assertTrue(self.fleet.checkouts[0].finished, "a stopped run says what it kept")
         self.assertNotIn("PR #7: merged", self.told)
 
     # -- the reviewer's scenario: GitHub already shows Ready when the Draft gate's blocker arrives -------------
@@ -1078,7 +1276,9 @@ class UnverifiedTests(RunPRCase):
         message = self.stops(re.escape(self.refusal()), ["unverified"] * 2)
         self.assertEqual("PR #7: " + self.refusal(), message)
         self.assertEqual(2, self.world.reads, "the phase is believed after two reads, like any other")
-        self.assertEqual(([], [], [], []), (self.fleet.agents, self.fleet.checkouts, self.fleet.submits, self.fleet.tasks))
+        self.assertEqual(([], [], []), (self.fleet.agents, self.fleet.submits, self.fleet.tasks))
+        (checkout,) = self.fleet.checkouts  # inspected at the start of the run, before the first read
+        self.assertEqual(0, checkout.verified, "and never verified for a dispatch that did not happen")
 
     def test_one_unverified_read_between_ready_reads_is_not_acted_on(self):
         # The debounce, with the new phase: the same sequence that is refused above when it is stable.
@@ -1205,6 +1405,107 @@ class ImportsTests(unittest.TestCase):
                  "imports write from ready_signal")):
             with self.subTest(case=case):
                 self.assertIn(expected, "; ".join(self.problems(source)))
+
+    # The runner starts agents in the operator's own checkout and must never create a workspace of its own or destroy
+    # anything of the operator's (class `ephemeral-agent-workspace`, kjelly/pilot#423): no temporary directory, no
+    # deleting, no clone, no git call that writes, and GitHub only through gh_runtime's reads.
+    BANNED_MODULES = {"tempfile"}
+    DELETES_ANYWHERE = {"rmtree", "unlink", "rmdir", "removedirs", "truncate", "write_text", "write_bytes"}
+    DELETES_ON_OS = {"remove", "rename", "renames", "replace", "ftruncate"}
+    READ_ONLY_GIT = {"rev-parse", "symbolic-ref", "cat-file", "merge-base", "config", "check-ignore", "ls-remote",
+                     "check-ref-format"}
+    SPAWNS = {"command", "run", "Popen", "check_output", "check_call", "call"}
+
+    @classmethod
+    def ephemeral(cls, source):
+        """What in `source` could create a workspace for the agents or destroy something of the operator's."""
+        tree = ast.parse(source)
+        found = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                found += [f"imports {alias.name}" for alias in node.names if alias.name in cls.BANNED_MODULES]
+            elif isinstance(node, ast.ImportFrom):
+                if node.module in cls.BANNED_MODULES:
+                    found.append(f"imports from {node.module}")
+                elif node.module == "shutil":
+                    found += [f"imports {alias.name} from shutil" for alias in node.names if alias.name != "which"]
+                elif node.module == "os":
+                    found += [f"imports {alias.name} from os" for alias in node.names
+                              if alias.name in cls.DELETES_ON_OS | cls.DELETES_ANYWHERE]
+            elif isinstance(node, ast.Attribute):
+                receiver = node.value.id if isinstance(node.value, ast.Name) else None
+                if node.attr in cls.DELETES_ANYWHERE:
+                    found.append(f"uses {node.attr}")
+                if receiver == "os" and node.attr in cls.DELETES_ON_OS:
+                    found.append(f"uses os.{node.attr}")
+                if receiver == "shutil" and node.attr != "which":
+                    found.append(f"uses shutil.{node.attr}")
+            elif isinstance(node, ast.Name) and node.id in cls.DELETES_ANYWHERE:
+                found.append(f"uses {node.id}")
+            elif isinstance(node, ast.Call):
+                found += cls.call_problems(node)
+        return sorted(set(found))
+
+    @classmethod
+    def call_problems(cls, call):
+        name = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", None)
+        strings = [arg.value for arg in call.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)]
+        found = []
+        if name == "open" or (name and name.endswith("open")):
+            modes = strings + [kw.value.value for kw in call.keywords if kw.arg == "mode" and isinstance(kw.value, ast.Constant)]
+            found += ["opens a file for writing over it" for mode in modes if isinstance(mode, str) and "w" in mode]
+        first = call.args[0] if call.args else None
+        if name in cls.SPAWNS and first is not None:
+            head = first.elts[0] if isinstance(first, (ast.List, ast.Tuple)) and first.elts else first
+            if isinstance(head, ast.Constant) and head.value == "gh":
+                found.append("runs gh (reads go through gh_runtime)")
+            if isinstance(head, ast.Constant) and head.value == "git" and name == "command":
+                found.append("calls git through command() (use git(), which is read-only)")
+        if name == "git" and isinstance(call.func, ast.Name):
+            sub = call.args[1] if len(call.args) > 1 else None
+            if not (isinstance(sub, ast.Constant) and isinstance(sub.value, str)):
+                found.append("calls git with a subcommand that is not a literal")
+            elif sub.value not in cls.READ_ONLY_GIT:
+                found.append(f"calls git {sub.value}")
+            elif sub.value == "config" and "--get-all" not in strings:
+                found.append("calls git config without --get-all")
+        return found
+
+    def test_the_runner_makes_no_workspace_and_destroys_nothing(self):
+        self.assertEqual([], self.ephemeral(self.SOURCE))
+
+    def test_the_guard_rejects_every_way_to_make_a_workspace_or_destroy_one(self):
+        good = ("import os, shutil, subprocess\nfrom pathlib import Path\n"
+                "shutil.which('claude')\ngit(cwd, 'rev-parse', '--show-toplevel')\n"
+                "git(cwd, 'config', '--get-all', '-z', 'remote.origin.url')\ncommand('tmux', 'list-panes')\n"
+                "exclude.open('a', encoding='utf-8')\npath.open('x', encoding='utf-8')\ntext.replace('a', 'b')\n")
+        self.assertEqual([], self.ephemeral(good), "control: what the runner does is accepted")
+        for case, extra, expected in (
+                ("a temporary directory", "import tempfile\n", "imports tempfile"),
+                ("one from the module", "from tempfile import mkdtemp\n", "imports from tempfile"),
+                ("rmtree", "shutil.rmtree(path)\n", "uses rmtree"),
+                ("rmtree by name", "from shutil import rmtree\n", "imports rmtree from shutil"),
+                ("another shutil call", "shutil.move(a, b)\n", "uses shutil.move"),
+                ("unlink", "path.unlink()\n", "uses unlink"),
+                ("rmdir", "path.rmdir()\n", "uses rmdir"),
+                ("os.remove", "os.remove(path)\n", "uses os.remove"),
+                ("os.replace", "os.replace(a, b)\n", "uses os.replace"),
+                ("a truncating open", "open(path, 'w')\n", "opens a file for writing over it"),
+                ("a truncating Path.open", "path.open('w+')\n", "opens a file for writing over it"),
+                ("write_text", "path.write_text('x')\n", "uses write_text"),
+                ("a clone", "command('gh', 'repo', 'clone', url, path)\n", "runs gh"),
+                ("gh through subprocess", "subprocess.run(['gh', 'pr', 'ready'])\n", "runs gh"),
+                ("git through command", "command('git', 'status', cwd=path)\n", "calls git through command()"),
+                ("git reset", "git(cwd, 'reset', '--hard')\n", "calls git reset"),
+                ("git clean", "git(cwd, 'clean', '-fdx')\n", "calls git clean"),
+                ("git stash", "git(cwd, 'stash', 'push')\n", "calls git stash"),
+                ("git checkout", "git(cwd, 'checkout', 'main')\n", "calls git checkout"),
+                ("git status", "git(cwd, 'status')\n", "calls git status"),
+                ("git clone", "git(cwd, 'clone', url)\n", "calls git clone"),
+                ("git config that writes", "git(cwd, 'config', 'user.name', 'x')\n", "calls git config without --get-all"),
+                ("a subcommand that is computed", "git(cwd, verb)\n", "calls git with a subcommand that is not a literal")):
+            with self.subTest(case=case):
+                self.assertIn(expected, "; ".join(self.ephemeral(good + extra)))
 
     def test_the_task_directory_is_named_once_in_the_shared_module(self):
         tree = ast.parse(self.SOURCE)
@@ -1427,127 +1728,848 @@ class CloseTests(TmuxCase):
             agent.close()
 
 
-# ---- (D) Checkout: the fake gh clones a scratch bare repository, git is real -------------------------------------
+# ---- (D) Checkout: real git, a real scratch remote, the fake tmux and gh -------------------------------------------
+
+@contextlib.contextmanager
+def working_in(path):
+    here = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(here)
+
+
+def sha256_of(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+class CheckPrUrlTests(unittest.TestCase):
+    """The PR a view describes must be this repository's pull request: a pure check, run before every dispatch."""
+    repo = pr_loop.Repo.parse("acme/demo")
+    BAD = {
+        "plain http": "http://github.com/acme/demo/pull/7",
+        "ssh": "ssh://github.com/acme/demo/pull/7",
+        "another host": "https://example.com/acme/demo/pull/7",
+        "another repository": "https://github.com/acme/other/pull/7",
+        "another owner": "https://github.com/other/demo/pull/7",
+        "another PR": "https://github.com/acme/demo/pull/8",
+        "not a pull URL": "https://github.com/acme/demo/issues/7",
+        "a longer path": "https://github.com/acme/demo/pull/7/files",
+        "a query": "https://github.com/acme/demo/pull/7?x=1",
+        "a fragment": "https://github.com/acme/demo/pull/7#issuecomment-1",
+        "empty": "",
+    }
+
+    def test_a_pr_url_that_is_not_this_pr_is_refused(self):
+        for case, url in self.BAD.items():
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(pr_loop.Stop, "^GitHub returned an unexpected PR URL$"):
+                    pr_loop.check_pr_url(pr_view_json("ready", url=url), self.repo)
+        view = pr_view_json("ready")
+        del view["url"]
+        with self.assertRaisesRegex(pr_loop.Stop, "^GitHub returned an unexpected PR URL$"):
+            pr_loop.check_pr_url(view, self.repo)
+        self.assertIsNone(pr_loop.check_pr_url(pr_view_json("ready"), self.repo), "control: this PR's own URL")
+
+    def test_the_comparison_ignores_case_like_github(self):
+        self.assertIsNone(pr_loop.check_pr_url(pr_view_json("ready", url="https://GitHub.com/Acme/Demo/pull/7"), self.repo))
+
+    def test_a_host_qualified_repository_is_checked_against_its_own_host(self):
+        repo = pr_loop.Repo.parse("ghe.example.com/acme/demo")
+        self.assertIsNone(pr_loop.check_pr_url(
+            pr_view_json("ready", url="https://ghe.example.com/acme/demo/pull/7"), repo))
+        with self.assertRaisesRegex(pr_loop.Stop, "unexpected PR URL"):
+            pr_loop.check_pr_url(pr_view_json("ready"), repo)  # a github.com URL for a ghe.example.com repository
+
 
 class CheckoutCase(unittest.TestCase):
+    """A real clone of a real bare repository (the operator's checkout), the fake tmux and gh, real git."""
     repo = pr_loop.Repo.parse("acme/demo")
+    IDENTITY = "github.com/acme/demo"
 
     def setUp(self):
         self.env = FakeEnv(self)
+        self.path = self.env.checkout
         self.told = []
         patcher = patch.object(pr_loop, "tell", self.told.append)
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def checkout(self, view=None, repo=None):
-        return pr_loop.Checkout(view or pr_view_json("ready"), repo or self.repo)
+    def checkout(self, directory="", *, repo=None, dry_run=False):
+        """The Checkout of the operator's checkout (`directory`: a path; None, the current directory)."""
+        found = pr_loop.Checkout(repo or self.repo, str(self.path) if directory == "" else directory, dry_run=dry_run)
+        self.addCleanup(found.release)
+        return found
 
-    def git(self, checkout, *args):
-        return self.env.git(*args, cwd=checkout.path)
+    def refused(self, directory="", **kwargs):
+        """The checkout is refused; the Stop it raised (it holds no lock afterwards)."""
+        with self.assertRaises(pr_loop.Stop) as caught:
+            self.checkout(directory, **kwargs)
+        return caught.exception
 
-    def ignored(self, checkout, path):
-        done = subprocess.run(["git", "check-ignore", "-q", "--", path], cwd=checkout.path, env=self.env.git_env)
+    def stops(self, message, directory="", **kwargs):
+        """The checkout is refused, with exactly `message`."""
+        error = self.refused(directory, **kwargs)
+        self.assertEqual(message, str(error))
+        return error
+
+    def git(self, *args, cwd=None):
+        return self.env.git(*args, cwd=cwd or self.path)
+
+    def tip(self, cwd=None):
+        return self.git("rev-parse", "HEAD", cwd=cwd)
+
+    def commit(self, name="local.txt", cwd=None):
+        (Path(cwd or self.path) / name).write_text("local\n")
+        self.git("add", "-A", cwd=cwd)
+        self.git("commit", "-q", "-m", "local " + name, cwd=cwd)
+        return self.tip(cwd)
+
+    def ignored(self, path, probe):
+        done = subprocess.run(["git", "check-ignore", "-q", "--", probe], cwd=path, env=self.env.git_env)
         return done.returncode == 0
 
-
-class CheckoutUrlTests(CheckoutCase):
-    def test_a_pr_url_that_is_not_this_pr_is_refused_before_anything_is_cloned(self):
-        for case, url in {
-            "plain http": "http://github.com/acme/demo/pull/7",
-            "ssh": "ssh://github.com/acme/demo/pull/7",
-            "another host": "https://example.com/acme/demo/pull/7",
-            "another repository": "https://github.com/acme/other/pull/7",
-            "another owner": "https://github.com/other/demo/pull/7",
-            "another PR": "https://github.com/acme/demo/pull/8",
-            "not a pull URL": "https://github.com/acme/demo/issues/7",
-            "a longer path": "https://github.com/acme/demo/pull/7/files",
-            "a query": "https://github.com/acme/demo/pull/7?x=1",
-            "a fragment": "https://github.com/acme/demo/pull/7#issuecomment-1",
-            "empty": "",
-        }.items():
-            with self.subTest(case=case):
-                with self.assertRaisesRegex(pr_loop.Stop, "GitHub returned an unexpected PR URL"):
-                    self.checkout(pr_view_json("ready", url=url))
-                self.assertEqual([], self.env.gh_calls(), "nothing was cloned")
-                self.assertFalse(self.env.state_home.exists(), "no checkout directory was made")
-        with self.assertRaisesRegex(pr_loop.Stop, "unexpected PR URL"):
-            view = pr_view_json("ready")
-            del view["url"]
-            self.checkout(view)
-
-    def test_the_expected_url_is_cloned_over_https_into_the_managed_directory(self):
-        checkout = self.checkout()
-        self.assertEqual([["repo", "clone", "https://github.com/acme/demo", str(checkout.path)]],
-                         self.env.gh_calls())
-        root = self.env.state_home / "pilot" / "pr-loop"
-        self.assertEqual(root, checkout.path.parent)
-        self.assertTrue(checkout.path.name.startswith("batch-"))
-        self.assertEqual(0o700, stat.S_IMODE(root.stat().st_mode))
-        self.assertIn(f"Managed checkout: {checkout.path}", self.told)
-        self.assertEqual("refs/heads/main", checkout.branch)
-        self.assertEqual(self.env.remote_head, checkout.head)
-
-    def test_the_comparison_ignores_case_like_github(self):
-        self.checkout(pr_view_json("ready", url="https://GitHub.com/Acme/Demo/pull/7"))
-
-    def test_a_host_qualified_repository_is_cloned_from_its_own_host(self):
-        repo = pr_loop.Repo.parse("ghe.example.com/acme/demo")
-        checkout = self.checkout(pr_view_json("ready", url="https://ghe.example.com/acme/demo/pull/7"), repo)
-        self.assertEqual("https://ghe.example.com/acme/demo", self.env.gh_calls()[0][2])
-        with self.assertRaisesRegex(pr_loop.Stop, "unexpected PR URL"):
-            self.checkout(pr_view_json("ready"), repo)  # a github.com URL for a ghe.example.com repository
-        self.assertTrue(checkout.path.exists())
-
-    def test_a_clone_that_fails_stops(self):
-        self.env.update_gh(clone_exit=5)
-        with self.assertRaisesRegex(pr_loop.Stop, r"gh repo failed \(5\): fake gh: injected clone failure"):
-            self.checkout()
-        self.assertEqual(1, len(self.env.gh_calls()), "a clone is not retried")
-
-
-class CheckoutIgnoreTests(CheckoutCase):
-    def test_the_task_and_evidence_directories_are_excluded_from_git_status(self):
-        checkout = self.checkout()
-        exclude = (checkout.path / ".git/info/exclude").read_text().splitlines()
-        self.assertIn("/.pr-ready/", exclude)
-        self.assertIn("/.pr-loop/", exclude)
-        self.assertNotIn("tmux-ai", "\n".join(exclude))
-        self.assertTrue(self.ignored(checkout, ".pr-loop/" + "0" * 32 + "/task.json"))
-        self.assertTrue(self.ignored(checkout, ".pr-ready/anything"))
-        self.assertFalse(self.ignored(checkout, "stray.txt"), "control: only those two are ignored")
-
-    def test_a_checkout_that_does_not_ignore_the_task_directory_is_refused(self):
-        # A tracked .gitignore beats .git/info/exclude, so the exclude written by the runner can be neutralised.
-        self.env.make_remote({**self.helpers(), ".gitignore": "!/.pr-loop/\n"})
-        with self.assertRaisesRegex(pr_loop.Stop, r"managed checkout does not ignore \.pr-loop/ and \.pr-ready/"):
-            self.checkout()
-
-    def test_a_checkout_that_does_not_ignore_the_evidence_directory_is_refused(self):
-        # Each directory is probed by itself: ignoring only one of them is not enough.
-        self.env.make_remote({**self.helpers(), ".gitignore": "!/.pr-ready/\n"})
-        with self.assertRaisesRegex(pr_loop.Stop, r"managed checkout does not ignore \.pr-loop/ and \.pr-ready/"):
-            self.checkout()
+    def exclude(self, path=None):
+        return Path(path or self.path) / ".git/info/exclude"
 
     @staticmethod
-    def helpers(*, leave_out=()):
-        """The two helper files of a default branch the runner accepts (stubs: only their presence is checked)."""
-        return {path: "x = 1\n" for path in HELPER_PATHS if path not in leave_out}
+    def helpers(*, leave_out=(), **more):
+        """The files of a default branch the runner accepts (stubs: only the presence of the two helpers is checked)."""
+        return {**{path: "x = 1\n" for path in HELPER_PATHS if path not in leave_out}, **more}
 
-    def test_a_default_branch_without_the_result_helper_is_refused(self):
-        self.env.make_remote({"other.txt": "x\n"})
-        with self.assertRaisesRegex(pr_loop.Stop, r"git cat-file failed"):
-            self.checkout()
+    def rebuild(self, files):
+        """The scratch remote with these files on `main`, and the operator's checkout of it again."""
+        self.env.make_remote(files)
+        self.path = self.env.make_checkout()
+
+
+class CheckoutResolveTests(CheckoutCase):
+    """AC1 at the unit level: ONE absolute path, the root of the work tree, for the agents and for every git call."""
+
+    def test_the_default_is_the_root_of_the_work_tree_that_contains_the_current_directory(self):
+        below = self.path / "sub" / "dir"
+        below.mkdir(parents=True)
+        for here in (self.path, below):
+            with self.subTest(here=str(here)), working_in(here):
+                self.assertEqual(self.path, pr_loop.resolve_checkout(self.repo))
+                found = self.checkout(None)
+                self.assertEqual(self.path, found.path)
+                found.release()
+
+    def test_a_current_directory_outside_a_work_tree_is_refused(self):
+        message = ("the current directory is not inside a git work tree; start the runner in a checkout of "
+                   f"{self.IDENTITY} or pass --checkout DIR")
+        plain = self.env.root / "plain"
+        plain.mkdir()
+        # (the ceiling keeps git from finding a repository above the scratch directory)
+        with patch.dict(os.environ, GIT_CEILING_DIRECTORIES=str(self.env.root)):
+            for here in (plain, self.path / ".git"):
+                with self.subTest(here=str(here)), working_in(here):
+                    self.stops(message, None)
+
+    def test_checkout_must_be_a_directory_that_is_a_work_tree(self):
+        plain = self.env.root / "plain"
+        plain.mkdir()
+        (self.env.root / "file.txt").write_text("x")
+        with patch.dict(os.environ, GIT_CEILING_DIRECTORIES=str(self.env.root)):
+            for given, message in ((str(self.env.root / "missing"), "is not a directory"),
+                                   (str(self.env.root / "file.txt"), "is not a directory"),
+                                   (str(plain), "is not a git work tree"),
+                                   (str(self.path / ".git"), "is not a git work tree")):
+                with self.subTest(given=given):
+                    self.stops(f"--checkout {given} {message}", given)
+
+    def test_checkout_must_be_the_root_of_its_work_tree(self):
+        below = self.path / "sub"
+        below.mkdir()
+        self.stops(f"--checkout {below} is not the root of its git work tree {self.path}; pass {self.path}", str(below))
+        self.assertEqual(self.path, self.checkout(str(self.path)).path, "control: the root itself")
+
+    def test_the_same_checkout_however_it_is_spelled(self):
+        link = self.env.root / "link"
+        link.symlink_to(self.path)
+        for case, given, cwd in (("a symlink to it", str(link), None), ("a trailing slash", str(self.path) + "/", None),
+                                 ("a relative path", "checkout", self.env.root)):
+            with self.subTest(case=case), working_in(cwd or os.getcwd()):
+                found = self.checkout(given)
+                self.assertEqual(self.path, found.path, "one real absolute path")
+                found.release()
+        with patch.dict(os.environ, HOME=str(self.env.root)):
+            found = self.checkout("~/checkout")
+            self.assertEqual(self.path, found.path, "~ is expanded")
+
+    def test_a_linked_work_tree_is_a_checkout_of_its_own(self):
+        # The main checkout steps aside so that the linked work tree can be on main.
+        self.git("switch", "-q", "-c", "side")
+        linked = self.env.root / "linked"
+        self.git("worktree", "add", "-q", str(linked), "main")
+        found = self.checkout(str(linked))
+        self.assertEqual(linked, found.path)
+        # Its lock is its own; the exclude file is shared by every work tree of the repository.
+        self.assertEqual(self.path / ".git/worktrees/linked", found.lock_path.parent)
+        self.assertTrue(found.lock_path.is_file())
+        self.assertEqual(self.path / ".git/info/exclude", found.exclude)
+        self.assertEqual(["/.pr-ready/", "/.pr-loop/"], self.exclude().read_text().splitlines()[-2:])
+        # The main work tree, on `side`, is refused for being on side, not for the lock the linked one holds.
+        self.stops(f"checkout {self.path} is on side, not on main, the default branch of origin")
+
+
+class CheckoutOriginTests(CheckoutCase):
+    """origin must be the repository the runner drives; git reads the raw configuration, never a rewritten URL."""
+
+    def point_at(self, *urls, replace=True):
+        """Make these URLs the origin: the first is configured, and all of them are sent to the scratch remote."""
+        self.git("remote", "set-url", "origin", urls[0])
+        self.env.redirect_origin(self.path, *urls, replace=replace)
+
+    def test_no_origin_at_all_is_refused(self):
+        self.git("remote", "remove", "origin")
+        self.stops(f"checkout {self.path} has no origin remote")
+
+    def test_another_repository_is_refused_and_the_right_one_passes(self):
+        for url, found in (("https://github.com/other/demo.git", "github.com/other/demo"),
+                           ("https://github.com/acme/other.git", "github.com/acme/other"),
+                           ("https://example.com/acme/demo.git", "example.com/acme/demo"),
+                           ("git@gitlab.com:acme/demo.git", "gitlab.com/acme/demo")):
+            with self.subTest(url=url):
+                self.git("remote", "set-url", "origin", url)
+                self.stops(f"origin of {self.path} is {found}, not {self.IDENTITY}")
+        self.point_at("https://github.com/acme/demo.git")
+        self.checkout()
+
+    def test_an_origin_that_is_not_a_url_of_the_repository_is_refused(self):
+        for case, url in (("a local path", str(self.env.remote)), ("a file URL", f"file://{self.env.remote}"),
+                          ("git protocol", "git://github.com/acme/demo.git"), ("plain http", "http://github.com/acme/demo"),
+                          ("a deeper path", "https://github.com/acme/demo/tree/main"), ("only an owner", "https://github.com/acme"),
+                          ("a query", "https://github.com/acme/demo.git?x=1"), ("empty", "")):
+            with self.subTest(case=case):
+                self.git("remote", "set-url", "origin", url)
+                self.stops(f"origin of {self.path} is not a URL of {self.IDENTITY}")
+
+    def test_two_urls_are_refused_even_when_one_is_right(self):
+        # git fetches from the first and pushes to all of them: the runner needs exactly one.
+        for second in ("https://github.com/acme/other.git", "https://github.com/acme/demo.git"):
+            with self.subTest(second=second):
+                self.git("config", "--add", "remote.origin.url", second)
+                self.stops(f"origin of {self.path} has 2 URLs; the runner needs exactly one, of {self.IDENTITY}")
+                self.git("config", "--unset-all", "remote.origin.url")  # back to exactly one
+                self.git("config", "remote.origin.url", self.env.ORIGIN)
+        self.assertEqual([self.env.ORIGIN], self.git("config", "--get-all", "remote.origin.url").split())
+        self.checkout()  # control: one URL
+
+    def test_every_push_url_must_be_the_repository_too(self):
+        self.git("config", "remote.origin.pushurl", "https://github.com/other/demo.git")
+        self.stops(f"origin of {self.path} pushes to github.com/other/demo, not {self.IDENTITY}")
+        self.git("config", "remote.origin.pushurl", str(self.env.remote))
+        self.stops(f"a push URL of origin of {self.path} is not a URL of {self.IDENTITY}")
+        self.git("config", "remote.origin.pushurl", "git@github.com:acme/demo.git")
+        self.git("config", "--add", "remote.origin.pushurl", "https://github.com/acme/other.git")
+        self.stops(f"origin of {self.path} pushes to github.com/acme/other, not {self.IDENTITY}")
+        self.git("config", "--unset-all", "remote.origin.pushurl")
+        self.git("config", "--add", "remote.origin.pushurl", "git@github.com:acme/demo.git")
+        self.git("config", "--add", "remote.origin.pushurl", "ssh://git@github.com/ACME/demo")
+        self.checkout()  # control: every push URL is the repository, in other spellings
+
+    def test_the_forms_github_hands_out_are_the_repository(self):
+        token = "tok" + uuid.uuid4().hex
+        # (one of each form through the whole inspection; OriginRepoTests reads every spelling of them)
+        for url in ("https://GitHub.com/Acme/Demo/", "ssh://git@github.com:22/acme/demo.git", "git@github.com:acme/demo.git",
+                    f"https://x-access-token:{token}@github.com/acme/demo.git"):
+            with self.subTest(url=url.replace(token, "<token>")):
+                self.point_at(url)
+                found = self.checkout()
+                found.release()
+        self.assertNotIn(token, "\n".join(self.told), "a token in the URL is never printed")
+
+    def test_a_token_in_the_url_is_never_printed(self):
+        token = "tok" + uuid.uuid4().hex
+        self.git("remote", "set-url", "origin", f"https://x-access-token:{token}@github.com/other/demo.git")
+        error = self.stops(f"origin of {self.path} is github.com/other/demo, not {self.IDENTITY}")
+        self.assertNotIn(token, str(error))
+        self.git("config", "remote.origin.pushurl", f"https://{token}@example.com/acme/demo.git")
+        self.git("config", "--unset-all", "remote.origin.url")
+        self.git("config", "remote.origin.url", f"https://{token}@github.com/acme/demo.git")
+        error = self.stops(f"origin of {self.path} pushes to example.com/acme/demo, not {self.IDENTITY}")
+        self.assertNotIn(token, str(error))
+
+    def test_a_host_qualified_repository_is_the_origin_on_its_own_host(self):
+        repo = pr_loop.Repo.parse("ghe.example.com/acme/demo")
+        self.stops(f"origin of {self.path} is github.com/acme/demo, not ghe.example.com/acme/demo", repo=repo)
+        self.point_at("https://ghe.example.com/acme/demo.git")
+        self.assertEqual(self.path, self.checkout(repo=repo).path)
+
+
+class OriginRepoTests(unittest.TestCase):
+    """`origin_repo` reads the three URL forms GitHub hands out and nothing else; it never returns userinfo."""
+
+    def test_the_url_forms_of_a_repository(self):
+        token = "tok" + uuid.uuid4().hex  # (built at run time: no credential-shaped literal in a committed file)
+        for url, expected in {
+            "https://github.com/acme/demo": ("github.com", "acme", "demo"),
+            "https://github.com/acme/demo.git": ("github.com", "acme", "demo"),
+            "https://github.com/acme/demo/": ("github.com", "acme", "demo"),
+            "https://github.com/acme/demo.git/": ("github.com", "acme", "demo"),
+            f"https://user:{token}@github.com:8443/acme/demo.git": ("github.com", "acme", "demo"),
+            "https://GitHub.COM/Acme/Demo": ("github.com", "Acme", "Demo"),
+            "ssh://git@github.com/acme/demo.git": ("github.com", "acme", "demo"),
+            "ssh://github.com:22/acme/demo": ("github.com", "acme", "demo"),
+            "git@github.com:acme/demo.git": ("github.com", "acme", "demo"),
+            "github.com:acme/demo": ("github.com", "acme", "demo"),
+            "git@GHE.example.com:acme/demo": ("ghe.example.com", "acme", "demo"),
+            "https://github.com/acme/my.repo.git": ("github.com", "acme", "my.repo"),
+        }.items():
+            with self.subTest(url=url):
+                self.assertEqual(expected, pr_loop.origin_repo(url))
+
+    def test_anything_else_is_not_a_url_of_a_repository(self):
+        for url in ("", "/srv/git/demo.git", "../demo", "file:///srv/git/demo.git", "git://github.com/acme/demo.git",
+                    "http://github.com/acme/demo", "https://github.com/acme", "https://github.com/acme/demo/extra",
+                    "https://github.com/acme/demo?x=1", "https://github.com/acme/demo#frag", "https://github.com:bad/acme/demo",
+                    "https:///acme/demo", "https://[::1]/acme/demo", "git@github.com:acme", "git@github.com:acme/demo/extra",
+                    "git@github.com acme/demo", "C:\\\\repos\\\\demo", "https://github.com/acme/de mo", "github.com:acme//demo"):
+            with self.subTest(url=url):
+                self.assertIsNone(pr_loop.origin_repo(url))
+
+    def test_a_url_that_git_quotes_back_is_redacted(self):  # the function; CheckoutDefaultBranchTests tests its use
+        token = "tok" + uuid.uuid4().hex
+        url = f"https://x-access-token:{token}@github.com/acme/demo.git"
+        for text in (f"fatal: unable to access '{url}': boom", f"fatal: repository '{url}/' not found",
+                     f"fatal: unable to access 'https://{token}@other.example/x.git': boom"):
+            with self.subTest(text=text.replace(token, "<token>")):
+                self.assertNotIn(token, pr_loop.redact(text, [url]))
+        self.assertEqual("fatal: nothing to hide here", pr_loop.redact("fatal: nothing to hide here", [url, ""]))
+
+
+class CheckoutDefaultBranchTests(CheckoutCase):
+    """Origin says which branch is its default and where it is NOW; the checkout must be on it, at its tip."""
+
+    def test_an_origin_that_cannot_be_reached_is_refused(self):
+        self.env.redirect_origin(self.path, self.env.ORIGIN, remote=self.env.root / "missing.git", replace=True)
+        error = str(self.refused())
+        self.assertRegex(error, rf"^cannot read the default branch of origin for {re.escape(str(self.path))}: "
+                                r"git ls-remote failed \(128\): fatal: .*does not appear to be a git repository")
+        self.assertLessEqual(len(error.split("failed (128): ", 1)[1]), 300)
+        self.env.redirect_origin(self.path, self.env.ORIGIN, replace=True)
+        self.checkout()  # control: the same checkout, origin reachable
+
+    def test_what_git_says_about_origin_never_carries_a_url_with_a_token(self):
+        # SYNTHETIC: git quotes the URL back, userinfo and all, in some failures; a failing `git ls-remote` is made to
+        # do that here, because a real one would only be as good as the git version that runs the test.
+        token = "tok" + uuid.uuid4().hex
+        url = f"https://x-access-token:{token}@github.com/acme/demo.git"
+        self.git("remote", "set-url", "origin", url)
+        real = pr_loop.git
+
+        def quoting(cwd, *args, **kwargs):
+            if args[:1] == ("ls-remote",):
+                return subprocess.CompletedProcess(args, 128, "", f"fatal: unable to access '{url}/': boom {url}")
+            return real(cwd, *args, **kwargs)
+        with patch.object(pr_loop, "git", quoting):
+            with self.assertRaises(pr_loop.Stop) as caught:
+                self.checkout()
+        self.assertNotIn(token, str(caught.exception))
+        self.assertRegex(str(caught.exception), r"git ls-remote failed \(128\): fatal: unable to access '<origin>/': boom <origin>$")
+
+    def test_a_listing_that_is_not_exactly_the_two_lines_of_a_default_branch_is_refused(self):
+        # SYNTHETIC outputs (the real shape: `ref: refs/heads/main<TAB>HEAD` and `<sha><TAB>HEAD`, captured from git 2.53 and
+        # served by every other test of this class); each is a way for origin's answer to be something else.
+        sha, ref = "a" * 40, "ref: refs/heads/main\tHEAD"
+        real = pr_loop.git
+        refused = "origin did not report its default branch (git ls-remote --symref origin HEAD)"
+        for case, output in (("nothing", ""), ("the sha only", f"{sha}\tHEAD\n"), ("the ref only", f"{ref}\n"),
+                             ("a third line", f"{ref}\n{sha}\tHEAD\n{sha}\trefs/heads/other\n"),
+                             ("the lines the other way round", f"{sha}\tHEAD\n{ref}\n"), ("a short sha", f"{ref}\n{'a' * 39}\tHEAD\n"),
+                             ("a ref that is not a branch", f"ref: refs/tags/v1\tHEAD\n{sha}\tHEAD\n"),
+                             ("a branch name git refuses", f"ref: refs/heads/a..b\tHEAD\n{sha}\tHEAD\n"),
+                             ("another remote ref than HEAD", f"{ref}\n{sha}\trefs/heads/main\n"),
+                             ("no tab", f"ref: refs/heads/main HEAD\n{sha} HEAD\n")):
+            with self.subTest(case=case):
+                def listing(cwd, *args, _output=output, **kwargs):
+                    if args[:1] == ("ls-remote",):
+                        return subprocess.CompletedProcess(args, 0, _output, "")
+                    return real(cwd, *args, **kwargs)
+                with patch.object(pr_loop, "git", listing):
+                    self.stops(refused)
+        self.checkout()  # control: the real answer
+
+    def test_an_origin_without_a_default_branch_is_refused(self):
+        empty = self.env.root / "empty.git"
+        self.env.git("init", "-q", "--bare", "-b", "main", str(empty), cwd=self.env.root)
+        self.env.redirect_origin(self.path, self.env.ORIGIN, remote=empty, replace=True)
+        self.stops("origin did not report its default branch (git ls-remote --symref origin HEAD)")
+
+    def test_the_default_branch_is_what_origin_says_not_the_cached_origin_head(self):
+        # origin renamed its default branch to trunk; the checkout's refs/remotes/origin/HEAD still says main.
+        self.env.git("branch", "trunk", "main", cwd=self.env.remote)
+        self.env.git("symbolic-ref", "HEAD", "refs/heads/trunk", cwd=self.env.remote)
+        self.assertEqual("refs/remotes/origin/main", self.git("symbolic-ref", "refs/remotes/origin/HEAD"))
+        self.stops(f"checkout {self.path} is on main, not on trunk, the default branch of origin")
+        self.git("switch", "-q", "-c", "trunk", "main")
+        self.assertEqual("refs/heads/trunk", self.checkout().branch, "control: on trunk it passes")
+
+    def test_a_missing_or_wrong_cached_origin_head_changes_nothing(self):
+        self.git("remote", "set-head", "origin", "-d")
+        self.checkout().release()
+        self.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/nonexistent")
+        self.checkout().release()
+
+    def test_a_detached_head_is_refused_even_at_the_tip(self):
+        self.git("switch", "-q", "--detach")
+        self.stops(f"checkout {self.path} has a detached HEAD at {self.env.remote_head[:12]}; check out main, "
+                   "the default branch of origin")
+        self.git("switch", "-q", "main")
+        self.checkout()
+
+    def test_another_branch_at_the_same_commit_is_refused(self):
+        # The tip alone would pass: `other` and `main` are the same commit.
+        self.git("switch", "-q", "-c", "other")
+        self.assertEqual(self.env.remote_head, self.tip())
+        self.stops(f"checkout {self.path} is on other, not on main, the default branch of origin")
+        self.git("switch", "-q", "main")
+        self.checkout()
+
+    def test_a_checkout_behind_origin_is_told_to_pull(self):
+        behind = (f"local main is at {self.env.remote_head[:12]} but origin's main is at %s; run git pull --ff-only in "
+                  f"{self.path} and start the runner again")
+        old = self.env.remote_head
+        new = self.env.advance_remote()
+        # origin's new commit is not in the checkout yet ...
+        self.stops(behind % new[:12])
+        # ... and once it has been fetched, the checkout is still behind, not ahead.
+        self.git("fetch", "-q", "origin")
+        self.stops(behind % new[:12])
+        self.assertEqual(old, self.tip(), "the runner never updates the checkout")
+        self.git("pull", "-q", "--ff-only", "origin", "main")
+        self.checkout()  # control: pulled, equal to origin
+
+    def test_a_checkout_ahead_of_origin_is_refused(self):
+        local = self.commit()
+        self.stops(f"local main at {local[:12]} has commits that origin's main ({self.env.remote_head[:12]}) does not "
+                   "have; the skills must come from origin's default branch")
+        self.git("push", "-q", "origin", "main")
+        self.env.remote_head = self.git("rev-parse", "main", cwd=self.env.remote)
+        self.checkout()  # control: pushed, equal to origin
+
+    def test_a_diverged_checkout_is_told_to_pull_too(self):
+        local = self.commit()
+        new = self.env.advance_remote()
+        for fetched in (False, True):
+            with self.subTest(fetched=fetched):
+                if fetched:
+                    self.git("fetch", "-q", "origin")
+                self.stops(f"local main is at {local[:12]} but origin's main is at {new[:12]}; run git pull --ff-only in "
+                           f"{self.path} and start the runner again")
+
+    def test_a_checkout_without_a_commit_is_refused(self):
+        fresh = self.env.root / "fresh"
+        self.env.git("init", "-q", "-b", "main", str(fresh), cwd=self.env.root)
+        self.env.git("remote", "add", "origin", self.env.ORIGIN, cwd=fresh)
+        self.env.redirect_origin(fresh, self.env.ORIGIN)
+        self.stops(f"local main has no commit but origin's main is at {self.env.remote_head[:12]}; run git pull "
+                   f"--ff-only in {fresh} and start the runner again", str(fresh))
+
+
+class CheckoutCleanTests(CheckoutCase):
+    """The runner never stashes or discards work: a checkout with anything of the operator's in flight is refused."""
+
+    def test_uncommitted_work_is_refused_and_a_clean_checkout_passes(self):
+        text = "checkout %s has uncommitted changes or untracked files (%d paths, e.g. %s); commit or remove them; " \
+               "the runner never stashes or discards work"
+        (self.path / "README.txt").write_text("changed\n")
+        self.stops(text % (self.path, 1, "README.txt"))                                    # modified, unstaged
+        self.git("checkout", "--", "README.txt")
+        (self.path / "staged.txt").write_text("x")
+        self.git("add", "staged.txt")
+        self.stops(text % (self.path, 1, "staged.txt"))                                    # staged
+        self.git("reset", "-q")
+        self.stops(text % (self.path, 1, "staged.txt"))                                    # untracked
+        (self.path / "staged.txt").unlink()
+        self.checkout()                                                                    # control: clean
+
+    def test_the_first_three_paths_are_named_and_all_are_counted(self):
+        for name in ("z4", "z3", "z2", "z1"):
+            (self.path / name).write_text("x")
+        (self.path / "README.txt").write_text("changed\n")
+        self.stops(f"checkout {self.path} has uncommitted changes or untracked files (5 paths, e.g. README.txt, z1, z2); "
+                   "commit or remove them; the runner never stashes or discards work")
+
+    def test_a_path_that_is_not_printable_cannot_forge_the_message(self):
+        (self.path / "bad\nname").write_text("x")
+        error = str(self.refused())
+        self.assertIn("e.g. bad?name)", error)
+        self.assertEqual(1, len(error.splitlines()))
+
+    def test_ignored_files_do_not_count(self):
+        with self.exclude().open("a") as stream:
+            stream.write("/build/\n/.pr-ready/\n")
+        (self.path / "build").mkdir()
+        (self.path / "build/out.bin").write_text("x")
+        (self.path / ".pr-ready/7").mkdir(parents=True)
+        (self.path / ".pr-ready/7/evidence.json").write_text("{}")
+        self.checkout()
+
+    def test_a_dirty_submodule_is_refused(self):
+        inner = self.env.root / "inner"
+        self.env.git("init", "-q", "-b", "main", str(inner), cwd=self.env.root)
+        (inner / "lib.txt").write_text("lib\n")
+        self.env.git("add", "-A", cwd=inner)
+        self.env.git("commit", "-q", "-m", "lib", cwd=inner)
+        self.git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(inner), "sub")
+        self.git("commit", "-q", "-m", "add the submodule")
+        self.git("push", "-q", "origin", "main")
+        self.env.remote_head = self.git("rev-parse", "main", cwd=self.env.remote)
+        self.checkout().release()  # control: the submodule is clean
+        (self.path / "sub/lib.txt").write_text("edited inside the submodule\n")
+        self.stops(f"checkout {self.path} has uncommitted changes or untracked files (1 paths, e.g. sub); "
+                   "commit or remove them; the runner never stashes or discards work")
+
+    def test_a_git_operation_in_progress_is_refused(self):
+        for name in ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG",
+                     "sequencer"):
+            with self.subTest(name=name):
+                marker = Path(self.git("rev-parse", "--git-path", name))
+                marker = marker if marker.is_absolute() else self.path / marker
+                marker.mkdir() if name in ("rebase-merge", "rebase-apply", "sequencer") else marker.write_text("x\n")
+                self.stops(f"a git operation is in progress in {self.path} ({name}); finish or abort it")
+                shutil.rmtree(marker) if marker.is_dir() else marker.unlink()
+        self.checkout()  # control
+
+    def test_every_operation_in_progress_is_named(self):
+        for name in ("rebase-merge", "MERGE_HEAD"):
+            marker = Path(self.git("rev-parse", "--path-format=absolute", "--git-path", name))
+            marker.mkdir() if name == "rebase-merge" else marker.write_text("x\n")
+        self.stops(f"a git operation is in progress in {self.path} (MERGE_HEAD, rebase-merge); finish or abort it")
+
+    def test_a_real_merge_in_progress_comes_before_the_dirty_state(self):
+        self.git("switch", "-q", "-c", "side")
+        self.git("commit", "-q", "--allow-empty", "-m", "nothing changes")
+        self.git("switch", "-q", "main")
+        self.git("merge", "-q", "--no-ff", "--no-commit", "side")
+        self.assertEqual("", self.git("status", "--porcelain=v1"), "a merge that stages nothing: the tree is clean")
+        self.stops(f"a git operation is in progress in {self.path} (MERGE_HEAD); finish or abort it")
+        (self.path / "stray.txt").write_text("x")
+        self.stops(f"a git operation is in progress in {self.path} (MERGE_HEAD); finish or abort it")
+        (self.path / "stray.txt").unlink()
+        self.git("merge", "--abort")
+        self.checkout()
+
+
+class CheckoutHelpersTests(CheckoutCase):
+    """The skills run from the checkout, so the default branch of origin must host both helpers they call."""
 
     def test_a_default_branch_needs_each_of_the_two_helpers(self):
         # An old default branch has no ready_signal.py: the skills that run from this checkout could not sign a PR
         # and the run would wait for its phase timeout. Each helper is required by itself.
         for missing in HELPER_PATHS:
             with self.subTest(missing=missing):
-                self.env.make_remote(self.helpers(leave_out=(missing,)))
-                with self.assertRaisesRegex(pr_loop.Stop, r"git cat-file failed \(\d+\): .*" + re.escape(missing)):
-                    self.checkout()
-        self.env.make_remote(self.helpers())
+                self.rebuild(self.helpers(leave_out=(missing,)))
+                self.stops(f"origin's default branch main at {self.env.remote_head[:12]} lacks {missing}; "
+                           "the skills it hosts could not report or sign")
+        self.rebuild(self.helpers())
         self.checkout()  # control: both present
+
+    def test_a_default_branch_with_neither_names_the_first(self):
+        self.rebuild({"other.txt": "x\n"})
+        self.stops(f"origin's default branch main at {self.env.remote_head[:12]} lacks {HELPER_PATHS[0]}; "
+                   "the skills it hosts could not report or sign")
+
+
+class CheckoutIgnoreTests(CheckoutCase):
+    """The task and evidence directories must not count as uncommitted work: ignored by git, or the run is refused."""
+
+    def test_the_task_and_evidence_directories_are_excluded_from_git_status(self):
+        checkout = self.checkout()
+        exclude = self.exclude().read_text().splitlines()
+        self.assertEqual(["/.pr-ready/", "/.pr-loop/"], exclude[-2:])
+        self.assertNotIn("tmux-ai", "\n".join(exclude))
+        self.assertEqual(f"Added /.pr-ready/, /.pr-loop/ to {self.exclude()}", self.told[0])
+        self.assertTrue(self.ignored(self.path, ".pr-loop/" + "0" * 32 + "/task.json"))
+        self.assertTrue(self.ignored(self.path, ".pr-ready/anything"))
+        self.assertFalse(self.ignored(self.path, "stray.txt"), "control: only those two are ignored")
+        self.assertEqual([], checkout.would_add)
+
+    def test_a_checkout_that_already_ignores_them_is_left_alone(self):
+        self.checkout().release()
+        before = self.exclude().read_bytes()
+        self.told.clear()
+        self.checkout()
+        self.assertEqual(before, self.exclude().read_bytes(), "a second run appends nothing")
+        self.assertEqual([], [line for line in self.told if line.startswith("Added")])
+
+    def test_only_what_git_does_not_ignore_yet_is_added(self):
+        # An unanchored line of the operator's own ignores .pr-ready/ already: the literal line is not what counts.
+        with self.exclude().open("a") as stream:
+            stream.write(".pr-ready/\n")
+        self.checkout()
+        self.assertEqual([".pr-ready/", "/.pr-loop/"], self.exclude().read_text().splitlines()[-2:])
+        self.assertEqual(f"Added /.pr-loop/ to {self.exclude()}", self.told[0])
+
+    def test_an_exclude_file_without_a_final_newline_keeps_its_last_line(self):
+        self.exclude().write_text("# the operator's\nbuild/")
+        self.checkout()
+        self.assertEqual("# the operator's\nbuild/\n/.pr-ready/\n/.pr-loop/\n", self.exclude().read_text())
+
+    def test_a_missing_info_directory_is_made(self):
+        shutil.rmtree(self.path / ".git/info")
+        self.checkout()
+        self.assertEqual("/.pr-ready/\n/.pr-loop/\n", self.exclude().read_text())
+
+    def test_a_tracked_gitignore_that_negates_them_is_refused(self):
+        # A tracked .gitignore beats the exclude file, so the lines the runner writes can be neutralised.
+        for negated in (".pr-loop", ".pr-ready"):
+            with self.subTest(negated=negated):
+                self.rebuild(self.helpers(**{".gitignore": f"!/{negated}/\n"}))
+                self.stops(f"{self.path} does not ignore .pr-loop/ and .pr-ready/ even after they were added to "
+                           f"{self.exclude()}: a tracked .gitignore overrides it, so the task files would count as "
+                           "uncommitted work")
+                self.assertEqual("/.pr-ready/\n/.pr-loop/\n", self.exclude().read_text()[-len("/.pr-ready/\n/.pr-loop/\n"):],
+                                 "a line the runner wrote is never taken back")
+        self.rebuild(self.helpers(**{".gitignore": "/dist/\n"}))
+        self.checkout()  # control: an unrelated tracked .gitignore
+
+    def test_in_a_linked_work_tree_the_lines_go_to_the_exclude_file_of_the_repository(self):
+        self.git("switch", "-q", "-c", "side")
+        linked = self.env.root / "linked"
+        self.git("worktree", "add", "-q", str(linked), "main")
+        self.checkout(str(linked))
+        self.assertEqual("/.pr-ready/\n/.pr-loop/\n", self.exclude().read_text()[-len("/.pr-ready/\n/.pr-loop/\n"):])
+        self.assertTrue(self.ignored(linked, ".pr-loop/x"))
+        self.assertFalse((self.path / ".git/worktrees/linked/info").exists())
+
+
+class CheckoutLockTests(CheckoutCase):
+    """One runner per work tree, for the life of the process, and never deleted or inherited."""
+
+    def message(self, found):
+        return (f"another pr_loop runner is using the checkout {found.path} (lock {found.lock_path}); "
+                "wait for it to finish or stop it")
+
+    def test_a_second_runner_in_the_same_checkout_is_refused_until_the_first_is_done(self):
+        first = self.checkout()
+        self.assertEqual(self.path / ".git/pilot-pr-loop.lock", first.lock_path)
+        self.stops(self.message(first))
+        first.release()
+        self.checkout()  # control: the lock is free again (in a run, the kernel frees it when the process ends)
+
+    def test_the_lock_file_is_the_owners_and_is_never_deleted(self):
+        first = self.checkout()
+        self.assertEqual(0o600, stat.S_IMODE(first.lock_path.stat().st_mode))
+        first.release()
+        self.assertTrue(first.lock_path.is_file(), "releasing the lock leaves the file")
+
+    def test_the_lock_is_not_inheritable_and_a_started_command_does_not_get_it(self):
+        found = self.checkout()
+        self.assertIs(False, os.get_inheritable(found.lock_fd))
+        probe = "import os, sys\ntry:\n    os.fstat(int(sys.argv[1]))\nexcept OSError:\n    print('closed')\nelse:\n    print('open')\n"
+        self.assertEqual("closed\n", pr_loop.command(sys.executable, "-c", probe, str(found.lock_fd)))
+
+    def test_a_refusal_gives_the_lock_back(self):
+        self.git("remote", "set-url", "origin", "https://github.com/other/demo.git")
+        self.stops(f"origin of {self.path} is github.com/other/demo, not {self.IDENTITY}")
+        self.git("remote", "set-url", "origin", self.env.ORIGIN)
+        self.checkout()  # not "another runner": the refused attempt let go
+
+    def test_a_lock_that_cannot_be_trusted_is_a_refusal(self):
+        lock = self.path / ".git/pilot-pr-loop.lock"
+        elsewhere = self.env.root / "elsewhere.lock"
+        elsewhere.write_text("")
+        lock.symlink_to(elsewhere)
+        self.stops(f"cannot lock the checkout {self.path} ({lock}): Too many levels of symbolic links")
+        lock.unlink()
+        lock.mkdir()
+        self.stops(f"cannot lock the checkout {self.path} ({lock}): Is a directory")
+        lock.rmdir()
+        os.mkfifo(lock)
+        self.stops(f"cannot lock the checkout {self.path} ({lock}): not a regular file")
+        lock.unlink()
+        self.checkout()  # control
+
+    def test_a_lock_the_file_system_cannot_give_is_a_refusal_not_a_pass(self):
+        # ENOLCK (NFS without a lock manager): an unknown lock is no lock.
+        with patch.object(pr_loop.fcntl, "flock", side_effect=OSError(pr_loop.errno.ENOLCK, "No locks available")):
+            self.stops(f"cannot lock the checkout {self.path} ({self.path / '.git/pilot-pr-loop.lock'}): "
+                       "No locks available")
+        self.checkout()
+
+    def test_linked_work_trees_lock_independently(self):
+        self.git("switch", "-q", "-c", "side")
+        linked = self.env.root / "linked"
+        self.git("worktree", "add", "-q", str(linked), "main")
+        paths = {}
+        for top in (self.path, linked):
+            raw = pr_loop.git(top, "rev-parse", "--git-path", pr_loop.LOCK_NAME).stdout.strip()
+            paths[top] = Path(raw) if os.path.isabs(raw) else top / raw
+        self.assertNotEqual(*paths.values())
+        fds = [pr_loop.lock_checkout(top, path) for top, path in paths.items()]
+        self.addCleanup(lambda: [os.close(fd) for fd in fds])
+        for top, path in paths.items():
+            with self.assertRaisesRegex(pr_loop.Stop, "another pr_loop runner is using the checkout"):
+                pr_loop.lock_checkout(top, path)
+
+
+class CheckoutPaneTests(CheckoutCase):
+    """A pane an earlier run kept is a second user of the checkout: the lock died with that run, the pane did not."""
+    SESSION = "pilot-pr-7-draft-0123456789"
+
+    def listing(self, *rows):
+        self.env.update_tmux(listing=list(rows))
+
+    def refusal(self, pane="%3", session=SESSION):
+        return (f"agent pane {pane} (session {session}) is still running in {self.path}; "
+                "inspect and close it before starting the runner again")
+
+    def test_a_live_pilot_pane_in_the_checkout_is_refused(self):
+        for where in (str(self.path), str(self.path / "sub")):
+            with self.subTest(where=where):
+                self.listing(f"{self.SESSION}|%3|0|{where}")
+                self.stops(self.refusal())
+        self.listing(f"other|%1|0|{self.env.root}", f"{self.SESSION}|%3|0|{self.path}")
+        self.stops(self.refusal())
+        self.assertEqual(["list-panes", "-a", "-F", "#{session_name}|#{pane_id}|#{pane_dead}|#{pane_current_path}"],
+                         self.env.tmux_calls("list-panes")[-1])
+
+    def test_panes_that_are_not_in_the_way_pass(self):
+        self.listing(f"{self.SESSION}|%3|1|",                              # dead (tmux reports no path for it)
+                     f"{self.SESSION}|%4|1|{self.path}",                   # dead, whatever its path
+                     f"{self.SESSION}|%5|0|{self.env.root}",               # live, elsewhere
+                     f"{self.SESSION}|%6|0|{self.path}-other",             # live, a sibling whose name starts the same
+                     f"mine|%7|0|{self.path}",                             # the operator's own session in the checkout
+                     f"pilot-pr|%8|0|{self.path}")                         # not the runner's prefix
+        self.checkout()
+
+    def test_a_pane_that_reaches_the_checkout_through_a_symlink_counts(self):
+        link = self.env.root / "link"
+        link.symlink_to(self.path)
+        self.listing(f"{self.SESSION}|%3|0|{link}/sub")
+        self.stops(self.refusal())
+
+    def test_no_tmux_server_means_no_pane(self):
+        for error in (NO_SERVER, NO_SOCKET):
+            with self.subTest(error=error):
+                self.env.update_tmux(no_server=error)
+                self.checkout().release()
+
+    def test_any_other_tmux_failure_is_a_refusal(self):
+        self.env.update_tmux(fail={"list-panes": 1})
+        self.stops("tmux list-panes failed (1): fake tmux: injected failure of list-panes")
+        self.env.update_tmux(fail={}, no_server="error connecting to /tmp/tmux-1000/default (Permission denied)")
+        self.stops("tmux list-panes failed (1): error connecting to /tmp/tmux-1000/default (Permission denied)")
+        self.env.update_tmux(fail={}, no_server="", listing=["garbage"])
+        self.stops("tmux list-panes returned a line that cannot be read")
+
+    def test_the_panes_are_read_after_the_lock_and_before_anything_else_of_the_checkout(self):
+        first = self.checkout()
+        self.env.update_tmux(log=[], listing=[f"{self.SESSION}|%3|0|{self.path}"])
+        self.stops(f"another pr_loop runner is using the checkout {first.path} (lock {first.lock_path}); "
+                   "wait for it to finish or stop it")
+        self.assertEqual([], self.env.tmux_calls(), "the lock refuses first: tmux is not asked")
+
+
+class GitCallTests(unittest.TestCase):
+    """Every git call of the runner reads: no opportunistic index refresh (a plain `git status` rewrites .git/index), no
+    credential prompt on a terminal the runner does not own, one locale (the output is parsed)."""
+
+    def test_every_git_call_is_made_read_only_and_never_prompts(self):
+        seen = []
+
+        def record(args, **kwargs):
+            seen.append(kwargs["env"])
+            return subprocess.CompletedProcess(args, 0, "", "")
+        with patch.object(pr_loop, "run", record):
+            pr_loop.git("/x", "rev-parse", "HEAD")
+            pr_loop.git("/x", "cat-file", "-e", "x", env={"GIT_NO_LAZY_FETCH": "1"})
+        self.assertEqual(2, len(seen))
+        for env in seen:
+            self.assertEqual(("0", "0", "C"), tuple(env.get(name) for name in ("GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT",
+                                                                               "LC_ALL")))
+        self.assertEqual("1", seen[1].get("GIT_NO_LAZY_FETCH"), "a caller adds to the environment, it does not replace it")
+
+    def test_a_status_outside_the_accepted_ones_is_a_stop_and_ok_none_is_the_callers_to_judge(self):
+        with patch.object(pr_loop, "run", lambda args, **kwargs: subprocess.CompletedProcess(args, 3, "", "boom\n")):
+            with self.assertRaisesRegex(pr_loop.Stop, r"^git config failed \(3\): boom$"):
+                pr_loop.git("/x", "config", "--get-all", "x")
+            self.assertEqual(3, pr_loop.git("/x", "config", "--get-all", "x", ok=(0, 3)).returncode)
+            self.assertEqual(3, pr_loop.git("/x", "ls-remote", ok=None).returncode)
+
+
+class CheckoutDryRunTests(CheckoutCase):
+    """A dry run inspects the checkout the way the real run does and writes nothing: no lock, no tmux, no exclude line."""
+
+    def snapshot(self):
+        index = self.path / ".git/index"
+        return dict(exclude=sha256_of(self.exclude()), index=(sha256_of(index), index.stat().st_mtime_ns),
+                    lock=(self.path / ".git/pilot-pr-loop.lock").exists(), tasks=(self.path / ".pr-loop").exists(),
+                    tmux=self.env.tmux_calls())
+
+    def stale_index(self):
+        """A tracked file whose timestamp changed, so that a plain `git status` would rewrite the index."""
+        os.utime(self.path / "README.txt", (1, 1))
+        before = sha256_of(self.path / ".git/index")
+        probe = subprocess.run(["git", "status", "--porcelain"], cwd=self.path, env=self.env.git_env)
+        self.assertEqual(0, probe.returncode)
+        self.assertNotEqual(before, sha256_of(self.path / ".git/index"), "the setup must make a plain status write")
+        os.utime(self.path / "README.txt", (2, 2))
+
+    def test_a_dry_run_writes_nothing_and_takes_nothing(self):
+        self.stale_index()
+        before = self.snapshot()
+        found = self.checkout(dry_run=True)
+        self.assertEqual(before, self.snapshot())
+        self.assertIsNone(found.lock_fd)
+        self.assertEqual(["/.pr-ready/", "/.pr-loop/"], found.would_add)
+        self.assertEqual([], self.told, "nothing is said before the PRs are reported")
+        found.announce()
+        self.assertEqual([f"Checkout: {self.path} (main at {self.env.remote_head[:12]})",
+                          f"would add /.pr-ready/, /.pr-loop/ to {self.exclude()}",
+                          f"not checked in a dry run: whether another runner holds {self.path / '.git/pilot-pr-loop.lock'}; "
+                          f"whether an agent pane kept from an earlier run is still open in {self.path}"], self.told)
+
+    def test_a_dry_run_does_not_mind_the_lock_or_the_panes_a_real_run_refuses(self):
+        first = self.checkout()
+        self.env.update_tmux(listing=[f"pilot-pr-7-draft-0123456789|%3|0|{self.path}"])
+        asked = len(self.env.tmux_calls())
+        self.assertEqual(self.path, self.checkout(dry_run=True).path)
+        self.assertEqual(asked, len(self.env.tmux_calls()), "a dry run never calls tmux, not even to list the panes")
+        first.release()
+
+    def test_a_dry_run_that_has_nothing_to_add_says_so_by_saying_nothing(self):
+        self.checkout().release()  # a real run adds the lines
+        self.told.clear()
+        found = self.checkout(dry_run=True)
+        self.assertEqual([], found.would_add)
+        found.announce()
+        self.assertEqual([f"Checkout: {self.path} (main at {self.env.remote_head[:12]})",
+                          f"not checked in a dry run: whether another runner holds {self.path / '.git/pilot-pr-loop.lock'}; "
+                          f"whether an agent pane kept from an earlier run is still open in {self.path}"], self.told)
+
+    def refusals(self):
+        """Each state the real run refuses, as `(name, set up, message)`."""
+        top = self.path
+        def dirty(): (self.path / "stray.txt").write_text("x")
+        def other(): self.git("switch", "-q", "-c", "other")
+        def behind(): self.env.advance_remote()
+        def origin(): self.git("remote", "set-url", "origin", "https://github.com/other/demo.git")
+        def merging(): Path(self.git("rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD")).write_text("x\n")
+        return (("dirty", dirty, f"checkout {top} has uncommitted changes or untracked files (1 paths, e.g. stray.txt); "
+                                 "commit or remove them; the runner never stashes or discards work"),
+                ("another branch", other, f"checkout {top} is on other, not on main, the default branch of origin"),
+                ("behind", behind, f"local main is at {self.env.remote_head[:12]} but origin's main is at "
+                                   "%s; run git pull --ff-only in " + f"{top} and start the runner again"),
+                ("another origin", origin, f"origin of {top} is github.com/other/demo, not {self.IDENTITY}"),
+                ("a git operation", merging, f"a git operation is in progress in {top} (MERGE_HEAD); finish or abort it"))
+
+    def test_a_dry_run_refuses_what_the_real_run_refuses_for_the_same_reason(self):
+        for name, setup, message in self.refusals():
+            with self.subTest(name=name):
+                self.env.make_checkout()
+                setup()
+                message = message % self.env.remote_head[:12] if "%s" in message else message
+                with self.assertRaises(pr_loop.Stop) as dry:
+                    self.checkout(dry_run=True)
+                with self.assertRaises(pr_loop.Stop) as real:
+                    self.checkout()
+                self.assertEqual((message, message), (str(dry.exception), str(real.exception)))
 
 
 class CheckoutTaskTests(CheckoutCase):
@@ -1578,12 +2600,16 @@ class CheckoutTaskTests(CheckoutCase):
         with self.assertRaisesRegex(pr_loop.Stop, f"PR #7 DRAFT-BLOCKED at {HEAD[:12]}: a blocker"):
             pr_loop.check_result(path, task, HEAD)
 
-    def test_every_task_gets_its_own_directory(self):
+    def test_every_task_gets_its_own_directory_and_an_old_one_is_left_alone(self):
         checkout = self.checkout()
+        old = self.path / ".pr-loop/0ld"  # left by an earlier run: ignored by the lines that run appended
+        old.mkdir(parents=True)
+        (old / "task.json").write_text("{}")
         first, _ = checkout.task(self.repo, 7, "draft", HEAD)
         second, _ = checkout.task(self.repo, 7, "ready", HEAD)
         self.assertNotEqual(first.parent, second.parent)
         self.assertEqual(first.parent.parent, second.parent.parent)
+        self.assertEqual("{}", (old / "task.json").read_text())
 
     def test_a_task_directory_that_exists_is_never_reused(self):
         checkout = self.checkout()
@@ -1599,73 +2625,92 @@ class CheckoutTaskTests(CheckoutCase):
         path.with_name("result.json").write_text("{}")
         (checkout.path / ".pr-ready" / "7").mkdir(parents=True)
         (checkout.path / ".pr-ready/7/evidence.json").write_text("{}")
-        self.assertEqual("", self.git(checkout, "status", "--porcelain=v1", "--untracked-files=normal"))
+        self.assertEqual("", self.git("status", "--porcelain=v1", "--untracked-files=normal"))
         checkout.verify()
 
 
 class CheckoutVerifyTests(CheckoutCase):
-    def test_a_clean_checkout_at_the_default_branch_verifies(self):
+    """Before every dispatch the checkout must be where the run started it: a skill that did not restore it, or
+    anything else that changed it, stops the run before an agent is given a task. Origin's tip is not read again."""
+    NOTHING = "; nothing was dispatched"
+
+    def test_a_clean_checkout_where_it_started_verifies(self):
         self.checkout().verify()
 
     def test_work_outside_the_ignored_directories_stops(self):
         checkout = self.checkout()
-        (checkout.path / "stray.txt").write_text("x")
-        with self.assertRaisesRegex(pr_loop.Stop, rf"managed checkout contains uncommitted work: {checkout.path}"):
+        text = f"checkout {self.path} has uncommitted changes or untracked files (1 paths, e.g. %s); commit or remove " \
+               f"them; the runner never stashes or discards work{self.NOTHING}"
+        (self.path / "stray.txt").write_text("x")
+        with self.assertRaises(pr_loop.Stop) as caught:
             checkout.verify()
-        (checkout.path / "stray.txt").unlink()
-        (checkout.path / "README.txt").write_text("changed\n")
-        with self.assertRaisesRegex(pr_loop.Stop, "uncommitted work"):
+        self.assertEqual(text % "stray.txt", str(caught.exception))
+        (self.path / "stray.txt").unlink()
+        (self.path / "README.txt").write_text("changed\n")
+        with self.assertRaises(pr_loop.Stop) as caught:
             checkout.verify()
+        self.assertEqual(text % "README.txt", str(caught.exception))
+        self.git("checkout", "--", "README.txt")
+        checkout.verify()
+
+    def moved(self, checkout, now, at):
+        return (f"checkout {self.path} is no longer on main at {checkout.head[:12]} (now {now} at {at[:12]}): a skill "
+                f"did not restore it or something else changed it{self.NOTHING}")
 
     def test_a_head_that_moved_stops(self):
         checkout = self.checkout()
-        self.git(checkout, "commit", "-q", "--allow-empty", "-m", "an agent committed here")
-        with self.assertRaisesRegex(pr_loop.Stop, rf"skill did not restore the checked default branch at {checkout.head}"):
+        new = self.commit("agent.txt")
+        with self.assertRaises(pr_loop.Stop) as caught:
             checkout.verify()
+        self.assertEqual(self.moved(checkout, "main", new), str(caught.exception))
 
-    def test_another_branch_stops(self):
+    def test_another_branch_stops_even_at_the_same_commit(self):
         checkout = self.checkout()
-        self.git(checkout, "checkout", "-q", "-b", "other")
-        with self.assertRaisesRegex(pr_loop.Stop, "skill did not restore the checked default branch"):
+        self.git("switch", "-q", "-c", "other")
+        with self.assertRaises(pr_loop.Stop) as caught:
             checkout.verify()
+        self.assertEqual(self.moved(checkout, "other", checkout.head), str(caught.exception))
+        self.git("switch", "-q", "--detach")
+        with self.assertRaises(pr_loop.Stop) as caught:
+            checkout.verify()
+        self.assertEqual(self.moved(checkout, "detached", checkout.head), str(caught.exception))
+        self.git("switch", "-q", "main")
+        checkout.verify()  # control: back where it started
 
-
-class CheckoutCleanUpTests(CheckoutCase):
-    def retained(self, checkout):
-        return checkout.path.exists() and f"Retained checkout and evidence: {checkout.path}" in self.told
-
-    def test_a_checkout_with_nothing_to_keep_is_deleted(self):
+    def test_a_git_operation_in_progress_stops_before_anything_else(self):
         checkout = self.checkout()
-        checkout.task(self.repo, 7, "draft", HEAD)  # ignored files do not count
-        checkout.clean_up()
-        self.assertFalse(checkout.path.exists())
-        self.assertNotIn(f"Retained checkout and evidence: {checkout.path}", self.told)
+        (self.path / "stray.txt").write_text("x")
+        marker = Path(self.git("rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD"))
+        marker.write_text("x\n")
+        with self.assertRaises(pr_loop.Stop) as caught:
+            checkout.verify()
+        self.assertEqual(f"a git operation is in progress in {self.path} (MERGE_HEAD); finish or abort it{self.NOTHING}",
+                         str(caught.exception))
 
-    def test_evidence_is_kept(self):
+    def test_the_tip_of_origin_is_not_read_again(self):
+        # The merge train moves origin while a batch runs: that must not refuse the next PR.
         checkout = self.checkout()
-        (checkout.path / ".pr-ready").mkdir()
-        checkout.clean_up()
-        self.assertTrue(self.retained(checkout))
+        self.env.advance_remote()
+        checkout.verify()
+        self.assertEqual([], [call for call in self.env.tmux_calls() if call[0] != "list-panes"])
 
-    def test_uncommitted_work_is_kept(self):
-        checkout = self.checkout()
-        (checkout.path / "stray.txt").write_text("x")
-        checkout.clean_up()
-        self.assertTrue(self.retained(checkout))
 
-    def test_a_commit_that_is_not_on_the_remote_is_kept(self):
-        checkout = self.checkout()
-        self.git(checkout, "commit", "-q", "--allow-empty", "-m", "unpushed")
-        checkout.clean_up()
-        self.assertTrue(self.retained(checkout))
+class CheckoutFinishTests(CheckoutCase):
+    def tree(self):
+        return sorted(str(path.relative_to(self.path)) for path in self.path.rglob("*") if ".git/objects" not in str(path))
 
-    def test_a_stash_is_kept(self):
+    def test_finishing_says_where_things_are_and_deletes_nothing(self):
         checkout = self.checkout()
-        (checkout.path / "README.txt").write_text("changed\n")
-        self.git(checkout, "stash", "push", "-q")
-        self.assertEqual("", self.git(checkout, "status", "--porcelain=v1"))
-        checkout.clean_up()
-        self.assertTrue(self.retained(checkout))
+        checkout.task(self.repo, 7, "draft", HEAD)
+        before = self.tree()
+        self.told.clear()
+        checkout.finish()
+        self.assertEqual(before, self.tree())
+        self.assertEqual([f"Kept: the task files under {self.path / '.pr-loop'} and any agent pane that is still open "
+                          f"(sessions pilot-pr-*); close the panes before the next run. Nothing in {self.path} was "
+                          "deleted or reset."], self.told)
+        self.assertEqual(self.env.remote_head, self.tip())
+        self.assertFalse(self.env.state_home.exists())
 
 
 # ---- (E) the whole program, started as a user starts it, against the fake gh/tmux/agents --------------------------
@@ -1677,10 +2722,11 @@ class ProgramTests(unittest.TestCase):
     def setUp(self):
         self.env = FakeEnv(self)
 
-    def run_program(self, *extra):
+    def run_program(self, *extra, cwd=None):
+        """The runner, started the way a user starts it: in the operator's checkout unless `cwd` says otherwise."""
         argv = [sys.executable, "-B", str(self.SCRIPT), "7", "--repo", "acme/demo", "--poll-interval", "0.01",
                 "--startup-timeout", "2", *extra]
-        return subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=self.env.root)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=cwd or self.env.checkout)
 
     def pastes(self):
         """(prompt, task path) of every text pasted into an agent."""
@@ -1694,20 +2740,23 @@ class ProgramTests(unittest.TestCase):
             found.append((prompt, Path(path)))
         return found
 
-    def managed_checkout(self, proc):
-        lines = [line for line in proc.stdout.splitlines() if line.startswith("Managed checkout: ")]
-        self.assertEqual(1, len(lines), proc.stdout)
-        return Path(lines[0][len("Managed checkout: "):])
+    def checkout_line(self, proc):
+        """The one `Checkout:` line of a real run: it names the operator's own checkout, its branch and commit."""
+        lines = [line for line in proc.stdout.splitlines() if line.startswith("Checkout: ")]
+        self.assertEqual([f"Checkout: {self.env.checkout} (main at {self.env.remote_head[:12]})"], lines, proc.stdout)
+        return self.env.checkout
+
+    def only_listed_panes(self):
+        """tmux was asked to list the panes (the retained-pane check) and nothing else: nothing was started."""
+        self.assertEqual(["list-panes"], [call[0] for call in self.env.tmux_calls()])
 
     def gh_kinds(self):
-        """What each `gh` call of the runner was, in order. A call that is none of the four reads is reported as its own
+        """What each `gh` call of the runner was, in order. A call that is none of the three reads is reported as its own
         argv, so that any write (`pr ready`, `pr edit`, `pr comment`, `api -X ...`) fails the tests that compare these."""
         kinds = []
         for call in self.env.gh_calls():
             if call[:2] == ["pr", "view"]:
                 kinds.append("pr view")
-            elif call[:2] == ["repo", "clone"]:
-                kinds.append("repo clone")
             elif call == ["api", "user"]:
                 kinds.append("api user")
             elif call[:1] == ["api"] and "--slurp" in call and call[-1].split("?")[0].endswith("/timeline"):
@@ -1716,12 +2765,114 @@ class ProgramTests(unittest.TestCase):
                 kinds.append(" ".join(call))
         return kinds
 
+    # ---- the agents start in the checkout the operator chose (AC1) and the runner deletes nothing (AC3) ----------
+    def blocked_run(self, *extra, cwd=None):
+        """A run that dispatches the Draft agent and stops on its blocker: the shortest run that starts an agent."""
+        self.env.set_pane("%1", enter=[{"result": {"outcome": "DRAFT-BLOCKED", "reason": "synthetic blocker"}}])
+        proc = self.run_program(*extra, cwd=cwd)
+        self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
+        self.assertIn("DRAFT-BLOCKED", proc.stderr)
+        return proc
+
+    def agent_cwd(self):
+        (session,) = self.env.tmux()["sessions"]
+        return session["cwd"]
+
+    def test_the_agent_starts_in_the_checkout_the_runner_was_started_in(self):
+        # From a directory below the root: the checkout is the root of the work tree (and not the directory the
+        # runner was started in, nor a directory of its own: every test of this class runs from the root).
+        below = self.env.checkout / "sub" / "dir"
+        below.mkdir(parents=True)
+        self.blocked_run(cwd=below)
+        self.assertEqual(str(self.env.checkout), self.agent_cwd())
+
+    def test_checkout_names_another_directory_whatever_the_current_one_is(self):
+        elsewhere = self.env.root / "elsewhere"
+        elsewhere.mkdir()
+        self.blocked_run("--checkout", str(self.env.checkout), cwd=elsewhere)
+        self.assertEqual(str(self.env.checkout), self.agent_cwd(), "not the directory the runner was started in")
+
+    def plant(self):
+        """What the operator already has in the checkout and the runner must leave alone: the exclude lines of an
+        earlier run, ignored build output, evidence and an old task directory."""
+        root = self.env.checkout
+        with (root / ".git/info/exclude").open("a") as stream:
+            stream.write("/build/\n/.pr-ready/\n/.pr-loop/\n")
+        sentinels = {"build/out.bin": "build output\n", ".pr-ready/7/evidence.json": "{}\n",
+                     ".pr-loop/0ld/task.json": "{}\n", ".pr-loop/0ld/result.json": "{}\n"}
+        for name, text in sentinels.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(text)
+        # A managed clone an earlier version of the runner left behind: not used any more, and not the runner's to delete.
+        old = self.env.state_home / "pilot/pr-loop/batch-0ld"
+        old.mkdir(parents=True)
+        (old / "README.txt").write_text("an old clone\n")
+        self.addCleanup(shutil.rmtree, self.env.state_home, ignore_errors=True)  # (FakeEnv asserts nothing is left)
+        return sentinels
+
+    def untouched(self, sentinels, proc, *, tasks):
+        """The checkout after a run: where it was, clean, with everything the operator had and the run's own task files."""
+        root = self.env.checkout
+        self.assertTrue(root.is_dir(), "the checkout was deleted")
+        self.assertEqual(self.env.remote_head, self.env.git("rev-parse", "HEAD", cwd=root))
+        self.assertEqual("main", self.env.git("symbolic-ref", "--short", "HEAD", cwd=root))
+        self.assertEqual("", self.env.git("status", "--porcelain=v1", "--untracked-files=all", cwd=root),
+                         "the run left the checkout dirty")
+        self.assertEqual((self.env.root / "work" / "README.txt").read_text(), (root / "README.txt").read_text())
+        for name, text in sentinels.items():
+            self.assertEqual(text, (root / name).read_text(), f"{name} was changed or removed")
+        exclude = (root / ".git/info/exclude").read_text().splitlines()
+        self.assertTrue({"/build/", "/.pr-ready/", "/.pr-loop/"} <= set(exclude), exclude)
+        for _, task in tasks:
+            self.assertTrue(task.is_file(), f"{task} was removed")
+            self.assertEqual(root / ".pr-loop", task.parent.parent, "task files are under the checkout")
+        found = sorted(str(path.relative_to(self.env.state_home)) for path in self.env.state_home.rglob("*"))
+        self.assertEqual(["pilot", "pilot/pr-loop", "pilot/pr-loop/batch-0ld", "pilot/pr-loop/batch-0ld/README.txt"], found,
+                         "the old clone is left alone and the runner made no state directory of its own")
+
+    def test_a_completed_run_leaves_the_checkout_as_it_found_it(self):
+        sentinels = self.plant()
+        signed = signal_world()
+        ready, queued, merged = ready_view(signed), pr_view_json("queued"), pr_view_json("merged")
+        self.env.update_gh(view=pr_view_json("draft"))
+        self.env.set_pane("%1", enter=[{"gh": {"set_view": ready, "set_timeline": signed.s["events"]},
+                                        "result": {"outcome": "READY", "reason": "gate passed"}}])
+        self.env.set_pane("%2", enter=[{"gh": {"set_seq": [{"view": v} for v in (queued, queued, queued, merged)]},
+                                        "result": {"outcome": "ENQUEUED", "reason": "queued for the train"}}])
+        proc = self.run_program()
+        self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+        self.assertIn("PR #7: merged", proc.stdout.splitlines())
+        tasks = self.pastes()
+        self.assertEqual(2, len(tasks))
+        self.untouched(sentinels, proc, tasks=tasks)
+        self.assertEqual([str(self.env.checkout)] * 2, [session["cwd"] for session in self.env.tmux()["sessions"]])
+
+    def test_a_run_that_stops_on_a_blocker_leaves_the_checkout_as_it_found_it(self):
+        sentinels = self.plant()
+        proc = self.blocked_run()
+        self.untouched(sentinels, proc, tasks=self.pastes())
+
+    def test_a_run_that_cannot_read_the_pr_leaves_the_checkout_as_it_found_it(self):
+        sentinels = self.plant()
+        self.env.update_gh(seq=[{"exit": 1, "stderr": "synthetic outage"}])
+        proc = self.run_program()
+        self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
+        self.assertIn("GitHub read failed 3 consecutive times; no command sent", proc.stderr)
+        self.untouched(sentinels, proc, tasks=[])
+
+    def test_a_run_that_times_out_leaves_the_checkout_as_it_found_it(self):
+        sentinels = self.plant()
+        proc = self.run_program("--phase-timeout", "0.5")
+        self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
+        self.assertIn("timed out in draft", proc.stderr)
+        self.untouched(sentinels, proc, tasks=self.pastes())
+
     def test_a_pr_goes_from_draft_to_merged(self):
         # The success variant: the gate's Ready is followed by its signal (the marker comment, then the label), which
         # the fake gh serves as the PR's timeline; only then is the Ready phase dispatched.
         signed = signal_world()
         ready, queued, merged = ready_view(signed), pr_view_json("queued"), pr_view_json("merged")
-        self.env.write_gh(calls=[], seq=[], view=pr_view_json("draft"), login=LOGIN, comments=[], clone_exit=0, timeline=[])
+        self.env.write_gh(calls=[], seq=[], view=pr_view_json("draft"), login=LOGIN, comments=[], timeline=[])
         self.env.set_pane("%1", enter=[{"gh": {"set_view": ready, "set_timeline": signed.s["events"]},
                                         "result": {"outcome": "READY", "reason": "gate passed"}}])
         self.env.set_pane("%2", enter=[{"gh": {"set_seq": [{"view": v} for v in (queued, queued, queued, merged)]},
@@ -1731,7 +2882,7 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual("", proc.stderr)
         self.assertIn("PR #7: merged", proc.stdout.splitlines())
         # Two dispatches, each carrying the task path of its own <checkout>/.pr-loop/<nonce>/ directory.
-        checkout = self.managed_checkout(proc)
+        checkout = self.checkout_line(proc)
         (draft_prompt, draft_task), (ready_prompt, ready_task) = self.pastes()
         self.assertEqual(("/pr-ready 7", "$pr-review-merge 7"), (draft_prompt, ready_prompt))
         for task in (draft_task, ready_task):
@@ -1743,12 +2894,14 @@ class ProgramTests(unittest.TestCase):
         # The real result CLI accepted both task paths (it exits 2 on a layout it does not know), and the
         # runner read their results without stopping.
         self.assertEqual([0, 0], [done["rc"] for done in self.env.tmux()["cli"]])
-        # Both panes are closed and a clean checkout is deleted.
+        # Both panes are closed; the checkout and the task files stay, and the run says so.
         self.assertEqual([["kill-pane", "-t", "%1"], ["kill-pane", "-t", "%2"]], self.env.tmux_calls("kill-pane"))
-        self.assertFalse(checkout.exists())
+        self.assertTrue(checkout.is_dir())
+        self.assertTrue(draft_task.is_file() and ready_task.is_file())
+        self.assertIn(f"Kept: the task files under {checkout / '.pr-loop'}", proc.stdout)
         # The runner only reads GitHub, asked for its account once, and read the signal's timeline.
         kinds = self.gh_kinds()
-        self.assertEqual({"pr view", "repo clone", "api user", "api timeline"}, set(kinds))
+        self.assertEqual({"pr view", "api user", "api timeline"}, set(kinds))
         self.assertEqual(1, kinds.count("api user"), "the account is read once per run")
 
     def test_a_blocker_stops_the_run_and_keeps_everything_for_inspection(self):
@@ -1759,7 +2912,7 @@ class ProgramTests(unittest.TestCase):
                                       r"go test failed in the synthetic gate\n$")
         self.assertEqual(1, len(self.env.tmux_calls("new-session")), "the Ready phase was never dispatched")
         self.assertEqual([], self.env.tmux_calls("kill-pane"), "the pane is retained")
-        checkout = self.managed_checkout(proc)
+        checkout = self.checkout_line(proc)
         self.assertTrue(checkout.exists())
         ((_, task),) = self.pastes()
         result = json.loads(task.with_name("result.json").read_text())
@@ -1781,7 +2934,7 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual(1, len(self.pastes()))
         self.assertNotIn("PR #7: merged", proc.stdout)
         self.assertEqual([], self.env.tmux_calls("kill-pane"), "the pane is retained")
-        self.assertTrue(self.managed_checkout(proc).exists())
+        self.assertTrue(self.checkout_line(proc).exists())
         self.assertEqual(0, self.env.tmux()["cli"][0]["rc"])
         self.assertNotIn("api timeline", self.gh_kinds(), "a Ready PR without the label has no signal to read")
 
@@ -1802,7 +2955,7 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual(1, len(self.env.tmux_calls("new-session")), "the Ready phase was never dispatched")
         self.assertNotIn("PR #7: merged", proc.stdout)
         self.assertIn("api timeline", self.gh_kinds(), "the label is on the PR: the timeline was read")
-        self.assertEqual({"pr view", "repo clone", "api user", "api timeline"}, set(self.gh_kinds()))
+        self.assertEqual({"pr view", "api user", "api timeline"}, set(self.gh_kinds()))
 
     def test_a_ready_pr_without_a_signal_is_refused_and_nothing_is_started(self):
         self.env.update_gh(view=pr_view_json("ready"))
@@ -1811,8 +2964,8 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual(f"pr-loop: PR #7: PR #7 is Ready without a valid {rs.LABEL} signal at HEAD {HEAD[:12]}: "
                          f"the PR does not carry the {rs.LABEL} label; nothing is dispatched for it: convert it to "
                          "Draft and run pr-ready on it, then start the runner again\n", proc.stderr)
-        self.assertEqual([], self.env.tmux()["log"], "tmux was never called")
-        self.assertEqual(["pr view", "pr view"], self.gh_kinds(), "two reads, no clone, no account, no timeline")
+        self.only_listed_panes()
+        self.assertEqual(["pr view", "pr view"], self.gh_kinds(), "two reads, no account, no timeline")
 
     def test_a_ready_pr_whose_signal_names_an_earlier_head_is_refused_with_the_reason(self):
         signed = signal_world(NEW)
@@ -1821,27 +2974,171 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
         self.assertIn(f"at HEAD {HEAD[:12]}: stale: the signal was written for HEAD {NEW[:12]}, the PR HEAD is "
                       f"{HEAD[:12]}; nothing is dispatched for it", proc.stderr)
-        self.assertEqual([], self.env.tmux()["log"])
+        self.only_listed_panes()
         self.assertEqual({"pr view", "api user", "api timeline"}, set(self.gh_kinds()))
+
+    # ---- the dry run: the same inspection, read-only (AC5) ------------------------------------------------------
+    def dry_report(self, *phases):
+        """What a dry run that accepts the checkout prints: the phase of each PR, then the checkout, what it would add
+        to the exclude file, and what a dry run does not check."""
+        top = self.env.checkout
+        return "".join(f"{phase}\n" for phase in phases) + (
+            f"Checkout: {top} (main at {self.env.remote_head[:12]})\n"
+            f"would add /.pr-ready/, /.pr-loop/ to {top}/.git/info/exclude\n"
+            f"not checked in a dry run: whether another runner holds {top}/.git/pilot-pr-loop.lock; whether an agent "
+            f"pane kept from an earlier run is still open in {top}\n")
+
+    def written(self):
+        """Everything a dry run must leave as it is: the exclude file, the index (and when it was written), the lock
+        file, the task directory, tmux and GitHub."""
+        top = self.env.checkout
+        index = top / ".git/index"
+        digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+        return dict(exclude=digest(top / ".git/info/exclude"), index=(digest(index), index.stat().st_mtime_ns),
+                    lock=(top / ".git/pilot-pr-loop.lock").exists(), tasks=(top / ".pr-loop").exists(),
+                    tmux=self.env.tmux()["log"], state=self.env.state_home.exists())
+
+    def stale_index(self):
+        """A tracked file with another timestamp: a plain `git status` would refresh and rewrite the index."""
+        top = self.env.checkout
+        os.utime(top / "README.txt", (1, 1))
+        before = (top / ".git/index").read_bytes()
+        subprocess.run(["git", "status", "--porcelain"], cwd=top, env=self.env.git_env, check=True, capture_output=True)
+        self.assertNotEqual(before, (top / ".git/index").read_bytes(), "the setup must make a plain status write")
+        os.utime(top / "README.txt", (2, 2))
 
     def test_a_dry_run_names_why_a_ready_pr_is_unverified(self):
         self.env.update_gh(view=pr_view_json("ready"))
         proc = self.run_program("--dry-run")
-        self.assertEqual((0, f"PR #7: unverified (the PR does not carry the {rs.LABEL} label)\n", ""),
+        self.assertEqual((0, self.dry_report(f"PR #7: unverified (the PR does not carry the {rs.LABEL} label)"), ""),
                          (proc.returncode, proc.stdout, proc.stderr))
         self.assertEqual([], self.env.tmux()["log"])
 
-    def test_a_dry_run_reports_the_phase_and_touches_neither_tmux_nor_the_clone(self):
+    def test_a_dry_run_reports_the_phase_and_the_checkout_and_writes_nothing(self):
+        self.stale_index()
+        before = self.written()
         proc = self.run_program("--dry-run")
-        self.assertEqual((0, "PR #7: draft\n", ""), (proc.returncode, proc.stdout, proc.stderr))
-        self.assertEqual([], self.env.tmux()["log"], "tmux was never called")
+        self.assertEqual((0, self.dry_report("PR #7: draft"), ""), (proc.returncode, proc.stdout, proc.stderr))
+        self.assertEqual(before, self.written(), "no lock, no exclude line, no task directory, no index refresh, no tmux")
         self.assertEqual([["pr", "view"]], [call[:2] for call in self.env.gh_calls()])
+
+    def refused_states(self):
+        """Each state the real run refuses, as `(name, set up, working directory, a fragment of the reason)`."""
+        top, git = self.env.checkout, lambda *args: self.env.git(*args, cwd=self.env.checkout)
+        plain = self.env.root / "plain"
+        plain.mkdir(exist_ok=True)
+
+        def dirty():
+            (top / "stray.txt").write_text("x")
+
+        def without_helper():
+            self.env.make_remote({"other.txt": "x\n"})
+            self.env.make_checkout()
+        return (("not in a work tree", lambda: None, plain, "the current directory is not inside a git work tree"),
+                ("dirty", dirty, None, "has uncommitted changes or untracked files (1 paths, e.g. stray.txt)"),
+                ("behind", self.env.advance_remote, None, "run git pull --ff-only in"),
+                ("another origin", lambda: git("remote", "set-url", "origin", "https://github.com/other/demo.git"), None,
+                 "is github.com/other/demo, not github.com/acme/demo"),
+                ("a default branch without the helpers", without_helper, None,
+                 "lacks .agents/skills/_shared/scripts/pr_loop_result.py"))
+
+    def test_a_dry_run_refuses_what_the_real_run_refuses_for_the_same_reason_and_writes_nothing(self):
+        for name, setup, cwd, fragment in self.refused_states():
+            with self.subTest(name=name), patch.dict(os.environ, GIT_CEILING_DIRECTORIES=str(self.env.root)):
+                self.env.make_checkout()
+                setup()
+                self.env.write_tmux(log=[], fail={}, panes={}, buffers={}, sessions=[], cli=[], new_session=[], next=0,
+                                    listing=[])
+                self.env.update_gh(calls=[])
+                self.stale_index()
+                before = self.written()
+                dry = self.run_program("--dry-run", cwd=cwd)
+                self.assertEqual(1, dry.returncode, dry.stdout + dry.stderr)
+                self.assertEqual("PR #7: draft\n", dry.stdout, "the phases are reported; the checkout is not accepted")
+                self.assertRegex(dry.stderr, r"^pr-loop: .*" + re.escape(fragment) + r".*\n$")
+                self.assertEqual(1, dry.stderr.count("\n"))
+                self.assertEqual(before, self.written(), "a dry run writes nothing, even when it refuses")
+                real = self.run_program(cwd=cwd)
+                self.assertEqual((1, dry.stderr), (real.returncode, real.stderr), "the same reason as the real run")
+                self.assertEqual(1, len(self.env.gh_calls()), "the real run refused before it read a PR (the dry run read one)")
+
+    # ---- the lock, the panes and the PR URL (AC for the refusals that need a running process) ---------------------
+    def hold_lock(self):
+        """Hold the lock of the checkout in this process, as another runner would; `(lock path, release)`."""
+        lock = self.env.checkout / ".git/pilot-pr-loop.lock"
+        held = [os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)]
+        pr_loop.fcntl.flock(held[0], pr_loop.fcntl.LOCK_EX | pr_loop.fcntl.LOCK_NB)
+
+        def release():
+            while held:
+                os.close(held.pop())
+        self.addCleanup(release)
+        return lock, release
+
+    def test_a_second_runner_is_refused_before_anything_is_read_or_started(self):
+        lock, release = self.hold_lock()
+        top = self.env.checkout
+        proc = self.run_program()
+        self.assertEqual((1, "", f"pr-loop: another pr_loop runner is using the checkout {top} (lock {lock}); "
+                                 "wait for it to finish or stop it\n"), (proc.returncode, proc.stdout, proc.stderr))
+        self.assertEqual(([], []), (self.env.gh_calls(), self.env.tmux_calls()))
+        # Once the other runner is gone the same start goes through (it stops here for an unrelated reason).
+        release()
+        proc = self.run_with_ready_pr()
+        self.assertIn("is Ready without a valid", proc.stderr)
+        self.assertNotIn("another pr_loop runner", proc.stderr)
+
+    def test_the_lock_is_held_while_an_agent_is_dispatched_and_free_after_the_run(self):
+        lock = self.env.checkout / ".git/pilot-pr-loop.lock"
+        self.env.update_tmux(lock_path=str(lock))  # the fake tmux tries to take the lock when a session is made
+        self.blocked_run()
+        self.assertEqual(["held"], self.env.tmux()["lock_probes"], "the run holds the lock while it works")
+        fd = os.open(lock, os.O_RDWR)
+        self.addCleanup(os.close, fd)
+        pr_loop.fcntl.flock(fd, pr_loop.fcntl.LOCK_EX | pr_loop.fcntl.LOCK_NB)  # free: the process has ended
+
+    def test_a_pane_kept_from_an_earlier_run_in_the_checkout_refuses_the_start(self):
+        session = "pilot-pr-7-draft-0123456789"
+        self.env.update_tmux(listing=[f"{session}|%3|0|{self.env.checkout}/sub"])
+        proc = self.run_program()
+        self.assertEqual((1, "", f"pr-loop: agent pane %3 (session {session}) is still running in {self.env.checkout}; "
+                                 "inspect and close it before starting the runner again\n"),
+                         (proc.returncode, proc.stdout, proc.stderr))
+        self.assertEqual([], self.env.gh_calls())
+        self.only_listed_panes()
+        self.env.update_tmux(listing=[f"{session}|%3|1|"], log=[])  # closed (dead): the same start goes through
+        self.assertIn("is Ready without", self.run_with_ready_pr().stderr)
+
+    def run_with_ready_pr(self):
+        self.env.update_gh(view=pr_view_json("ready"))
+        return self.run_program("--phase-timeout", "5")
+
+    def test_a_pr_url_that_is_not_this_pr_stops_before_an_agent_is_started(self):
+        self.env.update_gh(view=pr_view_json("draft", url="https://example.com/acme/demo/pull/7"))
+        proc = self.run_program()
+        self.assertEqual((1, "pr-loop: PR #7: GitHub returned an unexpected PR URL\n"), (proc.returncode, proc.stderr))
+        self.only_listed_panes()
+
+    def test_checkout_must_be_the_root_of_a_work_tree(self):
+        below = self.env.checkout / "sub"
+        below.mkdir()
+        proc = self.run_program("--checkout", str(below), cwd=self.env.root)
+        top = self.env.checkout
+        self.assertEqual((1, f"pr-loop: --checkout {below} is not the root of its git work tree {top}; pass {top}\n"),
+                         (proc.returncode, proc.stderr))
+        self.assertEqual(([], []), (self.env.gh_calls(), self.env.tmux_calls()))
+
+    def test_the_help_of_checkout_says_what_it_defaults_to(self):
+        done = subprocess.run([sys.executable, "-B", str(self.SCRIPT), "--help"], capture_output=True, text=True, timeout=60)
+        text = " ".join(done.stdout.split())
+        self.assertIn("--checkout DIR", text)
+        self.assertIn(f"(default: {pr_loop.CHECKOUT_DEFAULT})", text)
 
     def test_a_pr_that_cannot_be_read_stops_without_starting_anything(self):
         self.env.update_gh(seq=[{"exit": 1, "stderr": "synthetic outage"}])
         proc = self.run_program()
         self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
         self.assertIn("GitHub read failed 3 consecutive times; no command sent", proc.stderr)
-        self.assertEqual([], self.env.tmux()["log"])
+        self.only_listed_panes()
         self.assertEqual({("pr", "view")}, {tuple(call[:2]) for call in self.env.gh_calls()})
         self.assertIn("GitHub read failed (2/3)", proc.stdout)
