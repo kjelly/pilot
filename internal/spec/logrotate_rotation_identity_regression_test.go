@@ -73,8 +73,13 @@ import (
 var logrotateIdentityAllowlist = map[string]string{
 	"playbooks/apply/audit-log-forwarding-apply.yml::Step 4: Render /etc/logrotate.d/auditd": "rotates /var/log/audit/audit.log, a file and a directory " +
 		"that root owns (auditd runs as root), so rotating as root is the identity of the files' owner and there is no lower-privileged " +
-		"identity to switch to. The exposure that remains on Ubuntu is distro-level (/var/log is root:syslog 0775 without the sticky bit) and " +
-		"has no `su` remedy in this policy; it is tracked by https://github.com/kjelly/pilot/issues/364.",
+		"identity to switch to. What remains on Ubuntu is distro-level: /var/log is root:syslog 0775 without the sticky bit, so code " +
+		"running as syslog can swap /var/log/audit for a symlink and root's rotation would follow it (measured for the SIEM policy in " +
+		"docs/evidence/log-server/issue-93.md, not for this one), and no `su` in this policy changes that. " +
+		"Accepted as residual risk without changing /var/log (decision 2026-11-18, https://github.com/kjelly/pilot/issues/364): the " +
+		"distro's own root-run policies and auditd itself go through the same parent, and /var/log's mode is shared by every package. " +
+		"The precondition (code execution as syslog), the reasons and when to reassess are in docs/runbooks/audit-log-forwarding.md §6 " +
+		"and docs/runbooks/log-server.md §6.",
 }
 
 // logrotateHostDerivedWriters names the tasks that put a logrotate policy in

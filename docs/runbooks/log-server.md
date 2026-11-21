@@ -95,3 +95,23 @@ block/rescue 還原本輪前的 drop-in、logrotate、TLS profile 與材料；
 - UFW/firewalld 的站台政策仍需另行驗證；2026-10-20 的拋棄式環境未啟用它們。
 - RELP 啟用時只對網路開放 mTLS listener；舊 TCP 只留 loopback，其他遠端 TCP client 需同步遷移。
 - ACK、容量、重複、葉憑證輪替與單張撤銷的邊界，以 RELP runbook 為準。
+
+## 6. 已知限制
+
+- **`/var/log` 可被 `syslog` 群組改寫（issue #364，已接受為殘餘風險）。** Ubuntu 24.04 的 `/var/log` 是
+  `root:syslog 0775`、沒有 sticky bit，以 `syslog` 身分執行的程式可以把 `/var/log` 底下的項目改名或換成 symlink，
+  包括 root 擁有的目錄。`siem-incoming` 不受影響：它以落地根目錄擁有者的身分輪替（§1），落地根目錄
+  （預設 `/var/log/siem`）被換掉時，輪替也只能動 `syslog` 本來就能寫的地方。受影響的是同機部署的
+  audit-log-forwarding（§0.5 的 2026-10-20 驗收拓樸就是如此，中央主機也部署 forwarding）：它的
+  `/etc/logrotate.d/auditd` 以 root 輪替 `/var/log/audit/audit.log`，`/var/log/audit` 被換成 symlink 時，
+  root 的每日輪替會在 symlink 指向的目錄裡動手。Ubuntu 上接收端的 rsyslogd 降權成 `syslog`
+  （見 [log-server spec 的 C12 由來](../verification/log-server.md)），並處理各來源主機送來的網路輸入；
+  若它被攻陷，就滿足下面的前提。沒有實測過從網路輸入取得 `syslog` 身分的路徑，
+  [#93 的實跑紀錄](../evidence/log-server/issue-93.md)以 `setpriv` 模擬這個前提。
+  - 前提：攻擊者已經能以 `syslog` 身分執行程式。
+  - 不修的理由：這是發行版層級的權限。發行版自己以 root 輪替的 policy（例如 apt 的 `/var/log/apt`）經過同一個父目錄，
+    改 `/var/log` 的權限影響每一個寫入 `/var/log` 的服務與套件，這次沒有評估會壞什麼。
+    2026-11-18 決定接受，不改 `/var/log` 的權限。
+  - 重新評估的時機：發行版或支援的平台改變 `/var/log` 的擁有者或權限；pilot 讓其他身分取得 `/var/log` 的寫入權；
+    或 pilot 新增以 root 輪替或寫入 `/var/log` 底下目錄的 policy 或服務。完整說明見
+    [audit-log-forwarding runbook §6](./audit-log-forwarding.md)。
