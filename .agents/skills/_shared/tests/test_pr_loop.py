@@ -1517,6 +1517,122 @@ class ImportsTests(unittest.TestCase):
         self.assertEqual([], spelled, "scripts/pr_loop.py must use pr_loop_result.TASK_DIR, not spell the layout")
 
 
+class DocumentationTests(unittest.TestCase):
+    """What the README, the runner's own docstring and the two skills that name it say is true of a runner that starts
+    its agents in the operator's own checkout (class `ephemeral-agent-workspace`, kjelly/pilot#423). The words of the
+    design it replaced (a managed clone, a trust dialog the operator answers in the printed session, `.git/info/exclude`)
+    must not come back, and the README must say what `--checkout` defaults to and what the runner does in a directory
+    the agents do not trust. Text is compared with its white space collapsed: the README is hard-wrapped."""
+    HEADING = "## Process a batch of pull requests"
+    SKILLS = ("pr-ready", "pr-review-merge")
+    EXCLUDE_FILE = "git rev-parse --git-path info/exclude"
+    # What the replaced design said, or an over-broad claim about the trust dialog, and no longer holds. The runner DOES
+    # recognise a screen whose options are numbered (`CHOICE`) and waits instead of typing into it; it takes a dialog
+    # whose options are not numbered (claude's) for the input prompt.
+    STALE = ("Managed checkout", "answer it in the printed tmux session", ".git/info/exclude",
+             "cannot recognise a trust dialog", "cannot recognize a trust dialog")
+    # What the README section must say: the option and its default (the runner's own words), the way to update a stale
+    # checkout, where the ignore lines go, and what the runner does in a directory the agents do not trust.
+    README_SAYS = ("--checkout DIR", pr_loop.CHECKOUT_DEFAULT, "git pull --ff-only", EXCLUDE_FILE,
+                   "must already trust the checkout", "stops at a trust dialog only when its options are numbered")
+
+    @staticmethod
+    def flat(text):
+        return " ".join(text.split())
+
+    @classmethod
+    def section(cls, readme):
+        """The README's batch section, from its heading to the next `## ` heading, flattened; None without the heading."""
+        found = re.search(rf"^{re.escape(cls.HEADING)}[ \t]*$(.*?)(?=^## |\Z)", readme, re.M | re.S)
+        return cls.flat(found.group(1)) if found else None
+
+    @classmethod
+    def stale(cls, text):
+        """What in `text` still describes the replaced design: a stale phrase, or any sentence that tells the operator to
+        answer a trust dialog within `--startup-timeout` (however it is reworded)."""
+        flat = cls.flat(text)
+        found = [f"still says {phrase!r}" for phrase in cls.STALE if phrase in flat]
+        found += [f"still tells the operator to answer a trust dialog within --startup-timeout: {sentence[:90]!r}"
+                  for sentence in re.split(r"(?<=[.!?])\s+", flat)
+                  if "--startup-timeout" in sentence and re.search(r"trust|answer", sentence, re.IGNORECASE)]
+        return found
+
+    @classmethod
+    def missing(cls, section):
+        return [f"does not say {phrase!r}" for phrase in cls.README_SAYS if phrase not in section]
+
+    @classmethod
+    def skill_lines(cls, name):
+        """The lines of a skill's SKILL.md that describe the task file `scripts/pr_loop.py` hands it (there must be one)."""
+        text = (ROOT / ".agents" / "skills" / name / "SKILL.md").read_text()
+        return [line for line in text.splitlines() if "scripts/pr_loop.py" in line and "--pr-loop-task=" in line]
+
+    def test_the_readme_describes_the_checkout_the_agents_start_in(self):
+        section = self.section((ROOT / "README.md").read_text())
+        self.assertIsNotNone(section, f"README.md has no section {self.HEADING!r}: the check scanned nothing")
+        self.assertGreater(len(section), 2000, "the section is there but nearly empty: the check scanned nothing")
+        self.assertIn("python3 scripts/pr_loop.py", section, "control: this is the section about the runner")
+        self.assertEqual([], self.missing(section) + self.stale(section),
+                         "README.md, section 'Process a batch of pull requests'")
+
+    def test_the_runners_docstring_describes_the_checkout_the_agents_start_in(self):
+        self.assertGreater(len(self.flat(pr_loop.__doc__ or "")), 500, "the docstring is missing: nothing was scanned")
+        self.assertEqual([], self.stale(pr_loop.__doc__), "the module docstring of scripts/pr_loop.py")
+
+    def test_the_two_skills_name_the_checkouts_git_exclude_file(self):
+        for name in self.SKILLS:
+            with self.subTest(skill=name):
+                lines = self.skill_lines(name)
+                self.assertEqual(1, len(lines), f".agents/skills/{name}/SKILL.md: the line about the task file of "
+                                                f"scripts/pr_loop.py was not found exactly once: nothing was scanned")
+                self.assertEqual([], self.stale(lines[0]), f".agents/skills/{name}/SKILL.md")
+                self.assertIn(self.EXCLUDE_FILE, self.flat(lines[0]), f".agents/skills/{name}/SKILL.md")
+
+    def test_the_check_fails_on_every_way_the_old_words_come_back(self):
+        old_readme = ("The runner hides `/.pr-loop/` and `/.pr-ready/` from `git status` through the checkout's "
+                      "`.git/info/exclude` and refuses to start when git does not ignore them. A newly started agent may "
+                      "ask whether to trust the new checkout directory; answer it in the printed tmux session within "
+                      "`--startup-timeout`.")
+        self.assertEqual([], self.stale("The runner keeps `.pr-loop/` out of git status through the checkout's git exclude "
+                                        "file (`git rev-parse --git-path info/exclude`). `--startup-timeout` is how long "
+                                        "the runner waits for a started agent's prompt."),
+                         "control: the new wording, and `--startup-timeout` without a trust sentence, are accepted")
+        for case, text, expected in (
+                ("the managed checkout line", "Managed checkout: /somewhere/batch-1", "still says 'Managed checkout'"),
+                ("the old trust sentence", old_readme, "still says 'answer it in the printed tmux session'"),
+                ("the old exclude file", old_readme, "still says '.git/info/exclude'"),
+                ("the over-broad trust claim", "The runner cannot recognise a trust dialog: it pastes its command.",
+                 "still says 'cannot recognise a trust dialog'"),
+                ("the over-broad trust claim, wrapped and in US spelling", "The runner cannot\nrecognize a trust\ndialog.",
+                 "still says 'cannot recognize a trust dialog'"),
+                ("the old trust sentence, wrapped", "answer it in\nthe printed\ntmux session",
+                 "still says 'answer it in the printed tmux session'"),
+                ("a reworded trust sentence", "Answer the trust prompt within `--startup-timeout`.",
+                 "still tells the operator to answer a trust dialog within --startup-timeout"),
+                ("a reworded sentence that names the dialog", "The agent may ask whether you trust the folder, "
+                 "so wait for it for up to --startup-timeout seconds.",
+                 "still tells the operator to answer a trust dialog within --startup-timeout")):
+            with self.subTest(case=case):
+                self.assertIn(expected, "; ".join(self.stale(text)))
+
+    def test_the_check_fails_when_the_readme_stops_saying_what_it_must(self):
+        section = "The runner " + ", ".join(self.README_SAYS) + "."  # synthetic: this test must not depend on the README
+        self.assertEqual([], self.missing(section), "control: a section that says all of it is accepted")
+        for phrase in self.README_SAYS:
+            with self.subTest(phrase=phrase):
+                self.assertEqual([f"does not say {phrase!r}"], self.missing(section.replace(phrase, "...")))
+        self.assertEqual(len(self.README_SAYS), len(self.missing("")), "an empty section says none of it")
+
+    def test_the_check_fails_when_it_would_scan_nothing(self):
+        readme = f"# Title\n\n{self.HEADING}\n\nAnswer it in the printed tmux session.\n\n## Command map\n\nManaged checkout\n"
+        self.assertEqual("Answer it in the printed tmux session.", self.section(readme),
+                         "control: the section is cut at the next heading")
+        self.assertIsNone(self.section(readme.replace(self.HEADING, "## Process batches of pull requests")),
+                          "a renamed heading is no section: the test above fails instead of passing on an empty scan")
+        self.assertEqual("", self.section(f"{self.HEADING}\n\n## Command map\n"), "an empty section is empty, not None")
+        self.assertEqual("", self.section(f"{self.HEADING}\n"), "a heading at the end of the file is an empty section")
+
+
 # ---- (C) Agent: the real class driving the fake tmux in a subprocess ----------------------------------------------
 
 class TmuxCase(unittest.TestCase):

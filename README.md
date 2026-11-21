@@ -68,11 +68,27 @@ secret-bearing tasks.
 
 ## Process a batch of pull requests
 
-Run the standalone PR loop from a Pilot checkout:
+Run the standalone PR loop in the checkout the agents should work in:
 
 ```bash
 python3 scripts/pr_loop.py 371 372 --repo kjelly/pilot
 ```
+
+The agents start in that checkout of yours, not in a clone the runner makes.
+`--checkout DIR` names it and defaults to the root of the git work tree that
+contains the current directory; `DIR` must be the root of its work tree, not a
+subdirectory. The runner refuses to start, with `pr-loop: <reason>` on stderr and
+exit status 1, before it reads a pull request or starts an agent (a dry run
+reports it after the PR states, below), unless: `origin` has exactly one URL,
+and that URL and every push URL name the `--repo` repository; no git operation
+is in progress; nothing is uncommitted or untracked and not ignored; HEAD is on
+the default branch that `origin` itself reports
+(`git ls-remote --symref origin HEAD`); that local branch is at the tip of
+`origin`'s (otherwise run `git pull --ff-only` yourself: the runner never updates
+the checkout); and the default branch has the two helpers named below. It also
+refuses while another runner holds the checkout's lock (the file
+`git rev-parse --git-path pilot-pr-loop.lock` names) and while an agent pane of
+an earlier run (session `pilot-pr-*`) is still alive in the checkout.
 
 The runner uses the Python 3 standard library. Install `git`, authenticated
 `gh`, `tmux`, and the coding agents, with `claude` and `codex` as defaults.
@@ -82,28 +98,62 @@ signal module (`.agents/skills/_shared/scripts/ready_signal.py`); the runner che
 both and refuses a default branch that lacks either. The merge train consumer must
 be running.
 
-The runner starts agents automatically on the verified default branch. An
-agent process is reused for its role while the same PR moves between Draft
-and Ready. After GitHub confirms the merge, the runner closes that PR's agent
-panes and starts new processes for the next PR. A gate that reports a blocker,
-a current-HEAD `needs-person` hand-off, a Ready PR without a valid signal (below),
-or a timeout stops the batch and retains the checkout and panes for inspection.
-The runner prints their locations.
+The runner starts agents automatically in the checkout, which it has verified to
+be on the default branch of `origin` at its tip. An agent process is reused for
+its role while the same PR moves between Draft and Ready. After GitHub confirms
+the merge, the runner closes that PR's agent panes and starts new processes for
+the next PR. Before every dispatch it checks that the checkout is back on the
+branch and commit it started on, clean, with no git operation in progress, and
+otherwise stops without dispatching. A gate that reports a blocker, a
+current-HEAD `needs-person` hand-off, a Ready PR without a valid signal (below),
+or a timeout stops the batch and keeps the agent panes open for inspection. The
+runner prints each pane and its session (`pilot-pr-*`) when it starts the agent,
+and where the task files are when it stops.
+
+The runner never deletes, resets, cleans or stashes anything in the checkout, and
+it never deletes the task files; any agent pane still open when it stops stays
+open. An agent that was interrupted may leave the checkout on a PR branch or with
+uncommitted work; the next run refuses it until you have put it right. Nothing
+else may use the checkout while the runner runs: the agents switch it to PR
+branches, and your own agent sessions in that directory are not protected by the
+lock. A second runner on the same checkout refuses, and so does a run that finds
+a pane kept from an earlier run still alive there, so close those panes before
+the next run. For a long-lived setup, use a dedicated checkout that you trust
+once: a second clone, or a linked worktree when your primary checkout is not on
+the default branch. The runner no longer creates or uses the clones under
+`$XDG_STATE_HOME/pilot/pr-loop/batch-*` (by default
+`~/.local/state/pilot/pr-loop/batch-*`); delete old ones by hand.
 
 Use `--draft-agent` and `--ready-agent` to choose executable paths. The prompts
 default to `/pr-ready {pr}` and `$pr-review-merge {pr}`; you can set them with
 `--draft-command` and `--ready-command`. Quote them in the shell to preserve
 the native skill syntax. Add `--dry-run` to see PR states before starting any
-agent. The phase timeout defaults to 7200 seconds.
+agent: it prints `PR #N: <phase>` for each PR, then inspects the checkout the same
+way, read-only (no lock, no write, no tmux), and prints
+`Checkout: <path> (<branch> at <sha12>)`, or `pr-loop: <reason>` and exit status 1
+for a refused checkout. It does not check whether another runner holds the lock
+or whether a pane from an earlier run is still open, and only a real run notices
+a tracked `.gitignore` that overrides the exclude lines below. The phase timeout
+defaults to 7200 seconds.
 
 Each dispatch writes `<checkout>/.pr-loop/<nonce>/task.json` and pastes
 `--pr-loop-task=<path>` after the prompt; the skill writes `result.json` beside
-it. The runner hides `/.pr-loop/` and `/.pr-ready/` from `git status` through the
-checkout's `.git/info/exclude` and refuses to start when git does not ignore
-them. A newly started agent may ask whether to trust the new checkout
-directory; answer it in the printed tmux session within `--startup-timeout`.
-Agents run with the environment of the tmux server when one is already
+it. The runner keeps `/.pr-loop/` and `/.pr-ready/` out of `git status`: for a
+path that git does not already ignore, it appends the line to the checkout's git
+exclude file (found with `git rev-parse --git-path info/exclude`) and prints
+`Added ... to <file>`, and it refuses to start when git still does not ignore
+them. Agents run with the environment of the tmux server when one is already
 running, not with the environment of the shell that started the runner.
+
+Both agents must already trust the checkout: start each of them there once
+yourself and answer its trust dialog. The runner stops at a trust dialog only
+when its options are numbered; claude's are not, so it takes the selected option
+for the input prompt, pastes its command and presses Enter in the same second,
+and nobody can answer in time. In a directory an agent does not trust, `claude`
+exits at once (its default answer is "No, exit") and the runner stops with an
+`agent exited` message that does not mention trust; `codex` loses the command,
+may record the directory as trusted, and the runner then waits silently until
+`--phase-timeout` (7200 seconds by default).
 
 The runner dispatches the Ready phase only for a PR that carries a valid Ready
 signal at its current HEAD: the label `pr-ready-verified` and a comment that starts with
@@ -136,8 +186,8 @@ failed GitHub read twice before it stops, so one lagging or failing read neither
 dispatches an agent nor ends the run. An agent that is still working when
 GitHub shows the next phase is given the phase timeout to return to its prompt;
 a PR can therefore take up to about twice `--phase-timeout` in one phase. Every
-exhausted wait stops the runner without sending a command and retains the
-panes and the checkout. The runner reads the finished agent's result before it
+exhausted wait stops the runner without sending a command and keeps the
+panes open. The runner reads the finished agent's result before it
 moves on, and stops on a blocker even when GitHub already shows the next phase.
 
 ## Command map
