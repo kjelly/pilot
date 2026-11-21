@@ -1,0 +1,38 @@
+{
+  "result": {
+    "result": [
+      {
+        "accessruletype": [
+          "allow"
+        ],
+        "objectclass": [
+          "ipaassociation",
+          "ipahbacrule"
+        ],
+        "ipauniqueid": [
+          "ccfc57c2-e3ea-11f1-ac98-525400dff9fd"
+        ],
+        "cn": [
+          "P3aCap-CaseRule"
+        ],
+        "hostcategory": [
+          "all"
+        ],
+        "ipaenabledflag": [
+          true
+        ],
+        "servicecategory": [
+          "all"
+        ],
+        "dn": "ipaUniqueID=ccfc57c2-e3ea-11f1-ac98-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 1,
+    "truncated": false,
+    "summary": "1 HBAC rule matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

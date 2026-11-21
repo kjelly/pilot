@@ -1,0 +1,52 @@
+{
+  "result": {
+    "count": 2,
+    "results": [
+      {
+        "result": {
+          "accessruletype": [
+            "allow"
+          ],
+          "objectclass": [
+            "ipaassociation",
+            "ipahbacrule"
+          ],
+          "ipauniqueid": [
+            "d0bdf3fc-e3ea-11f1-af20-525400dff9fd"
+          ],
+          "description": [
+            "p3a capture"
+          ],
+          "ipaenabledflag": [
+            false
+          ],
+          "cn": [
+            "p3acap-r9"
+          ],
+          "memberuser_user": [
+            "p3acap-u1"
+          ],
+          "memberservice_hbacsvc": [
+            "p3acap-svc1"
+          ],
+          "dn": "ipaUniqueID=d0bdf3fc-e3ea-11f1-af20-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+        },
+        "value": "p3acap-r9",
+        "summary": null,
+        "error": null
+      },
+      {
+        "error": "p3acap-nosuchrule: HBAC rule not found",
+        "error_code": 4001,
+        "error_name": "NotFound",
+        "error_kw": {
+          "reason": "p3acap-nosuchrule: HBAC rule not found"
+        }
+      }
+    ]
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -1,0 +1,19 @@
+{
+  "result": {
+    "result": [
+      {
+        "cn": [
+          "p3acap-hg1"
+        ],
+        "dn": "cn=p3acap-hg1,cn=hostgroups,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 1,
+    "truncated": false,
+    "summary": "1 hostgroup matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

@@ -1,0 +1,322 @@
+{
+  "result": {
+    "result": [
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "38aed306-e3ea-11f1-80c9-525400dff9fd"
+        ],
+        "cn": [
+          "crond"
+        ],
+        "description": [
+          "crond"
+        ],
+        "dn": "cn=crond,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "cbb3aa6a-e3e9-11f1-acef-525400dff9fd"
+        ],
+        "cn": [
+          "ftp"
+        ],
+        "description": [
+          "ftp"
+        ],
+        "memberof_hbacsvcgroup": [
+          "ftp"
+        ],
+        "dn": "cn=ftp,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "cbb78108-e3e9-11f1-ac5e-525400dff9fd"
+        ],
+        "cn": [
+          "gdm"
+        ],
+        "description": [
+          "gdm"
+        ],
+        "dn": "cn=gdm,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "cbb7ce42-e3e9-11f1-8b22-525400dff9fd"
+        ],
+        "cn": [
+          "gdm-password"
+        ],
+        "description": [
+          "gdm-password"
+        ],
+        "dn": "cn=gdm-password,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "38afd936-e3ea-11f1-bc51-525400dff9fd"
+        ],
+        "cn": [
+          "gssftp"
+        ],
+        "description": [
+          "gssftp"
+        ],
+        "memberof_hbacsvcgroup": [
+          "ftp"
+        ],
+        "dn": "cn=gssftp,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "cbb81852-e3e9-11f1-a957-525400dff9fd"
+        ],
+        "cn": [
+          "kdm"
+        ],
+        "description": [
+          "kdm"
+        ],
+        "dn": "cn=kdm,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "cbb54fe6-e3e9-11f1-9003-525400dff9fd"
+        ],
+        "cn": [
+          "login"
+        ],
+        "description": [
+          "login"
+        ],
+        "dn": "cn=login,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipaobject",
+          "ipahbacservice"
+        ],
+        "ipauniqueid": [
+          "c114e244-e3ea-11f1-ac6d-525400dff9fd"
+        ],
+        "cn": [
+          "p3acap-svc1"
+        ],
+        "description": [
+          "p3a capture"
+        ],
+        "dn": "cn=p3acap-svc1,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipaobject",
+          "ipahbacservice"
+        ],
+        "ipauniqueid": [
+          "c11d2526-e3ea-11f1-821b-525400dff9fd"
+        ],
+        "cn": [
+          "p3acap-svc2"
+        ],
+        "description": [
+          "p3a capture"
+        ],
+        "dn": "cn=p3acap-svc2,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "38af6122-e3ea-11f1-89af-525400dff9fd"
+        ],
+        "cn": [
+          "proftpd"
+        ],
+        "description": [
+          "proftpd"
+        ],
+        "memberof_hbacsvcgroup": [
+          "ftp"
+        ],
+        "dn": "cn=proftpd,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "38af9bf6-e3ea-11f1-9024-525400dff9fd"
+        ],
+        "cn": [
+          "pure-ftpd"
+        ],
+        "description": [
+          "pure-ftpd"
+        ],
+        "memberof_hbacsvcgroup": [
+          "ftp"
+        ],
+        "dn": "cn=pure-ftpd,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "cb8d4ece-e3e9-11f1-856c-525400dff9fd"
+        ],
+        "cn": [
+          "sshd"
+        ],
+        "description": [
+          "sshd"
+        ],
+        "dn": "cn=sshd,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "cbb48e76-e3e9-11f1-ae76-525400dff9fd"
+        ],
+        "cn": [
+          "su"
+        ],
+        "description": [
+          "su"
+        ],
+        "dn": "cn=su,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "cbb5f8b0-e3e9-11f1-8c3a-525400dff9fd"
+        ],
+        "cn": [
+          "su-l"
+        ],
+        "description": [
+          "su with login shell"
+        ],
+        "dn": "cn=su-l,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "cbb68d20-e3e9-11f1-9a3d-525400dff9fd"
+        ],
+        "cn": [
+          "sudo"
+        ],
+        "description": [
+          "sudo"
+        ],
+        "memberof_hbacsvcgroup": [
+          "Sudo"
+        ],
+        "dn": "cn=sudo,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "cbb6eb62-e3e9-11f1-9880-525400dff9fd"
+        ],
+        "cn": [
+          "sudo-i"
+        ],
+        "description": [
+          "sudo-i"
+        ],
+        "memberof_hbacsvcgroup": [
+          "Sudo"
+        ],
+        "dn": "cn=sudo-i,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "cbb73af4-e3e9-11f1-9fc8-525400dff9fd"
+        ],
+        "cn": [
+          "systemd-user"
+        ],
+        "description": [
+          "pam_systemd and systemd user@.service"
+        ],
+        "dn": "cn=systemd-user,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "objectclass": [
+          "ipahbacservice",
+          "ipaobject"
+        ],
+        "ipauniqueid": [
+          "38af1b4a-e3ea-11f1-91e2-525400dff9fd"
+        ],
+        "cn": [
+          "vsftpd"
+        ],
+        "description": [
+          "vsftpd"
+        ],
+        "memberof_hbacsvcgroup": [
+          "ftp"
+        ],
+        "dn": "cn=vsftpd,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 18,
+    "truncated": false,
+    "summary": "18 HBAC services matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

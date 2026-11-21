@@ -1,0 +1,32 @@
+{
+  "result": {
+    "result": {
+      "cn": [
+        "p3acap-r1"
+      ],
+      "description": [
+        "p3a capture"
+      ],
+      "ipauniqueid": [
+        "c1fc5cdc-e3ea-11f1-ac98-525400dff9fd"
+      ],
+      "ipaenabledflag": [
+        true
+      ],
+      "accessruletype": [
+        "allow"
+      ],
+      "objectclass": [
+        "ipaassociation",
+        "ipahbacrule"
+      ],
+      "dn": "ipaUniqueID=c1fc5cdc-e3ea-11f1-ac98-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p3acap-r1",
+    "summary": "Added HBAC rule \"p3acap-r1\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

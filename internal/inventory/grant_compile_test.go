@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -261,5 +262,19 @@ grants:
 	}
 	if len(hbac) != 0 || len(sudo) != 0 {
 		t.Fatalf("expected breakglass to be skipped by the Phase 1 reconcile compiler, got hbac=%v sudo=%v", hbac, sudo)
+	}
+}
+
+// CompiledLoginRulePrefix is the one place the name-space of the compiled HBAC rules is
+// written down: other code derives from it (the Go HBAC engine blocks roster rules under it),
+// so the names the compiler makes must always start with it.
+func TestCompiledLoginRuleNamesStartWithThePrefix(t *testing.T) {
+	for _, g := range []string{"vendor-project-x", "Vendor X", "vendor_x", "", "日本語"} {
+		if got := CompiledLoginRuleName(g); !strings.HasPrefix(got, CompiledLoginRulePrefix) || len(got) <= len(CompiledLoginRulePrefix) {
+			t.Errorf("CompiledLoginRuleName(%q) = %q does not start with %q", g, got, CompiledLoginRulePrefix)
+		}
+		if strings.HasPrefix(CompiledSudoRuleName(g), CompiledLoginRulePrefix) {
+			t.Errorf("the sudo name of %q is in the HBAC name-space", g)
+		}
 	}
 }

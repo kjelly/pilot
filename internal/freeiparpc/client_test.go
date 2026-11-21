@@ -364,7 +364,7 @@ func TestRPCErrorsAreTyped(t *testing.T) {
 func TestCommandsOutsideTheAllowlistAreNeverSent(t *testing.T) {
 	f, c := loggedIn(t, map[string]string{"user_show": "user-show"})
 	ctx := context.Background()
-	for _, m := range []string{"hbacrule_del", "config_mod", "batch", "session_logout"} {
+	for _, m := range []string{"hbacsvc_del", "hostgroup_del", "config_mod", "batch", "session_logout"} {
 		if _, err := c.Call(ctx, Command{Method: m}); !errors.As(err, new(*ErrMethodNotAllowed)) {
 			t.Fatalf("Call(%s) = %v", m, err)
 		}

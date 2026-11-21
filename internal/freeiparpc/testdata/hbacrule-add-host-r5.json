@@ -1,0 +1,30 @@
+{
+  "result": {
+    "completed": 1,
+    "failed": {
+      "memberhost": {
+        "host": [],
+        "hostgroup": []
+      }
+    },
+    "result": {
+      "description": [
+        "p3a capture"
+      ],
+      "ipaenabledflag": [
+        true
+      ],
+      "cn": [
+        "p3acap-r5"
+      ],
+      "memberhost_host": [
+        "p3acap-h1.ipa.pilot.internal"
+      ],
+      "dn": "ipaUniqueID=c45f633e-e3ea-11f1-92f7-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    }
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

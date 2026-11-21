@@ -1,0 +1,35 @@
+{
+  "result": {
+    "result": {
+      "accessruletype": [
+        "allow"
+      ],
+      "objectclass": [
+        "ipaassociation",
+        "ipahbacrule"
+      ],
+      "ipauniqueid": [
+        "ccfc57c2-e3ea-11f1-ac98-525400dff9fd"
+      ],
+      "ipaenabledflag": [
+        true
+      ],
+      "cn": [
+        "P3aCap-CaseRule"
+      ],
+      "hostcategory": [
+        "all"
+      ],
+      "servicecategory": [
+        "all"
+      ],
+      "dn": "ipaUniqueID=ccfc57c2-e3ea-11f1-ac98-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p3acap-caserule",
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

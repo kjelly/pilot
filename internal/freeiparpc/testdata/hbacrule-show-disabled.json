@@ -1,0 +1,32 @@
+{
+  "result": {
+    "result": {
+      "accessruletype": [
+        "allow"
+      ],
+      "objectclass": [
+        "ipaassociation",
+        "ipahbacrule"
+      ],
+      "ipauniqueid": [
+        "cba59ec4-e3ea-11f1-821b-525400dff9fd"
+      ],
+      "cn": [
+        "p3acap-r7"
+      ],
+      "ipaenabledflag": [
+        false
+      ],
+      "description": [
+        "p3a capture"
+      ],
+      "dn": "ipaUniqueID=cba59ec4-e3ea-11f1-821b-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p3acap-r7",
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

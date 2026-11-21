@@ -1,0 +1,103 @@
+{
+  "result": {
+    "count": 4,
+    "results": [
+      {
+        "completed": 1,
+        "failed": {
+          "memberuser": {
+            "user": [],
+            "group": []
+          }
+        },
+        "result": {
+          "cn": [
+            "p3acap-r9"
+          ],
+          "description": [
+            "p3a capture"
+          ],
+          "ipaenabledflag": [
+            true
+          ],
+          "memberuser_user": [
+            "p3acap-u1"
+          ],
+          "dn": "ipaUniqueID=d0bdf3fc-e3ea-11f1-af20-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+        },
+        "error": null
+      },
+      {
+        "completed": 1,
+        "failed": {
+          "memberservice": {
+            "hbacsvc": [],
+            "hbacsvcgroup": []
+          }
+        },
+        "result": {
+          "cn": [
+            "p3acap-r9"
+          ],
+          "description": [
+            "p3a capture"
+          ],
+          "ipaenabledflag": [
+            true
+          ],
+          "memberuser_user": [
+            "p3acap-u1"
+          ],
+          "memberservice_hbacsvc": [
+            "p3acap-svc1"
+          ],
+          "dn": "ipaUniqueID=d0bdf3fc-e3ea-11f1-af20-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+        },
+        "error": null
+      },
+      {
+        "completed": 0,
+        "failed": {
+          "memberhost": {
+            "host": [
+              [
+                "p3acap-nohost.ipa.pilot.internal",
+                "no such entry"
+              ]
+            ],
+            "hostgroup": []
+          }
+        },
+        "result": {
+          "cn": [
+            "p3acap-r9"
+          ],
+          "description": [
+            "p3a capture"
+          ],
+          "ipaenabledflag": [
+            true
+          ],
+          "memberuser_user": [
+            "p3acap-u1"
+          ],
+          "memberservice_hbacsvc": [
+            "p3acap-svc1"
+          ],
+          "dn": "ipaUniqueID=d0bdf3fc-e3ea-11f1-af20-525400dff9fd,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+        },
+        "error": null
+      },
+      {
+        "result": true,
+        "value": "p3acap-r9",
+        "summary": "Disabled HBAC rule \"p3acap-r9\"",
+        "error": null
+      }
+    ]
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

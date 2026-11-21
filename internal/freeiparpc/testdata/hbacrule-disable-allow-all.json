@@ -1,0 +1,11 @@
+{
+  "result": {
+    "result": true,
+    "value": "allow_all",
+    "summary": "Disabled HBAC rule \"allow_all\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}
