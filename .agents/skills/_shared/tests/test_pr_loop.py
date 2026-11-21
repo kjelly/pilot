@@ -1502,14 +1502,56 @@ class OneSessionPerBatchTests(RunPRCase):
         self.assertEqual({first: ["7-ready"]}, self.env.live(), "the first checkout's agent was not touched")
 
     def test_the_session_is_made_again_when_the_operator_killed_it_between_two_prs(self):
-        # PR #7 is merged and its agent waits to be closed when the operator kills the session (and the pane with it). PR #8
-        # finds no session: it makes one, and closing PR #7's pane, which is gone, is not a failure.
+        # PR #7 is merged and its agent waits to be closed when the operator kills the session, the only one: the tmux server
+        # exits with it. PR #8 starts a new server, whose first pane has the ID PR #7's had. Closing PR #7's pane must not
+        # touch it: only PR #8's own agent is killed, once, at the end of the run.
         killed = lambda: self.env.kill_session(self.session())
         self.run_batch(self.PR + [killed] + self.PR, pr=[7, 8])
         session = self.session()
-        self.assertEqual([("new-session", session, "7-ready"), ("new-session", session, "8-ready")],
-                         [(made["kind"], made["session"], made["window"]) for made in self.env.created()])
-        self.assertEqual([["kill-pane", "-t", "%1"], ["kill-pane", "-t", "%2"]], self.env.tmux_calls("kill-pane"))
+        self.assertEqual([("new-session", session, "7-ready", "%1"), ("new-session", session, "8-ready", "%1")],
+                         [(made["kind"], made["session"], made["window"], made["pane"]) for made in self.env.created()])
+        self.assertEqual([["kill-pane", "-t", "%1"]], self.env.tmux_calls("kill-pane"),
+                         "one kill: the end of the run closes PR #8's agent; PR #7's was on another server")
+        self.assertEqual({}, self.env.live())
+
+    def test_the_same_when_the_operators_own_session_keeps_the_server_alive(self):
+        # The server survives: PR #8's pane is %2, and PR #7's %1 is gone from it. It is closed already, not killed.
+        self.env.keeper()
+        killed = lambda: self.env.kill_session(self.session())
+        self.run_batch(self.PR + [killed] + self.PR, pr=[7, 8])
+        session = self.session()
+        self.assertEqual([("new-session", session, "7-ready", "%1"), ("new-session", session, "8-ready", "%2")],
+                         [(made["kind"], made["session"], made["window"], made["pane"]) for made in self.env.created()])
+        self.assertEqual([["kill-pane", "-t", "%2"]], self.env.tmux_calls("kill-pane"))
+        self.assertEqual({"operator": ["keeper"]}, self.env.live())
+
+    def test_a_server_that_exited_before_the_end_of_the_run_is_not_a_failure_to_close(self):
+        # The operator kills the runner's session, the only one, after the last agent handed over and before the run ends: the
+        # tmux server is gone, so the pane is closed already. `could not close` is for a pane that is still there.
+        killed = lambda: self.env.kill_session(self.session())
+        self.run_batch(["ready"] * 3 + ["merged"] * 2 + [killed] + ["merged"])
+        self.assertEqual([], [line for line in self.told if "could not close" in line])
+        self.assertEqual([], self.env.tmux_calls("kill-pane"), "nothing was sent to a server that was not there")
+        self.assertTrue(self.told[-1].startswith("Kept: "), "and the run ended as any other")
+
+    def test_a_server_that_exits_between_the_check_and_the_kill_is_not_a_failure_to_close_either(self):
+        self.env.update_tmux(before={"kill-pane": [{"kill_session": self.session()}]})
+        self.run_batch(self.PR)
+        self.assertEqual([], [line for line in self.told if "could not close" in line])
+        self.assertEqual([["kill-pane", "-t", "%1"]], self.env.tmux_calls("kill-pane"), "sent, and answered with no server")
+
+    def test_two_prs_with_a_draft_and_a_ready_agent_each_are_four_windows_of_one_session_created_once(self):
+        # The whole flow: Draft, then Ready, then merged, for each of two PRs, with the real Agent and the fake tmux.
+        flow = ["draft"] * 3 + ["ready"] * 4 + ["merged"] * 3
+        self.run_batch(flow + flow, pr=[7, 8])
+        session = self.session()
+        self.assertEqual([("new-session", "7-draft"), ("new-window", "7-ready"), ("new-window", "8-draft"),
+                          ("new-window", "8-ready")], [(made["kind"], made["window"]) for made in self.env.created()])
+        self.assertEqual({session}, {made["session"] for made in self.env.created()}, "one session for all four")
+        order = [call[0] if call[0] == "new-window" else call[2] for call in self.env.tmux_calls()
+                 if call[0] in ("new-window", "kill-pane")]
+        self.assertEqual(["new-window", "new-window", "%1", "%2", "new-window", "%3", "%4"], order,
+                         "PR #7's two panes are closed once PR #8's first agent exists, PR #8's two when the run ends")
         self.assertEqual({}, self.env.live())
 
 
@@ -1762,7 +1804,9 @@ class DocumentationTests(unittest.TestCase):
              "cannot recognise a trust dialog", "cannot recognize a trust dialog",
              # the session design of before kjelly/pilot#425: one session per agent, a PR's panes closed at its merge
              "closes that PR's agent panes", "prints each pane and its session", "close those panes before the next run",
-             "(session `pilot-pr-*`)", "(sessions pilot-pr-*)")
+             "(session `pilot-pr-*`)", "(sessions pilot-pr-*)",
+             # the claim of db19ac69, which the runner does not keep: it adds windows to a session an earlier run left
+             "reuses a window or a session")
     # What the README section must say: the option and its default (the runner's own words), the way to update a stale
     # checkout, where the ignore lines go, and what the runner does in a directory the agents do not trust.
     README_SAYS = ("--checkout DIR", pr_loop.CHECKOUT_DEFAULT, "git pull --ff-only", EXCLUDE_FILE,
@@ -1772,10 +1816,15 @@ class DocumentationTests(unittest.TestCase):
                    # matters), the environment the windows get, and the one tmux version this was verified on
                    "pilot-pr-<directory name>-<8 hex>", f"at most {pr_loop.SESSION_LABEL_MAX} characters",
                    "tmux attach -r -t", "sessions should be nested with care", "tmux switch-client -t", "prefix s",
-                   "tmux kill-pane -t %N", "tmux kill-session -t =", "update-environment", "verified on tmux 3.8")
+                   "tmux kill-pane -t %N", "tmux kill-session -t =", "update-environment", "verified on tmux 3.8",
+                   # what the runner does and does not do to windows and sessions, and why it checks a pane before it kills it
+                   "never kills or renames a window or a session", "still that pane on the same tmux server",
+                   "adds a window to the session named for the checkout when that exists", "glob pattern")
     # What the runner's docstring says about the session, which `--help` shows
     DOCSTRING_SAYS = ("pilot-pr-<directory name>-<8 hex>", "tmux attach -r -t",
-                      "never kills, renames or reuses a window or a session it did not create in this process")
+                      "never kills or renames a window or a session",
+                      "adds a window to the session named for the checkout when that exists",
+                      "still that pane on the same tmux server")
 
     @staticmethod
     def flat(text):
@@ -1813,7 +1862,7 @@ class DocumentationTests(unittest.TestCase):
                 where = SimpleNamespace(dry_run=dry_run, path=Path("/x/checkout"), branch="refs/heads/main", head="0" * 40,
                                         would_add=[], lock_path="/x/lock", exclude="/x/exclude", session="<session>")
                 pr_loop.Checkout.announce(where)
-            wait = subprocess.CompletedProcess([], 0, "%12\n", "")
+            wait = subprocess.CompletedProcess([], 0, "%12|4207|1700000091\n", "")
             with patch.object(pr_loop, "run", return_value=wait), patch.object(pr_loop, "command", return_value=""), \
                  patch.object(pr_loop.shutil, "which", return_value="/x/bin/claude"):
                 pr_loop.Agent("claude", SimpleNamespace(path=Path("/x/checkout"), session="<session>"), 7, "draft")
@@ -1921,7 +1970,9 @@ class DocumentationTests(unittest.TestCase):
                 ("the old session wording", "an earlier run (session `pilot-pr-*`) is still alive",
                  "still says '(session `pilot-pr-*`)'"),
                 ("the old close advice", "so close those panes before the next run.",
-                 "still says 'close those panes before the next run'")):
+                 "still says 'close those panes before the next run'"),
+                ("the claim it never reuses a session", "it never kills, renames or reuses a window or a session it did not "
+                 "start in this run", "still says 'reuses a window or a session'")):
             with self.subTest(case=case):
                 self.assertIn(expected, "; ".join(self.stale(text)))
 
@@ -1946,9 +1997,11 @@ class DocumentationTests(unittest.TestCase):
 # ---- (C) Agent: the real class driving the fake tmux in a subprocess ----------------------------------------------
 
 class SessionNameTests(unittest.TestCase):
-    """The tmux session of a checkout (kjelly/pilot#425). tmux 3.8 keeps `.` and `:` in a session name as typed and then
-    cannot address it (`:` makes `-t S:` name the wrong thing), refuses a tab and accepts an empty name: the name is made
-    of letters, digits, `_` and `-` only, whatever the directory is called, and it is the same on every run in a checkout."""
+    """The tmux session of a checkout (kjelly/pilot#425). tmux 3.8 keeps `.` and `:` in a session name as typed; a `:` makes
+    the session impossible to address (`-t =a:b:` names the session `a`), a `.` breaks some target forms (`=a.b:` works for
+    new-window and list-windows, `has-session -t =a.b` does not), a tab is refused and an empty name is accepted: the name is
+    made of letters, digits, `_` and `-` only, whatever the directory is called, and it is the same on every run in a
+    checkout."""
     NAME = re.compile(r"pilot-pr-[A-Za-z0-9_-]+-[0-9a-f]{8}")
 
     def test_the_name_is_the_prefix_the_directory_name_and_a_hash_of_the_whole_path(self):
@@ -2020,7 +2073,7 @@ class AgentStartTests(TmuxCase):
         session = self.checkout.session
         self.assertRegex(session, r"^pilot-pr-[A-Za-z0-9_-]+-[0-9a-f]{8}$")
         self.assertEqual([["new-session", "-d", "-s", session, "-n", "7-draft", "-c", str(self.env.root), "-P", "-F",
-                           "#{pane_id}", "--", "exec " + shlex.quote(str(self.env.bin / "claude"))]],
+                           pr_loop.PANE_FORMAT, "--", "exec " + shlex.quote(str(self.env.bin / "claude"))]],
                          self.calls("new-session", "new-window", "show-options"))
         self.assertEqual([["set-option", "-w", "-t", "%1", "remain-on-exit", "on"]], self.calls("set-option"))
         self.assertIn(f"PR #7 draft agent: %1 in window 7-draft of tmux session {session}", self.told)
@@ -2050,11 +2103,11 @@ class AgentStartTests(TmuxCase):
     # ---- the second agent: a window of the session the first one made (kjelly/pilot#425) -----------------------
     def window_argv(self, window, *environment):
         return ["new-window", "-d", "-t", f"={self.checkout.session}:", "-n", window, "-c", str(self.env.root), "-P", "-F",
-                "#{pane_id}", *environment, "--", "exec " + shlex.quote(str(self.env.bin / "claude"))]
+                pr_loop.PANE_FORMAT, *environment, "--", "exec " + shlex.quote(str(self.env.bin / "claude"))]
 
     def session_argv(self, window):
         return ["new-session", "-d", "-s", self.checkout.session, "-n", window, "-c", str(self.env.root), "-P", "-F",
-                "#{pane_id}", "--", "exec " + shlex.quote(str(self.env.bin / "claude"))]
+                pr_loop.PANE_FORMAT, "--", "exec " + shlex.quote(str(self.env.bin / "claude"))]
 
     def test_the_second_agent_finds_the_session_and_adds_a_window_to_it_with_an_exact_target(self):
         first = self.agent(7, "draft")
@@ -2085,6 +2138,25 @@ class AgentStartTests(TmuxCase):
         self.env.update_tmux(log=[])
         self.agent(8, "ready")
         self.assertEqual(self.window_argv("8-ready"), self.calls("new-window")[0], "a runner without them passes none")
+
+    def test_an_entry_of_update_environment_is_a_glob_pattern_as_tmux_matches_it(self):
+        # tmux 3.8 copies every variable of the client that a pattern of the list matches (`FOO_*` copies `FOO_X`):
+        # captured on a private server, `set -g update-environment FOO_*` and a client with FOO_X set gave the session FOO_X.
+        self.agent(7, "draft")
+        self.env.update_tmux(update_environment=["FOO_*", "DISPLAY", "BAR?", "NOTHING_*"], log=[])
+        env = {"FOO_X": "1", "FOO_Y": "2", "FOO": "no", "foo_z": "no", "BARS": "s", "BARSS": "no", "DISPLAY": ":9", "OTHER": "o"}
+        with patch.dict(os.environ, env):
+            self.agent(7, "ready")
+        self.assertEqual(self.window_argv("7-ready", "-e", "FOO_X=1", "-e", "FOO_Y=2", "-e", "DISPLAY=:9", "-e", "BARS=s"),
+                         self.calls("new-window")[0], "the pattern's matches, a plain name, `?` for one character; not the "
+                                                      "rest (case counts) and nothing for a pattern that matches nothing")
+
+    def test_a_variable_two_entries_match_is_passed_once(self):
+        self.agent(7, "draft")
+        self.env.update_tmux(update_environment=["FOO_*", "FOO_X"], log=[])
+        with patch.dict(os.environ, {"FOO_X": "1"}):
+            self.agent(7, "ready")
+        self.assertEqual(self.window_argv("7-ready", "-e", "FOO_X=1"), self.calls("new-window")[0])
 
     def test_the_environment_is_not_read_for_the_first_agent_and_a_failure_to_read_it_is_a_stop(self):
         self.agent()
@@ -2130,6 +2202,8 @@ class AgentStartTests(TmuxCase):
 
     def test_a_session_that_is_killed_between_the_two_calls_is_made_again(self):
         # new-session says the session exists; the operator kills it; the window has nowhere to go: the session is made.
+        # (The operator has a session of their own, which keeps the tmux server alive: see the tests of a server that exits.)
+        self.env.keeper()
         self.agent(7, "draft")
         session = self.checkout.session
         self.env.update_tmux(log=[], before={"new-window": [{"kill_session": session}]})
@@ -2137,7 +2211,7 @@ class AgentStartTests(TmuxCase):
         self.assertEqual(["new-session", "show-options", "new-window", "new-session", "set-option"],
                          [call[0] for call in self.calls()])
         self.assertEqual("%2", second.pane)
-        self.assertEqual({session: ["7-ready"]}, self.env.live())
+        self.assertEqual({session: ["7-ready"], "operator": ["keeper"]}, self.env.live())
         self.assertEqual(["new-session", "new-session"], [made["kind"] for made in self.env.created()])
 
     def test_a_session_somebody_made_just_before_the_first_call_gets_the_window(self):
@@ -2152,6 +2226,7 @@ class AgentStartTests(TmuxCase):
         session = self.checkout.session
         appears = {"create_session": session}
         disappears = {"kill_session": session}
+        self.env.keeper()
         self.env.update_tmux(before={"new-session": [appears] * 3, "new-window": [disappears] * 3})
         with self.assertRaisesRegex(pr_loop.Stop, rf"^tmux session {session} kept appearing and disappearing while an "
                                                   "agent was started; nothing was dispatched$"):
@@ -2159,16 +2234,17 @@ class AgentStartTests(TmuxCase):
         self.assertEqual(["new-session", "show-options", "new-window", "new-session", "new-window", "new-session",
                           "new-window"], [call[0] for call in self.calls()],
                          "three rounds of new-session, then new-window (the environment is read once), and no fourth")
-        self.assertEqual({}, self.env.live())
+        self.assertEqual({"operator": ["keeper"]}, self.env.live())
         self.assertEqual([], self.calls("set-option"), "nothing was started")
 
     def test_two_rounds_of_it_are_tolerated(self):
         # The control of the test above: the third round gets through.
         session = self.checkout.session
+        self.env.keeper()
         self.env.update_tmux(before={"new-session": [{"create_session": session}] * 2,
                                      "new-window": [{"kill_session": session}] * 2})
         agent = self.agent()
-        self.assertEqual({session: ["7-draft"]}, self.env.live())
+        self.assertEqual({session: ["7-draft"], "operator": ["keeper"]}, self.env.live())
         self.assertEqual(["new-session", "show-options", "new-window", "new-session", "new-window", "new-session",
                           "set-option"], [call[0] for call in self.calls()])
         self.assertTrue(re.fullmatch(r"%\d+", agent.pane))
@@ -2306,7 +2382,8 @@ class SubmitTests(TmuxCase):
         self.assertEqual(["load-buffer", "-b", buffer, "-"], load["argv"])
         self.assertEqual(self.TEXT, load["stdin"])
         self.assertEqual([["paste-buffer", "-p", "-d", "-b", buffer, "-t", "%1"]], self.calls("paste-buffer"))
-        self.assertEqual(["load-buffer", "paste-buffer", "display-message", "send-keys"], self.names()[2:])
+        self.assertEqual(["display-message", "load-buffer", "paste-buffer", "display-message", "send-keys"], self.names()[2:],
+                         "the pane is checked before anything is loaded or pasted, and again before Enter")
         self.assertEqual([["send-keys", "-t", "%1", "Enter"]], self.calls("send-keys"))
         self.assertEqual([self.TEXT], self.env.tmux()["panes"]["%1"]["input"])
         self.assertEqual([0.25], self.clock.sleeps, "the paste is given time to land before the pane is checked")
@@ -2328,7 +2405,8 @@ class SubmitTests(TmuxCase):
             self.submit()
         (load,) = [c for c in self.env.tmux()["log"] if c["argv"][0] == "load-buffer"]
         self.assertEqual([["delete-buffer", "-b", load["argv"][2]]], self.calls("delete-buffer"))
-        self.assertEqual([], self.calls("send-keys", "display-message"))
+        self.assertEqual([], self.calls("send-keys"))
+        self.assertEqual(1, len(self.calls("display-message")), "the check before the paste, and none after the failure")
 
     def test_a_failing_cleanup_does_not_hide_the_paste_failure(self):
         self.env.update_tmux(fail={"paste-buffer": 1, "delete-buffer": 1})
@@ -2363,7 +2441,8 @@ class CloseTests(TmuxCase):
         split = self.env.add_split(first.pane)
         self.env.update_tmux(log=[])
         first.close()
-        self.assertEqual([["kill-pane", "-t", first.pane]], self.env.tmux_calls())
+        self.assertEqual([["display-message", "-p", "-t", first.pane, pr_loop.READ_FORMAT], ["kill-pane", "-t", first.pane]],
+                         self.env.tmux_calls(), "the pane is checked to be this agent's, then it is killed")
         state = self.env.tmux()
         windows = {window["name"]: window["panes"] for window in state["live"][self.checkout.session]["windows"]}
         self.assertEqual({"7-draft": [split], "7-ready": [second.pane]}, windows)
@@ -2378,17 +2457,27 @@ class CloseTests(TmuxCase):
         self.assertEqual({}, self.env.live())
 
     def test_a_pane_that_is_already_gone_is_closed(self):
-        # The operator closed the window, or killed the session: what close asks for has happened.
+        # The operator closed the window, or killed the session: what close asks for has happened, and nothing is sent.
         agent = self.agent()
+        self.env.keeper()  # another session keeps the server alive: the server answers, and has no such pane
         self.env.kill_session(self.checkout.session)
         agent.close()
+        self.assertEqual([], self.calls("kill-pane"))
+        self.assertEqual(1, len(self.calls("display-message")))
+
+    def test_a_pane_that_vanishes_between_the_check_and_the_kill_is_closed_too(self):
+        agent = self.agent()
+        self.env.update_tmux(answers={"kill-pane": [{"rc": 1, "stderr": "can't find pane: %1"}]})
+        agent.close()
         self.assertEqual([["kill-pane", "-t", "%1"]], self.calls("kill-pane"))
+        self.env.update_tmux(answers={"kill-pane": [{"rc": 1, "stderr": NO_SERVER}]})
+        agent.close()  # the server went in those milliseconds: the pane is as gone as it can be
 
     def test_only_a_pane_that_is_gone_counts_as_closed(self):
         agent = self.agent()
         for case, answer in (("another pane", {"rc": 1, "stderr": "can't find pane: %9"}),
                              ("another status", {"rc": 2, "stderr": "can't find pane: %1"}),
-                             ("no server", {"rc": 1, "stderr": NO_SERVER}),
+                             ("a status that is not 1 with no server", {"rc": 2, "stderr": NO_SERVER}),
                              ("another text", {"rc": 1, "stderr": "no space"})):
             with self.subTest(case=case):
                 self.env.update_tmux(answers={"kill-pane": [answer]})
@@ -2397,53 +2486,202 @@ class CloseTests(TmuxCase):
                     agent.close()
 
 
+class ServerIdentityTests(TmuxCase):
+    """A pane ID is only unique within one tmux server (kjelly/pilot#425, review of db19ac69). A server exits with its last
+    session, and the next one numbers its panes again: after the operator killed the runner's session, `%1` can be the pane
+    of the runner's NEXT agent, or of a pane the operator made. An agent records which server made its pane (the PID and the
+    start time that new-session and new-window print beside the pane ID) and acts on the pane only while the server that
+    answers is that one: `close` does not kill what it cannot show is its own pane, and `status` and `submit` stop."""
+
+    def operator_session(self, name="ops"):
+        """The operator starts a session of their own, with tmux itself: its first pane; a new server if none runs."""
+        done = subprocess.run(["tmux", "new-session", "-d", "-s", name, "-n", "w", "-c", "/", "-P", "-F", pr_loop.PANE_FORMAT,
+                               "--", "x"], input="", capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, done.returncode, done.stderr)
+        return done.stdout.split("|")[0]
+
+    def restarted(self):
+        """An agent of a server that has exited: the operator killed the runner's session, the only one."""
+        old = self.agent(7, "draft")
+        self.env.kill_session(self.checkout.session)
+        self.assertIsNone(self.env.server(), "the last session took the server with it")
+        self.env.update_tmux(log=[])
+        return old
+
+    def stale(self, agent):
+        return rf"^agent pane {agent.pane} \(window {agent.window} of tmux session {re.escape(agent.session)}\) is not the pane " \
+               "this agent was started in: the tmux server it was started on or the pane itself is gone or was replaced; " \
+               "nothing was done to it$"
+
+    def test_an_agent_records_the_server_that_made_its_pane(self):
+        agent = self.agent()
+        self.assertEqual(tuple(self.env.server().split("|")), agent.server)
+        second = self.agent(7, "ready")  # a window of the same server: the same identity
+        self.assertEqual(agent.server, second.server)
+        self.assertEqual((False, False, "claude"), agent.status())
+
+    def test_the_new_agent_of_a_new_server_has_the_old_agents_pane_id_and_closing_the_old_one_leaves_it_alone(self):
+        old = self.restarted()
+        new = self.agent(7, "ready")
+        self.assertEqual(old.pane, new.pane, "the IDs collide: a new server numbers its panes again")
+        self.assertNotEqual(old.server, new.server)
+        self.env.update_tmux(log=[])
+        old.close()
+        self.assertEqual([["display-message", "-p", "-t", old.pane, pr_loop.READ_FORMAT]], self.env.tmux_calls(),
+                         "the check found another server: no kill-pane")
+        self.assertEqual({self.checkout.session: ["7-ready"]}, self.env.live(), "the new agent's window is there")
+        self.assertEqual((False, False, "claude"), new.status(), "and it is still readable")
+        new.close()  # the control: the agent that owns the pane kills it
+        self.assertEqual([["kill-pane", "-t", new.pane]], self.calls("kill-pane"))
+        self.assertEqual({}, self.env.live())
+
+    def test_the_old_agent_does_not_read_or_paste_into_the_pane_that_has_its_id_now(self):
+        old = self.restarted()
+        new = self.agent(7, "ready")
+        self.env.update_tmux(log=[])
+        for action in (old.status, lambda: old.wait_for_prompt(1, allow_exit=True), lambda: old.submit("/pr-ready 7")):
+            with self.assertRaisesRegex(pr_loop.Stop, self.stale(old)):
+                action()
+        self.assertEqual([], self.calls("load-buffer", "paste-buffer", "send-keys", "capture-pane"),
+                         "nothing was loaded, pasted, typed or read")
+        self.assertEqual([], self.env.tmux()["panes"][new.pane]["input"], "the new agent was sent nothing")
+
+    def test_the_old_id_that_is_now_a_pane_of_the_operators_survives_and_is_not_sent_anything(self):
+        old = self.restarted()
+        ops = self.operator_session()
+        self.assertEqual(old.pane, ops, "the operator's first pane has the old agent's ID")
+        self.env.update_tmux(log=[])
+        old.close()
+        self.assertEqual([], self.calls("kill-pane"))
+        self.assertEqual({"ops": ["w"]}, self.env.live(), "the operator's pane survives")
+        with self.assertRaisesRegex(pr_loop.Stop, self.stale(old)):
+            old.submit("/pr-ready 7")
+        with self.assertRaisesRegex(pr_loop.Stop, self.stale(old)):
+            old.status()
+        self.assertEqual([], self.calls("load-buffer", "paste-buffer", "send-keys"))
+        self.assertEqual([], self.env.tmux()["panes"][ops]["input"])
+
+    def test_another_pid_or_another_start_time_is_another_server(self):
+        # tmux's start time has a resolution of a second and PIDs are reused: both have to match.
+        for case, change in (("another pid", lambda pid, start: (str(int(pid) + 1), start)),
+                             ("another start time", lambda pid, start: (pid, str(int(start) + 1)))):
+            with self.subTest(case=case):
+                self.setUp()
+                agent = self.agent()
+                agent.server = change(*agent.server)
+                self.env.update_tmux(log=[])
+                agent.close()
+                self.assertEqual([], self.calls("kill-pane"))
+                with self.assertRaisesRegex(pr_loop.Stop, self.stale(agent)):
+                    agent.status()
+                agent.server = tuple(self.env.server().split("|"))  # the control: the real identity
+                agent.close()
+                self.assertEqual(1, len(self.calls("kill-pane")))
+
+    def test_a_server_that_is_gone_means_the_pane_is_closed_and_a_stop_for_an_active_agent(self):
+        for case, answer in (("a server that ran (the socket is left behind)", NO_SERVER),
+                             ("no server ever ran there", NO_SOCKET)):
+            with self.subTest(case=case):
+                self.setUp()
+                agent = self.agent()
+                self.env.update_tmux(answers={"display-message": [{"rc": 1, "stderr": answer}] * 3}, log=[])
+                agent.close()  # closed already: no kill-pane
+                self.assertEqual([], self.calls("kill-pane"))
+                with self.assertRaisesRegex(pr_loop.Stop, self.stale(agent)):
+                    agent.status()
+                with self.assertRaisesRegex(pr_loop.Stop, self.stale(agent)):
+                    agent.submit("x")
+                self.assertEqual([], self.calls("load-buffer", "paste-buffer", "send-keys"))
+
+    def test_a_server_the_fake_ended_is_gone_for_close_and_status_alike(self):
+        agent = self.agent()
+        self.env.kill_server()
+        self.env.update_tmux(log=[])
+        agent.close()
+        self.assertEqual(["display-message"], [call[0] for call in self.calls()], "the check says there is no server")
+        with self.assertRaisesRegex(pr_loop.Stop, self.stale(agent)):
+            agent.status()
+
+    def test_a_pane_the_same_server_does_not_have_is_closed_and_a_stop_for_an_active_agent(self):
+        agent = self.agent()
+        self.env.keeper()  # the operator's session keeps this server alive
+        self.env.kill_session(self.checkout.session)
+        self.env.update_tmux(log=[])
+        agent.close()
+        self.assertEqual([], self.calls("kill-pane"))
+        with self.assertRaisesRegex(pr_loop.Stop, self.stale(agent)):
+            agent.status()
+
+    def test_a_failure_of_tmux_that_is_not_a_missing_server_is_a_stop_and_kills_nothing(self):
+        agent = self.agent()
+        self.env.update_tmux(answers={"display-message": [{"rc": 1, "stderr": "protocol version mismatch"}]}, log=[])
+        with self.assertRaisesRegex(pr_loop.Stop, r"^tmux display-message failed \(1\): protocol version mismatch$"):
+            agent.close()
+        self.assertEqual([], self.calls("kill-pane"))
+        self.env.set_pane(agent.pane, status=["garbage"])  # output that cannot be read
+        with self.assertRaisesRegex(pr_loop.Stop, rf"^tmux could not read pane {agent.pane}$"):
+            agent.close()
+        self.assertEqual([], self.calls("kill-pane"))
+
+
 class FakeTmuxTests(unittest.TestCase):
-    """The fake tmux says about sessions and windows what tmux 3.8 said on a private server (kjelly/pilot#425): the texts
-    are those captures, and a test that relies on one of the rules below (the exact `=S:`, the prefix fallback of `S:`)
-    relies on it being true of the fake as it is of tmux."""
+    """The fake tmux says about sessions, windows, panes and servers what tmux 3.8 said on a private server (kjelly/pilot#425):
+    the texts are those captures, and what was not captured is not modelled: the fake refuses a target or a format the runner
+    does not use with status 98 and a message that says so. A test that relies on a rule below relies on it being true of the
+    fake as it is of tmux."""
 
     def setUp(self):
         self.env = FakeEnv(self)
 
     @staticmethod
     def tmux(*args):
-        done = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=60)
+        done = subprocess.run(["tmux", *args], input="", capture_output=True, text=True, timeout=60)
         return done.returncode, done.stdout, done.stderr.strip()
 
     def session(self, name, window="w"):
-        return self.tmux("new-session", "-d", "-s", name, "-n", window, "-c", "/", "-P", "-F", "#{pane_id}", "--", "x")
+        return self.tmux("new-session", "-d", "-s", name, "-n", window, "-c", "/", "-P", "-F", pr_loop.PANE_FORMAT, "--", "x")
 
     def window(self, target, name="v"):
-        return self.tmux("new-window", "-d", "-t", target, "-n", name, "-c", "/", "-P", "-F", "#{pane_id}", "--", "x")
+        return self.tmux("new-window", "-d", "-t", target, "-n", name, "-c", "/", "-P", "-F", pr_loop.PANE_FORMAT, "--", "x")
 
-    def test_a_session_name_in_use_is_a_duplicate(self):
-        self.assertEqual((0, "%1\n", ""), self.session("S"))
+    def read(self, pane):
+        return self.tmux("display-message", "-p", "-t", pane, pr_loop.READ_FORMAT)
+
+    def test_a_session_name_in_use_is_a_duplicate_and_a_new_pane_says_which_server_made_it(self):
+        rc, out, err = self.session("S")
+        self.assertEqual((0, "", f"%1|{self.env.server()}\n"), (rc, err, out))
         self.assertEqual((1, "", "duplicate session: S"), self.session("S"))
-        self.assertEqual((0, "%2\n", ""), self.session("S-eink"), "another name is another session")
+        self.assertEqual(0, self.session("S-eink")[0], "another name is another session")
 
-    def test_a_window_needs_a_session_that_exists(self):
-        self.assertEqual((1, "", "can't find session: S"), self.window("=S:"))
-        self.assertEqual((1, "", "can't find session: S"), self.window("S:"))
+    def test_a_window_needs_a_server_and_a_session_that_exists(self):
+        self.assertEqual((1, "", NO_SERVER), self.window("=S:"), "no session, so no server")
         self.session("S")
-        self.assertEqual((1, "", "can't find window: S"), self.window("S"), "without a colon the target is a window name")
-        self.assertEqual((0, "%2\n", ""), self.window("=S:"))
-        self.assertEqual((0, "%3\n", ""), self.window("S:"))
-        self.assertEqual({"S": ["w", "v", "v"]}, self.env.live())
+        self.assertEqual((1, "", "can't find session: gone"), self.window("=gone:"))
+        rc, out, _ = self.window("=S:")
+        self.assertEqual((0, "%2|" + self.env.server() + "\n"), (rc, out))
+        self.assertEqual({"S": ["w", "v"]}, self.env.live())
 
-    def test_an_inexact_target_falls_back_to_a_session_whose_name_starts_with_it_and_an_exact_one_does_not(self):
+    def test_a_target_the_runner_does_not_use_is_refused_loudly_and_changes_nothing(self):
+        # The runner only sends `=S:`. Colon-less targets and inexact ones resolve in ways that depend on what else the
+        # server has (a colon-less `S` is a window name that tmux 3.8 found in S, and in a session `S-eink` when S was
+        # gone); the fake does not model any of it, and a runner that sent one would fail its tests here.
+        self.session("S")
         self.session("S-eink")
-        self.assertEqual((1, "", "can't find session: S"), self.window("=S:"))
-        self.assertEqual({"S-eink": ["w"]}, self.env.live())
-        self.assertEqual((0, "%2\n", ""), self.window("S:"), "tmux put the window into S-eink")
-        self.assertEqual({"S-eink": ["w", "v"]}, self.env.live())
+        for target in ("S", "S:", "S-e:", "=S", ":", "=:", "", "=S:w", "=a:b:"):
+            with self.subTest(target=target):
+                rc, out, err = self.window(target)
+                self.assertEqual((98, ""), (rc, out))
+                self.assertIn("is not a target the runner uses (only =SESSION:)", err)
+        self.assertEqual({"S": ["w"], "S-eink": ["w"]}, self.env.live())
 
-    def test_an_ambiguous_prefix_is_no_session_and_a_whole_name_wins_over_a_prefix(self):
-        self.session("S-a")
-        self.session("S-b")
-        self.assertEqual((1, "", "can't find session: S"), self.window("S:"))
+    def test_a_format_the_runner_does_not_use_is_refused_loudly(self):
+        rc, _, err = self.tmux("new-session", "-d", "-s", "S", "-P", "-F", "#{pane_id}", "--", "x")
+        self.assertEqual(98, rc)
+        self.assertIn("is only answered with -P -F", err)
         self.session("S")
-        self.assertEqual((0, "%4\n", ""), self.window("S:"))
-        self.assertEqual(["w", "v"], self.env.live()["S"], "the session called S, not one of the longer names")
+        self.assertEqual(98, self.tmux("display-message", "-p", "-t", "%1", "#{pane_dead}")[0])
+        self.assertEqual(98, self.tmux("list-panes", "-a", "-F", "#{pane_id}")[0])
+        self.assertEqual({"S": ["w"]}, self.env.live())
 
     def test_a_pane_goes_with_its_window_a_window_with_its_session_and_the_session_with_its_twin(self):
         self.session("S")
@@ -2455,7 +2693,7 @@ class FakeTmuxTests(unittest.TestCase):
         self.assertEqual({"S": ["v"], "S-eink": ["v"]}, self.env.live())
         self.assertEqual((0, "", ""), self.tmux("kill-pane", "-t", "%2"))
         self.assertEqual({}, self.env.live())
-        self.assertEqual((1, "", "can't find pane: %2"), self.tmux("kill-pane", "-t", "%2"), "a second kill finds nothing")
+        self.assertEqual((1, "", NO_SERVER), self.tmux("kill-pane", "-t", "%2"), "the last session took the server with it")
 
     def test_a_window_survives_while_a_pane_the_operator_split_off_is_in_it(self):
         self.session("S")
@@ -2470,11 +2708,43 @@ class FakeTmuxTests(unittest.TestCase):
         self.env.add_twin("S", "S-eink")
         self.env.kill_session("S")
         self.assertEqual({"S-eink": ["w"]}, self.env.live())
+        self.assertIsNotNone(self.env.server(), "the twin keeps the server alive")
         self.assertEqual((0, "", ""), self.tmux("kill-pane", "-t", "%1"))
         self.assertEqual({}, self.env.live())
 
+    def test_a_pane_it_does_not_have_is_empty_fields_with_the_servers_identity_and_status_0(self):
+        self.session("S")
+        identity = self.env.server()
+        self.assertEqual((0, f"0|0|claude|{identity}\n", ""), self.read("%1"))
+        self.assertEqual((0, f"|||{identity}\n", ""), self.read("%77"),
+                         "tmux 3.8 answers a pane it has not got with empty pane fields, exit status 0, server fields filled")
+
+    def test_the_server_goes_with_its_last_session_and_the_next_one_is_another_server_that_numbers_its_panes_again(self):
+        self.session("S")
+        first = self.env.server()
+        self.env.set_pane("%1", enter=["old"])  # something the old pane had
+        self.assertEqual((0, "", ""), self.tmux("kill-pane", "-t", "%1"))
+        self.assertIsNone(self.env.server())
+        self.assertEqual((1, "", NO_SERVER), self.read("%1"), "no server: tmux says so and exits 1")
+        self.assertEqual((1, "", NO_SERVER), self.tmux("list-panes", "-a", "-F", "#{session_name}|#{pane_id}|#{pane_dead}|"
+                                                                          "#{pane_current_path}"))
+        rc, out, _ = self.session("S")
+        second = self.env.server()
+        self.assertNotEqual(first, second, "another PID and start time")
+        self.assertEqual((0, f"%1|{second}\n"), (rc, out), "and the pane IDs start again: %1 is another pane")
+        self.assertEqual([], self.env.tmux()["panes"]["%1"].get("enter", []), "with nothing of the old pane's")
+        self.assertEqual((0, f"0|0|claude|{second}\n", ""), self.read("%1"))
+
+    def test_a_server_that_exits_takes_its_buffers_with_it(self):
+        self.session("S")
+        self.assertEqual((0, "", ""), self.tmux("load-buffer", "-b", "b", "-"))
+        self.assertEqual(["b"], list(self.env.tmux()["buffers"]))
+        self.tmux("kill-pane", "-t", "%1")
+        self.assertEqual({}, self.env.tmux()["buffers"])
+
     def test_the_panes_listing_is_derived_from_the_model_the_way_tmux_prints_it(self):
         format = "#{session_name}|#{pane_id}|#{pane_dead}|#{pane_current_path}"
+        self.assertEqual((1, "", NO_SERVER), self.tmux("list-panes", "-a", "-F", format), "no session, no server")
         self.session("S")
         self.window("=S:")
         self.env.add_twin("S", "S-eink")
@@ -2485,6 +2755,7 @@ class FakeTmuxTests(unittest.TestCase):
         self.assertEqual((0, "x|%1|0|/y\n", ""), self.tmux("list-panes", "-a", "-F", format), "a listing a test sets wins")
 
     def test_the_environment_a_new_session_takes_is_tmuxs_default_list(self):
+        self.session("S")
         self.assertEqual((0, "".join(name + "\n" for name in UPDATE_ENVIRONMENT), ""),
                          self.tmux("show-options", "-gv", "update-environment"))
         self.assertEqual(13, len(UPDATE_ENVIRONMENT))
@@ -3649,9 +3920,10 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual([str(self.env.checkout)] * 2, [session["cwd"] for session in self.env.tmux()["sessions"]])
 
     # ---- a run that stopped leaves its window; the next run in the same checkout (kjelly/pilot#425 AC2) ---------------
-    def blocked_rerun(self):
-        """The second run of `blocked_run`: the agent of the new run is pane `%2` and publishes a blocker too."""
-        self.env.set_pane("%2", enter=[{"result": {"outcome": "DRAFT-BLOCKED", "reason": "synthetic blocker"}}])
+    def blocked_rerun(self, pane="%2"):
+        """The second run of `blocked_run`: the agent of the new run is pane `pane` (`%2` on the server the first run used,
+        `%1` again on a new one) and publishes a blocker too."""
+        self.env.set_pane(pane, enter=[{"result": {"outcome": "DRAFT-BLOCKED", "reason": "synthetic blocker"}}])
         proc = self.run_program()
         self.assertEqual(1, proc.returncode, proc.stdout + proc.stderr)
         self.assertIn("DRAFT-BLOCKED", proc.stderr)
@@ -3684,10 +3956,11 @@ class ProgramTests(unittest.TestCase):
         top = self.env.checkout
         session = pr_loop.session_name(top)
         self.blocked_run()
-        self.env.kill_session(session)  # (and the agent with it: nothing of the earlier run is left in the checkout)
+        self.env.kill_session(session)  # (and the agent with it: nothing of the earlier run is left in the checkout; the
+        self.assertIsNone(self.env.server())  # session was the last one, so the tmux server exited too)
         self.env.update_tmux(log=[])
-        proc = self.blocked_rerun()
-        self.assertIn(f"PR #7 draft agent: %2 in window 7-draft of tmux session {session}", proc.stdout)
+        proc = self.blocked_rerun("%1")  # a new server numbers its panes again
+        self.assertIn(f"PR #7 draft agent: %1 in window 7-draft of tmux session {session}", proc.stdout)
         self.assertEqual({session: ["7-draft"]}, self.env.live())
         self.assertEqual(["new-session", "new-session"], [made["kind"] for made in self.env.created()])
         self.assertEqual(["new-session"], [call[0] for call in self.env.tmux_calls()

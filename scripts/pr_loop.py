@@ -12,10 +12,13 @@ The agents run as windows (one per agent, named `<PR>-<phase>`) of ONE tmux sess
 yours: `pilot-pr-<directory name>-<8 hex>`, where the directory name is the checkout's, cut down to letters, digits, `_`
 and `-`, and the hex is a hash of its full path, so that the name is the same on every run in this checkout and differs
 between checkouts. The first agent creates the session, every later one adds a window to it; the runner announces the
-name once and you watch from another terminal, read-only, with `tmux attach -r -t <session>`. The runner closes only
-the panes it started in this process, one pane at a time: it never kills, renames or reuses a window or a session it
-did not create in this process (the dead windows of an earlier run stay where they are). The session ends with its
-last window, and a client attached to it is detached then (tmux's default).
+name once and you watch from another terminal, read-only, with `tmux attach -r -t <session>`. The runner never kills
+or renames a window or a session. It adds a window to the session named for the checkout when that exists (also one an
+earlier run left), and it closes only the panes it started in this process, one pane at a time, after checking that
+each is still that pane on the same tmux server: pane IDs are only unique within one server, and a tmux server exits
+with its last session, so a later server can give the same ID to another pane. The dead windows of an earlier run
+stay where they are. The session ends with its last window, and a client attached to it is detached then (tmux's
+default).
 
 The runner dispatches the Ready skill (pr-review-merge) only for a PR that carries a valid Ready signal at its
 current HEAD and for its latest Ready transition (`ready_signal.assess`): proof that pr-ready (or issue-to-pr's mark_ready.py) verified and signed it. A
@@ -28,6 +31,7 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import fnmatch
 import hashlib
 import json
 import math
@@ -69,6 +73,11 @@ PANE_SESSION_PREFIX = "pilot-pr-"
 # somebody else created or killed meanwhile before it gives up. Module constants, not flags.
 SESSION_LABEL_MAX = 24
 CREATE_ROUNDS = 3
+# What tmux prints for a new pane (`-P -F`): the pane ID, and the PID and start time of the tmux server that made it. A
+# pane ID is only unique within one server; the pair identifies the server. And what the runner reads of a pane in ONE
+# call, the server's identity beside the pane's fields.
+PANE_FORMAT = "#{pane_id}|#{pid}|#{start_time}"
+READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pid}|#{start_time}"
 
 
 class Stop(RuntimeError):
@@ -273,11 +282,18 @@ def lock_checkout(top, path):
 def session_name(path):
     """The tmux session of the runner in the checkout at `path` (absolute and resolved: `resolve_checkout`):
     `pilot-pr-<label>-<8 hex>`. The label is the directory name cut down to what tmux keeps as typed and can target
-    (letters, digits, `_` and `-`: a `:` or a `.` in a name makes the session impossible to address, a tab is
-    refused) and the hex is a hash of the whole path, so the name is stable per checkout and two checkouts with the
-    same directory name under different parents do not share a session."""
+    (letters, digits, `_` and `-`: a `:` in a name makes the session impossible to address, a `.` breaks some target
+    forms such as `has-session -t =a.b`, a tab is refused) and the hex is a hash of the whole path, so the name is
+    stable per checkout and two checkouts with the same directory name under different parents do not share a session."""
     label = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(path).name).strip("-")[:SESSION_LABEL_MAX].rstrip("-") or "checkout"
     return f"{PANE_SESSION_PREFIX}{label}-{hashlib.sha256(os.fsencode(str(path))).hexdigest()[:8]}"
+
+
+def no_tmux_server(stderr):
+    """Whether what tmux said is that no server is running: the socket is left behind (`no server running on ...`) or there
+    is none (`error connecting to ... (No such file or directory)`)."""
+    return "no server running" in stderr or re.search(r"error connecting to .* \(No such file or directory\)",
+                                                      stderr) is not None
 
 
 _PANE = re.compile(r"(?P<session>.*)\|(?P<pane>%\d+)\|(?P<dead>[01])\|(?P<path>.*)")
@@ -288,8 +304,7 @@ def check_panes(top):
     that run, the pane did not. Panes of other sessions, dead panes and panes elsewhere are not the runner's business."""
     done = run(["tmux", "list-panes", "-a", "-F", "#{session_name}|#{pane_id}|#{pane_dead}|#{pane_current_path}"])
     if done.returncode != 0:
-        if "no server running" in done.stderr or re.search(r"error connecting to .* \(No such file or directory\)",
-                                                           done.stderr):
+        if no_tmux_server(done.stderr):
             return  # no tmux server, so no pane
         raise Stop(f"tmux list-panes failed ({done.returncode}): {done.stderr.strip()[:500]}")
     inside = os.path.realpath(top)
@@ -527,9 +542,12 @@ class Agent:
         if not path:
             raise Stop(f"agent executable not found: {executable}")
         self.session, self.window = checkout.session, f"{number}-{phase}"
-        self.pane = self.start(checkout.path, "exec " + shlex.quote(os.path.abspath(path)))
-        if not re.fullmatch(r"%\d+", self.pane):
+        made = re.fullmatch(r"(%\d+)\|(\d+)\|(\d+)",
+                            self.start(checkout.path, "exec " + shlex.quote(os.path.abspath(path))))
+        if not made:
             raise Stop("tmux did not return a pane ID")
+        # The pane, and the tmux server that made it: a pane ID means this pane only on that server.
+        self.pane, self.server = made[1], (made[2], made[3])
         tell(f"PR #{number} {phase} agent: {self.pane} in window {self.window} of tmux session {self.session}")
         command("tmux", "set-option", "-w", "-t", self.pane, "remain-on-exit", "on")
 
@@ -539,7 +557,7 @@ class Agent:
         again): each answer is compared exactly, a `duplicate session` turns into a new window, a missing session into
         a new session, and anything else is a Stop. Every target is exact (`=S:`): an inexact `S:` falls back to a
         session whose name merely starts with S."""
-        where, environment = ["-c", str(directory), "-P", "-F", "#{pane_id}"], None
+        where, environment = ["-c", str(directory), "-P", "-F", PANE_FORMAT], None
         for _ in range(CREATE_ROUNDS):
             done = run(["tmux", "new-session", "-d", "-s", self.session, "-n", self.window, *where, "--", shell_command])
             if done.returncode == 0:
@@ -560,18 +578,48 @@ class Agent:
     def environment():
         """What a new window of an existing session must be given: a window takes the SESSION's value of each name in
         tmux's `update-environment` list (an earlier run's, or the last client's: the operator signs commits through
-        SSH_AUTH_SOCK), a new session takes the runner's. `-e NAME=VALUE` for each such name the runner has itself, so
-        that every agent sees the runner's environment; a name the runner does not have is not passed."""
-        names = command("tmux", "show-options", "-gv", "update-environment").splitlines()
-        return [arg for name in names if name in os.environ for arg in ("-e", f"{name}={os.environ[name]}")]
+        SSH_AUTH_SOCK), a new session takes the runner's. `-e NAME=VALUE` for each variable the runner has itself that
+        the list names, so that every agent sees the runner's environment; a name the runner does not have is not passed.
+        An entry of the list is a glob pattern, as tmux matches it (`FOO_*` copies `FOO_X`; a plain name matches itself)."""
+        entries = command("tmux", "show-options", "-gv", "update-environment").splitlines()
+        names = {}
+        for entry in entries:
+            names.update((name, None) for name in sorted(os.environ) if fnmatch.fnmatchcase(name, entry))
+        return [arg for name in names for arg in ("-e", f"{name}={os.environ[name]}")]
+
+    def probe(self):
+        """`(state, fields)`: the one place that reads this agent's pane, in ONE `display-message` that also prints the
+        identity of the tmux server answering. A pane ID is only unique within one tmux server, and a server exits with its
+        last session: a later server can give the same ID to another pane (this agent's replacement, or the operator's).
+        `state` is `ours` (`fields` are the pane's dead and in-mode flags and its foreground command), `other server`
+        (the server answering is not the one that made the pane), `gone` (that server has no such pane) or `no server`.
+        Output that cannot be read, or any other failure of tmux, is a Stop. The commands that follow act on the pane by
+        its ID: the milliseconds between this read and them are not covered."""
+        done = run(["tmux", "display-message", "-p", "-t", self.pane, READ_FORMAT])
+        if done.returncode != 0:
+            if no_tmux_server(done.stderr):
+                return "no server", None
+            raise Stop(f"tmux display-message failed ({done.returncode}): {done.stderr.strip()[:500]}")
+        parts = done.stdout.strip().split("|")
+        if len(parts) != 5 or not (parts[3].isdigit() and parts[4].isdigit()):
+            raise Stop(f"tmux could not read pane {self.pane}")
+        if tuple(parts[3:]) != self.server:
+            return "other server", None
+        if parts[:3] == ["", "", ""]:
+            return "gone", None  # tmux answers a pane it does not have with empty fields and exit status 0
+        if parts[0] not in ("0", "1") or parts[1] not in ("0", "1"):
+            raise Stop(f"tmux could not read pane {self.pane}")
+        return "ours", (parts[0] == "1", parts[1] == "1", parts[2].lstrip("-"))
 
     def status(self):
-        raw = command("tmux", "display-message", "-p", "-t", self.pane,
-                      "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}").strip()
-        parts = raw.split("|")
-        if len(parts) != 3 or parts[0] not in ("0", "1") or parts[1] not in ("0", "1"):
-            raise Stop(f"tmux could not read pane {self.pane}")
-        return parts[0] == "1", parts[1] == "1", parts[2].lstrip("-")
+        """`(dead, in_mode, foreground command)` of the pane. A pane that is gone, or a tmux server that is not the one the
+        agent was started on, is a Stop that names the pane: nothing is ever done to the pane that now has the ID."""
+        state, fields = self.probe()
+        if state != "ours":
+            raise Stop(f"agent pane {self.pane} (window {self.window} of tmux session {self.session}) is not the pane "
+                       "this agent was started in: the tmux server it was started on or the pane itself is gone or was "
+                       "replaced; nothing was done to it")
+        return fields
 
     def wait_for_prompt(self, timeout, *, allow_exit=False):
         end = time.monotonic() + timeout
@@ -592,6 +640,7 @@ class Agent:
                    f"session {self.session}")
 
     def submit(self, text):
+        self.status()  # still this pane, on the same tmux server, before anything is loaded or pasted
         buffer = "pilot-pr-" + uuid.uuid4().hex
         command("tmux", "load-buffer", "-b", buffer, "-", data=text)
         try:
@@ -610,10 +659,16 @@ class Agent:
 
     def close(self):
         """Close the agent's pane, and only its pane (`kill-pane` on its ID; never its window or its session, so that a
-        pane the operator split off in the window survives). A pane that is already gone (the operator closed it, or
-        killed the session) is closed, which is what this asks for; any other failure is a Stop."""
+        pane the operator split off in the window survives), and only after `probe` found it is still this agent's pane
+        on the tmux server that made it. A pane that is already gone, a tmux server that is gone (the operator killed the
+        session, and no other session kept the server alive) and a server that is not the one that made the pane are all
+        closed, which is what this asks for, and `kill-pane` is not sent: the ID may belong to another pane now. Any other
+        failure is a Stop. The check and the `kill-pane` are two commands: what happens between them is not covered."""
+        if self.probe()[0] != "ours":
+            return
         done = run(["tmux", "kill-pane", "-t", self.pane])
-        if done.returncode != 0 and (done.returncode, done.stderr.strip()) != (1, f"can't find pane: {self.pane}"):
+        if done.returncode != 0 and (done.returncode, done.stderr.strip()) != (1, f"can't find pane: {self.pane}") and \
+           not (done.returncode == 1 and no_tmux_server(done.stderr)):
             raise Stop(f"tmux kill-pane failed ({done.returncode}): {done.stderr.strip()[:500]}")
 
 

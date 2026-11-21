@@ -131,20 +131,24 @@ Inside tmux that command fails (`sessions should be nested with care`): use
 `tmux switch-client -t <session>` or `prefix s` instead. These are not read-only:
 what you type in an agent's window reaches the agent, so look and do not type.
 Agents run with the environment of the tmux server, except that every agent gets
-the runner's own value of each name in tmux's `update-environment` list
-(`tmux show-options -gv update-environment`; `SSH_AUTH_SOCK` and `DISPLAY` are
-among them) that the runner has, so the agents use the runner's agent socket and
-not one left by an earlier run or by the last client to attach. Those values are
-socket paths and display names, not secrets, and they appear for a moment in the
-arguments of the tmux command: do not add a name that carries a secret to
-`update-environment`. The session handling was verified on tmux 3.8 only.
+the runner's own value of each variable that tmux's `update-environment` list
+(`tmux show-options -gv update-environment`) names, as tmux matches it: an entry
+may be a glob pattern such as `FOO_*`, and `SSH_AUTH_SOCK` and `DISPLAY` are in
+the default list. So the agents use the runner's agent socket and not one left by
+an earlier run or by the last client to attach. Those values are socket paths and
+display names, not secrets, and they appear for a moment in the arguments of the
+tmux command: do not add a name that carries a secret, or a pattern that matches
+one, to `update-environment`. The session handling was verified on tmux 3.8 only.
 
 The runner never deletes, resets, cleans or stashes anything in the checkout, and
-it never deletes the task files. It closes only panes it started in this run, one
-pane at a time (`kill-pane`, so a pane you split off in an agent's window
-survives), and it never kills, renames or reuses a window or a session it did not
-start in this run: the dead windows of an earlier run stay where they are. A stop
-keeps the agent windows open. Close one with `tmux kill-pane -t %N` (`%N` is the
+it never deletes the task files. It never kills or renames a window or a session.
+It adds a window to the session named for the checkout when that exists, also one
+an earlier run left, and it closes only panes it started in this run, one pane at
+a time (`kill-pane`, so a pane you split off in an agent's window survives),
+after checking that each is still that pane on the same tmux server: pane IDs are
+only unique within one server, which exits with its last session, so a later
+server can give the same ID to another pane. The dead windows of an earlier run
+stay where they are. A stop keeps the agent windows open. Close one with `tmux kill-pane -t %N` (`%N` is the
 pane ID the runner printed), or the whole session with
 `tmux kill-session -t =<session>` when nothing in it still runs; the `=` is
 required, because without it tmux may pick another session whose name starts the

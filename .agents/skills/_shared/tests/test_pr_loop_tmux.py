@@ -63,23 +63,39 @@ class RealTmuxCase(unittest.TestCase):
         told = patch.object(pr_loop, "tell")
         told.start()
         self.addCleanup(told.stop)
-        # The keeper: a session of its own that keeps the server alive when the last session of a test goes. Started on the
-        # private socket explicitly, so that nothing can reach any other server while the environment is not yet checked.
+        self.start_keeper()
+        # Whatever is on the private socket at the end goes: explicitly that socket, never a name or the default.
+        self.addCleanup(subprocess.run, ["tmux", "-S", str(self.socket), "kill-server"], capture_output=True, timeout=30)
+
+    def start_keeper(self):
+        """The keeper: a session of its own that keeps the server alive when the last session of a test goes (a server exits
+        with its last session). Started on the private socket explicitly, so that nothing can reach any other server while the
+        environment is not yet checked; then the check: what the runner's plain `tmux` reaches must be this server, it finds the
+        keeper and its socket is in the private directory. Everything the runner does goes through that plain `tmux`. A test that
+        lets the server exit calls this again for the next one, and the check is made again."""
         self.keeper = "pr-loop-keeper-" + uuid.uuid4().hex[:8]
         done = subprocess.run(["tmux", "-S", str(self.socket), "-f", "/dev/null", "new-session", "-d", "-s", self.keeper,
-                               "exec sleep 600"], capture_output=True, text=True, timeout=30)
+                               "exec sleep 600"], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
         self.assertEqual(0, done.returncode, done.stderr)
-        self.addCleanup(subprocess.run, ["tmux", "-S", str(self.socket), "kill-server"], capture_output=True, timeout=30)
-        # What the runner's plain `tmux` reaches must be this server: it finds the keeper, and its socket is in the private
-        # directory. Everything the runner does goes through that plain `tmux`.
         rc, out, err = self.tmux("display-message", "-p", "-t", f"={self.keeper}:", "#{socket_path}")
         self.assertEqual((0, str(self.socket)), (rc, out.strip()), f"plain tmux does not reach the private server: {err}")
         self.assertTrue(os.path.realpath(out.strip()).startswith(os.path.realpath(self.root) + os.sep))
 
+    def server(self):
+        """`(pid, start_time)` of the tmux server on the private socket, as tmux prints them."""
+        return tuple(self.tmux_ok("display-message", "-p", "-t", f"={self.keeper}:", "#{pid}|#{start_time}").split("|"))
+
+    def kill_server(self):
+        """Every session and pane goes, the server with them: explicitly the private socket, and then the wait until it is
+        not answering."""
+        subprocess.run(["tmux", "-S", str(self.socket), "kill-server"], capture_output=True, timeout=30,
+                       stdin=subprocess.DEVNULL)
+        self.wait_for("the server to be gone", lambda: self.tmux("list-sessions")[0] != 0)
+
     # ---- the real tmux, as the operator uses it -------------------------------------------------------------------
     @staticmethod
     def tmux(*args):
-        done = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=30)
+        done = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
         return done.returncode, done.stdout, done.stderr.strip()
 
     def tmux_ok(self, *args):
@@ -128,6 +144,7 @@ class RealTmuxSessionTests(RealTmuxCase):
         agents = [self.agent(checkout, 7, "draft"), self.agent(checkout, 7, "ready"), self.agent(checkout, 8, "draft")]
         self.assertEqual({checkout.session: ["7-draft", "7-ready", "8-draft"]}, self.sessions())
         self.assertEqual(3, len({agent.pane for agent in agents}))
+        self.assertEqual({self.server()}, {agent.server for agent in agents}, "each agent has the PID and start time of the server")
         for agent in agents:
             self.assertEqual((False, False), agent.status()[:2])
         # `-n` turns automatic renaming off: the window is not renamed after the program in it (`sleep`, or `sh`)
@@ -196,6 +213,84 @@ class RealTmuxSessionTests(RealTmuxCase):
                 self.assertNotIn(checkout.session, self.sessions())
 
 
+class RealTmuxServerIdentityTests(RealTmuxCase):
+    """A pane ID is only unique within one tmux server (kjelly/pilot#425, review of db19ac69), and a server exits with its last
+    session. The module's own keeper normally prevents that; here the server is killed and started again, the way it goes
+    when the operator kills the runner's session and has no other session, so that the next server gives the old pane's ID to
+    another pane. The new keeper is started on the private socket explicitly and the socket is checked again."""
+
+    def restarted(self, checkout):
+        """An agent A of a server that has exited, and a new server (a new keeper, `%0`) that has not made `%1` yet."""
+        old = self.agent(checkout, 7, "draft", "agent-a")
+        self.assertEqual("%1", old.pane, "the keeper has %0")
+        before = self.server()
+        self.kill_server()
+        self.start_keeper()
+        self.assertNotEqual(before, self.server(), "another server: another PID, and another start time unless it is the same second")
+        return old
+
+    def test_the_new_agent_has_the_old_agents_pane_id_and_closing_the_old_one_leaves_it_alone(self):
+        checkout = self.checkout()
+        old = self.restarted(checkout)
+        new = self.agent(checkout, 7, "ready", "agent-b")
+        self.assertEqual(old.pane, new.pane, "the IDs collide: the new server numbers its panes again")
+        self.assertNotEqual(old.server, new.server)
+        self.assertEqual(new.server, self.server())
+        old.close()
+        self.assertEqual({checkout.session: ["7-ready"]}, self.sessions(), "the new agent is still there")
+        self.assertEqual([f"7-ready|{new.pane}|0"], self.panes(checkout.session))
+        self.assertEqual((False, False), new.status()[:2], "and it can still be read")
+        with self.assertRaisesRegex(pr_loop.Stop, rf"^agent pane {old.pane} \(window 7-draft of tmux session "
+                                                  rf"{re.escape(checkout.session)}\) is not the pane this agent was started in"):
+            old.status()
+        new.close()  # the control: the agent that owns the pane kills it
+        self.assertEqual({}, self.sessions())
+
+    def test_the_old_id_that_is_now_a_pane_of_the_operators_survives_and_nothing_is_pasted_into_it(self):
+        checkout = self.checkout()
+        old = self.restarted(checkout)
+        ops = self.tmux_ok("new-session", "-d", "-s", "ops", "-P", "-F", "#{pane_id}", "exec sleep 600")
+        self.assertEqual(old.pane, ops, "the operator's pane has the old agent's ID")
+        old.close()
+        self.assertEqual(["ops"], list(self.sessions()), "the operator's session is there")
+        self.assertEqual([(ops, "0")], [tuple(row.split("|")[1:]) for row in self.panes("ops")], "and its pane is alive")
+        with self.assertRaisesRegex(pr_loop.Stop, "is not the pane this agent was started in"):
+            old.submit("typed into the operator's pane")
+        self.assertEqual("", self.tmux_ok("list-buffers"), "nothing was loaded: the check comes first")
+        self.assertNotIn("typed", self.tmux_ok("capture-pane", "-p", "-t", ops))
+
+    def test_a_server_that_is_gone_means_the_pane_is_closed_and_a_stop_for_an_active_agent(self):
+        checkout = self.checkout()
+        old = self.agent(checkout)
+        self.kill_server()
+        old.close()  # `no server running on <the socket left behind>`: closed already
+        with self.assertRaisesRegex(pr_loop.Stop, "is not the pane this agent was started in"):
+            old.status()
+        self.socket.unlink()  # and with no socket at all: `error connecting to ... (No such file or directory)`
+        old.close()
+        with self.assertRaisesRegex(pr_loop.Stop, "is not the pane this agent was started in"):
+            old.submit("x")
+
+    def test_a_pane_the_server_has_not_got_is_empty_fields_with_the_servers_own_and_exit_status_0(self):
+        # The fake tmux says the same (FakeTmuxTests): this is the capture it rests on.
+        checkout = self.checkout()
+        agent = self.agent(checkout)
+        pid, started = self.server()
+        self.wait_for("the agent's script to reach sleep", lambda: self.tmux_ok(
+            "display-message", "-p", "-t", agent.pane, "#{pane_current_command}") == "sleep")
+        self.assertEqual((0, f"0|0|sleep|{pid}|{started}\n", ""), self.tmux("display-message", "-p", "-t", agent.pane,
+                                                                            pr_loop.READ_FORMAT))
+        self.assertEqual((0, f"|||{pid}|{started}\n", ""), self.tmux("display-message", "-p", "-t", "%987", pr_loop.READ_FORMAT))
+        # The operator kills the session; the keeper keeps the server: the pane is gone on a server that is still there
+        self.tmux_ok("kill-session", "-t", f"={checkout.session}")
+        self.assertEqual((0, f"|||{pid}|{started}\n", ""), self.tmux("display-message", "-p", "-t", agent.pane,
+                                                                    pr_loop.READ_FORMAT))
+        agent.close()
+        with self.assertRaisesRegex(pr_loop.Stop, "is not the pane this agent was started in"):
+            agent.status()
+        self.assertEqual({}, self.sessions())
+
+
 class RealTmuxAnswerTests(RealTmuxCase):
     """The texts the runner compares exactly, as THIS tmux says them: when a tmux version words one differently these fail,
     and the runner must be looked at before the fake (pr_loop_fakes.py) is."""
@@ -255,10 +350,12 @@ class RealTmuxEnvironmentTests(RealTmuxCase):
     the runner passes its own, so that every agent sees the runner's environment (the operator signs commits through
     SSH_AUTH_SOCK)."""
 
-    def recorder(self, name):
-        """An agent that records its SSH_AUTH_SOCK in a file; `(executable, file)`."""
+    def recorder(self, name, *variables):
+        """An agent that records its values of `variables` (default SSH_AUTH_SOCK), joined by `|`, in a file;
+        `(executable, file)`."""
         out = self.root / f"{name}.out"
-        self.script(name, f"#!/bin/sh\nprintf '%s' \"$SSH_AUTH_SOCK\" > '{out}'\nexec sleep 600\n")
+        shown = "|".join(f"${{{variable}}}" for variable in variables or ("SSH_AUTH_SOCK",))
+        self.script(name, f"#!/bin/sh\nprintf '%s' \"{shown}\" > '{out}'\nexec sleep 600\n")
         return name, out
 
     def recorded(self, out):
@@ -276,6 +373,23 @@ class RealTmuxEnvironmentTests(RealTmuxCase):
         self.assertEqual("/synthetic/earlier.sock", self.recorded(first_out), "a new session takes the runner's")
         self.assertEqual("/synthetic/later.sock", self.recorded(second_out), "a new window takes the runner's with -e")
         self.assertEqual("/synthetic/earlier.sock", self.recorded(third_out), "without -e it takes the session's: what -e fixes")
+
+    def test_a_pattern_of_update_environment_is_matched_the_way_tmux_matches_it(self):
+        # tmux 3.8 copies every variable of the client that an entry of the list matches: `FOO_*` copies `FOO_X` (captured on a
+        # private server). The runner passes the runner's value of each such variable to a new window, and only those.
+        self.tmux_ok("set-option", "-g", "update-environment", "FOO_*")
+        self.assertEqual("FOO_*", self.tmux_ok("show-options", "-gv", "update-environment"))
+        checkout = self.checkout()
+        (first, first_out), (second, second_out), (third, third_out) = (
+            self.recorder(name, "FOO_X", "FOO_Y", "BAR") for name in ("one", "two", "three"))
+        with patch.dict(os.environ, {"FOO_X": "earlier", "FOO_Y": "y1", "BAR": "b1"}):
+            self.agent(checkout, 7, "draft", first)
+        with patch.dict(os.environ, {"FOO_X": "later", "FOO_Y": "y2", "BAR": "b2"}):
+            self.agent(checkout, 7, "ready", second)
+            self.tmux_ok("new-window", "-d", "-t", f"={checkout.session}:", "-c", str(checkout.path), f"exec {self.bin / third}")
+        self.assertEqual("earlier|y1|", self.recorded(first_out), "a new session takes what the pattern matches, not BAR")
+        self.assertEqual("later|y2|", self.recorded(second_out), "a new window takes the runner's, for every match, not BAR")
+        self.assertEqual("earlier|y1|", self.recorded(third_out), "without -e it takes the session's: what -e fixes")
 
     def test_a_name_the_runner_does_not_have_is_not_passed_and_a_session_value_stays(self):
         checkout = self.checkout()
