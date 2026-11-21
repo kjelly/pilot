@@ -6,7 +6,16 @@ in, or the directory named by --checkout. Start the agents there once yourself, 
 runner cannot answer a trust dialog. The checkout must be clean, on the default branch of origin, at origin's tip, and
 its origin must be --repo, or the runner refuses before it reads GitHub. The runner never deletes, resets, cleans or
 stashes anything in it; the task files it writes stay under the checkout's task directory (ignored by git), and the
-agent panes it started stay open when it stops.
+agent windows it started stay open when it stops.
+
+The agents run as windows (one per agent, named `<PR>-<phase>`) of ONE tmux session of the runner's own, never of one of
+yours: `pilot-pr-<directory name>-<8 hex>`, where the directory name is the checkout's, cut down to letters, digits, `_`
+and `-`, and the hex is a hash of its full path, so that the name is the same on every run in this checkout and differs
+between checkouts. The first agent creates the session, every later one adds a window to it; the runner announces the
+name once and you watch from another terminal, read-only, with `tmux attach -r -t <session>`. The runner closes only
+the panes it started in this process, one pane at a time: it never kills, renames or reuses a window or a session it
+did not create in this process (the dead windows of an earlier run stay where they are). The session ends with its
+last window, and a client attached to it is detached then (tmux's default).
 
 The runner dispatches the Ready skill (pr-review-merge) only for a PR that carries a valid Ready signal at its
 current HEAD and for its latest Ready transition (`ready_signal.assess`): proof that pr-ready (or issue-to-pr's mark_ready.py) verified and signed it. A
@@ -19,6 +28,7 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -55,6 +65,10 @@ READ_ATTEMPTS = 3
 CHECKOUT_DEFAULT = "the root of the git work tree that contains the current directory"
 LOCK_NAME = "pilot-pr-loop.lock"
 PANE_SESSION_PREFIX = "pilot-pr-"
+# The longest directory name kept in a session name, and how many times starting an agent follows a session that
+# somebody else created or killed meanwhile before it gives up. Module constants, not flags.
+SESSION_LABEL_MAX = 24
+CREATE_ROUNDS = 3
 
 
 class Stop(RuntimeError):
@@ -256,6 +270,16 @@ def lock_checkout(top, path):
     return fd
 
 
+def session_name(path):
+    """The tmux session of the runner in the checkout at `path` (absolute and resolved: `resolve_checkout`):
+    `pilot-pr-<label>-<8 hex>`. The label is the directory name cut down to what tmux keeps as typed and can target
+    (letters, digits, `_` and `-`: a `:` or a `.` in a name makes the session impossible to address, a tab is
+    refused) and the hex is a hash of the whole path, so the name is stable per checkout and two checkouts with the
+    same directory name under different parents do not share a session."""
+    label = re.sub(r"[^A-Za-z0-9_-]+", "-", Path(path).name).strip("-")[:SESSION_LABEL_MAX].rstrip("-") or "checkout"
+    return f"{PANE_SESSION_PREFIX}{label}-{hashlib.sha256(os.fsencode(str(path))).hexdigest()[:8]}"
+
+
 _PANE = re.compile(r"(?P<session>.*)\|(?P<pane>%\d+)\|(?P<dead>[01])\|(?P<path>.*)")
 
 
@@ -293,6 +317,7 @@ class Checkout:
     def __init__(self, repo, directory=None, *, dry_run=False):
         self.repo, self.dry_run, self.lock_fd, self.would_add = repo, dry_run, None, []
         self.path = resolve_checkout(repo, directory)
+        self.session = session_name(self.path)
         self.lock_path = self.git_path(LOCK_NAME)
         if not dry_run:
             self.lock_fd = lock_checkout(self.path, self.lock_path)
@@ -450,8 +475,12 @@ class Checkout:
         if self.dry_run:
             if self.would_add:
                 tell(f"would add {', '.join(self.would_add)} to {self.exclude}")
+            tell(f"would start the agents in tmux session {self.session}")
             tell(f"not checked in a dry run: whether another runner holds {self.lock_path}; whether an agent pane "
                  f"kept from an earlier run is still open in {self.path}")
+        else:
+            tell(f"Agents run as windows of tmux session {self.session}; watch them read-only with: "
+                 f"tmux attach -r -t {self.session}")
 
     def verify(self):
         """Before every dispatch: back on the branch and commit the run started on, clean, no git operation in
@@ -481,8 +510,9 @@ class Checkout:
 
     def finish(self):
         """The run is over: say what it left where. It deletes nothing; the lock goes with the process."""
-        tell(f"Kept: the task files under {self.path / TASK_DIR} and any agent pane that is still open (sessions "
-             f"{PANE_SESSION_PREFIX}*); close the panes before the next run. Nothing in {self.path} was deleted or reset.")
+        tell(f"Kept: the task files under {self.path / TASK_DIR} and any agent window still open in tmux session "
+             f"{self.session}; close the agents still running in {self.path} before the next run. Nothing in "
+             f"{self.path} was deleted or reset.")
 
 
 PROMPT = re.compile(r"^(?:[›❯](?:\s.*)?|>)$")
@@ -496,13 +526,44 @@ class Agent:
         path = shutil.which(executable)
         if not path:
             raise Stop(f"agent executable not found: {executable}")
-        self.session = f"pilot-pr-{number}-{phase}-{uuid.uuid4().hex[:10]}"
-        self.pane = command("tmux", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", self.session,
-                            "-c", str(checkout.path), "--", "exec " + shlex.quote(os.path.abspath(path))).strip()
+        self.session, self.window = checkout.session, f"{number}-{phase}"
+        self.pane = self.start(checkout.path, "exec " + shlex.quote(os.path.abspath(path)))
         if not re.fullmatch(r"%\d+", self.pane):
             raise Stop("tmux did not return a pane ID")
-        tell(f"PR #{number} {phase} agent: {self.pane} in session {self.session}")
+        tell(f"PR #{number} {phase} agent: {self.pane} in window {self.window} of tmux session {self.session}")
         command("tmux", "set-option", "-w", "-t", self.pane, "remain-on-exit", "on")
+
+    def start(self, directory, shell_command):
+        """The pane of the new agent: the first one creates the runner's session, every later one adds a window to it.
+        Somebody else may create the session between the two calls, or kill it (the operator may; tmux then makes it
+        again): each answer is compared exactly, a `duplicate session` turns into a new window, a missing session into
+        a new session, and anything else is a Stop. Every target is exact (`=S:`): an inexact `S:` falls back to a
+        session whose name merely starts with S."""
+        where, environment = ["-c", str(directory), "-P", "-F", "#{pane_id}"], None
+        for _ in range(CREATE_ROUNDS):
+            done = run(["tmux", "new-session", "-d", "-s", self.session, "-n", self.window, *where, "--", shell_command])
+            if done.returncode == 0:
+                return done.stdout.strip()
+            if (done.returncode, done.stderr.strip()) != (1, f"duplicate session: {self.session}"):
+                raise Stop(f"tmux new-session failed ({done.returncode}): {done.stderr.strip()[:500]}")
+            environment = self.environment() if environment is None else environment
+            done = run(["tmux", "new-window", "-d", "-t", f"={self.session}:", "-n", self.window, *where,
+                        *environment, "--", shell_command])
+            if done.returncode == 0:
+                return done.stdout.strip()
+            if (done.returncode, done.stderr.strip()) != (1, f"can't find session: {self.session}"):
+                raise Stop(f"tmux new-window failed ({done.returncode}): {done.stderr.strip()[:500]}")
+        raise Stop(f"tmux session {self.session} kept appearing and disappearing while an agent was started; "
+                   "nothing was dispatched")
+
+    @staticmethod
+    def environment():
+        """What a new window of an existing session must be given: a window takes the SESSION's value of each name in
+        tmux's `update-environment` list (an earlier run's, or the last client's: the operator signs commits through
+        SSH_AUTH_SOCK), a new session takes the runner's. `-e NAME=VALUE` for each such name the runner has itself, so
+        that every agent sees the runner's environment; a name the runner does not have is not passed."""
+        names = command("tmux", "show-options", "-gv", "update-environment").splitlines()
+        return [arg for name in names if name in os.environ for arg in ("-e", f"{name}={os.environ[name]}")]
 
     def status(self):
         raw = command("tmux", "display-message", "-p", "-t", self.pane,
@@ -527,7 +588,8 @@ class Agent:
                    any(PROMPT.fullmatch(line) for line in recent[-6:]):
                     return True
             time.sleep(0.25)
-        raise Stop(f"agent did not return to its input prompt in {self.pane}; inspect session {self.session}")
+        raise Stop(f"agent did not return to its input prompt in {self.pane}; inspect window {self.window} of tmux "
+                   f"session {self.session}")
 
     def submit(self, text):
         buffer = "pilot-pr-" + uuid.uuid4().hex
@@ -547,7 +609,12 @@ class Agent:
         command("tmux", "send-keys", "-t", self.pane, "Enter")
 
     def close(self):
-        command("tmux", "kill-pane", "-t", self.pane)
+        """Close the agent's pane, and only its pane (`kill-pane` on its ID; never its window or its session, so that a
+        pane the operator split off in the window survives). A pane that is already gone (the operator closed it, or
+        killed the session) is closed, which is what this asks for; any other failure is a Stop."""
+        done = run(["tmux", "kill-pane", "-t", self.pane])
+        if done.returncode != 0 and (done.returncode, done.stderr.strip()) != (1, f"can't find pane: {self.pane}"):
+            raise Stop(f"tmux kill-pane failed ({done.returncode}): {done.stderr.strip()[:500]}")
 
 
 def check_result(path, task, head):
@@ -577,6 +644,10 @@ class Batch:
         self.repo, self.args = repo, args
         self.checkout = None
         self.login = None
+        # Agents the runner is done with (merged PRs, agents that exited and were replaced), still open: they are
+        # closed once the next agent exists, or when the run ends, so the session lives from the first dispatch to the
+        # end of the batch instead of being torn down and made again between two PRs.
+        self.finished = []
 
     def account(self):
         """The login `gh` runs as: asked once per Batch, a login does not change while the runner works."""
@@ -598,8 +669,25 @@ class Batch:
             interrupted = True  # main says what was kept
             raise
         finally:
+            self.release_finished()
             if not interrupted:
                 self.checkout.finish()
+
+    def close_finished(self):
+        """Close the agents the runner is done with, each one once, in the order they finished. A failure is a Stop;
+        the agents after it stay in `finished` for `release_finished`."""
+        while self.finished:
+            self.finished.pop(0).close()
+
+    def release_finished(self):
+        """The end of the run, however it ends: close what is left of `finished`, best effort. A pane that cannot be
+        closed is said and never raised: this runs in a `finally`, and must not hide the Stop or the interrupt."""
+        while self.finished:
+            agent = self.finished.pop(0)
+            try:
+                agent.close()
+            except (Stop, OSError, subprocess.SubprocessError) as exc:
+                tell(f"could not close the agent pane {agent.pane}: {exc}")
 
     def dry_run(self):
         """The PR phases, then the same inspection of the checkout the real run starts with, read-only: no lock, no
@@ -672,8 +760,7 @@ class Batch:
                     role, agent = active
                     tell(f"PR #{number}: waiting for the {role} agent in {agent.pane} to return to its prompt")
                     if not agent.wait_for_prompt(self.args.phase_timeout, allow_exit=True):
-                        agent.close()
-                        del agents[role]
+                        self.finished.append(agents.pop(role))
                     # The agent publishes its result before it returns to its prompt, and GitHub may already show
                     # the next phase (a gate can mark the PR Ready and then report a blocker): read the result
                     # against a fresh HEAD before another role starts or the PR is reported done.
@@ -684,8 +771,7 @@ class Batch:
                                f"{head_of(view)[:12]}: {detail}; nothing is dispatched for it: convert it to Draft and "
                                "run pr-ready on it, then start the runner again")
                 if phase == "merged":
-                    for agent in agents.values():
-                        agent.close()
+                    self.finished.extend(agents.values())
                     tell(f"PR #{number}: merged")
                     return
                 deadline = time.monotonic() + self.args.phase_timeout
@@ -697,13 +783,17 @@ class Batch:
                         raise Stop("maximum agent dispatches reached")
                     check_pr_url(view, self.repo)
                     self.checkout.verify()
-                    agent = agents.get(phase)
+                    agent, replaced = agents.get(phase), None
                     if agent is not None and agent.status()[0]:
-                        agent.close()
-                        agent = None
+                        agent, replaced = None, agent
                     if agent is None:
                         agent = Agent(getattr(self.args, phase + "_agent"), self.checkout, number, phase)
                         agents[phase] = agent
+                        # The new agent comes first: closing the dead one (or a merged PR's) while it was the last window
+                        # would end the session and detach whoever watches it.
+                        if replaced is not None:
+                            self.finished.append(replaced)
+                        self.close_finished()
                     agent.wait_for_prompt(self.args.startup_timeout)
                     # An approval prompt at startup can take long enough for GitHub to change.
                     view, now, _ = self.read(number)
@@ -756,9 +846,11 @@ def main():
         batch.run()
         return 0
     except KeyboardInterrupt:
-        kept = f"the task files under {batch.checkout.path / TASK_DIR}/ were kept" if batch and batch.checkout else \
-            "nothing was written"
-        print(f"Interrupted; any active panes and {kept}.", file=sys.stderr)
+        if batch and batch.checkout:
+            print(f"Interrupted; any agent window still open in tmux session {batch.checkout.session} and the task "
+                  f"files under {batch.checkout.path / TASK_DIR}/ were kept.", file=sys.stderr)
+        else:
+            print("Interrupted; nothing was written.", file=sys.stderr)
         return 130
     except (Stop, GitHubError, OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"pr-loop: {exc}", file=sys.stderr)

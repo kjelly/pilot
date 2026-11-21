@@ -8,9 +8,15 @@ files (`GIT_ALLOW_PROTOCOL=file`). The screens, pane states and PR views they se
 for these tests, not captured from a real tmux, agent or GitHub session, and they only claim to exercise the parsing
 rules of scripts/pr_loop.py. The exceptions: the Ready signal's GitHub state (`signal_world`) is
 `ready_signal_world.World`, which builds the timeline events and labels in the shapes of the reduced real captures of
-kjelly/pilot#419, and the error lines of the fake `tmux list-panes` (`NO_SERVER`, `NO_SOCKET`) and the shape of its
-rows are the real tmux 3.8 output, captured on a private tmux socket. git is always REAL: the checkout is a real
-clone of a real bare repository.
+kjelly/pilot#419, and what the fake `tmux` says about SESSIONS and WINDOWS is the real tmux 3.8 behaviour, captured on a
+private tmux socket (kjelly/pilot#425): the error lines of `list-panes` (`NO_SERVER`, `NO_SOCKET`), `new-session` on a
+name in use (`duplicate session: S`), `new-window` and the way it resolves its target (`=S:` is exactly S; `S:` is S,
+else a session whose name merely starts with S; a target without a colon is a window name), `kill-pane` (a window
+goes with its last pane, a session with its last window, and a grouped twin of it with the session), the rows of
+`list-panes -a` (a dead pane has no path, a twin repeats the rows of its session) and `show-options -gv
+update-environment`. The model lives in `MODEL`, which is both embedded in the fake `tmux` and executed by the tests
+to set a state up (`FakeEnv.kill_session` and the like). git is always REAL: the checkout is a real clone of a real
+bare repository.
 """
 import json
 import os
@@ -36,14 +42,116 @@ URL = "https://github.com/acme/demo/pull/7"
 # The fakes run with `python -S`: they need nothing but the standard library.
 SHEBANG = f"#!{sys.executable} -S\n"
 
-FAKE_TMUX = '''
+# The session and window model of the fake `tmux`, as source: embedded in the fake (which runs as its own process, once per
+# call) and executed by `FakeEnv` to set a state up or change it the way the operator would. `state["live"]` maps a
+# session name to {"group": the session it is grouped with or None, "windows": [{"name", "cwd", "panes": [ids]}]};
+# a grouped twin owns no windows of its own, it shows its group's.
+MODEL = r'''
+def live_of(state):
+    return state.setdefault("live", {})
+
+
+def leader(state, name):
+    """The session that owns the windows `name` shows: itself, or the one it is grouped with."""
+    return live_of(state)[name].get("group") or name
+
+
+def find_session(state, target):
+    """`(session or None, what tmux says when there is none)` for the `-t` of new-window, as tmux 3.8 resolves it: `=S:`
+    is exactly S; `S:` is S, else the one session whose name starts with S; without a colon the target names a window, and
+    there is no current session to look it up in."""
+    live = live_of(state)
+    if ":" not in target:
+        return None, "can't find window: " + target
+    name = target.split(":", 1)[0]
+    if name.startswith("="):
+        name = name[1:]
+        return (name if name in live else None), "can't find session: " + name
+    if name in live:
+        return name, ""
+    starts = sorted(session for session in live if session.startswith(name))
+    return (starts[0] if len(starts) == 1 else None), "can't find session: " + name
+
+
+def make_session(state, name, window, cwd, pane):
+    live_of(state)[name] = {"group": None, "windows": [{"name": window, "cwd": cwd, "panes": [pane]}]}
+
+
+def add_window(state, session, window, cwd, pane):
+    live_of(state)[leader(state, session)]["windows"].append({"name": window, "cwd": cwd, "panes": [pane]})
+
+
+def add_twin(state, session, twin):
+    """A session grouped with `session` (an operator's `<name>-eink` twin): it shows the same windows."""
+    live_of(state)[twin] = {"group": session, "windows": []}
+
+
+def add_split(state, pane, new):
+    """The operator splits the window of `pane`: `new` is a second pane of it."""
+    for entry in live_of(state).values():
+        for window in entry["windows"]:
+            if pane in window["panes"]:
+                window["panes"].append(new)
+                return True
+    return False
+
+
+def kill_session(state, name):
+    """The operator kills session `name`. A grouped twin that survives keeps the windows, as a session of its own."""
+    live = live_of(state)
+    entry = live.pop(name, None)
+    if entry is None or entry.get("group"):
+        return
+    twins = [twin for twin, other in live.items() if other.get("group") == name]
+    if twins:
+        live[twins[0]].update(group=None, windows=entry["windows"])
+        for twin in twins[1:]:
+            live[twin]["group"] = twins[0]
+        return
+    for window in entry["windows"]:
+        for pane in window["panes"]:
+            state["panes"].setdefault(pane, {})["killed"] = True
+
+
+def kill_pane(state, pane):
+    """`kill-pane -t pane`: False when there is no such pane. A window goes with its last pane, a session with its last
+    window, and the twins of a session with it."""
+    live = live_of(state)
+    for name, entry in list(live.items()):
+        for window in entry["windows"]:
+            if pane in window["panes"]:
+                window["panes"].remove(pane)
+                state["panes"].setdefault(pane, {})["killed"] = True
+                if not window["panes"]:
+                    entry["windows"].remove(window)
+                if not entry["windows"]:
+                    del live[name]
+                    for twin in [twin for twin, other in live.items() if other.get("group") == name]:
+                        del live[twin]
+                return True
+    return False
+
+
+def rows(state):
+    """`list-panes -a` as `(session, pane, dead, path)`, sorted by session name: a twin repeats the rows of its session,
+    and a dead pane has no path."""
+    live, found = live_of(state), []
+    for name in sorted(live):
+        for window in live[leader(state, name)]["windows"]:
+            for pane in window["panes"]:
+                dead = state["panes"].get(pane, {}).get("status", ["0|0|claude"])[0].split("|")[0] == "1"
+                found.append((name, pane, "1" if dead else "0", "" if dead else window["cwd"]))
+    return found
+'''
+
+FAKE_TMUX = r'''
 import json, os, subprocess, sys
 
 PATH = os.environ.get("FAKE_TMUX_STATE")
 if not PATH:
-    sys.stderr.write("fake tmux: FAKE_TMUX_STATE is not set\\n")
+    sys.stderr.write("fake tmux: FAKE_TMUX_STATE is not set\n")
     sys.exit(97)
-
+''' + MODEL + r'''
 
 def load():
     with open(PATH) as stream:
@@ -67,14 +175,30 @@ def take(sequence, default):
 def pane_of(state, name):
     pane = state["panes"].setdefault(name, {})
     pane.setdefault("status", ["0|0|claude"])
-    pane.setdefault("screens", ["\\u276f"])
+    pane.setdefault("screens", ["❯"])
     pane.setdefault("input", [])
     pane.setdefault("enter", [])
     return pane
 
 
+def next_pane(state):
+    """The pane ID the next new-session or new-window prints: a scripted one (`pane_ids`), else the next number."""
+    pane = take(state.setdefault("pane_ids", []), None)
+    if pane is None:
+        state["next"] += 1
+        pane = "%" + str(state["next"])
+    pane_of(state, pane)
+    return pane
+
+
 def option(args, flag):
     return args[args.index(flag) + 1]
+
+
+def refuse(state, code, text):
+    save(state)
+    sys.stderr.write(text + "\n")
+    sys.exit(code)
 
 
 def act(state, pane, action):
@@ -121,10 +245,27 @@ cmd = args[0] if args else ""
 code = state["fail"].get(cmd, 0)
 if code:
     save(state)
-    sys.stderr.write("fake tmux: injected failure of " + cmd + "\\n")
+    sys.stderr.write("fake tmux: injected failure of " + cmd + "\n")
     sys.exit(code)
+# Something the operator (or another process) does between two calls of the runner: the next call of `cmd` finds
+# the state after it. {"kill_session": S} or {"create_session": S}; None: nothing this time.
+hooks = state.get("before", {}).get(cmd)
+if hooks:
+    hook = hooks.pop(0)
+    if hook and "kill_session" in hook:
+        kill_session(state, hook["kill_session"])
+    if hook and "create_session" in hook:
+        state["foreign"] = state.get("foreign", 900) + 1
+        make_session(state, hook["create_session"], "operator", hook.get("cwd", "/"), "%" + str(state["foreign"]))
+# An answer a test scripts for the next call of `cmd`, {"rc": 1, "stderr": "..."}: what tmux says for a state the model
+# does not make (None: this call goes to the model).
+scripted = state.get("answers", {}).get(cmd)
+if scripted:
+    answer = scripted.pop(0)
+    if answer:
+        refuse(state, answer["rc"], answer["stderr"])
 out = ""
-if cmd == "new-session":
+if cmd in ("new-session", "new-window"):
     if state.get("lock_path"):
         # What a second runner would find while this dispatch happens: the lock file of the checkout, held or free.
         import fcntl
@@ -135,19 +276,34 @@ if cmd == "new-session":
         except OSError:
             state.setdefault("lock_probes", []).append("held")
         os.close(probe)
-    pane = take(state["new_session"], None)
-    if pane is None:
-        state["next"] += 1
-        pane = "%" + str(state["next"])
-    pane_of(state, pane)
-    state["sessions"].append({"session": option(args, "-s"), "cwd": option(args, "-c"), "command": args[-1]})
-    out = pane + "\\n"
+    # Without `-n` tmux names the window after the program in it (and keeps renaming it as the program changes).
+    window = option(args, "-n") if "-n" in args else os.path.basename(args[-1].split()[-1])
+    cwd = option(args, "-c")
+    if cmd == "new-session":
+        session = option(args, "-s")
+        if session in live_of(state):
+            refuse(state, 1, "duplicate session: " + session)
+        pane = next_pane(state)
+        make_session(state, session, window, cwd, pane)
+    else:
+        session, error = find_session(state, option(args, "-t"))
+        if session is None:
+            refuse(state, 1, error)
+        pane = next_pane(state)
+        add_window(state, session, window, cwd, pane)
+    state["sessions"].append({"kind": cmd, "session": session, "window": window, "pane": pane, "cwd": cwd,
+                              "command": args[-1], "env": [args[i + 1] for i, arg in enumerate(args) if arg == "-e"]})
+    out = pane + "\n"
+elif cmd == "show-options":
+    if args[1:] != ["-gv", "update-environment"]:
+        refuse(state, 98, "fake tmux: unexpected show-options " + " ".join(args[1:]))
+    out = "".join(name + "\n" for name in state.get("update_environment", []))
 elif cmd == "display-message":
     pane = pane_of(state, option(args, "-t"))
-    out = take(pane["status"], "0|0|claude") + "\\n"
+    out = take(pane["status"], "0|0|claude") + "\n"
 elif cmd == "capture-pane":
     pane = pane_of(state, option(args, "-t"))
-    out = take(pane["screens"], "\\u276f") + "\\n"
+    out = take(pane["screens"], "❯") + "\n"
 elif cmd == "load-buffer":
     state["buffers"][option(args, "-b")] = call["stdin"]
 elif cmd == "paste-buffer":
@@ -155,7 +311,7 @@ elif cmd == "paste-buffer":
     pane = pane_of(state, option(args, "-t"))
     if name not in state["buffers"]:
         save(state)
-        sys.stderr.write("fake tmux: no buffer " + name + "\\n")
+        sys.stderr.write("fake tmux: no buffer " + name + "\n")
         sys.exit(1)
     pane["input"].append(state["buffers"].pop(name))
     if pane.get("die_on_paste"):
@@ -170,18 +326,22 @@ elif cmd == "send-keys":
             save(state)
             sys.exit(rc)
 elif cmd == "kill-pane":
-    pane_of(state, option(args, "-t"))["killed"] = True
+    if not kill_pane(state, option(args, "-t")):
+        refuse(state, 1, "can't find pane: " + option(args, "-t"))
 elif cmd == "set-option":
     pass
 elif cmd == "list-panes":
     if state.get("no_server"):
-        save(state)
-        sys.stderr.write(state["no_server"] + "\\n")
-        sys.exit(1)
-    out = "".join(line + "\\n" for line in state.get("listing", []))
+        refuse(state, 1, state["no_server"])
+    listing = state.get("listing")
+    if listing is None:
+        if args[1:] != ["-a", "-F", "#{session_name}|#{pane_id}|#{pane_dead}|#{pane_current_path}"]:
+            refuse(state, 98, "fake tmux: unexpected list-panes " + " ".join(args[1:]))
+        listing = ["|".join(row) for row in rows(state)]
+    out = "".join(line + "\n" for line in listing)
 else:
     save(state)
-    sys.stderr.write("fake tmux: unexpected subcommand " + cmd + "\\n")
+    sys.stderr.write("fake tmux: unexpected subcommand " + cmd + "\n")
     sys.exit(98)
 save(state)
 sys.stdout.write(out)
@@ -228,10 +388,20 @@ if args[:1] == ["api"] and args[-1].endswith("/comments?per_page=100"):
 done(99, err="fake gh: unexpected call " + " ".join(args) + "\\n")
 '''
 
+# What `tmux show-options -gv update-environment` really prints, one name per line (tmux 3.8, a private server started with
+# no configuration file): the variables a new session takes from the client that creates it.
+UPDATE_ENVIRONMENT = ["DISPLAY", "KRB5CCNAME", "MSYSTEM", "SSH_ASKPASS", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "SSH_CONNECTION",
+                      "WAYLAND_DISPLAY", "WINDOWID", "XAUTHORITY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP",
+                      "XDG_SESSION_TYPE"]
+
 # What `tmux list-panes -a` really prints (tmux 3.8, captured on a private socket) when no server is running: the socket's
 # directory exists (a server ran and was killed), or it does not (none ever ran). Both exit 1.
 NO_SERVER = "no server running on /tmp/tmux-1000/default"
 NO_SOCKET = "error connecting to /tmp/tmux-1000/default (No such file or directory)"
+
+# The model, as functions the tests call on a state they loaded (the fake `tmux` runs the same source).
+_model = {}
+exec(MODEL, _model)
 
 AGENT_STUB = SHEBANG + "# Only here so that shutil.which finds an agent executable; the fake tmux never runs it.\n"
 
@@ -300,12 +470,14 @@ class FakeEnv:
         self.git_env = dict(hermetic_env(self.home), GIT_ALLOW_PROTOCOL="file")
         self.make_remote(remote_files)
         self.checkout = self.make_checkout()
-        self.write_tmux(log=[], fail={}, panes={}, buffers={}, sessions=[], cli=[], new_session=[], next=0, listing=[])
+        self.reset_tmux()
         self.write_gh(calls=[], seq=[], view=pr_view_json(), login=LOGIN, comments=[], timeline=[])
         env = dict(self.git_env, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                    FAKE_TMUX_STATE=str(self.tmux_path), FAKE_GH_STATE=str(self.gh_path),
                    FAKE_RESULT_CLI=str(RESULT_CLI), XDG_STATE_HOME=str(self.state_home), GH_PROMPT_DISABLED="1", PYTHONDONTWRITEBYTECODE="1")
         env.pop("TMUX", None)  # it would point a real tmux at the developer's server
+        for name in UPDATE_ENVIRONMENT:
+            env.pop(name, None)  # the developer's session variables: a test that wants one sets it itself
         patcher = patch.dict(os.environ, env, clear=True)
         patcher.start()
         test.addCleanup(patcher.stop)
@@ -396,6 +568,12 @@ class FakeEnv:
     def write_tmux(self, **state):
         self._write(self.tmux_path, state)
 
+    def reset_tmux(self):
+        """A tmux server with no session, no call logged and nothing scripted. `listing` is None: `list-panes -a` is
+        derived from the sessions and windows that exist (a test that sets a list gets that list instead)."""
+        self.write_tmux(log=[], fail={}, panes={}, buffers={}, sessions=[], cli=[], pane_ids=[], next=0, listing=None,
+                        live={}, before={}, answers={}, update_environment=UPDATE_ENVIRONMENT)
+
     def write_gh(self, **state):
         self._write(self.gh_path, state)
 
@@ -419,6 +597,38 @@ class FakeEnv:
         state = self.tmux()
         state["panes"].setdefault(pane, {}).update(fields)
         self._write(self.tmux_path, state)
+
+    def operator(self, function, *args):
+        """What the operator does to the tmux server, between two calls of the runner: `function` of MODEL on the state."""
+        state = self.tmux()
+        result = _model[function](state, *args)
+        self._write(self.tmux_path, state)
+        return result
+
+    def kill_session(self, name):
+        self.operator("kill_session", name)
+
+    def add_twin(self, session, twin):
+        self.operator("add_twin", session, twin)
+
+    def add_split(self, pane):
+        """The operator splits the window of `pane`; the ID of the new pane."""
+        state = self.tmux()
+        state["foreign"] = state.get("foreign", 900) + 1
+        new = f"%{state['foreign']}"
+        self._write(self.tmux_path, state)
+        assert self.operator("add_split", pane, new), f"no window with {pane}"
+        return new
+
+    def live(self):
+        """The sessions that exist: name -> the names of its windows (a grouped twin shows its group's)."""
+        state = self.tmux()
+        return {name: [window["name"] for window in state["live"][_model["leader"](state, name)]["windows"]]
+                for name in sorted(state["live"])}
+
+    def created(self):
+        """Every agent pane tmux created (a session or a window), in order: what `sessions` of the state holds."""
+        return self.tmux()["sessions"]
 
     def tmux_calls(self, command=None):
         """The argv of every tmux call (of one subcommand), in order."""
