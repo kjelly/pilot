@@ -1,13 +1,16 @@
-"""Fake `tmux`, `gh` and agent executables, a scratch remote and a fake clock for the scripts/pr_loop.py tests
-(not a test module).
+"""Fake `tmux`, `gh` and agent executables, a scratch remote with an operator's checkout of it, and a fake clock
+for the scripts/pr_loop.py tests (not a test module).
 
-NOTHING here may reach the developer's real tmux server or real GitHub. `FakeEnv` puts its own `tmux`, `gh`,
-`claude` and `codex` first on PATH and refuses to continue unless `shutil.which` resolves every one of them to
-the fakes; the fake `tmux` and `gh` also refuse to run without their own state file. The screens, pane states
-and PR views they serve are SYNTHETIC: they are written for these tests, not captured from a real tmux,
-agent or GitHub session, and they only claim to exercise the parsing rules of scripts/pr_loop.py. The one
-exception is the Ready signal's GitHub state (`signal_world`): it is `ready_signal_world.World`, which builds the
-timeline events and labels in the shapes of the reduced real captures of kjelly/pilot#419.
+NOTHING here may reach the developer's real tmux server, real GitHub or the network. `FakeEnv` puts its own `tmux`,
+`gh`, `claude` and `codex` first on PATH and refuses to continue unless `shutil.which` resolves every one of them to
+the fakes; the fake `tmux` and `gh` also refuse to run without their own state file, and git is limited to local
+files (`GIT_ALLOW_PROTOCOL=file`). The screens, pane states and PR views they serve are SYNTHETIC: they are written
+for these tests, not captured from a real tmux, agent or GitHub session, and they only claim to exercise the parsing
+rules of scripts/pr_loop.py. The exceptions: the Ready signal's GitHub state (`signal_world`) is
+`ready_signal_world.World`, which builds the timeline events and labels in the shapes of the reduced real captures of
+kjelly/pilot#419, and the error lines of the fake `tmux list-panes` (`NO_SERVER`, `NO_SOCKET`) and the shape of its
+rows are the real tmux 3.8 output, captured on a private tmux socket. git is always REAL: the checkout is a real
+clone of a real bare repository.
 """
 import json
 import os
@@ -25,7 +28,7 @@ HERE = Path(__file__).resolve().parent
 SKILLS = HERE.parents[1]
 RESULT_CLI = SKILLS / "_shared" / "scripts" / "pr_loop_result.py"
 SIGNAL_MODULE = SKILLS / "_shared" / "scripts" / "ready_signal.py"
-# The two helpers a managed checkout's default branch must carry (scripts/pr_loop.py `Checkout`).
+# The two helpers the default branch of the checkout's origin must carry (scripts/pr_loop.py `Checkout`).
 HELPER_PATHS = (".agents/skills/_shared/scripts/pr_loop_result.py", ".agents/skills/_shared/scripts/ready_signal.py")
 LOGIN = "reviewer"  # what the fake `gh api user` answers
 HEAD = "a" * 40
@@ -122,6 +125,16 @@ if code:
     sys.exit(code)
 out = ""
 if cmd == "new-session":
+    if state.get("lock_path"):
+        # What a second runner would find while this dispatch happens: the lock file of the checkout, held or free.
+        import fcntl
+        probe = os.open(state["lock_path"], os.O_RDWR)
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            state.setdefault("lock_probes", []).append("free")
+        except OSError:
+            state.setdefault("lock_probes", []).append("held")
+        os.close(probe)
     pane = take(state["new_session"], None)
     if pane is None:
         state["next"] += 1
@@ -160,6 +173,12 @@ elif cmd == "kill-pane":
     pane_of(state, option(args, "-t"))["killed"] = True
 elif cmd == "set-option":
     pass
+elif cmd == "list-panes":
+    if state.get("no_server"):
+        save(state)
+        sys.stderr.write(state["no_server"] + "\\n")
+        sys.exit(1)
+    out = "".join(line + "\\n" for line in state.get("listing", []))
 else:
     save(state)
     sys.stderr.write("fake tmux: unexpected subcommand " + cmd + "\\n")
@@ -169,7 +188,7 @@ sys.stdout.write(out)
 '''
 
 FAKE_GH = '''
-import json, os, subprocess, sys
+import json, os, sys
 
 PATH = os.environ.get("FAKE_GH_STATE")
 if not PATH:
@@ -206,14 +225,13 @@ if args[:1] == ["api"] and args[-1].split("?")[0].endswith("/timeline") and "--s
 if args[:1] == ["api"] and args[-1].endswith("/comments?per_page=100"):
     pages = [[{"body": c["body"], "user": {"login": c["login"]}} for c in state["comments"]]]
     done(0, json.dumps(pages))
-if args[:2] == ["repo", "clone"]:
-    if state["clone_exit"]:
-        done(state["clone_exit"], err="fake gh: injected clone failure")
-    proc = subprocess.run(["git", "clone", "-q", os.environ["FAKE_GH_REMOTE"], args[3]],
-                          capture_output=True, text=True)
-    done(proc.returncode, proc.stdout, proc.stderr)
 done(99, err="fake gh: unexpected call " + " ".join(args) + "\\n")
 '''
+
+# What `tmux list-panes -a` really prints (tmux 3.8, captured on a private socket) when no server is running: the socket's
+# directory exists (a server ran and was killed), or it does not (none ever ran). Both exit 1.
+NO_SERVER = "no server running on /tmp/tmux-1000/default"
+NO_SOCKET = "error connecting to /tmp/tmux-1000/default (No such file or directory)"
 
 AGENT_STUB = SHEBANG + "# Only here so that shutil.which finds an agent executable; the fake tmux never runs it.\n"
 
@@ -277,14 +295,16 @@ class FakeEnv:
         self.home = self.root / "home"
         self.state_home = self.root / "state"
         self.home.mkdir()
-        self.git_env = hermetic_env(self.home)
+        # Nothing may leave the machine: git refuses every transport but a local file (the origin of a scratch
+        # checkout is a github.com URL that `insteadOf` sends to the scratch remote).
+        self.git_env = dict(hermetic_env(self.home), GIT_ALLOW_PROTOCOL="file")
         self.make_remote(remote_files)
-        self.write_tmux(log=[], fail={}, panes={}, buffers={}, sessions=[], cli=[], new_session=[], next=0)
-        self.write_gh(calls=[], seq=[], view=pr_view_json(), login=LOGIN, comments=[], clone_exit=0, timeline=[])
+        self.checkout = self.make_checkout()
+        self.write_tmux(log=[], fail={}, panes={}, buffers={}, sessions=[], cli=[], new_session=[], next=0, listing=[])
+        self.write_gh(calls=[], seq=[], view=pr_view_json(), login=LOGIN, comments=[], timeline=[])
         env = dict(self.git_env, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                    FAKE_TMUX_STATE=str(self.tmux_path), FAKE_GH_STATE=str(self.gh_path),
-                   FAKE_GH_REMOTE=str(self.remote), FAKE_RESULT_CLI=str(RESULT_CLI),
-                   XDG_STATE_HOME=str(self.state_home), GH_PROMPT_DISABLED="1", PYTHONDONTWRITEBYTECODE="1")
+                   FAKE_RESULT_CLI=str(RESULT_CLI), XDG_STATE_HOME=str(self.state_home), GH_PROMPT_DISABLED="1", PYTHONDONTWRITEBYTECODE="1")
         env.pop("TMUX", None)  # it would point a real tmux at the developer's server
         patcher = patch.dict(os.environ, env, clear=True)
         patcher.start()
@@ -294,8 +314,14 @@ class FakeEnv:
             found = shutil.which(name)
             assert found == str(self.bin / name), f"{name} resolves to {found}, not to the fake in {self.bin}"
         self.environ = os.environ
+        # The runner works in the operator's checkout and keeps no state of its own: whatever a test did, nothing may
+        # exist under XDG_STATE_HOME afterwards (the managed clones of an earlier design lived there).
+        test.addCleanup(self._assert_no_state_directory)
 
-    # ---- the scratch remote: what `gh repo clone` clones --------------------------------------------------
+    def _assert_no_state_directory(self):
+        assert not self.state_home.exists(), f"the runner created {self.state_home}: it keeps no state of its own"
+
+    # ---- the scratch remote: what the operator's checkout is a clone of ------------------------------------
     def git(self, *args, cwd):
         done = subprocess.run(["git", *args], cwd=cwd, env=self.git_env, capture_output=True, text=True)
         assert done.returncode == 0, f"git {' '.join(args)}: {done.stderr}"
@@ -319,6 +345,42 @@ class FakeEnv:
         self.git("commit", "-q", "-m", "synthetic main", cwd=work)
         self.git("clone", "-q", "--bare", str(work), str(self.remote), cwd=self.root)
         self.remote_head = self.git("rev-parse", "main", cwd=self.remote)
+
+    # ---- the operator's checkout: a clone of the scratch remote whose origin is a github.com URL --------------
+    ORIGIN = "https://github.com/acme/demo.git"
+
+    def make_checkout(self, name="checkout"):
+        """A clone of the scratch remote at `<root>/<name>`, on `main`: what the operator starts the runner in. Its
+        origin is the github.com URL of the repository the tests drive; a repository-local `insteadOf` sends that
+        URL to the scratch remote (the hermetic environment ignores every other git configuration)."""
+        path = self.root / name
+        shutil.rmtree(path, ignore_errors=True)
+        self.git("clone", "-q", str(self.remote), name, cwd=self.root)
+        self.git("remote", "set-url", "origin", self.ORIGIN, cwd=path)
+        self.redirect_origin(path, self.ORIGIN)
+        return path
+
+    def redirect_origin(self, path, *urls, remote=None, replace=False):
+        """Send each of `urls` to a local repository (default: the scratch remote) for the checkout at `path`; with
+        `replace`, instead of whatever the checkout redirected before."""
+        if replace:
+            listed = subprocess.run(["git", "config", "--name-only", "--get-regexp", r"^url\..*\.insteadof$"],
+                                    cwd=path, env=self.git_env, capture_output=True, text=True).stdout.split()
+            for key in listed:
+                self.git("config", "--unset-all", key, cwd=path)
+        target = f"file://{remote or self.remote}"
+        for url in urls:
+            self.git("config", "--add", f"url.{target}.insteadOf", url, cwd=path)
+
+    def advance_remote(self, name="advance.txt"):
+        """Push one more commit to `main` of the scratch remote (the way a merged PR moves origin); its SHA."""
+        work = self.root / "work"
+        (work / name).write_text("advance\n")
+        self.git("add", "-A", cwd=work)
+        self.git("commit", "-q", "-m", "advance " + name, cwd=work)
+        self.git("push", "-q", str(self.remote), "main", cwd=work)
+        self.remote_head = self.git("rev-parse", "main", cwd=self.remote)
+        return self.remote_head
 
     # ---- state files ---------------------------------------------------------------------------------------
     @staticmethod
