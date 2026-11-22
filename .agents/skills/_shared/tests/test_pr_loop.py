@@ -4923,6 +4923,96 @@ class GitChangeTests(unittest.TestCase):
             self.real_git_fetch("interrupt")
 
 
+class RunTests(unittest.TestCase):
+    """`run`, the one call of this runner that starts every other command (tmux, gh, git reads): a command that outlives its
+    timeout is a Stop and its WHOLE process group ends; one that exited is judged by its exit code, whatever something it
+    started does with its output (kjelly/pilot#427). The command is a script named `tool` in front of PATH; the processes
+    it starts carry an environment marker, and only those are ever killed by the test."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="pr-loop-run-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        (self.root / "bin").mkdir()
+        patcher = patch.dict(os.environ, PATH=f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}", BR_TEST_MARKER=str(self.root))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name, value in (("KILL_AFTER", 0.5), ("DRAIN", 0.5), ("POLL", 0.2)):
+            patcher = patch.object(pr_loop, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(self.kill_leftovers)
+        watchdog = threading.Timer(12, self.kill_leftovers)
+        watchdog.daemon = True
+        watchdog.start()
+        self.addCleanup(watchdog.cancel)
+
+    def tool(self, body):
+        path = self.root / "bin/tool"
+        path.write_text(f"#!/bin/sh\necho $$ > {self.root}/leader\n" + body)
+        path.chmod(0o755)
+
+    def pid(self, name):
+        return int((self.root / name).read_text())
+
+    def owned(self, pid):
+        try:
+            return f"BR_TEST_MARKER={self.root}".encode() in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        except OSError:
+            return False
+
+    def kill_leftovers(self):
+        for name in ("leader", "child"):
+            with contextlib.suppress(OSError, ValueError):
+                pid = self.pid(name)
+                if alive(pid) and self.owned(pid):
+                    group = os.getpgid(pid)
+                    if group != os.getpgid(0):  # never the runner's own group (a command that was not given one of its own)
+                        with contextlib.suppress(OSError):
+                            os.killpg(group, signal.SIGKILL)
+                    os.kill(pid, signal.SIGKILL)
+
+    def assertGone(self, name, within=3.0):
+        pid, end = self.pid(name), time.monotonic() + within
+        while alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertFalse(alive(pid), f"{name} (pid {pid}) is still running")
+
+    def test_a_command_that_exited_is_judged_by_its_exit_code_when_a_leftover_holds_its_output(self):
+        for code in (0, 3):
+            with self.subTest(code=code):
+                self.tool(f"sleep 6 &\necho $! > {self.root}/child\necho out\necho err >&2\nexit {code}\n")
+                began = time.monotonic()
+                done = pr_loop.run(["tool", "sub"], timeout=30)
+                self.assertEqual((code, "out\n", "err\n"), (done.returncode, done.stdout, done.stderr))
+                self.assertLess(time.monotonic() - began, 3, "the command's own exit, not the 30 second timeout or the leftover's 6")
+                self.assertTrue(alive(self.pid("child")), "what a finished command left behind is not signalled")
+                self.kill_leftovers()
+
+    def test_a_command_that_outlives_its_timeout_is_a_stop_and_its_whole_group_is_ended(self):
+        self.tool(f"trap 'exit 143' TERM\nsleep 30 &\necho $! > {self.root}/child\nwait\n")
+        began = time.monotonic()
+        with self.assertRaisesRegex(pr_loop.Stop, r"^tool sub timed out after 0\.5 seconds$"):
+            pr_loop.run(["tool", "sub", "ignored"], timeout=0.5)
+        self.assertLess(time.monotonic() - began, 4)
+        self.assertGone("leader")
+        self.assertGone("child")  # the leader alone is what `subprocess.run(timeout=)` ends
+
+    def test_a_command_that_ignores_sigterm_is_killed_after_kill_after(self):
+        self.tool(f"trap '' TERM\nsleep 30 &\necho $! > {self.root}/child\nwait\n")
+        began = time.monotonic()
+        with self.assertRaisesRegex(pr_loop.Stop, r"^tool sub timed out after 0\.5 seconds$"):
+            pr_loop.run(["tool", "sub"], timeout=0.5)
+        self.assertGreaterEqual(time.monotonic() - began, 0.5 + 0.5 - 0.2, "SIGTERM first, SIGKILL KILL_AFTER seconds later")
+        self.assertGone("leader")
+        self.assertGone("child")
+
+    def test_data_is_the_standard_input_and_without_it_the_input_is_closed(self):
+        self.tool("cat\n")
+        self.assertEqual("hello", pr_loop.run(["tool", "sub"], data="hello").stdout)
+        self.assertEqual("", pr_loop.run(["tool", "sub"]).stdout, "`cat` met end of input at once")
+
+
 class CheckoutCleanTests(CheckoutCase):
     """The runner never stashes or discards work: a checkout with anything of the operator's in flight is refused."""
 

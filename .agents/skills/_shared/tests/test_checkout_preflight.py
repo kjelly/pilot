@@ -4,11 +4,16 @@ Every test drives the real command line against a scratch git repository. A STOP
 asserts the premise: what the plain git command would have done to the file the script
 protects, so a passing test proves the refusal is for the intended reason.
 """
+import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +22,8 @@ from unittest import mock
 from gitrepo import Repo, load_module
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "checkout_preflight.py"
+sys.path.insert(0, str(SCRIPT.parent))
+import bounded_run  # noqa: E402  (the module the script runs its git calls through: the tests patch its waits)
 PR_GATE = Path(__file__).resolve().parents[2] / "pr-ready" / "scripts" / "pr_gate.py"
 ORIGIN = ("--remote", "origin", "--merge", "refs/heads/pr")
 
@@ -716,6 +723,213 @@ class Land(unittest.TestCase):
         rc, report = preflight(w.work, w.main, "main", None, "--safe-sha", w.main)  # a restore from another commit
         self.assertEqual((1, ["detached_head_unreachable", "unpushed_commits"]), (rc, checks(report)))
         self.assertEqual(("", w.p2), (w.work.out("branch", "--show-current"), w.work.out("rev-parse", "HEAD")))
+
+
+# A stand-in for `git` that runs first on PATH. What it does is named by $FAKE_GIT_MODE, for a subcommand (the third word:
+# `git -C <repo> <subcommand>`): "hang" (every call): a child process and then nothing, until a signal ends it; "stubborn": the
+# same, but it and its child ignore SIGTERM; "hangswitch": "hang" for `switch` only; "leaked": print, exit 0 at once and leave a descendant that holds git's stdout and stderr;
+# "slowswitch": a `switch` that takes 0.8 s and then leaves a marker. Anything else is the real git.
+FAKE_GIT = r"""#!/bin/sh
+root="$BR_TEST_MARKER"
+echo $$ > "$root/leader"
+case "$FAKE_GIT_MODE:$3" in
+    hang:*|hangswitch:switch)
+        sleep 30 &
+        echo $! > "$root/child"
+        wait ;;
+    stubborn:*)
+        trap '' TERM
+        sleep 30 &
+        echo $! > "$root/child"
+        wait ;;
+    leaked:*)
+        sleep 6 &
+        echo $! > "$root/child"
+        echo out
+        echo err >&2
+        exit 0 ;;
+    slowswitch:switch)
+        touch "$root/ready"
+        sleep 0.8
+        echo finished > "$root/finished"
+        exit 0 ;;
+esac
+exec "$REAL_GIT" "$@"
+"""
+
+
+def alive(pid):
+    """Whether process `pid` runs: a killed process stays a zombie until its parent (init, for an orphan) reaps it."""
+    try:
+        with open(f"/proc/{pid}/stat") as stat_file:
+            return stat_file.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+class BoundedGitTests(unittest.TestCase):
+    """Every git call of the script has a bound: a git that hangs is a STOP that names the command and ends its whole
+    group, a git that finished is judged by its exit code whatever a descendant does with its output, and the change
+    commands `--execute` runs are waited for once interrupted (kjelly/pilot#427). The git here is a fake in front of a
+    real one (the cases a real git does not produce on demand); the descendants carry an environment marker, and only
+    processes that carry it are ever killed by the test."""
+
+    def setUp(self):
+        self.cp = load_module(SCRIPT)
+        temp = tempfile.TemporaryDirectory(prefix="preflight-bound-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(os.path.realpath(temp.name))
+        (self.root / "bin").mkdir()
+        (self.root / "bin" / "git").write_text(FAKE_GIT)
+        (self.root / "bin" / "git").chmod(0o755)
+        self.repo = Repo(self)
+        self.repo.write("a.txt")
+        self.head = self.repo.commit("init")
+        patcher = mock.patch.dict(os.environ, {"PATH": f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}",
+                                               "BR_TEST_MARKER": str(self.root), "REAL_GIT": shutil.which("git"),
+                                               "FAKE_GIT_MODE": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self.kill_leftovers)
+        watchdog = threading.Timer(15, self.kill_leftovers)
+        watchdog.daemon = True
+        watchdog.start()
+        self.addCleanup(watchdog.cancel)
+        self.armed = False  # a SIGINT counts only while the call under test runs; a late one is dropped
+
+        def on_sigint(_signum, _frame):
+            if self.armed:
+                raise KeyboardInterrupt
+        before = signal.signal(signal.SIGINT, on_sigint)
+        self.addCleanup(signal.signal, signal.SIGINT, before)
+
+    def mode(self, name):
+        os.environ["FAKE_GIT_MODE"] = name
+
+    def pid(self, name):
+        return int((self.root / name).read_text())
+
+    def owned(self, pid):
+        try:
+            return f"BR_TEST_MARKER={self.root}".encode() in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        except OSError:
+            return False
+
+    def kill_leftovers(self):
+        for name in ("leader", "child"):
+            with contextlib.suppress(OSError, ValueError):
+                pid = self.pid(name)
+                if alive(pid) and self.owned(pid):
+                    group = os.getpgid(pid)
+                    if group != os.getpgid(0):  # never the runner's own group (a command that was not given one of its own)
+                        with contextlib.suppress(OSError):
+                            os.killpg(group, signal.SIGKILL)
+                    os.kill(pid, signal.SIGKILL)
+
+    def assertGone(self, name, within=3.0):
+        pid, end = self.pid(name), time.monotonic() + within
+        while alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertFalse(alive(pid), f"{name} (pid {pid}) is still running")
+
+    def bounded(self, fn, limit=8):
+        """(what `fn` returned or raised, seconds it took). `fn` runs in a thread: a call without a bound (the code before
+        kjelly/pilot#427) is cut off after `limit` seconds, its processes are killed, and the test fails."""
+        box, began = {}, time.monotonic()
+
+        def target():
+            try:
+                box["value"] = fn()
+            except BaseException as exc:  # reported below, in the test's thread
+                box["value"] = exc
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        thread.join(limit)
+        took = time.monotonic() - began
+        if thread.is_alive():
+            self.kill_leftovers()
+            thread.join(10)
+            self.fail(f"still waiting after {limit} s: the git call has no bound, or does not end what it started")
+        return box["value"], took
+
+    def test_a_git_that_hangs_is_a_stop_that_names_the_command_and_its_group_is_ended(self):
+        self.mode("hang")
+        with mock.patch.object(self.cp, "GIT_TIMEOUT", 0.5, create=True), mock.patch.object(self.cp, "KILL_AFTER", 0.3, create=True):
+            error, took = self.bounded(lambda: self.cp.git(self.repo.path, "status", "--porcelain"))
+        self.assertIsInstance(error, self.cp.GitError)
+        self.assertEqual("git status --porcelain timed out after 0.5 s and was ended (SIGTERM)", str(error))
+        self.assertLess(took, 4)
+        self.assertGone("leader")
+        self.assertGone("child")  # a signal to the whole group, not to git alone
+
+    def test_a_git_that_ignores_sigterm_is_killed_after_the_grace(self):
+        self.mode("stubborn")
+        with mock.patch.object(self.cp, "GIT_TIMEOUT", 0.4, create=True), mock.patch.object(self.cp, "KILL_AFTER", 0.4, create=True):
+            error, took = self.bounded(lambda: self.cp.git(self.repo.path, "status"))
+        self.assertIsInstance(error, self.cp.GitError)
+        self.assertEqual("git status timed out after 0.4 s and was ended (SIGTERM, then SIGKILL)", str(error))
+        self.assertGreaterEqual(took, 0.8 - 0.2, "the timeout, then the grace, before SIGKILL")
+        self.assertLess(took, 5)
+        self.assertGone("leader")
+        self.assertGone("child")
+
+    def test_the_plan_of_a_checkout_whose_git_hangs_is_a_stop_that_cannot_be_verified(self):
+        self.mode("hang")
+        with mock.patch.object(self.cp, "GIT_TIMEOUT", 0.5, create=True), mock.patch.object(self.cp, "KILL_AFTER", 0.3, create=True):
+            report, took = self.bounded(lambda: self.cp.plan(self.repo.path, self.head, None, None, [], False, []))
+        self.assertEqual(("STOP", ["unverifiable"]), (report["status"], [p["check"] for p in report["problems"]]))
+        self.assertIn("git rev-parse --show-toplevel timed out after 0.5 s and was ended", report["problems"][0]["detail"])
+        self.assertLess(took, 4)
+        self.assertGone("child")
+
+    def test_a_git_that_finished_is_judged_by_its_exit_code_although_a_descendant_holds_its_output(self):
+        self.mode("leaked")
+        with mock.patch.object(bounded_run, "POLL", 0.2), mock.patch.object(bounded_run, "DRAIN", 0.5):
+            done, took = self.bounded(lambda: self.cp.git(self.repo.path, "rev-parse", "HEAD"))
+        self.assertEqual((0, b"out\n", b"err\n"), (done.returncode, done.stdout, done.stderr))
+        self.assertLess(took, 3, "poll + drain, not the descendant's 6 seconds")
+        self.assertTrue(alive(self.pid("child")), "what a finished git left behind is not signalled")
+
+    def test_the_control_a_git_that_ends_at_once_returns_what_it_always_returned(self):
+        self.mode("")
+        done, took = self.bounded(lambda: self.cp.git(self.repo.path, "rev-parse", "HEAD"))
+        self.assertEqual((0, self.head.encode() + b"\n", b""), (done.returncode, done.stdout, done.stderr))
+        self.assertLess(took, 3)
+
+    def execution(self):
+        """A report for `execute` that detaches HEAD at the commit it is already on."""
+        return {"toplevel": str(self.repo.path), "target": self.head, "branch": None, "problems": [], "status": "PASS",
+                "commands": [["git", "switch", "--detach", f"{self.head}^{{commit}}"]]}
+
+    def test_a_change_command_that_hangs_is_a_stop_that_says_where_the_checkout_is(self):
+        self.mode("hangswitch")
+        with mock.patch.object(self.cp, "CHANGE_TIMEOUT", 0.5, create=True), mock.patch.object(self.cp, "KILL_AFTER", 0.3, create=True):
+            report, took = self.bounded(lambda: self.cp.execute(self.execution()))
+        self.assertEqual("STOP", report["status"])
+        self.assertEqual(f"git switch --detach {self.head}^{{commit}} timed out after 0.5 s and was ended (SIGTERM); "
+                         f"the checkout is now on main at {self.head}", report["problems"][0]["detail"])
+        self.assertLess(took, 4)
+        self.assertGone("child")
+
+    def test_an_interrupted_change_command_is_waited_for_and_the_interrupt_raised_afterwards(self):
+        # A tree update must finish or fail whole: the terminal's Ctrl-C no longer reaches git (a session of its own).
+        self.mode("slowswitch")
+
+        def interrupt_when_running():
+            end = time.monotonic() + 5
+            while not (self.root / "ready").exists() and time.monotonic() < end:
+                time.sleep(0.01)
+            time.sleep(0.2)
+            if self.armed:  # the call under test is over (it failed early): a late SIGINT would reach the runner
+                os.kill(os.getpid(), signal.SIGINT)
+        threading.Thread(target=interrupt_when_running, daemon=True).start()
+        self.armed = True
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                self.cp.execute(self.execution())
+        finally:
+            self.armed = False
+        self.assertEqual("finished\n", (self.root / "finished").read_text(), "the switch ran to its end before the interrupt left")
 
 
 if __name__ == "__main__":

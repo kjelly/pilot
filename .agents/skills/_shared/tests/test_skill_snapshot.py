@@ -216,6 +216,26 @@ class RunFromTheSnapshot(unittest.TestCase):
         self.assertEqual({}, wrote, "these scripts wrote bytecode into the snapshot")  # diagnostic: names them
         self.assertEqual([], self.bytecode_dirs(snapshot))
 
+    PREFLIGHT_REL = ".agents/skills/_shared/scripts/checkout_preflight.py"
+
+    def test_the_landing_preflight_runs_from_the_snapshot_under_python_I_and_the_snapshot_still_verifies(self):
+        """checkout_preflight.py imports its sibling bounded_run.py (kjelly/pilot#427). Under `python -I` the script's own
+        directory is not on sys.path (the script has to add it), and CPython writes `__pycache__` next to an imported
+        sibling (the script has to set sys.dont_write_bytecode before it imports): either one breaks the landing, or
+        every later `verify`. A real dry run, in a real checkout, from a real snapshot of the real bundle."""
+        r, snapshot = self.real_snapshot()
+        head = r.out("rev-parse", "HEAD")
+        environ = {k: v for k, v in r.env.items() if not k.startswith("PYTHON")}
+        for flags in (("-I",), ("-E",)):
+            with self.subTest(flags=flags):
+                p = subprocess.run([sys.executable, *flags, str(snapshot / self.PREFLIGHT_REL), "--repo", str(r.path),
+                                    "--target", head], capture_output=True, text=True, env=environ, cwd=r.base)
+                report = json.loads(p.stdout) if p.stdout.strip() else None
+                self.assertEqual((0, "PASS"), (p.returncode, report and report["status"]), p.stderr)
+        rc, out = snap(r, "verify", "--snapshot", str(snapshot))
+        self.assertEqual((0, "PASS"), (rc, out["status"]), out)
+        self.assertEqual([], self.bytecode_dirs(snapshot))
+
     FAKE_GH = r'''#!/usr/bin/env python3
 import base64, json, sys
 a = sys.argv[1:]

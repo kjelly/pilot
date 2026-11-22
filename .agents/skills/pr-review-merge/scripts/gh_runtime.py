@@ -6,10 +6,24 @@ import binascii
 import json
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+# Running from the skill snapshot must not add __pycache__ there (`skill_snapshot.py verify` counts any added file): set
+# before the first sibling import. `bounded_run` lives in the `_shared` bundle directory, which goes on the import path
+# LAST and only when absent (review_gate and list_ready do the same): `pr_gate.merge_gate_modules` puts this directory at
+# index 0, imports this module and pops index 0, so nothing here may insert at the front.
+sys.dont_write_bytecode = True
+_SHARED_SCRIPTS = str(Path(__file__).resolve().parents[2] / "_shared" / "scripts")
+if _SHARED_SCRIPTS not in sys.path:
+    sys.path.append(_SHARED_SCRIPTS)
+import bounded_run  # noqa: E402  (every `gh` call goes through it: tests/test_bounded_run_lint.py)
+
+# Seconds one `gh` call may run; SIGKILL for a group that ignores SIGTERM follows up to bounded_run.KILL_AFTER + DRAIN later.
+GH_TIMEOUT = 75
 COMMIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 # GitHub's compare API lists at most 300 changed files for the whole comparison and says
 # nothing when it cuts the list (a 1554-commit compare of kjelly/pilot returned exactly 300).
@@ -57,9 +71,11 @@ class Repo:
 
 
 def run_gh(args: list[str], *, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """One `gh` call. It is bounded by `GH_TIMEOUT` and its whole process group is ended at the deadline; a `gh` that
+    exited is judged by its exit code, also when something it started still holds its output."""
     try:
-        completed = subprocess.run(["gh", *args], input=input_text, text=True, capture_output=True, timeout=75)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        completed = bounded_run.run(["gh", *args], limit=GH_TIMEOUT, input=input_text)
+    except (OSError, bounded_run.Timeout) as exc:
         raise GitHubError(f"gh unavailable or timed out: {exc}") from exc
     if check and completed.returncode != 0:
         raise GitHubError(f"gh {' '.join(args[:4])} failed ({completed.returncode}): {completed.stderr.strip()[:500]}")
