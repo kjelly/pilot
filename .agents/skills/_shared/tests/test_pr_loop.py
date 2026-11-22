@@ -24,6 +24,7 @@ import threading
 import time
 import unittest
 import uuid
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -4586,6 +4587,31 @@ class CheckoutSwitchTests(FastForwardCase):
         self.assertEqual("refs/heads/main", self.git("symbolic-ref", "HEAD"), "it is not switched back")
 
 
+def alive(pid):
+    """Whether process `pid` runs: a killed process stays a zombie until its parent (init, for an orphan) reaps it."""
+    try:
+        os.kill(pid, 0)
+        with open(f"/proc/{pid}/stat") as stat_file:
+            return stat_file.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:  # gone between the two calls, or /proc says so
+        return False
+
+
+def group_members(pgid):
+    """The pids of the live (not zombie) members of process group `pgid`."""
+    found = []
+    for name in os.listdir("/proc"):
+        if name.isdigit():
+            try:
+                with open(f"/proc/{name}/stat") as stat_file:
+                    state, _, group = stat_file.read().rsplit(")", 1)[1].split()[:3]
+            except OSError:
+                continue
+            if state != "Z" and int(group) == pgid:
+                found.append(int(name))
+    return found
+
+
 class GitChangeTests(unittest.TestCase):
     """`git_change`, the one call that changes a checkout: what it runs, with what, and how it ends."""
 
@@ -4603,11 +4629,38 @@ class GitChangeTests(unittest.TestCase):
         # A test run started in the background has SIGINT ignored: the interrupt these tests send would go nowhere.
         before = signal.signal(signal.SIGINT, signal.default_int_handler)
         self.addCleanup(signal.signal, signal.SIGINT, before)
+        # Small limits for what the bounded-cleanup tests wait for. Whatever a test starts is killed when it ends, and by a
+        # watchdog if it hangs: nothing may outlive the test, also when the code under test is wrong.
+        for name, value in (("KILL_AFTER", 0.5), ("DRAIN", 0.5), ("POLL", 0.2)):
+            patcher = patch.object(pr_loop, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(self.kill_leftovers)
+        watchdog = threading.Timer(12, self.kill_leftovers)
+        watchdog.daemon = True
+        watchdog.start()
+        self.addCleanup(watchdog.cancel)
 
     def fake_git(self, body):
         path = self.root / "bin/git"
-        path.write_text("#!/bin/sh\n" + body)
+        path.write_text(f"#!/bin/sh\necho $$ > {self.root}/leader\n" + body)
         path.chmod(0o755)
+
+    def script(self, name, text):
+        path = self.root / name
+        path.write_text(text)
+        return f"{shlex.quote(sys.executable)} {path}"
+
+    def pid(self, name):
+        return int((self.root / name).read_text())
+
+    def kill_leftovers(self):
+        for name in ("leader", "child", "helper"):
+            with contextlib.suppress(OSError, ValueError):
+                pid = self.pid(name)
+                with contextlib.suppress(OSError):
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                os.kill(pid, signal.SIGKILL)
 
     def test_it_runs_the_subcommand_with_hooks_off_and_nothing_to_prompt_for(self):
         self.fake_git(f'{{ pwd; echo "$@"; echo "$GIT_TERMINAL_PROMPT $GIT_NO_LAZY_FETCH $LC_ALL $GIT_FOO"; }} > {self.log}\n'
@@ -4668,6 +4721,206 @@ class GitChangeTests(unittest.TestCase):
         self.assertLess(time.monotonic() - began, 2.5, "it did not wait for the command to end by itself")
         time.sleep(0.5)
         self.assertFalse(self.signal.exists())
+
+
+    # What `git_change` guarantees however git's descendants behave (class: completion and cleanup keyed on the leader and
+    # on pipe EOF, instead of on the process group and one fixed deadline; PR #426 review). Every test names the pids it
+    # starts in files, and asserts the outcome (the time it took, the group's live members, the exact text), not a call.
+    def ignores_sigterm(self):
+        return self.script("ignore.py", "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(30)\n")
+
+    def child_holding_the_pipes(self):
+        return f"{self.ignores_sigterm()} &\necho $! > {self.root}/child\n"
+
+    # Git ends on SIGTERM, after reaping its own child: no zombie of its own is left to keep the group "there" until init
+    # reaps it (what the descendants of a killed group do, whose reaping is not up to the runner).
+    LEADER_ENDS_ON_SIGTERM = "trap 'kill $!; wait $!; exit 143' TERM\nsleep 30 &\nwait\n"
+
+    def assertGone(self, name, within=3.0):
+        pid, end = self.pid(name), time.monotonic() + within
+        while alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertFalse(alive(pid), f"{name} (pid {pid}) is still running")
+
+    def assertGroupGone(self, within=3.0):
+        """No live member is left in git's group (killed members are zombies until init reaps them: not live)."""
+        pgid, end = self.pid("leader"), time.monotonic() + within
+        while group_members(pgid) and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertEqual([], group_members(pgid), "a process of git's group is still running")
+
+    def interrupt_at(self, *delays):
+        for delay in delays:
+            timer = threading.Timer(delay, os.kill, (os.getpid(), signal.SIGINT))
+            timer.start()
+            self.addCleanup(timer.cancel)
+
+    def test_a_timeout_ends_what_a_leader_that_ended_on_sigterm_left_holding_its_pipes(self):
+        self.fake_git(self.child_holding_the_pipes() + self.LEADER_ENDS_ON_SIGTERM)
+        began = time.monotonic()
+        with patch.dict(pr_loop.GIT_CHANGES, {"fetch": 0.3}):
+            with self.assertRaisesRegex(pr_loop.Stop, r"^git fetch timed out after 0\.3 seconds$"):
+                pr_loop.git_change(self.root / "work", "fetch")
+        self.assertLess(time.monotonic() - began, 4, "limit + KILL_AFTER + DRAIN, not the child's 30 seconds")
+        self.assertGone("child")
+        self.assertGroupGone()
+
+    def test_a_member_that_ignores_sigterm_and_holds_no_pipe_is_killed_after_kill_after(self):
+        self.fake_git(f"{self.ignores_sigterm()} >/dev/null 2>&1 &\necho $! > {self.root}/child\n"
+                      + self.LEADER_ENDS_ON_SIGTERM)
+        with patch.dict(pr_loop.GIT_CHANGES, {"fetch": 0.3}):
+            with self.assertRaisesRegex(pr_loop.Stop, r"^git fetch timed out after 0\.3 seconds$"):
+                pr_loop.git_change(self.root / "work", "fetch")
+        self.assertGone("child")
+        self.assertGroupGone()
+
+    def test_an_interrupted_fetch_ends_what_a_leader_that_ended_on_sigterm_left_holding_its_pipes(self):
+        self.fake_git(self.child_holding_the_pipes() + self.LEADER_ENDS_ON_SIGTERM)
+        self.interrupt_at(0.3)
+        began = time.monotonic()
+        with self.assertRaises(KeyboardInterrupt):
+            pr_loop.git_change(self.root / "work", "fetch")
+        self.assertLess(time.monotonic() - began, 4, "KILL_AFTER + DRAIN after the interrupt")
+        self.assertGone("child")
+        self.assertGroupGone()
+
+    def test_an_interrupted_merge_is_ended_at_its_original_limit_and_the_interrupt_is_raised_not_the_timeout(self):
+        self.fake_git(self.LEADER_ENDS_ON_SIGTERM)
+        self.interrupt_at(1.5)
+        began = time.monotonic()
+        with patch.dict(pr_loop.GIT_CHANGES, {"merge": 2.0}):
+            with self.assertRaises(KeyboardInterrupt):  # a Stop is a RuntimeError: it would be an error here
+                pr_loop.git_change(self.root / "work", "merge", "--ff-only")
+        took = time.monotonic() - began
+        self.assertGreater(took, 1.9, "an interrupted merge is still waited for, up to its limit")
+        self.assertLess(took, 3.0, "the limit counts from the start of the call, not from the interrupt")
+        self.assertGroupGone()
+
+    def test_an_interrupted_switch_with_a_lingering_child_is_ended_at_its_limit(self):
+        self.fake_git(self.child_holding_the_pipes() + self.LEADER_ENDS_ON_SIGTERM)
+        self.interrupt_at(0.3)
+        began = time.monotonic()
+        with patch.dict(pr_loop.GIT_CHANGES, {"switch": 1.0}):
+            with self.assertRaises(KeyboardInterrupt):
+                pr_loop.git_change(self.root / "work", "switch", "--no-guess")
+        self.assertLess(time.monotonic() - began, 4)
+        self.assertGone("child")
+        self.assertGroupGone()
+
+    def test_a_git_that_exited_is_judged_by_its_exit_code_even_when_a_leftover_holds_its_output(self):
+        for code in (0, 3):
+            with self.subTest(code=code):
+                self.fake_git(self.child_holding_the_pipes() + f"echo out\necho err >&2\nexit {code}\n")
+                began = time.monotonic()
+                with patch.dict(pr_loop.GIT_CHANGES, {"fetch": 30}):
+                    done = pr_loop.git_change(self.root / "work", "fetch")
+                self.assertEqual((code, "out\n", "err\n"), (done.returncode, done.stdout, done.stderr))
+                self.assertLess(time.monotonic() - began, 3, "git's own exit, not the 30 second limit")
+                self.assertTrue(alive(self.pid("child")), "what a finished git left behind is not signalled")
+                self.kill_leftovers()
+
+    def test_a_process_that_left_the_group_while_holding_the_pipe_cannot_hold_the_runner(self):
+        writer = self.script("escaped.py", "import os, signal, sys, time\nos.setsid()\n"
+                             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\nfor _ in range(300):\n"
+                             "    sys.stderr.write('x\\n')\n    sys.stderr.flush()\n    time.sleep(0.1)\n")
+        self.fake_git(f"{writer} &\necho $! > {self.root}/child\n" + self.LEADER_ENDS_ON_SIGTERM)
+        calls, real = [], os.killpg
+
+        def recording_killpg(pgid, sig):
+            try:
+                real(pgid, sig)
+            except ProcessLookupError:
+                calls.append((sig, "ESRCH"))
+                raise
+            calls.append((sig, "ok"))
+        made = []
+
+        class Recording(subprocess.Popen):  # the test holds git's Popen: only the runner can close its pipes (a collected
+            def __init__(self, *args, **kwargs):  # Popen closes them by itself, and would hide a runner that does not)
+                super().__init__(*args, **kwargs)
+                made.append(self)
+        began = time.monotonic()
+        with patch.dict(pr_loop.GIT_CHANGES, {"fetch": 0.3}), patch.object(pr_loop.os, "killpg", recording_killpg), \
+                patch.object(pr_loop.subprocess, "Popen", Recording):
+            with self.assertRaisesRegex(pr_loop.Stop, r"^git fetch timed out after 0\.3 seconds$"):
+                pr_loop.git_change(self.root / "work", "fetch")
+        self.assertLess(time.monotonic() - began, 4)
+        seen_empty = [i for i, (_, result) in enumerate(calls) if result == "ESRCH"]
+        self.assertTrue(seen_empty, f"the group was seen empty: {calls}")
+        self.assertEqual(seen_empty[0] + 1, len(calls), f"nothing is signalled after the group answered ESRCH: {calls}")
+        self.assertTrue(made[0].stdout.closed and made[0].stderr.closed, "the runner closed git's pipes")
+        self.assertGone("child", within=3.0)  # its next write meets a closed pipe
+
+    def test_a_second_interrupt_ends_the_group_at_once(self):
+        self.fake_git("trap '' TERM\nsleep 30\n")
+        self.interrupt_at(0.3, 1.0)
+        began = time.monotonic()
+        with patch.object(pr_loop, "KILL_AFTER", 20):
+            with self.assertRaises(KeyboardInterrupt):
+                pr_loop.git_change(self.root / "work", "fetch")
+        self.assertLess(time.monotonic() - began, 3, "not KILL_AFTER (20 s)")
+        self.assertGroupGone()
+
+    def test_a_group_that_cannot_be_signalled_does_not_turn_the_timeout_into_a_crash(self):
+        self.fake_git("trap '' TERM\nsleep 30\n")
+
+        def refused(pgid, sig):
+            raise PermissionError(1, "Operation not permitted")
+        began = time.monotonic()
+        with patch.dict(pr_loop.GIT_CHANGES, {"fetch": 0.3}), patch.object(pr_loop.os, "killpg", refused), \
+                warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)  # git cannot be ended here, and is collected still running
+            with self.assertRaisesRegex(pr_loop.Stop, r"^git fetch timed out after 0\.3 seconds$"):
+                pr_loop.git_change(self.root / "work", "fetch")
+        self.assertLess(time.monotonic() - began, 4, "the pipes were still drained and closed within the bound")
+
+    # The same, with a real git: `git fetch` of an `ext::` remote runs a helper that ignores SIGTERM and holds git's stderr.
+    def real_git_fetch(self, mode):
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed")
+        helper = self.root / "helper.sh"
+        helper.write_text(f"#!/bin/sh\necho $$ > {self.root}/helper\ntrap '' TERM\nexec sleep 30\n")
+        helper.chmod(0o755)
+        probe = self.root / "probe.sh"
+        probe.write_text(f"#!/bin/sh\necho ran > {self.root}/probed\n")
+        probe.chmod(0o755)
+        patcher = patch.dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="protocol.ext.allow",
+                             GIT_CONFIG_VALUE_0="always")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        subprocess.run(["git", "init", "-q", str(self.root / "work")], check=True)
+        subprocess.run(["git", "ls-remote", f"ext::{probe}"], cwd=self.root / "work", capture_output=True, timeout=30)
+        if not (self.root / "probed").exists():
+            self.skipTest("this git does not run an ext:: helper here (protocol.ext.allow), so the case cannot be made")
+        if mode == "interrupt":
+            self.interrupt_at(1.2)
+        patches = [patch.object(pr_loop, "KILL_AFTER", 1.0), patch.object(pr_loop, "DRAIN", 1.0)]
+        if mode == "timeout":
+            patches.append(patch.dict(pr_loop.GIT_CHANGES, {"fetch": 1.5}))
+        for each in patches:
+            each.start()
+            self.addCleanup(each.stop)
+        began = time.monotonic()
+        try:
+            pr_loop.git_change(self.root / "work", "fetch", "--no-tags", f"ext::{helper}", "+refs/heads/*:refs/remotes/x/*")
+        finally:
+            took = time.monotonic() - began
+            self.assertTrue((self.root / "helper").exists(), "git started the helper")
+            self.assertLess(took, 6, "limit + KILL_AFTER + DRAIN")
+            end = time.monotonic() + 3
+            while alive(self.pid("helper")) and time.monotonic() < end:
+                time.sleep(0.05)
+            self.assertFalse(alive(self.pid("helper")), "the helper that ignores SIGTERM was ended")
+            self.assertEqual([], sorted(p.name for p in (self.root / "work/.git").rglob("*.lock")),
+                             "git removed its own lock files")
+
+    def test_a_real_git_fetch_whose_helper_ignores_sigterm_is_bounded_at_its_limit(self):
+        with self.assertRaisesRegex(pr_loop.Stop, r"^git fetch timed out after 1\.5 seconds$"):
+            self.real_git_fetch("timeout")
+
+    def test_an_interrupted_real_git_fetch_whose_helper_ignores_sigterm_is_bounded(self):
+        with self.assertRaises(KeyboardInterrupt):
+            self.real_git_fetch("interrupt")
 
 
 class CheckoutCleanTests(CheckoutCase):

@@ -88,9 +88,14 @@ CREATE_ROUNDS = 3
 PANE_FORMAT = "#{pane_id}|#{pid}|#{start_time}"
 READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pid}|#{start_time}"
 # The only git subcommands that change the checkout (the startup fast-forward and switch to origin's default branch), and
-# how long each may run, in seconds; a command that outlives its limit gets SIGTERM and, KILL_AFTER seconds later, SIGKILL. Module constants.
+# how long each may run, in seconds. A command that outlives its limit gets SIGTERM to its whole process group and, KILL_AFTER
+# seconds later, SIGKILL to whatever is still in that group (also when git itself has already gone). What is then still in
+# git's pipes is read for at most DRAIN seconds and the pipes are closed, so that nothing git started, in or out of its
+# group, can hold the runner; POLL is the length of one wait for git's output. Module constants.
 GIT_CHANGES = {"fetch": 600, "merge": 120, "switch": 120}
 KILL_AFTER = 30
+DRAIN = 5
+POLL = 1
 
 
 class Stop(RuntimeError):
@@ -127,42 +132,93 @@ def command(*args, cwd=None, data=None):
 
 
 def stop_group(proc):
-    """End `proc` and everything it started (it leads its own process group): SIGTERM, so that git removes its own lock
-    files, and SIGKILL when it is still there KILL_AFTER seconds later; then collect it."""
-    for sig, wait in ((signal.SIGTERM, KILL_AFTER), (signal.SIGKILL, None)):
+    """End `proc` and every process still in its process group (it leads one of its own), then collect what is left in its
+    pipes (`drain`). SIGTERM goes to the group first, so that git removes its own lock files; whatever is still in the
+    group at one fixed instant, KILL_AFTER seconds after that, gets SIGKILL: also when the leader has exited by then and
+    a descendant that ignores SIGTERM stays (the group is probed every 50 ms once the leader is reaped, a zombie leader
+    keeps its group alive). A group that answered ESRCH is never signalled again: it is empty, and its id may belong to
+    another group by now. A group that cannot be signalled (EPERM, a member that changed user) is left alone too. An
+    interrupt while this runs (a second Ctrl-C) SIGKILLs the group at once, still drains, and is raised."""
+    kill_at, done = time.monotonic() + KILL_AFTER, False
+
+    def signal_group(sig):
+        nonlocal done
+        if not done:
+            try:
+                os.killpg(proc.pid, sig)
+            except (ProcessLookupError, PermissionError):
+                done = True
+    try:
+        signal_group(signal.SIGTERM)
         try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
-            break
-        try:
-            proc.wait(wait)
-            break
+            proc.wait(max(0.0, kill_at - time.monotonic()))
         except subprocess.TimeoutExpired:
-            continue
-    proc.communicate()
+            pass
+        while proc.returncode is not None and not done and time.monotonic() < kill_at:
+            signal_group(0)  # the leader is reaped, so a group without members answers ESRCH
+            if not done:
+                time.sleep(0.05)
+        signal_group(signal.SIGKILL)
+    except KeyboardInterrupt:
+        signal_group(signal.SIGKILL)
+        drain(proc)
+        raise
+    drain(proc)
+
+
+def drain(proc):
+    """What is left in `proc`'s pipes, `(stdout, stderr)` as text, read for at most DRAIN seconds: then both pipes are
+    closed, `proc` is collected (for DRAIN seconds at most) and what was read so far is returned. A process that left
+    git's group while holding a pipe therefore cannot hold the runner: its next write meets a closed pipe."""
+    try:
+        return proc.communicate(timeout=DRAIN)
+    except subprocess.TimeoutExpired as exc:
+        pipes = [(pipe.encoding, pipe.errors) for pipe in (proc.stdout, proc.stderr)]
+        for pipe in (proc.stdout, proc.stderr):
+            pipe.close()
+        try:
+            proc.wait(DRAIN)
+        except subprocess.TimeoutExpired:
+            pass
+        # The partial output a timed-out communicate carries is bytes (also in text mode, on Python 3.10).
+        return tuple(data if isinstance(data, str) else (data or b"").decode(encoding, errors).replace("\r\n", "\n")
+                     .replace("\r", "\n") for data, (encoding, errors) in zip((exc.stdout, exc.stderr), pipes))
 
 
 def git_change(cwd, sub, *args):
     """The ONLY git call of this runner that changes the checkout: `sub` is `fetch`, `merge` or `switch` (anything else is a
     Stop), run with hooks and automatic maintenance off, no credential prompt, no lazy fetch and one locale, in a
     process group of its own so that the terminal's Ctrl-C does not reach it half way. The result is the caller's to
-    judge. A `merge` or `switch` that was interrupted is waited for (it is short, and must finish or fail whole) and the
-    interrupt is raised afterwards; a `fetch` that was interrupted is ended (SIGTERM, then SIGKILL) first. tests/test_pr_loop.py::
-    ImportsTests lists the call sites and the flags each must carry."""
+    judge. The call has ONE deadline, GIT_CHANGES[sub] seconds from its start, and returns or raises within that plus
+    KILL_AFTER and DRAIN (and one POLL), whatever git's descendants do with SIGTERM or with git's pipes: at the deadline
+    `stop_group` ends the group and the call raises a Stop. A git that exits is judged by its exit code and its output
+    alone: what it left behind is not waited for beyond DRAIN and not signalled (it may be a daemon git started on
+    purpose; every caller reads the state with git itself afterwards). A `merge` or `switch` that was interrupted is
+    still waited for (it is short, and must finish or fail whole), but only until that same deadline, and the interrupt
+    is raised afterwards, in place of the timeout Stop; a `fetch` that was interrupted is ended (SIGTERM, then SIGKILL)
+    at once, and a second interrupt ends it with SIGKILL at once. tests/test_pr_loop.py::ImportsTests lists the call
+    sites and the flags each must carry."""
     if sub not in GIT_CHANGES:
         raise Stop(f"git {sub} is not a command this runner changes a checkout with")
     argv = ["git", "-c", "core.hooksPath=/dev/null", "-c", "maintenance.auto=false", sub, *args]
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1", LC_ALL="C")
     proc = subprocess.Popen(argv, cwd=cwd, env=env, text=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, start_new_session=True)
-    interrupted = None
+    deadline, interrupted = time.monotonic() + GIT_CHANGES[sub], None
     while True:
+        left = deadline - time.monotonic()  # outside the try: the deadline is judged also after an interrupt
+        if left <= 0:
+            stop_group(proc)
+            if interrupted is not None:
+                raise interrupted
+            raise Stop(f"git {sub} timed out after {GIT_CHANGES[sub]} seconds")
         try:
-            out, err = proc.communicate(timeout=GIT_CHANGES[sub])
+            out, err = proc.communicate(timeout=min(left, POLL))
             break
         except subprocess.TimeoutExpired:
-            stop_group(proc)
-            raise Stop(f"git {sub} timed out after {GIT_CHANGES[sub]} seconds") from None
+            if proc.poll() is not None:  # git is done; what it left behind holds the pipes
+                out, err = drain(proc)
+                break
         except KeyboardInterrupt as exc:
             interrupted = interrupted or exc
             if sub == "fetch":
