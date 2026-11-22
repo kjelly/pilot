@@ -3,14 +3,17 @@
 
 The agents start in YOUR checkout, not in a clone of their own: the root of the git work tree the runner is started
 in, or the directory named by --checkout. Start the agents there once yourself, so that they already trust it: the
-runner cannot answer a trust dialog. The checkout must be clean, on the default branch of origin, at origin's tip or
-strictly behind it, and its origin must be --repo, or the runner refuses before it reads GitHub. A checkout strictly
-behind is fast-forwarded at startup (and only then) to exactly the tip origin reported: one `git fetch` of that commit
-and one `git merge --ff-only` of it, with hooks and automatic maintenance off; a checkout that is ahead, diverged,
-without a commit, a partial clone, or whose update would touch a submodule or an ignored file is refused instead.
-Apart from that fast-forward the runner never deletes, resets, cleans or stashes anything in it; the task files it
-writes stay under the checkout's task directory (ignored by git), and the agent windows it started stay open when it
-stops.
+runner cannot answer a trust dialog. The checkout must be clean and its origin must be --repo, or the runner refuses
+before it reads GitHub. It must be on the default branch of origin, at origin's tip or strictly behind it, or on
+another branch, which the runner then leaves: it switches the checkout to origin's default branch (only an existing
+local branch that no other work tree holds) and says how to go back, and never switches it back. At startup only, a
+default branch strictly behind is fast-forwarded to exactly the tip origin reported: one `git fetch` of that commit,
+one local `git fetch .` that moves the branch to it (git refuses anything but a fast-forward) and one `git switch`
+(or, on the default branch itself, one `git merge --ff-only`), with hooks and automatic maintenance off; a checkout
+that is ahead, diverged, detached, without a commit, a partial clone, or whose update would touch a submodule or an
+ignored file is refused instead. Apart from that the runner never deletes, resets, cleans or stashes anything in it,
+and the branch it leaves keeps its commits; the task files it writes stay under the checkout's task directory (ignored
+by git), and the agent windows it started stay open when it stops.
 
 The agents run as windows (one per agent, named `<PR>-<phase>`) of ONE tmux session of the runner's own, never of one of
 yours: `pilot-pr-<directory name>-<8 hex>`, where the directory name is the checkout's, cut down to letters, digits, `_`
@@ -56,7 +59,8 @@ from urllib.parse import urlsplit
 sys.dont_write_bytecode = True
 SKILLS = Path(__file__).resolve().parents[1] / ".agents/skills"
 sys.path[:0] = [str(SKILLS / skill / "scripts") for skill in ("pr-review-merge", "_shared")]
-from checkout_preflight import HEX, GitError, check_dirty, check_ignored_collisions, check_in_progress
+from checkout_preflight import (HEX, GitError, check_checked_out_elsewhere, check_dirty, check_ignored_collisions,
+                                check_in_progress)
 from gh_runtime import GitHubError, Repo, issue_comments, pr_view, timeline_events, viewer_login
 from list_ready import QUEUE_LABEL
 from needs_person import LABEL as PERSON_LABEL, latest_marker
@@ -83,9 +87,9 @@ CREATE_ROUNDS = 3
 # call, the server's identity beside the pane's fields.
 PANE_FORMAT = "#{pane_id}|#{pid}|#{start_time}"
 READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pid}|#{start_time}"
-# The only two git subcommands that change the checkout (the startup fast-forward), and how long each may run, in
-# seconds; a command that outlives its limit gets SIGTERM and, KILL_AFTER seconds later, SIGKILL. Module constants.
-GIT_CHANGES = {"fetch": 600, "merge": 120}
+# The only git subcommands that change the checkout (the startup fast-forward and switch to origin's default branch), and
+# how long each may run, in seconds; a command that outlives its limit gets SIGTERM and, KILL_AFTER seconds later, SIGKILL. Module constants.
+GIT_CHANGES = {"fetch": 600, "merge": 120, "switch": 120}
 KILL_AFTER = 30
 
 
@@ -139,11 +143,11 @@ def stop_group(proc):
 
 
 def git_change(cwd, sub, *args):
-    """The ONLY git call of this runner that changes the checkout: `sub` is `fetch` or `merge` (anything else is a
+    """The ONLY git call of this runner that changes the checkout: `sub` is `fetch`, `merge` or `switch` (anything else is a
     Stop), run with hooks and automatic maintenance off, no credential prompt, no lazy fetch and one locale, in a
     process group of its own so that the terminal's Ctrl-C does not reach it half way. The result is the caller's to
-    judge. A `merge` that was interrupted is waited for (it is short, and must finish or fail whole) and the interrupt
-    is raised afterwards; a `fetch` that was interrupted is ended (SIGTERM, then SIGKILL) first. tests/test_pr_loop.py::
+    judge. A `merge` or `switch` that was interrupted is waited for (it is short, and must finish or fail whole) and the
+    interrupt is raised afterwards; a `fetch` that was interrupted is ended (SIGTERM, then SIGKILL) first. tests/test_pr_loop.py::
     ImportsTests lists the call sites and the flags each must carry."""
     if sub not in GIT_CHANGES:
         raise Stop(f"git {sub} is not a command this runner changes a checkout with")
@@ -161,7 +165,7 @@ def git_change(cwd, sub, *args):
             raise Stop(f"git {sub} timed out after {GIT_CHANGES[sub]} seconds") from None
         except KeyboardInterrupt as exc:
             interrupted = interrupted or exc
-            if sub != "merge":
+            if sub == "fetch":
                 stop_group(proc)
                 raise
     if interrupted is not None:
@@ -392,15 +396,19 @@ class Checkout:
     """The operator's own checkout, inspected once at startup and verified again before every dispatch. Everything
     here READS it, except three things: the lock file in its git directory; only when git does not ignore the task and
     evidence directories yet, two lines appended to its git exclude file; and, only when the checkout is strictly
-    behind origin's tip, the fast-forward to exactly that tip (the objects and the remote-tracking ref `git fetch`
-    writes, and the branch, index and work tree `git merge --ff-only` moves). `dry_run` inspects without any of them
-    (and without tmux); a refusal is a Stop."""
+    behind origin's tip or on another branch, the fast-forward and switch to exactly that tip: the objects and the remote-tracking ref
+    `git fetch` writes, the default branch that `git merge --ff-only` (on it) or a local `git fetch .` (from another
+    branch) moves, and the index, work tree and HEAD that the merge or `git switch` change. `dry_run` inspects without any
+    of them (and without tmux); a refusal is a Stop."""
 
     def __init__(self, repo, directory=None, *, dry_run=False):
         self.repo, self.dry_run, self.lock_fd, self.would_add = repo, dry_run, None, []
         # What the fast-forward is doing or did: `forwarding` is set before the fetch starts, `forwarded` when the merge
         # has landed on the tip, `would_forward` is what a dry run found: `(local, tip, whether the tip is in the checkout)`.
         self.forwarding = self.forwarded = self.would_forward = None
+        # The switch to origin's default branch, when the checkout was on another one: `switching` is `(x, b)`, set before
+        # the first write; `switched` is `(x, X)` once HEAD is on `b`; `would_switch` is `(x, X, b)` in a dry run.
+        self.switching = self.switched = self.would_switch = None
         self.path = resolve_checkout(repo, directory)
         self.session = session_name(self.path)
         self.lock_path = self.git_path(LOCK_NAME)
@@ -410,6 +418,10 @@ class Checkout:
             self.inspect()
         except BaseException as exc:
             self.release()  # a refusal does not keep the lock
+            if isinstance(exc, KeyboardInterrupt) and not isinstance(exc, ForwardInterrupted) and self.switching:
+                other, branch = self.switching
+                raise ForwardInterrupted(f"Interrupted while switching {self.path} from {printable(other)} to {branch}; "
+                                         "check it with git status before the next run.") from None
             if isinstance(exc, KeyboardInterrupt) and not isinstance(exc, ForwardInterrupted) and self.forwarding:
                 branch, local, tip = self.forwarding
                 raise ForwardInterrupted(f"Interrupted while fast-forwarding {branch} in {self.path} (from {local[:12]} "
@@ -430,14 +442,16 @@ class Checkout:
         self.check_clean()
         branch, tip = self.origin_head()
         ref, sha = self.current()
+        if ref is None:
+            raise Stop(f"checkout {self.path} has a detached HEAD at {(sha or '')[:12]}; check out {branch}, "
+                       "the default branch of origin")
         if ref != f"refs/heads/{branch}":
-            if ref is None:
-                raise Stop(f"checkout {self.path} has a detached HEAD at {(sha or '')[:12]}; check out {branch}, "
-                           "the default branch of origin")
-            raise Stop(f"checkout {self.path} is on {ref.removeprefix('refs/heads/')}, not on {branch}, the default "
-                       "branch of origin")
-        self.check_tip(branch, tip)
+            self.switch_to_default(branch, tip, ref, sha)
+        else:
+            self.check_tip(branch, tip)
         self.branch, self.head = ref, tip if self.forwarded else sha
+        if self.switched:
+            self.branch, self.head = f"refs/heads/{branch}", tip
         self.ignore_task_files()  # last: it judges the .gitignore of the tree the agents will see
 
     def git_path(self, name):
@@ -543,9 +557,7 @@ class Checkout:
         relation = self.relation(local, tip)
         self.refuse_unless_behind(branch, local, tip, relation)
         if self.partial_clone():
-            raise Stop(f"local {branch} is at {local[:12]} but origin's {branch} is at {tip[:12]}; {self.path} is a partial "
-                       f"clone, which the runner does not fast-forward: run git pull --ff-only in {self.path} and start "
-                       "the runner again")
+            raise self.partial_refusal(branch, local, tip)
         if not self.dry_run:
             self.forward(branch, local, tip)
         else:
@@ -553,14 +565,20 @@ class Checkout:
                 self.check_forward(branch, local, tip)
             self.would_forward = (local, tip, relation == "behind")
 
-    def refuse_unless_behind(self, branch, local, tip, relation):
+    def partial_refusal(self, branch, local, tip):
+        return Stop(f"local {branch} is at {local[:12]} but origin's {branch} is at {tip[:12]}; {self.path} is a partial "
+                    f"clone, which the runner does not fast-forward: run git pull --ff-only in {self.path} and start "
+                    "the runner again")
+
+    def refuse_unless_behind(self, branch, local, tip, relation, left=""):
+        """Refuse a local branch that is ahead of origin's tip or has diverged from it; `left` says where the checkout is."""
         if relation == "ahead":
             raise Stop(f"local {branch} at {local[:12]} has commits that origin's {branch} ({tip[:12]}) does not "
-                       "have; the skills must come from origin's default branch")
+                       f"have; the skills must come from origin's default branch{left}")
         if relation == "diverged":
             raise Stop(f"local {branch} at {local[:12]} and origin's {branch} at {tip[:12]} have diverged (each has "
                        "commits the other does not have); the runner only fast-forwards: put "
-                       f"{branch} at origin's tip yourself and start the runner again")
+                       f"{branch} at origin's tip yourself and start the runner again{left}")
 
     def partial_clone(self):
         """Whether the checkout is a partial clone: its missing objects would be fetched by git on its own."""
@@ -578,12 +596,14 @@ class Checkout:
                 raise Stop(f"origin's default branch {branch} at {tip[:12]} lacks {where}; "
                            "the skills it hosts could not report or sign")
 
-    def check_forward(self, branch, local, tip):
-        """What must hold before `local` may be fast-forwarded to `tip` (which is in the checkout): the two helpers are on
-        the tip, it does not move a submodule (the runner does not update submodules), and it does not overwrite, delete
-        or write into an ignored path (`git merge` does that without a word, even into an ignored nested repository)."""
+    def check_forward(self, branch, base, tip, doing=None):
+        """What must hold before the work tree at commit `base` becomes `tip`'s (which is in the checkout): the two helpers
+        are on the tip, it does not move a submodule (the runner does not update submodules), and it does not overwrite,
+        delete or write into an ignored path (git does that without a word, even into an ignored nested repository).
+        `doing` says what is about to happen, in the words of the refusal."""
+        doing = doing or f"fast-forwarding {branch} to {tip[:12]}"
         self.check_helpers(branch, tip)
-        moved = git(self.path, "diff-tree", "-r", "-z", "--raw", "--no-renames", local, tip,
+        moved = git(self.path, "diff-tree", "-r", "-z", "--raw", "--no-renames", base, tip,
                     env={"GIT_NO_LAZY_FETCH": "1"}).stdout.split("\0")[:-1]
         for header, name in zip(moved[::2], moved[1::2]):
             if "160000" in (mode.lstrip(":") for mode in header.split(" ")[:2]):
@@ -597,28 +617,39 @@ class Checkout:
         paths = sorted({path for problem in found for path in problem["paths"]})
         if found:
             count = sum(problem["count"] for problem in found)
-            raise Stop(f"fast-forwarding {branch} to {tip[:12]} would overwrite, delete or write into ignored paths in "
+            raise Stop(f"{doing} would overwrite, delete or write into ignored paths in "
                        f"{self.path} ({count} paths, e.g. {printable(', '.join(paths[:3]))}); move them out of the way "
                        "and start the runner again; the runner never deletes them")
+
+    def remote_urls(self):
+        """Every URL configured for origin: what git may quote back, and so what is taken out of what it says."""
+        return self.config_values("remote.origin.url") + self.config_values("remote.origin.pushurl")
+
+    def fetch_tip(self, branch, tip):
+        """Fetch exactly `tip` from origin, by its SHA, into the remote-tracking ref (as `git pull` would; never by name, so
+        that origin moving on cannot change what lands). Nothing else is written: no tag, no FETCH_HEAD, no pruning."""
+        urls = self.remote_urls()
+        done = git_change(self.path, "fetch", "--no-tags", "--no-recurse-submodules", "--no-auto-maintenance",
+                          "--no-prune", "--no-write-fetch-head", "--atomic", "origin",
+                          f"+{tip}:refs/remotes/origin/{branch}")
+        if done.returncode != 0:
+            raise Stop(f"cannot fetch origin's {branch} at {tip[:12]} into {self.path}: git fetch failed "
+                       f"({done.returncode}): {redact(done.stderr.strip(), urls)[:300]}; {branch} was not changed")
 
     def forward(self, branch, local, tip):
         """Fast-forward the branch to exactly `tip`, the commit origin reported a moment ago: fetch that commit (by its
         SHA, into the remote-tracking ref, as `git pull` would; never by name, so that origin moving on cannot change
         what lands), check everything that can be checked before anything is written to the work tree, then
         `git merge --ff-only` that SHA. A failure leaves the branch where it was, and says so, or says what git changed."""
-        urls = self.config_values("remote.origin.url") + self.config_values("remote.origin.pushurl")
         self.forwarding = (branch, local, tip)  # from here on, an interrupt may have left something half way
-        done = git_change(self.path, "fetch", "--no-tags", "--no-recurse-submodules", "--no-auto-maintenance",
-                          "--no-prune", "--no-write-fetch-head", "origin", f"+{tip}:refs/remotes/origin/{branch}")
-        if done.returncode != 0:
-            raise Stop(f"cannot fetch origin's {branch} at {tip[:12]} into {self.path}: git fetch failed "
-                       f"({done.returncode}): {redact(done.stderr.strip(), urls)[:300]}; {branch} was not changed")
+        self.fetch_tip(branch, tip)
         relation = self.relation(local, tip)
         if relation is None:
             raise Stop(f"cannot read origin's {branch} at {tip[:12]} in {self.path} after fetching it; {branch} was "
                        "not changed")
         self.refuse_unless_behind(branch, local, tip, relation)
         self.check_forward(branch, local, tip)
+        urls = self.remote_urls()
         done = git_change(self.path, "merge", "--ff-only", "--no-squash", "--no-overwrite-ignore", "--no-autostash",
                           "-q", tip)
         said = f"git merge --ff-only {tip[:12]} " + (f"failed ({done.returncode}): {redact(done.stderr.strip(), urls)[:300]}"
@@ -629,6 +660,142 @@ class Checkout:
             self.say_forwarded(branch, local, tip)
             return
         raise Stop(f"{said}; {self.state_after(branch, local)}")
+
+    def other_worktrees(self):
+        """`(path, prunable, bare)` of every work tree of the repository but this one, from `git worktree list --porcelain`."""
+        here, found, entry = os.path.realpath(self.path), [], None
+        for line in git(self.path, "worktree", "list", "--porcelain").stdout.splitlines() + [""]:
+            if line.startswith("worktree "):
+                entry = [line[len("worktree "):], False, False]
+            elif entry and line.startswith("prunable"):
+                entry[1] = True
+            elif entry and line == "bare":
+                entry[2] = True
+            elif not line and entry:
+                if os.path.realpath(entry[0]) != here:
+                    found.append(tuple(entry))
+                entry = None
+        return found
+
+    def check_worktrees(self, other, branch):
+        """The default branch is not checked out in another work tree (also one that is prunable), and no other work tree is
+        in the middle of a git operation (a rebase holds its branch without showing it): `git fetch .` refuses the one, and
+        the other is not something the runner may move a branch under."""
+        try:
+            held = check_checked_out_elsewhere(self.path, branch)
+        except GitError as exc:
+            raise Stop(str(exc)) from exc
+        if held:
+            raise Stop(f"checkout {self.path} is on {printable(other)}, and {branch}, the default branch of origin, is "
+                       f"checked out in another work tree ({printable(held[0]['paths'][0])}); the runner does not switch to "
+                       "it: start the runner in that work tree, or check out another branch there, and start the runner "
+                       "again")
+        for where, prunable, bare in self.other_worktrees():
+            if prunable or bare:
+                continue
+            try:
+                busy = check_in_progress(Path(where))
+            except GitError as exc:
+                raise Stop(str(exc)) from exc
+            if busy:
+                raise Stop(f"checkout {self.path} is on {printable(other)}, and the work tree {printable(where)} has a git "
+                           f"operation in progress ({', '.join(busy[0]['paths'])}); the runner does not move or switch to "
+                           f"{branch} while it may hold it: finish or abort it and start the runner again")
+
+    @staticmethod
+    def way_back(path, other):
+        """The command that puts the checkout back on the branch it was on."""
+        return f"git -C {shlex.quote(str(path))} switch {shlex.quote(printable(other))}"
+
+    def switch_to_default(self, branch, tip, ref, sha):
+        """The checkout is clean and on another branch `other` (at `sha`): put it on origin's default branch `branch`, at
+        `tip`. Everything that can refuse is read before the first write: `branch` exists locally and is not held by another
+        work tree, it is at the tip or strictly behind it, the tip has the helpers, moves no submodule and writes into no
+        ignored path. Then (a real run) the tip is fetched, `branch` is moved to it by a local, unforced `git fetch .` (git
+        itself checks the fast-forward and refuses a branch another work tree holds), and `git switch` makes the one tree
+        update. `other` and its commits are never touched, and the checkout is not switched back at the end."""
+        other, label = ref.removeprefix("refs/heads/"), printable(ref.removeprefix("refs/heads/"))
+        if sha is None:
+            raise Stop(f"checkout {self.path} is on {label}, which has no commit; check out {branch}, the default branch "
+                       "of origin")
+        local = git(self.path, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}",
+                    ok=(0, 1)).stdout.strip()
+        if not local:
+            raise Stop(f"checkout {self.path} is on {label}, and it has no local {branch}, the default branch of origin; "
+                       "the runner switches only to an existing local branch: create it at origin's tip yourself and "
+                       "start the runner again")
+        self.check_worktrees(other, branch)
+        relation = "equal" if local == tip else self.relation(local, tip)
+        self.refuse_unless_behind(branch, local, tip, relation, f"; the checkout was left on {label}")
+        if self.partial_clone():
+            if relation == "equal":
+                raise Stop(f"checkout {self.path} is on {label}; {self.path} is a partial clone, which the runner does not "
+                           f"switch: check out {branch}, the default branch of origin, yourself and start the runner again")
+            raise self.partial_refusal(branch, local, tip)
+        doing = f"switching {self.path} to {branch} at {tip[:12]}"
+        if self.dry_run:
+            known = relation in ("equal", "behind")
+            if known:
+                self.check_forward(branch, sha, tip, doing)
+            self.would_switch = (other, sha, branch)
+            if relation != "equal":
+                self.would_forward = (local, tip, known)
+            return
+        self.switching = (other, branch)  # from here on, an interrupt may have left something half way
+        if relation != "equal":
+            self.fetch_tip(branch, tip)
+            relation = self.relation(local, tip)
+            if relation is None:
+                raise Stop(f"cannot read origin's {branch} at {tip[:12]} in {self.path} after fetching it; {branch} was "
+                           "not changed")
+            self.refuse_unless_behind(branch, local, tip, relation, f"; the checkout was left on {label}")
+        self.check_forward(branch, sha, tip, doing)
+        urls = self.remote_urls()
+        if local != tip:
+            done = git_change(self.path, "fetch", "--no-tags", "--no-recurse-submodules", "--no-auto-maintenance",
+                              "--no-prune", "--no-write-fetch-head", "--atomic", ".", f"{tip}:refs/heads/{branch}")
+            if done.returncode != 0:
+                raise Stop(f"cannot move {branch} to {tip[:12]} in {self.path}: git fetch . failed ({done.returncode}): "
+                           f"{redact(done.stderr.strip(), urls)[:300]}; {branch} was not changed; "
+                           f"{self.state_on(ref, sha, other)}")
+            if git(self.path, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}",
+                   ok=(0, 1)).stdout.strip() != tip:
+                raise Stop(f"git fetch . reported success but {branch} is not at {tip[:12]} in {self.path}; "
+                           f"{self.state_on(ref, sha, other)}")
+            self.forwarded = (local, tip)
+            self.say_forwarded(branch, local, tip)
+        done = git_change(self.path, "switch", "--no-guess", "--no-recurse-submodules", "--no-overwrite-ignore", "-q",
+                          "--", branch)
+        moved = f"; {branch} was fast-forwarded to {tip[:12]}" * (local != tip)
+        if done.returncode != 0 or not self.landed_switch(branch, tip, other, sha):
+            said = (f"failed ({done.returncode}): {redact(done.stderr.strip(), urls)[:300]}" if done.returncode != 0 else
+                    f"reported success but did not leave the checkout on {branch} at {tip[:12]}, clean, with no git "
+                    "operation in progress")
+            raise Stop(f"git switch to {branch} {said}; {self.state_on(ref, sha, other, moved)}")
+        self.switched = (other, sha)
+        self.say_switched(self.path, other, sha, branch)
+
+    def landed_switch(self, branch, tip, other, sha):
+        """The checkout is on the default branch at the tip, clean, with no git operation in progress, and the branch it
+        left is where it was."""
+        if not self.landed(branch, tip):
+            return False
+        return git(self.path, "rev-parse", "--verify", "--quiet", f"refs/heads/{other}^{{commit}}",
+                   ok=(0, 1)).stdout.strip() == sha
+
+    def state_on(self, ref, sha, other, moved=""):
+        """Where a failed switch left the checkout, from git itself: still on `other` at `sha` and clean (what a refusal
+        before the tree update leaves), or somewhere else."""
+        now_ref, now_sha = self.current()
+        try:
+            dirty = bool(check_dirty(self.path))
+        except GitError:
+            dirty = True
+        if (now_ref, now_sha) == (ref, sha) and not dirty:
+            return f"the checkout is still on {printable(other)} at {sha[:12]} and clean{moved}"
+        now = "a detached HEAD" if now_ref is None else printable(now_ref.removeprefix("refs/heads/"))
+        return (f"the checkout is now on {now} at {(now_sha or '')[:12]}{' with uncommitted changes' if dirty else ''}: "
+                "inspect it before starting the runner again")
 
     def landed(self, branch, tip):
         """The checkout is on the branch at the tip, clean, with no git operation in progress."""
@@ -656,6 +823,10 @@ class Checkout:
     def say_forwarded(branch, local, tip):
         tell(f"Fast-forwarded {branch} from {local[:12]} to {tip[:12]}, origin's tip")
 
+    @classmethod
+    def say_switched(cls, path, other, sha, branch):
+        tell(f"Switched {path} from {printable(other)} (at {sha[:12]}) to {branch}; to go back: {cls.way_back(path, other)}")
+
     def ignores(self, probe):
         return git(self.path, "check-ignore", "-q", "--", probe, ok=(0, 1)).returncode == 0
 
@@ -682,16 +853,20 @@ class Checkout:
 
     def announce(self):
         branch = self.branch.removeprefix("refs/heads/")
-        tell(f"Checkout: {self.path} ({branch} at {self.head[:12]})")
+        tell(f"Checkout: {self.path} ({printable(branch)} at {self.head[:12]})")
         if self.dry_run:
             unchecked = ""
             if self.would_forward:
                 local, tip, known = self.would_forward
-                tell(f"would fetch origin's {branch} at {tip[:12]} and fast-forward {branch} from {local[:12]} to it")
+                target = self.would_switch[2] if self.would_switch else branch
+                tell(f"would fetch origin's {target} at {tip[:12]} and fast-forward {target} from {local[:12]} to it")
                 if not known:
-                    unchecked = (f"; whether origin's {branch} at {tip[:12]} is a fast-forward of {branch}, has the two "
-                                 f"helpers and leaves ignored files alone, because {tip[:12]} is not in the checkout and a "
-                                 "dry run does not fetch it")
+                    unchecked = (f"; whether origin's {target} at {tip[:12]} is a fast-forward of {target}, has the two "
+                                 f"helpers{', moves no submodule' * bool(self.would_switch)} and leaves ignored files "
+                                 f"alone, because {tip[:12]} is not in the checkout and a dry run does not fetch it")
+            if self.would_switch:
+                other, sha, target = self.would_switch
+                tell(f"would switch {self.path} from {printable(other)} (at {sha[:12]}) to {target}")
             if self.would_add:
                 tell(f"would add {', '.join(self.would_add)} to {self.exclude}")
             tell(f"would start the agents in tmux session {self.session}")
@@ -702,9 +877,10 @@ class Checkout:
                  f"tmux attach -r -t {self.session}")
 
     def verify(self):
-        """Before every dispatch: back on the branch and commit the run started on (the commit after the startup
-        fast-forward, when there was one), clean, no git operation in progress. The tip of origin is not read again,
-        and the checkout is not fast-forwarded again: origin moves while a batch runs."""
+        """Before every dispatch: back on the branch and commit the run started on (the default branch at the tip after the
+        startup fast-forward or switch, when there was one), clean, no git operation in progress. The tip of origin is
+        not read again, the checkout is not fast-forwarded again and not switched back: origin moves while a batch runs,
+        and a skill that leaves another branch stops the run."""
         suffix = "; nothing was dispatched"
         self.check_operation(suffix)
         ref, sha = self.current()
@@ -730,9 +906,16 @@ class Checkout:
 
     def finish(self):
         """The run is over: say what it left where. It deletes nothing; the lock goes with the process."""
+        branch = self.branch.removeprefix("refs/heads/")
         changed = f"Nothing in {self.path} was deleted or reset."
-        if self.forwarded:
-            changed = (f"The runner changed {self.path} only by fast-forwarding {self.branch.removeprefix('refs/heads/')} from "
+        if self.switched:
+            other, sha = self.switched
+            moved = f" and fast-forwarded {branch} from {self.forwarded[0][:12]} to {self.forwarded[1][:12]}" \
+                if self.forwarded else ""
+            changed = (f"The runner switched {self.path} from {printable(other)} (at {sha[:12]}) to {branch}{moved} at the "
+                       f"start; to go back: {self.way_back(self.path, other)}; nothing else in it was deleted or reset.")
+        elif self.forwarded:
+            changed = (f"The runner changed {self.path} only by fast-forwarding {branch} from "
                        f"{self.forwarded[0][:12]} to {self.forwarded[1][:12]} at the start; nothing else in it was deleted "
                        "or reset.")
         tell(f"Kept: the task files under {self.path / TASK_DIR} and any agent window still open in tmux session "
@@ -1095,8 +1278,9 @@ def main():
     parser.add_argument("--max-actions", type=int, default=20, help="maximum dispatches per PR (default: 20)")
     parser.add_argument("--checkout", metavar="DIR",
                         help="the checkout the agents start in: the ROOT of a git work tree that is clean, on origin's "
-                             "default branch at or strictly behind origin's tip (the runner fast-forwards it), whose "
-                             f"origin is --repo (default: {CHECKOUT_DEFAULT})")
+                             "default branch at or strictly behind origin's tip (the runner fast-forwards it), or on a "
+                             "branch of it (the runner switches to origin's default branch and fast-forwards it to "
+                             f"origin's tip), whose origin is --repo (default: {CHECKOUT_DEFAULT})")
     parser.add_argument("--dry-run", action="store_true", help="show current PR states and whether the checkout would be "
                                                               "accepted, without starting agents or writing anything")
     args = parser.parse_args()
@@ -1114,8 +1298,14 @@ def main():
         if isinstance(exc, ForwardInterrupted):
             print(exc.text, file=sys.stderr)
         elif batch and batch.checkout:
+            back = ""
+            if batch.checkout.switched:
+                other, sha = batch.checkout.switched
+                back = (f" The checkout was switched from {printable(other)} (at {sha[:12]}) to "
+                        f"{batch.checkout.branch.removeprefix('refs/heads/')} at the start; to go back: "
+                        f"{batch.checkout.way_back(batch.checkout.path, other)}.")
             print(f"Interrupted; any agent window still open in tmux session {batch.checkout.session} and the task "
-                  f"files under {batch.checkout.path / TASK_DIR}/ were kept.", file=sys.stderr)
+                  f"files under {batch.checkout.path / TASK_DIR}/ were kept.{back}", file=sys.stderr)
         else:
             print("Interrupted; nothing was written.", file=sys.stderr)
         return 130

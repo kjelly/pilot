@@ -81,9 +81,10 @@ subdirectory. The runner refuses to start, with `pr-loop: <reason>` on stderr an
 exit status 1, before it reads a pull request or starts an agent (a dry run
 reports it after the PR states, below), unless: `origin` has exactly one URL,
 and that URL and every push URL name the `--repo` repository; no git operation
-is in progress; nothing is uncommitted or untracked and not ignored; HEAD is on
-the default branch that `origin` itself reports
-(`git ls-remote --symref origin HEAD`); that local branch is at the tip of
+is in progress; nothing is uncommitted or untracked and not ignored; HEAD is on a
+branch: the default branch that `origin` itself reports
+(`git ls-remote --symref origin HEAD`), or another clean branch that the runner
+leaves for it (the paragraph after the next); the default branch is at the tip of
 `origin`'s or strictly behind it (the next paragraph); and the tip has the two
 helpers named below. It also refuses while another runner holds the checkout's
 lock (the file `git rev-parse --git-path pilot-pr-loop.lock` names) and while a
@@ -107,6 +108,27 @@ has diverged from it or has no commit yet, is a partial clone, or when the fetch
 the merge fails (the message then says where git left the checkout). Run
 `git pull --ff-only` yourself, or move the branch to the tip, for the refusals that
 say so.
+
+A clean checkout on another branch `<x>` is switched to the default branch `<b>`,
+at startup only, and is not switched back when the run ends. `<x>` and its commits
+are not touched, whether it tracks something or has commits `origin` does not have.
+The runner switches only to an existing local `<b>`; if `<b>` is strictly behind the
+tip, it is first moved to it by `git fetch . <tip>:refs/heads/<b>` (local, never
+forced: git itself checks the fast-forward and refuses a branch that another work
+tree holds), and then `git switch --no-guess --no-recurse-submodules
+--no-overwrite-ignore -- <b>` makes the one tree update, with hooks and automatic
+maintenance switched off. Every check that reads the tip's tree (the two helpers, no
+moved submodule between `<x>` and the tip, no ignored path overwritten) runs before
+any ref of yours is written. It prints, in this order, `Fast-forwarded <b> from <L12>
+to <T12>, origin's tip` when `<b>` moved, and `Switched <path> from <x> (at <X12>) to
+<b>; to go back: git -C <path> switch <x>`; the end of the run repeats the way back.
+It refuses, with the checkout left on `<x>`, when there is no local `<b>` (it is
+never created), when another work tree has `<b>` checked out (also a prunable one),
+when another work tree is in the middle of a git operation, when `<b>` is ahead of
+the tip or has diverged from it, when HEAD is detached or `<x>` has no commit, and
+for the partial clone, submodule, helper and ignored-path cases above. A failed
+`git switch` after `<b>` moved leaves the checkout on `<x>` and says that `<b>` was
+fast-forwarded.
 
 The runner uses the Python 3 standard library. Install `git`, authenticated
 `gh`, `tmux`, and the coding agents, with `claude` and `codex` as defaults.
@@ -174,12 +196,13 @@ same. A live pane in the checkout in any session whose name starts with
 `pilot-pr-` refuses the next run with `pr-loop: agent pane %N (session <session>)
 is still running in <checkout>; inspect and close it before starting the runner
 again`, and so does a window you open in the runner's session with its working
-directory in the checkout. Dead panes do not: after a stop that left only dead
-windows, the next run adds new windows to the same session. An agent that was interrupted may leave the checkout
-on a PR branch or with uncommitted work; the next run refuses it until you have
-put it right. Nothing else may use the checkout while the runner runs: the agents
-switch it to PR branches, and your own agent sessions in that directory are not
-protected by the lock. A second runner on the same checkout refuses. For a
+directory in the checkout. Dead panes do not: after a stop that left only dead windows, the next run adds new
+windows to the same session. An agent that was interrupted may leave the checkout
+with uncommitted work, which the next run refuses until you have put it right, or
+on a clean PR branch, which the next run leaves for the default branch (the branch
+and its commits stay). Nothing else may use the checkout while the runner runs:
+the agents switch it to PR branches, and your own agent sessions in that directory
+are not protected by the lock. A second runner on the same checkout refuses. For a
 long-lived setup, use a dedicated checkout that you trust once: a second clone,
 or a linked worktree when your primary checkout is not on the default branch. The
 runner no longer creates or uses the clones under
@@ -189,17 +212,19 @@ runner no longer creates or uses the clones under
 Use `--draft-agent` and `--ready-agent` to choose executable paths. The prompts
 default to `/pr-ready {pr}` and `$pr-review-merge {pr}`; you can set them with
 `--draft-command` and `--ready-command`. Quote them in the shell to preserve the
-native skill syntax. Add `--dry-run` to see PR states before starting any agent: it
-prints `PR #N: <phase>` for each PR, then inspects the checkout the same way,
+native skill syntax. Add `--dry-run` to see PR states before starting any agent:
+it prints `PR #N: <phase>` for each PR, then inspects the checkout the same way,
 read-only (no lock, no write, no tmux), and prints `Checkout: <path> (<branch> at
-<sha12>)` and the session name above, or `pr-loop: <reason>` and exit status 1 for a
-refused checkout. For a checkout behind `origin` it fetches nothing and writes
+<sha12>)` and the session name above, or `pr-loop: <reason>` and exit status 1 for
+a refused checkout. For a checkout behind `origin` it fetches nothing and writes
 nothing, and prints `would fetch origin's <branch> at <T12> and fast-forward
-<branch> from <L12> to it`; when that commit is already in the checkout it also runs
-the checks above on it, and otherwise says that it did not check them (without the
+<branch> from <L12> to it`; for a checkout on another branch it prints `Checkout:
+<path> (<x> at <X12>)` and `would switch <path> from <x> (at <X12>) to <b>`,
+switching nothing; when that commit is already in the checkout it also runs the
+checks above on it, and otherwise says that it did not check them (without the
 commit a dry run cannot tell that the checkout has diverged from it; the real run
-fetches it and says so). It does not check whether another runner holds the lock or
-whether a pane from an earlier run is still open, and only a real run notices a
+fetches it and says so). It does not check whether another runner holds the lock
+or whether a pane from an earlier run is still open, and only a real run notices a
 tracked `.gitignore` that overrides the exclude lines below. The phase timeout
 defaults to 7200 seconds.
 
