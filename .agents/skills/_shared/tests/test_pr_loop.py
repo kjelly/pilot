@@ -4357,6 +4357,142 @@ class CheckoutSwitchTests(FastForwardCase):
         self.still_on("feature", feature, main=new)
         self.assertEqual(self.line("main", feature, new), self.told[0], "the move of the branch was said when it happened")
 
+    def partial_clone(self, name="partial"):
+        """A partial clone of origin (`--filter=blob:none`), origin rewritten as in the other tests, on a new branch
+        `feature`: its path."""
+        self.env.git("config", "uploadpack.allowFilter", "true", cwd=self.env.remote)
+        shutil.rmtree(self.env.root / name, ignore_errors=True)
+        self.env.git("clone", "-q", "--filter=blob:none", f"file://{self.env.remote}", name, cwd=self.env.root)
+        where = self.env.root / name
+        self.env.git("remote", "set-url", "origin", self.env.ORIGIN, cwd=where)
+        self.env.redirect_origin(where, self.env.ORIGIN)
+        self.assertEqual("true", self.git("config", "remote.origin.promisor", cwd=where), "it is a partial clone")
+        self.env.git("switch", "-q", "-c", "feature", cwd=where)
+        return where
+
+    def test_a_partial_clone_on_another_branch_is_refused_before_a_ref_or_an_object_is_written(self):
+        for behind in (False, True):
+            for dry_run in (False, True):
+                with self.subTest(behind=behind, dry_run=dry_run):
+                    self.fresh()
+                    where = self.partial_clone()
+                    main = self.git("rev-parse", "refs/heads/main", cwd=where)
+                    new = self.push(name="partial-tip") if behind else None
+                    state = lambda: (self.git("symbolic-ref", "HEAD", cwd=where), self.tip(where), self.refs(where),
+                                     self.objects(where))
+                    before = state()
+                    if behind:
+                        message = (f"local main is at {main[:12]} but origin's main is at {new[:12]}; {where} is a partial "
+                                   f"clone, which the runner does not fast-forward: run git pull --ff-only in {where} and "
+                                   "start the runner again")
+                    else:
+                        message = (f"checkout {where} is on feature; {where} is a partial clone, which the runner does not "
+                                   "switch: check out main, the default branch of origin, yourself and start the runner "
+                                   "again")
+                    self.stops(message, str(where), dry_run=dry_run)
+                    self.assertEqual(before, state(), "no ref, no object, not even the tracking ref, was written")
+                    self.assertEqual("feature", self.git("branch", "--show-current", cwd=where))
+
+    def test_a_dry_run_runs_the_checks_on_the_tip_when_it_is_in_the_checkout_and_refuses_what_the_real_run_refuses(self):
+        def helper():
+            return self.push(remove=(HELPER_PATHS[0],), name="no-helper"), r"^origin's default branch main at \w+ lacks "
+
+        def submodule():
+            return self.push_gitlink("vendor/sub", self.tip()), r"^origin's main at \w+ moves the submodule vendor/sub; "
+
+        def ignored():
+            (self.path / "notes.log").write_text("ignored, and mine\n")
+            self.ignore("*.log")
+            return (self.push(files={"notes.log": "from origin\n"}, name="tracks-notes"),
+                    r"^switching .* to main at \w+ would overwrite, delete or write into ignored paths in ")
+        for name, setup in (("a helper missing from the tip", helper), ("a submodule moved by the tip", submodule),
+                            ("an ignored path the tip tracks", ignored)):
+            with self.subTest(case=name):
+                self.fresh()
+                (self.path / ".git/info/exclude").write_text("")
+                feature = self.on_other()
+                new, pattern = setup()
+                self.git("fetch", "-q", "origin")
+                self.assertTrue(self.has(new), "the tip is in the checkout, so a dry run can read it")
+                before = self.written()
+                dry = str(self.refused(dry_run=True))
+                self.assertEqual(before, self.written(), "a dry run writes nothing, even when it refuses")
+                self.assertRegex(dry, pattern)
+                real = str(self.refused())
+                self.assertEqual(real, dry, "the dry run refuses with the real run's words")
+                self.still_on("feature", feature)
+
+    def test_a_dry_run_refuses_a_submodule_the_tip_moves_even_when_the_default_branch_is_already_at_the_tip(self):
+        old = self.tip()
+        added = self.push_gitlink("vendor/sub", old)
+        self.git("pull", "-q", "--ff-only", "origin", "main")
+        self.git("switch", "-q", "-c", "feature", old)
+        message = (f"origin's main at {added[:12]} moves the submodule vendor/sub; the runner does not update submodules: "
+                   f"run git pull --ff-only and git submodule update in {self.path} and start the runner again")
+        before = self.written()
+        self.stops(message, dry_run=True)
+        self.assertEqual(before, self.written())
+        self.stops(message)
+
+    def test_a_prunable_work_tree_that_does_not_hold_the_default_branch_does_not_stop_the_switch(self):
+        feature = self.on_other()
+        where = self.env.root / "gone-tree"
+        self.git("worktree", "add", "-q", "-b", "side", str(where), "feature")
+        shutil.rmtree(where)  # its directory is gone, `git worktree prune` has not run
+        self.assertIn("prunable", self.git("worktree", "list", "--porcelain"))
+        found = self.checkout()
+        self.assertEqual(("refs/heads/main", ("feature", feature)), (self.git("symbolic-ref", "HEAD"), found.switched))
+        self.assertIn("prunable", self.git("worktree", "list", "--porcelain"), "the runner did not prune it")
+
+    def test_a_switch_that_git_stops_half_way_says_the_checkout_is_not_clean_and_does_not_claim_it_is_still_on_the_branch(self):
+        # A required smudge filter that fails, on a path that differs between the branch left and the tip: git writes part
+        # of the work tree and gives up. (`clean=cat` keeps `git status` working with a required filter.)
+        feature = self.on_other()
+        self.git("config", "filter.bad.required", "true")
+        self.git("config", "filter.bad.smudge", "false")
+        self.git("config", "filter.bad.clean", "cat")
+        (self.path / ".git/info/attributes").write_text("README.txt filter=bad\n")
+        new = self.push(files={"README.txt": "changed\n"})
+        error = str(self.refused())
+        self.assertRegex(error, rf"(?s)^git switch to main failed \(128\): .*smudge filter bad failed; the checkout is now on "
+                                rf"feature at {feature[:12]} with uncommitted changes: inspect it before starting the runner "
+                                "again$")
+        self.assertNotIn("still on", error)
+        self.assertNotIn("and clean", error)
+        self.assertEqual("D README.txt", self.git("status", "--porcelain=v1"), "it really is not clean")
+        self.assertEqual(new, self.git("rev-parse", "refs/heads/main"), "the default branch had been moved")
+
+    def test_a_tip_that_cannot_be_read_after_it_was_fetched_is_refused_with_nothing_changed(self):
+        # Defensive: the relation is unknown even after the fetch (patched: the one seam). From the default branch and from
+        # another one the run stops, and neither the branch nor HEAD moves.
+        for where in ("on the default branch", "on another branch"):
+            with self.subTest(case=where):
+                self.fresh()
+                main = self.tip()
+                feature = main if where == "on the default branch" else self.on_other()
+                new = self.push(name="unreadable-" + where.split()[-1])
+                with patch.object(pr_loop.Checkout, "relation", lambda *args: None):
+                    error = str(self.refused())
+                self.assertEqual(f"cannot read origin's main at {new[:12]} in {self.path} after fetching it; main was not "
+                                 "changed", error)
+                self.assertEqual(main, self.git("rev-parse", "refs/heads/main"))
+                self.assertEqual(feature, self.tip())
+                self.assertEqual("main" if where == "on the default branch" else "feature",
+                                 self.git("branch", "--show-current"))
+
+    def test_a_ref_move_that_reports_success_but_did_not_move_the_branch_is_refused(self):
+        feature = self.on_other()
+        main = self.git("rev-parse", "refs/heads/main")
+        new = self.push()
+        real = pr_loop.git_change
+        shim = lambda cwd, sub, *args: (subprocess.CompletedProcess(args, 0, "", "") if sub == "fetch" and "." in args
+                                        else real(cwd, sub, *args))
+        with patch.object(pr_loop, "git_change", shim):
+            error = str(self.refused())
+        self.assertEqual(f"git fetch . reported success but main is not at {new[:12]} in {self.path}; the checkout is still "
+                         f"on feature at {feature[:12]} and clean", error)
+        self.still_on("feature", feature, main=main)
+
     def test_a_switch_that_reports_success_without_moving_head_is_refused(self):
         feature = self.on_other()
         real = pr_loop.git_change
