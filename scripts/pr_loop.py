@@ -3,10 +3,14 @@
 
 The agents start in YOUR checkout, not in a clone of their own: the root of the git work tree the runner is started
 in, or the directory named by --checkout. Start the agents there once yourself, so that they already trust it: the
-runner cannot answer a trust dialog. The checkout must be clean, on the default branch of origin, at origin's tip, and
-its origin must be --repo, or the runner refuses before it reads GitHub. The runner never deletes, resets, cleans or
-stashes anything in it; the task files it writes stay under the checkout's task directory (ignored by git), and the
-agent windows it started stay open when it stops.
+runner cannot answer a trust dialog. The checkout must be clean, on the default branch of origin, at origin's tip or
+strictly behind it, and its origin must be --repo, or the runner refuses before it reads GitHub. A checkout strictly
+behind is fast-forwarded at startup (and only then) to exactly the tip origin reported: one `git fetch` of that commit
+and one `git merge --ff-only` of it, with hooks and automatic maintenance off; a checkout that is ahead, diverged,
+without a commit, a partial clone, or whose update would touch a submodule or an ignored file is refused instead.
+Apart from that fast-forward the runner never deletes, resets, cleans or stashes anything in it; the task files it
+writes stay under the checkout's task directory (ignored by git), and the agent windows it started stay open when it
+stops.
 
 The agents run as windows (one per agent, named `<PR>-<phase>`) of ONE tmux session of the runner's own, never of one of
 yours: `pilot-pr-<directory name>-<8 hex>`, where the directory name is the checkout's, cut down to letters, digits, `_`
@@ -39,6 +43,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -51,7 +56,7 @@ from urllib.parse import urlsplit
 sys.dont_write_bytecode = True
 SKILLS = Path(__file__).resolve().parents[1] / ".agents/skills"
 sys.path[:0] = [str(SKILLS / skill / "scripts") for skill in ("pr-review-merge", "_shared")]
-from checkout_preflight import HEX, GitError, check_dirty, check_in_progress
+from checkout_preflight import HEX, GitError, check_dirty, check_ignored_collisions, check_in_progress
 from gh_runtime import GitHubError, Repo, issue_comments, pr_view, timeline_events, viewer_login
 from list_ready import QUEUE_LABEL
 from needs_person import LABEL as PERSON_LABEL, latest_marker
@@ -78,10 +83,22 @@ CREATE_ROUNDS = 3
 # call, the server's identity beside the pane's fields.
 PANE_FORMAT = "#{pane_id}|#{pid}|#{start_time}"
 READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pid}|#{start_time}"
+# The only two git subcommands that change the checkout (the startup fast-forward), and how long each may run, in
+# seconds; a command that outlives its limit gets SIGTERM and, KILL_AFTER seconds later, SIGKILL. Module constants.
+GIT_CHANGES = {"fetch": 600, "merge": 120}
+KILL_AFTER = 30
 
 
 class Stop(RuntimeError):
     pass
+
+
+class ForwardInterrupted(KeyboardInterrupt):
+    """Ctrl-C while the startup fast-forward was under way, or after it began: `text` says what to check."""
+
+    def __init__(self, text):
+        super().__init__(text)
+        self.text = text
 
 
 def tell(message):
@@ -105,10 +122,58 @@ def command(*args, cwd=None, data=None):
     return proc.stdout
 
 
+def stop_group(proc):
+    """End `proc` and everything it started (it leads its own process group): SIGTERM, so that git removes its own lock
+    files, and SIGKILL when it is still there KILL_AFTER seconds later; then collect it."""
+    for sig, wait in ((signal.SIGTERM, KILL_AFTER), (signal.SIGKILL, None)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            break
+        try:
+            proc.wait(wait)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    proc.communicate()
+
+
+def git_change(cwd, sub, *args):
+    """The ONLY git call of this runner that changes the checkout: `sub` is `fetch` or `merge` (anything else is a
+    Stop), run with hooks and automatic maintenance off, no credential prompt, no lazy fetch and one locale, in a
+    process group of its own so that the terminal's Ctrl-C does not reach it half way. The result is the caller's to
+    judge. A `merge` that was interrupted is waited for (it is short, and must finish or fail whole) and the interrupt
+    is raised afterwards; a `fetch` that was interrupted is ended (SIGTERM, then SIGKILL) first. tests/test_pr_loop.py::
+    ImportsTests lists the call sites and the flags each must carry."""
+    if sub not in GIT_CHANGES:
+        raise Stop(f"git {sub} is not a command this runner changes a checkout with")
+    argv = ["git", "-c", "core.hooksPath=/dev/null", "-c", "maintenance.auto=false", sub, *args]
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1", LC_ALL="C")
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, text=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, start_new_session=True)
+    interrupted = None
+    while True:
+        try:
+            out, err = proc.communicate(timeout=GIT_CHANGES[sub])
+            break
+        except subprocess.TimeoutExpired:
+            stop_group(proc)
+            raise Stop(f"git {sub} timed out after {GIT_CHANGES[sub]} seconds") from None
+        except KeyboardInterrupt as exc:
+            interrupted = interrupted or exc
+            if sub != "merge":
+                stop_group(proc)
+                raise
+    if interrupted is not None:
+        raise interrupted
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def git(cwd, *args, ok=(0,), env=None):
     """One READ-ONLY git call in `cwd`: no opportunistic index refresh, no credential prompt, one locale. A status
-    outside `ok` is a Stop (`ok=None`: the caller judges the result). Every git call of this runner goes through
-    here, and tests/test_pr_loop.py::ImportsTests lists the subcommands it may name."""
+    outside `ok` is a Stop (`ok=None`: the caller judges the result). Every git call of this runner that only reads goes
+    through here, the two that change the checkout through `git_change`, and tests/test_pr_loop.py::ImportsTests lists
+    the subcommands each may name."""
     proc = run(["git", *args], cwd=cwd, env=dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
                                                   LC_ALL="C", **(env or {})))
     if ok is not None and proc.returncode not in ok:
@@ -325,12 +390,17 @@ def printable(text):
 
 class Checkout:
     """The operator's own checkout, inspected once at startup and verified again before every dispatch. Everything
-    here READS it, except two things: the lock file in its git directory and, only when git does not ignore the task
-    and evidence directories yet, two lines appended to its git exclude file. `dry_run` inspects without either (and
-    without tmux); a refusal is a Stop."""
+    here READS it, except three things: the lock file in its git directory; only when git does not ignore the task and
+    evidence directories yet, two lines appended to its git exclude file; and, only when the checkout is strictly
+    behind origin's tip, the fast-forward to exactly that tip (the objects and the remote-tracking ref `git fetch`
+    writes, and the branch, index and work tree `git merge --ff-only` moves). `dry_run` inspects without any of them
+    (and without tmux); a refusal is a Stop."""
 
     def __init__(self, repo, directory=None, *, dry_run=False):
         self.repo, self.dry_run, self.lock_fd, self.would_add = repo, dry_run, None, []
+        # What the fast-forward is doing or did: `forwarding` is set before the fetch starts, `forwarded` when the merge
+        # has landed on the tip, `would_forward` is what a dry run found: `(local, tip, whether the tip is in the checkout)`.
+        self.forwarding = self.forwarded = self.would_forward = None
         self.path = resolve_checkout(repo, directory)
         self.session = session_name(self.path)
         self.lock_path = self.git_path(LOCK_NAME)
@@ -338,8 +408,12 @@ class Checkout:
             self.lock_fd = lock_checkout(self.path, self.lock_path)
         try:
             self.inspect()
-        except BaseException:
+        except BaseException as exc:
             self.release()  # a refusal does not keep the lock
+            if isinstance(exc, KeyboardInterrupt) and not isinstance(exc, ForwardInterrupted) and self.forwarding:
+                branch, local, tip = self.forwarding
+                raise ForwardInterrupted(f"Interrupted while fast-forwarding {branch} in {self.path} (from {local[:12]} "
+                                         f"to {tip[:12]}); check it with git status before the next run.") from None
             raise
 
     def release(self):
@@ -363,15 +437,8 @@ class Checkout:
             raise Stop(f"checkout {self.path} is on {ref.removeprefix('refs/heads/')}, not on {branch}, the default "
                        "branch of origin")
         self.check_tip(branch, tip)
-        self.branch, self.head = ref, sha
-        # Both helpers are run from this checkout by the skills it hosts: a default branch that predates either
-        # would leave the agent unable to report or to sign, and the run would wait for its phase timeout.
-        for helper in ("pr_loop_result.py", "ready_signal.py"):
-            where = f".agents/skills/_shared/scripts/{helper}"
-            if git(self.path, "cat-file", "-e", f"HEAD:{where}", ok=(0, 128)).returncode != 0:
-                raise Stop(f"origin's default branch {branch} at {tip[:12]} lacks {where}; "
-                           "the skills it hosts could not report or sign")
-        self.ignore_task_files()
+        self.branch, self.head = ref, tip if self.forwarded else sha
+        self.ignore_task_files()  # last: it judges the .gitignore of the tree the agents will see
 
     def git_path(self, name):
         raw = git(self.path, "rev-parse", "--git-path", name).stdout.strip()
@@ -445,21 +512,149 @@ class Checkout:
             raise refused
         return branch[1], tip[1]
 
+    def relation(self, local, tip):
+        """How the local branch (at `local`) stands to origin's `tip`: `ahead` (the tip is an ancestor of it), `behind`
+        (it is an ancestor of the tip), `diverged`, or None when the tip is not in the checkout (or not with all its
+        history): then nothing can be said without fetching it. Read-only, and it never fetches (no lazy fetch)."""
+        quiet = {"GIT_NO_LAZY_FETCH": "1"}
+        if git(self.path, "cat-file", "-e", f"{tip}^{{commit}}", ok=(0, 1, 128), env=quiet).returncode != 0:
+            return None
+        found = git(self.path, "merge-base", "--is-ancestor", tip, local, ok=(0, 1, 128), env=quiet).returncode
+        if found == 0:
+            return "ahead"
+        if found != 1:
+            return None
+        found = git(self.path, "merge-base", "--is-ancestor", local, tip, ok=(0, 1, 128), env=quiet).returncode
+        return "behind" if found == 0 else "diverged" if found == 1 else None
+
     def check_tip(self, branch, tip):
-        """The skills run from this checkout, so it must be origin's default branch AT origin's tip. Checked at
-        startup only: the merge train moves origin during a batch, and that must not refuse the next PR."""
+        """The skills run from this checkout, so it must be origin's default branch AT origin's tip, or strictly behind it:
+        then (a real run) it is fast-forwarded to that tip, see `forward`. Ahead, diverged and without a commit are
+        refused. Checked at startup only: the merge train moves origin during a batch, and that must not refuse the next
+        PR, nor update the checkout between two of them."""
         local = git(self.path, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}",
                     ok=(0, 1)).stdout.strip()
         if local == tip:
+            self.check_helpers(branch, tip)
             return
-        quiet = {"GIT_NO_LAZY_FETCH": "1"}
-        if local and git(self.path, "cat-file", "-e", tip, ok=(0, 1), env=quiet).returncode == 0 and \
-           git(self.path, "merge-base", "--is-ancestor", tip, local, ok=(0, 1), env=quiet).returncode == 0:
+        if not local:
+            raise Stop(f"local {branch} has no commit but origin's {branch} is at {tip[:12]}; run git pull --ff-only in "
+                       f"{self.path} and start the runner again")
+        relation = self.relation(local, tip)
+        self.refuse_unless_behind(branch, local, tip, relation)
+        if self.partial_clone():
+            raise Stop(f"local {branch} is at {local[:12]} but origin's {branch} is at {tip[:12]}; {self.path} is a partial "
+                       f"clone, which the runner does not fast-forward: run git pull --ff-only in {self.path} and start "
+                       "the runner again")
+        if not self.dry_run:
+            self.forward(branch, local, tip)
+        else:
+            if relation == "behind":
+                self.check_forward(branch, local, tip)
+            self.would_forward = (local, tip, relation == "behind")
+
+    def refuse_unless_behind(self, branch, local, tip, relation):
+        if relation == "ahead":
             raise Stop(f"local {branch} at {local[:12]} has commits that origin's {branch} ({tip[:12]}) does not "
                        "have; the skills must come from origin's default branch")
-        what = f"is at {local[:12]} but" if local else "has no commit but"
-        raise Stop(f"local {branch} {what} origin's {branch} is at {tip[:12]}; run git pull --ff-only in "
-                   f"{self.path} and start the runner again")
+        if relation == "diverged":
+            raise Stop(f"local {branch} at {local[:12]} and origin's {branch} at {tip[:12]} have diverged (each has "
+                       "commits the other does not have); the runner only fast-forwards: put "
+                       f"{branch} at origin's tip yourself and start the runner again")
+
+    def partial_clone(self):
+        """Whether the checkout is a partial clone: its missing objects would be fetched by git on its own."""
+        promisor = git(self.path, "config", "--type=bool", "--get-all", "-z", "remote.origin.promisor", ok=(0, 1))
+        configured = git(self.path, "config", "--get-all", "-z", "extensions.partialclone", ok=(0, 1))
+        return "true" in promisor.stdout.split("\0") or configured.returncode == 0
+
+    def check_helpers(self, branch, tip):
+        """Both helpers are run from this checkout by the skills it hosts: a default branch that predates either would
+        leave the agent unable to report or to sign, and the run would wait for its phase timeout. Judged on the tip
+        itself, which is what the checkout is (or is about to be) at."""
+        for helper in ("pr_loop_result.py", "ready_signal.py"):
+            where = f".agents/skills/_shared/scripts/{helper}"
+            if git(self.path, "cat-file", "-e", f"{tip}:{where}", ok=(0, 128), env={"GIT_NO_LAZY_FETCH": "1"}).returncode != 0:
+                raise Stop(f"origin's default branch {branch} at {tip[:12]} lacks {where}; "
+                           "the skills it hosts could not report or sign")
+
+    def check_forward(self, branch, local, tip):
+        """What must hold before `local` may be fast-forwarded to `tip` (which is in the checkout): the two helpers are on
+        the tip, it does not move a submodule (the runner does not update submodules), and it does not overwrite, delete
+        or write into an ignored path (`git merge` does that without a word, even into an ignored nested repository)."""
+        self.check_helpers(branch, tip)
+        moved = git(self.path, "diff-tree", "-r", "-z", "--raw", "--no-renames", local, tip,
+                    env={"GIT_NO_LAZY_FETCH": "1"}).stdout.split("\0")[:-1]
+        for header, name in zip(moved[::2], moved[1::2]):
+            if "160000" in (mode.lstrip(":") for mode in header.split(" ")[:2]):
+                raise Stop(f"origin's {branch} at {tip[:12]} moves the submodule {printable(name)}; the runner does not "
+                           f"update submodules: run git pull --ff-only and git submodule update in {self.path} and start "
+                           "the runner again")
+        try:
+            found = check_ignored_collisions(self.path, tip)
+        except GitError as exc:
+            raise Stop(str(exc)) from exc
+        paths = sorted({path for problem in found for path in problem["paths"]})
+        if found:
+            count = sum(problem["count"] for problem in found)
+            raise Stop(f"fast-forwarding {branch} to {tip[:12]} would overwrite, delete or write into ignored paths in "
+                       f"{self.path} ({count} paths, e.g. {printable(', '.join(paths[:3]))}); move them out of the way "
+                       "and start the runner again; the runner never deletes them")
+
+    def forward(self, branch, local, tip):
+        """Fast-forward the branch to exactly `tip`, the commit origin reported a moment ago: fetch that commit (by its
+        SHA, into the remote-tracking ref, as `git pull` would; never by name, so that origin moving on cannot change
+        what lands), check everything that can be checked before anything is written to the work tree, then
+        `git merge --ff-only` that SHA. A failure leaves the branch where it was, and says so, or says what git changed."""
+        urls = self.config_values("remote.origin.url") + self.config_values("remote.origin.pushurl")
+        self.forwarding = (branch, local, tip)  # from here on, an interrupt may have left something half way
+        done = git_change(self.path, "fetch", "--no-tags", "--no-recurse-submodules", "--no-auto-maintenance",
+                          "--no-prune", "--no-write-fetch-head", "origin", f"+{tip}:refs/remotes/origin/{branch}")
+        if done.returncode != 0:
+            raise Stop(f"cannot fetch origin's {branch} at {tip[:12]} into {self.path}: git fetch failed "
+                       f"({done.returncode}): {redact(done.stderr.strip(), urls)[:300]}; {branch} was not changed")
+        relation = self.relation(local, tip)
+        if relation is None:
+            raise Stop(f"cannot read origin's {branch} at {tip[:12]} in {self.path} after fetching it; {branch} was "
+                       "not changed")
+        self.refuse_unless_behind(branch, local, tip, relation)
+        self.check_forward(branch, local, tip)
+        done = git_change(self.path, "merge", "--ff-only", "--no-squash", "--no-overwrite-ignore", "--no-autostash",
+                          "-q", tip)
+        said = f"git merge --ff-only {tip[:12]} " + (f"failed ({done.returncode}): {redact(done.stderr.strip(), urls)[:300]}"
+                                                     if done.returncode != 0 else "reported success but did not leave "
+                                                     f"{branch} at {tip[:12]}, clean, with no git operation in progress")
+        if done.returncode == 0 and self.landed(branch, tip):
+            self.forwarded = (local, tip)
+            self.say_forwarded(branch, local, tip)
+            return
+        raise Stop(f"{said}; {self.state_after(branch, local)}")
+
+    def landed(self, branch, tip):
+        """The checkout is on the branch at the tip, clean, with no git operation in progress."""
+        try:
+            self.check_operation()
+            self.check_clean()
+        except Stop:
+            return False
+        return self.current() == (f"refs/heads/{branch}", tip)
+
+    def state_after(self, branch, local):
+        """Where a merge that did not land left the checkout, from git itself."""
+        ref, sha = self.current()
+        try:
+            dirty = bool(check_dirty(self.path))
+        except GitError:
+            dirty = True
+        if ref == f"refs/heads/{branch}" and sha == local and not dirty:
+            return f"{branch} is still at {local[:12]} and clean"
+        now = "a detached HEAD" if ref is None else ref.removeprefix("refs/heads/")
+        return (f"the checkout is now on {now} at {(sha or '')[:12]}{' with uncommitted changes' if dirty else ''}: "
+                "inspect it before starting the runner again")
+
+    @staticmethod
+    def say_forwarded(branch, local, tip):
+        tell(f"Fast-forwarded {branch} from {local[:12]} to {tip[:12]}, origin's tip")
 
     def ignores(self, probe):
         return git(self.path, "check-ignore", "-q", "--", probe, ok=(0, 1)).returncode == 0
@@ -486,20 +681,30 @@ class Checkout:
         self.would_add = []
 
     def announce(self):
-        tell(f"Checkout: {self.path} ({self.branch.removeprefix('refs/heads/')} at {self.head[:12]})")
+        branch = self.branch.removeprefix("refs/heads/")
+        tell(f"Checkout: {self.path} ({branch} at {self.head[:12]})")
         if self.dry_run:
+            unchecked = ""
+            if self.would_forward:
+                local, tip, known = self.would_forward
+                tell(f"would fetch origin's {branch} at {tip[:12]} and fast-forward {branch} from {local[:12]} to it")
+                if not known:
+                    unchecked = (f"; whether origin's {branch} at {tip[:12]} is a fast-forward of {branch}, has the two "
+                                 f"helpers and leaves ignored files alone, because {tip[:12]} is not in the checkout and a "
+                                 "dry run does not fetch it")
             if self.would_add:
                 tell(f"would add {', '.join(self.would_add)} to {self.exclude}")
             tell(f"would start the agents in tmux session {self.session}")
             tell(f"not checked in a dry run: whether another runner holds {self.lock_path}; whether an agent pane "
-                 f"kept from an earlier run is still open in {self.path}")
+                 f"kept from an earlier run is still open in {self.path}{unchecked}")
         else:
             tell(f"Agents run as windows of tmux session {self.session}; watch them read-only with: "
                  f"tmux attach -r -t {self.session}")
 
     def verify(self):
-        """Before every dispatch: back on the branch and commit the run started on, clean, no git operation in
-        progress. The tip of origin is not read again: it moves while a batch runs."""
+        """Before every dispatch: back on the branch and commit the run started on (the commit after the startup
+        fast-forward, when there was one), clean, no git operation in progress. The tip of origin is not read again,
+        and the checkout is not fast-forwarded again: origin moves while a batch runs."""
         suffix = "; nothing was dispatched"
         self.check_operation(suffix)
         ref, sha = self.current()
@@ -525,9 +730,13 @@ class Checkout:
 
     def finish(self):
         """The run is over: say what it left where. It deletes nothing; the lock goes with the process."""
+        changed = f"Nothing in {self.path} was deleted or reset."
+        if self.forwarded:
+            changed = (f"The runner changed {self.path} only by fast-forwarding {self.branch.removeprefix('refs/heads/')} from "
+                       f"{self.forwarded[0][:12]} to {self.forwarded[1][:12]} at the start; nothing else in it was deleted "
+                       "or reset.")
         tell(f"Kept: the task files under {self.path / TASK_DIR} and any agent window still open in tmux session "
-             f"{self.session}; close the agents still running in {self.path} before the next run. Nothing in "
-             f"{self.path} was deleted or reset.")
+             f"{self.session}; close the agents still running in {self.path} before the next run. {changed}")
 
 
 PROMPT = re.compile(r"^(?:[›❯](?:\s.*)?|>)$")
@@ -886,7 +1095,8 @@ def main():
     parser.add_argument("--max-actions", type=int, default=20, help="maximum dispatches per PR (default: 20)")
     parser.add_argument("--checkout", metavar="DIR",
                         help="the checkout the agents start in: the ROOT of a git work tree that is clean, on origin's "
-                             f"default branch at origin's tip, whose origin is --repo (default: {CHECKOUT_DEFAULT})")
+                             "default branch at or strictly behind origin's tip (the runner fast-forwards it), whose "
+                             f"origin is --repo (default: {CHECKOUT_DEFAULT})")
     parser.add_argument("--dry-run", action="store_true", help="show current PR states and whether the checkout would be "
                                                               "accepted, without starting agents or writing anything")
     args = parser.parse_args()
@@ -900,8 +1110,10 @@ def main():
         batch = Batch(Repo.parse(args.repo), args)
         batch.run()
         return 0
-    except KeyboardInterrupt:
-        if batch and batch.checkout:
+    except KeyboardInterrupt as exc:
+        if isinstance(exc, ForwardInterrupted):
+            print(exc.text, file=sys.stderr)
+        elif batch and batch.checkout:
             print(f"Interrupted; any agent window still open in tmux session {batch.checkout.session} and the task "
                   f"files under {batch.checkout.path / TASK_DIR}/ were kept.", file=sys.stderr)
         else:

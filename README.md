@@ -84,11 +84,29 @@ and that URL and every push URL name the `--repo` repository; no git operation
 is in progress; nothing is uncommitted or untracked and not ignored; HEAD is on
 the default branch that `origin` itself reports
 (`git ls-remote --symref origin HEAD`); that local branch is at the tip of
-`origin`'s (otherwise run `git pull --ff-only` yourself: the runner never updates
-the checkout); and the default branch has the two helpers named below. It also
-refuses while another runner holds the checkout's lock (the file
-`git rev-parse --git-path pilot-pr-loop.lock` names) and while a live agent pane
-of an earlier run is still in the checkout (see below).
+`origin`'s or strictly behind it (the next paragraph); and the tip has the two
+helpers named below. It also refuses while another runner holds the checkout's
+lock (the file `git rev-parse --git-path pilot-pr-loop.lock` names) and while a
+live agent pane of an earlier run is still in the checkout (see below).
+
+A checkout that is strictly behind the tip of `origin` is fast-forwarded by the
+runner, at startup only (never again while a batch runs, when the merge train
+moves `origin`). It fetches exactly the commit `origin` reported, by its SHA, into
+`refs/remotes/origin/<branch>` as `git pull` does (no tags, no submodules, no
+pruning, no automatic maintenance, no `FETCH_HEAD`), so a push to `origin` a
+moment later cannot change what lands; then it runs `git merge --ff-only` of that
+SHA, with hooks and automatic maintenance switched off, and prints
+`Fast-forwarded <branch> from <L12> to <T12>, origin's tip`. The branch's reflog and
+`ORIG_HEAD` name the commit it was at. Before anything reaches the work tree it
+checks that the local branch is an ancestor of the tip, that the tip has the two
+helpers, that it does not move a submodule, and that it would not overwrite, delete
+or write into an ignored path (git does that without a word, also inside an ignored
+nested repository). It refuses, and leaves the branch at its old commit and the
+work tree as it was, when any of these fails, when the checkout is ahead of the tip,
+has diverged from it or has no commit yet, is a partial clone, or when the fetch or
+the merge fails (the message then says where git left the checkout). Run
+`git pull --ff-only` yourself, or move the branch to the tip, for the refusals that
+say so.
 
 The runner uses the Python 3 standard library. Install `git`, authenticated
 `gh`, `tmux`, and the coding agents, with `claude` and `codex` as defaults.
@@ -99,14 +117,14 @@ both and refuses a default branch that lacks either. The merge train consumer mu
 be running.
 
 The runner starts agents automatically in the checkout, which it has verified to
-be on the default branch of `origin` at its tip. An agent process is reused for
-its role while the same PR moves between Draft and Ready. Before every dispatch
-it checks that the checkout is back on the branch and commit it started on,
-clean, with no git operation in progress, and otherwise stops without
-dispatching. A gate that reports a blocker, a current-HEAD `needs-person`
-hand-off, a Ready PR without a valid signal (below), or a timeout stops the batch
-and keeps the agent windows open for inspection. The runner prints where the task
-files are when it stops.
+be on the default branch of `origin` at its tip (fast-forwarded to it, when it was
+behind). An agent process is reused for its role while the same PR moves between
+Draft and Ready. Before every dispatch it checks that the checkout is back on the
+branch and commit it started on, clean, with no git operation in progress, and
+otherwise stops without dispatching. A gate that reports a blocker, a current-HEAD
+`needs-person` hand-off, a Ready PR without a valid signal (below), or a timeout
+stops the batch and keeps the agent windows open for inspection. The runner prints
+where the task files are when it stops.
 
 The agents run as windows of one tmux session that belongs to the checkout, never
 in one of your own sessions. Its name is `pilot-pr-<directory name>-<8 hex>`: the
@@ -140,15 +158,15 @@ display names, not secrets, and they appear for a moment in the arguments of the
 tmux command: do not add a name that carries a secret, or a pattern that matches
 one, to `update-environment`. The session handling was verified on tmux 3.8 only.
 
-The runner never deletes, resets, cleans or stashes anything in the checkout, and
-it never deletes the task files. It never kills or renames a window or a session.
-It adds a window to the session named for the checkout when that exists, also one
-an earlier run left, and it closes only panes it started in this run, one pane at
-a time (`kill-pane`, so a pane you split off in an agent's window survives),
-after checking that each is still that pane on the same tmux server: pane IDs are
-only unique within one server, which exits with its last session, so a later
-server can give the same ID to another pane. The dead windows of an earlier run
-stay where they are. A stop keeps the agent windows open. Close one with `tmux kill-pane -t %N` (`%N` is the
+Apart from the fast-forward at startup, the runner never deletes, resets, cleans
+or stashes anything in the checkout, and it never deletes the task files. It never
+kills or renames a window or a session. It adds a window to the session named for
+the checkout when that exists, also one an earlier run left, and it closes only
+panes it started in this run, one pane at a time (`kill-pane`, so a pane you split
+off in an agent's window survives), after checking that each is still that pane on
+the same tmux server: pane IDs are only unique within one server, which exits with
+its last session, so a later server can give the same ID to another pane. The dead
+windows of an earlier run stay where they are. A stop keeps the agent windows open. Close one with `tmux kill-pane -t %N` (`%N` is the
 pane ID the runner printed), or the whole session with
 `tmux kill-session -t =<session>` when nothing in it still runs; the `=` is
 required, because without it tmux may pick another session whose name starts the
@@ -170,15 +188,19 @@ runner no longer creates or uses the clones under
 
 Use `--draft-agent` and `--ready-agent` to choose executable paths. The prompts
 default to `/pr-ready {pr}` and `$pr-review-merge {pr}`; you can set them with
-`--draft-command` and `--ready-command`. Quote them in the shell to preserve
-the native skill syntax. Add `--dry-run` to see PR states before starting any
-agent: it prints `PR #N: <phase>` for each PR, then inspects the checkout the same
-way, read-only (no lock, no write, no tmux), and prints
-`Checkout: <path> (<branch> at <sha12>)` and the session name above, or
-`pr-loop: <reason>` and exit status 1 for a refused checkout. It does not check
-whether another runner holds the lock or whether a pane from an earlier run is
-still open, and only a real run notices
-a tracked `.gitignore` that overrides the exclude lines below. The phase timeout
+`--draft-command` and `--ready-command`. Quote them in the shell to preserve the
+native skill syntax. Add `--dry-run` to see PR states before starting any agent: it
+prints `PR #N: <phase>` for each PR, then inspects the checkout the same way,
+read-only (no lock, no write, no tmux), and prints `Checkout: <path> (<branch> at
+<sha12>)` and the session name above, or `pr-loop: <reason>` and exit status 1 for a
+refused checkout. For a checkout behind `origin` it fetches nothing and writes
+nothing, and prints `would fetch origin's <branch> at <T12> and fast-forward
+<branch> from <L12> to it`; when that commit is already in the checkout it also runs
+the checks above on it, and otherwise says that it did not check them (without the
+commit a dry run cannot tell that the checkout has diverged from it; the real run
+fetches it and says so). It does not check whether another runner holds the lock or
+whether a pane from an earlier run is still open, and only a real run notices a
+tracked `.gitignore` that overrides the exclude lines below. The phase timeout
 defaults to 7200 seconds.
 
 Each dispatch writes `<checkout>/.pr-loop/<nonce>/task.json` and pastes

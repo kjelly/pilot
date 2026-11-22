@@ -15,10 +15,13 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -1612,7 +1615,7 @@ class ImportsTests(unittest.TestCase):
     DELETES_ANYWHERE = {"rmtree", "unlink", "rmdir", "removedirs", "truncate", "write_text", "write_bytes"}
     DELETES_ON_OS = {"remove", "rename", "renames", "replace", "ftruncate"}
     READ_ONLY_GIT = {"rev-parse", "symbolic-ref", "cat-file", "merge-base", "config", "check-ignore", "ls-remote",
-                     "check-ref-format"}
+                     "check-ref-format", "diff-tree"}
     SPAWNS = {"command", "run", "Popen", "check_output", "check_call", "call"}
 
     @classmethod
@@ -1672,6 +1675,109 @@ class ImportsTests(unittest.TestCase):
 
     def test_the_runner_makes_no_workspace_and_destroys_nothing(self):
         self.assertEqual([], self.ephemeral(self.SOURCE))
+
+    # The one way the runner changes the checkout: the startup fast-forward, which is `git fetch` of one commit and `git merge
+    # --ff-only` of it, both through `git_change`, which allows those two and builds their `-c` options itself. Each call
+    # site spells the flags that keep the call narrow, and no git command line is spelled anywhere else.
+    GIT_CHANGES = {"fetch": {"--no-tags", "--no-recurse-submodules", "--no-auto-maintenance", "--no-prune",
+                             "--no-write-fetch-head"},
+                   "merge": {"--ff-only", "--no-squash", "--no-overwrite-ignore", "--no-autostash"}}
+    GIT_SPELLERS = {"git", "git_change"}  # the only functions that may spell a git command line
+    CHANGE_OPTIONS = {"core.hooksPath=/dev/null", "maintenance.auto=false", "GIT_TERMINAL_PROMPT", "GIT_NO_LAZY_FETCH"}
+
+    @classmethod
+    def writers(cls, source):
+        """What in `source` could change a checkout beyond the two allowed git calls, or change it without their flags."""
+        tree = ast.parse(source)
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+        def inside(node):
+            while node in parents:
+                node = parents[node]
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return node.name
+            return None
+        found, seen = [], set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.List, ast.Tuple)) and node.elts and isinstance(node.elts[0], ast.Constant) \
+                    and node.elts[0].value == "git" and inside(node) not in cls.GIT_SPELLERS:
+                found.append("spells a git command line outside git() and git_change()")
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
+            if name in cls.SPAWNS and node.args and isinstance(node.args[0], ast.Constant) \
+                    and isinstance(node.args[0].value, str) and node.args[0].value.split(" ")[0] == "git" \
+                    and inside(node) not in cls.GIT_SPELLERS:
+                found.append("runs a git command line given as a string")
+            if name == "git_change" and isinstance(node.func, ast.Name):
+                sub = node.args[1] if len(node.args) > 1 else None
+                if not (isinstance(sub, ast.Constant) and isinstance(sub.value, str)):
+                    found.append("calls git_change with a subcommand that is not a literal")
+                    continue
+                seen.add(sub.value)
+                if sub.value not in cls.GIT_CHANGES:
+                    found.append(f"calls git_change {sub.value}")
+                    continue
+                spelled = {arg.value for arg in node.args[2:] if isinstance(arg, ast.Constant)}
+                found += [f"git_change {sub.value} lacks {flag}" for flag in sorted(cls.GIT_CHANGES[sub.value] - spelled)]
+            if name == "git" and isinstance(node.func, ast.Name) and len(node.args) > 1 \
+                    and isinstance(node.args[1], ast.Constant) and node.args[1].value in cls.GIT_CHANGES:
+                found.append(f"calls git {node.args[1].value} through git(), which is read-only")
+        for function in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "git_change"):
+            strings = {n.value for n in ast.walk(function) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+            strings |= {kw.arg for n in ast.walk(function) if isinstance(n, ast.Call) for kw in n.keywords}
+            found += [f"git_change does not set {option}" for option in sorted(cls.CHANGE_OPTIONS - strings)]
+        return sorted(set(found)), seen
+
+    def test_the_runner_changes_the_checkout_only_by_fetching_and_fast_forwarding_with_the_flags_that_narrow_them(self):
+        problems, seen = self.writers(self.SOURCE)
+        self.assertEqual([], problems)
+        self.assertEqual(set(self.GIT_CHANGES), seen, "both calls are made, and nothing else")
+        for sub, flags in self.GIT_CHANGES.items():
+            calls = [n for n in ast.walk(ast.parse(self.SOURCE)) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                     and n.func.id == "git_change" and n.args[1].value == sub]
+            self.assertEqual(1, len(calls), f"exactly one call site of git_change {sub}")
+
+    def test_the_writer_guard_rejects_every_other_way_to_change_a_checkout(self):
+        ok = (f"def git_change(cwd, sub, *args):\n    a = ['git', '-c', 'core.hooksPath=/dev/null', '-c', "
+              f"'maintenance.auto=false', sub, *args]\n    e = ('GIT_TERMINAL_PROMPT', 'GIT_NO_LAZY_FETCH')\n"
+              "def git(cwd, *args):\n    return run(['git', *args])\n"
+              "git_change(p, 'fetch', '--no-tags', '--no-recurse-submodules', '--no-auto-maintenance', '--no-prune', "
+              "'--no-write-fetch-head', 'origin', spec)\n"
+              "git_change(p, 'merge', '--ff-only', '--no-squash', '--no-overwrite-ignore', '--no-autostash', '-q', tip)\n")
+        self.assertEqual(([], {"fetch", "merge"}), self.writers(ok), "control: the two calls, as the runner makes them")
+        for case, extra, expected in (
+                ("git pull through the writer", "git_change(p, 'pull', '--ff-only')\n", "calls git_change pull"),
+                ("git reset through the writer", "git_change(p, 'reset', '--hard')\n", "calls git_change reset"),
+                ("a subcommand that is computed", "git_change(p, verb, '--ff-only')\n",
+                 "calls git_change with a subcommand that is not a literal"),
+                ("a fetch that may fetch tags", ok.replace("'--no-tags', ", ""), "git_change fetch lacks --no-tags"),
+                ("a fetch that may recurse", ok.replace("'--no-recurse-submodules', ", ""),
+                 "git_change fetch lacks --no-recurse-submodules"),
+                ("a fetch that may run maintenance", ok.replace("'--no-auto-maintenance', ", ""),
+                 "git_change fetch lacks --no-auto-maintenance"),
+                ("a fetch that writes FETCH_HEAD", ok.replace("'--no-write-fetch-head', ", ""),
+                 "git_change fetch lacks --no-write-fetch-head"),
+                ("a merge that may merge", ok.replace("'--ff-only', ", ""), "git_change merge lacks --ff-only"),
+                ("a merge that may squash", ok.replace("'--no-squash', ", ""), "git_change merge lacks --no-squash"),
+                ("a merge that may overwrite ignored files", ok.replace("'--no-overwrite-ignore', ", ""),
+                 "git_change merge lacks --no-overwrite-ignore"),
+                ("a writer that leaves hooks on", ok.replace("'core.hooksPath=/dev/null'", "'x'"),
+                 "git_change does not set core.hooksPath=/dev/null"),
+                ("a writer that may prompt", ok.replace("'GIT_TERMINAL_PROMPT', ", ""),
+                 "git_change does not set GIT_TERMINAL_PROMPT"),
+                ("git fetch through git()", "git(cwd, 'fetch', 'origin')\n", "calls git fetch through git(), which is read-only"),
+                ("git merge through git()", "git(cwd, 'merge', tip)\n", "calls git merge through git(), which is read-only"),
+                ("run with a git list", "run(['git', 'reset'])\n", "spells a git command line outside git() and git_change()"),
+                ("a list held in a variable", "argv = ['git', 'clean', '-fdx']\nrun(argv)\n",
+                 "spells a git command line outside git() and git_change()"),
+                ("Popen with a git tuple", "subprocess.Popen(('git', 'checkout', 'x'))\n",
+                 "spells a git command line outside git() and git_change()"),
+                ("a shell string", "subprocess.run('git reset --hard', shell=True)\n",
+                 "runs a git command line given as a string")):
+            with self.subTest(case=case):
+                source = extra if case.startswith(("a fetch", "a merge", "a writer")) else ok + extra
+                self.assertIn(expected, "; ".join(self.writers(source)[0]))
 
     def test_the_guard_rejects_every_way_to_make_a_workspace_or_destroy_one(self):
         good = ("import os, shutil, subprocess\nfrom pathlib import Path\n"
@@ -1806,7 +1912,12 @@ class DocumentationTests(unittest.TestCase):
              "closes that PR's agent panes", "prints each pane and its session", "close those panes before the next run",
              "(session `pilot-pr-*`)", "(sessions pilot-pr-*)",
              # the claim of db19ac69, which the runner does not keep: it adds windows to a session an earlier run left
-             "reuses a window or a session")
+             "reuses a window or a session",
+             # the checkout before it was fast-forwarded (kjelly/pilot#425): the runner does update it now, in
+             # one way, and a checkout behind origin is no longer something to pull by hand
+             "the runner never updates the checkout", "run `git pull --ff-only` yourself: the runner never",
+             "The runner never deletes, resets, cleans or stashes anything", "Everything here READS it, except two things",
+             "at origin's tip, or the runner refuses")
     # What the README section must say: the option and its default (the runner's own words), the way to update a stale
     # checkout, where the ignore lines go, and what the runner does in a directory the agents do not trust.
     README_SAYS = ("--checkout DIR", pr_loop.CHECKOUT_DEFAULT, "git pull --ff-only", EXCLUDE_FILE,
@@ -1819,9 +1930,14 @@ class DocumentationTests(unittest.TestCase):
                    "tmux kill-pane -t %N", "tmux kill-session -t =", "update-environment", "verified on tmux 3.8",
                    # what the runner does and does not do to windows and sessions, and why it checks a pane before it kills it
                    "never kills or renames a window or a session", "still that pane on the same tmux server",
-                   "adds a window to the session named for the checkout when that exists", "glob pattern")
+                   "adds a window to the session named for the checkout when that exists", "glob pattern",
+                   # the fast-forward: what it fetches and merges, what it leaves alone, what refuses it, and that it is startup only
+                   "strictly behind", "fast-forwarded by the runner, at startup only", "by its SHA", "git merge --ff-only",
+                   "hooks and automatic maintenance switched off", "ORIG_HEAD", "does not move a submodule",
+                   "write into an ignored path", "is a partial clone", "Apart from the fast-forward at startup")
     # What the runner's docstring says about the session, which `--help` shows
-    DOCSTRING_SAYS = ("pilot-pr-<directory name>-<8 hex>", "tmux attach -r -t",
+    DOCSTRING_SAYS = ("pilot-pr-<directory name>-<8 hex>", "tmux attach -r -t", "fast-forwarded at startup",
+                      "one `git merge --ff-only` of it",
                       "never kills or renames a window or a session",
                       "adds a window to the session named for the checkout when that exists",
                       "still that pane on the same tmux server")
@@ -1859,14 +1975,17 @@ class DocumentationTests(unittest.TestCase):
         told = []
         with patch.object(pr_loop, "tell", told.append):
             for dry_run in (False, True):
-                where = SimpleNamespace(dry_run=dry_run, path=Path("/x/checkout"), branch="refs/heads/main", head="0" * 40,
-                                        would_add=[], lock_path="/x/lock", exclude="/x/exclude", session="<session>")
+                where = SimpleNamespace(dry_run=dry_run, path=Path("/x/checkout"), branch="refs/heads/<branch>", head="1" * 40,
+                                        would_add=[], lock_path="/x/lock", exclude="/x/exclude", session="<session>",
+                                        would_forward=("1" * 40, "2" * 40, True))
                 pr_loop.Checkout.announce(where)
+            pr_loop.Checkout.say_forwarded("<branch>", "1" * 40, "2" * 40)
             wait = subprocess.CompletedProcess([], 0, "%12|4207|1700000091\n", "")
             with patch.object(pr_loop, "run", return_value=wait), patch.object(pr_loop, "command", return_value=""), \
                  patch.object(pr_loop.shutil, "which", return_value="/x/bin/claude"):
                 pr_loop.Agent("claude", SimpleNamespace(path=Path("/x/checkout"), session="<session>"), 7, "draft")
-        by_word = {word: [line for line in told if word in line] for word in ("Agents run as", "would start", "agent: %")}
+        by_word = {word: [line for line in told if word in line]
+                   for word in ("Agents run as", "would start", "agent: %", "Fast-forwarded", "would fetch")}
         agent = by_word["agent: %"][0].replace("PR #7 draft agent: %12 in window 7-draft", "PR #N <phase> agent: %<id> in window "
                                                                                            "<PR>-<phase>")
         with tempfile.TemporaryDirectory() as top:
@@ -1877,7 +1996,9 @@ class DocumentationTests(unittest.TestCase):
                 except pr_loop.Stop as exc:
                     refusal = f"pr-loop: {exc}".replace(top, "<checkout>").replace("pilot-pr-x-0123abcd", "<session>")
                     refusal = refusal.replace("%3", "%N")
-        return [by_word["Agents run as"][0], by_word["would start"][0], agent, refusal]
+        placed = lambda line: line.replace("1" * 12, "<L12>").replace("2" * 12, "<T12>")
+        return [by_word["Agents run as"][0], by_word["would start"][0], agent, refusal,
+                placed(by_word["Fast-forwarded"][0]), placed(by_word["would fetch"][0])]
 
     @classmethod
     def skill_lines(cls, name):
@@ -1900,16 +2021,41 @@ class DocumentationTests(unittest.TestCase):
     def test_the_runners_docstring_describes_the_session(self):
         self.assertEqual([], self.missing(pr_loop.__doc__, self.DOCSTRING_SAYS), "the module docstring of scripts/pr_loop.py")
 
+    def test_the_docstrings_of_the_checkout_describe_the_fast_forward(self):
+        for name, thing in (("Checkout", pr_loop.Checkout), ("Checkout.check_tip", pr_loop.Checkout.check_tip),
+                            ("Checkout.verify", pr_loop.Checkout.verify), ("git_change", pr_loop.git_change),
+                            ("git", pr_loop.git)):
+            with self.subTest(name=name):
+                self.assertGreater(len(self.flat(thing.__doc__ or "")), 200, "the docstring is missing")
+                self.assertEqual([], self.stale(thing.__doc__), name)
+        for name, thing, phrases in (
+                ("Checkout", pr_loop.Checkout, ("three things", "strictly behind origin's tip", "fast-forward")),
+                ("Checkout.check_tip", pr_loop.Checkout.check_tip, ("strictly behind it", "fast-forwarded", "refused")),
+                ("Checkout.verify", pr_loop.Checkout.verify, ("not fast-forwarded again",)),
+                ("git", pr_loop.git, ("READ-ONLY", "git_change"))):
+            with self.subTest(says=name):
+                self.assertEqual([], self.missing(thing.__doc__, phrases), name)
+
+    def test_the_help_of_checkout_says_the_runner_fast_forwards_it(self):
+        done = subprocess.run([sys.executable, "-B", str(ROOT / "scripts" / "pr_loop.py"), "--help"], capture_output=True,
+                              text=True, timeout=60)
+        text = self.flat(done.stdout).replace("fast- forwards", "fast-forwards")  # (argparse wraps at the hyphen)
+        self.assertEqual([], self.missing(text, ("at or strictly behind origin's tip (the runner fast-forwards it)",)))
+        self.assertNotIn("at origin's tip, whose origin", text, "the old help said the checkout must be AT the tip")
+
     def test_the_readme_quotes_the_lines_the_runner_prints(self):
         section = self.section((ROOT / "README.md").read_text())
         self.assertIsNotNone(section)
         lines = self.printed_by_the_runner()
-        self.assertEqual(4, len(lines))
+        self.assertEqual(6, len(lines))
         self.assertEqual(["Agents run as windows of tmux session <session>; watch them read-only with: tmux attach -r -t "
                           "<session>", "would start the agents in tmux session <session>",
                           "PR #N <phase> agent: %<id> in window <PR>-<phase> of tmux session <session>",
                           "pr-loop: agent pane %N (session <session>) is still running in <checkout>; inspect and close it "
-                          "before starting the runner again"], lines, "what the code prints, with placeholders")
+                          "before starting the runner again",
+                          "Fast-forwarded <branch> from <L12> to <T12>, origin's tip",
+                          "would fetch origin's <branch> at <T12> and fast-forward <branch> from <L12> to it"],
+                         lines, "what the code prints, with placeholders")
         self.assertEqual([], self.missing(section, lines), "README.md, section 'Process a batch of pull requests'")
 
     def test_the_check_fails_when_the_readme_quotes_something_the_runner_does_not_print(self):
@@ -1972,7 +2118,17 @@ class DocumentationTests(unittest.TestCase):
                 ("the old close advice", "so close those panes before the next run.",
                  "still says 'close those panes before the next run'"),
                 ("the claim it never reuses a session", "it never kills, renames or reuses a window or a session it did not "
-                 "start in this run", "still says 'reuses a window or a session'")):
+                 "start in this run", "still says 'reuses a window or a session'"),
+                ("the claim it never updates the checkout", "otherwise run `git pull --ff-only` yourself: the runner never "
+                 "updates the checkout)", "still says 'the runner never updates the checkout'"),
+                ("the claim, wrapped", "the runner never\nupdates the checkout", "still says 'the runner never updates the "
+                 "checkout'"),
+                ("the old promise of the runner", "The runner never deletes, resets, cleans or stashes anything in it.",
+                 "still says 'The runner never deletes, resets, cleans or stashes anything'"),
+                ("the old docstring of Checkout", "Everything here READS it, except two things: the lock",
+                 "still says 'Everything here READS it, except two things'"),
+                ("the old refusal sentence", "on the default branch of origin, at origin's tip, or the runner refuses",
+                 "still says \"at origin's tip, or the runner refuses\"")):
             with self.subTest(case=case):
                 self.assertIn(expected, "; ".join(self.stale(text)))
 
@@ -3163,20 +3319,6 @@ class CheckoutDefaultBranchTests(CheckoutCase):
         self.git("switch", "-q", "main")
         self.checkout()
 
-    def test_a_checkout_behind_origin_is_told_to_pull(self):
-        behind = (f"local main is at {self.env.remote_head[:12]} but origin's main is at %s; run git pull --ff-only in "
-                  f"{self.path} and start the runner again")
-        old = self.env.remote_head
-        new = self.env.advance_remote()
-        # origin's new commit is not in the checkout yet ...
-        self.stops(behind % new[:12])
-        # ... and once it has been fetched, the checkout is still behind, not ahead.
-        self.git("fetch", "-q", "origin")
-        self.stops(behind % new[:12])
-        self.assertEqual(old, self.tip(), "the runner never updates the checkout")
-        self.git("pull", "-q", "--ff-only", "origin", "main")
-        self.checkout()  # control: pulled, equal to origin
-
     def test_a_checkout_ahead_of_origin_is_refused(self):
         local = self.commit()
         self.stops(f"local main at {local[:12]} has commits that origin's main ({self.env.remote_head[:12]}) does not "
@@ -3185,16 +3327,6 @@ class CheckoutDefaultBranchTests(CheckoutCase):
         self.env.remote_head = self.git("rev-parse", "main", cwd=self.env.remote)
         self.checkout()  # control: pushed, equal to origin
 
-    def test_a_diverged_checkout_is_told_to_pull_too(self):
-        local = self.commit()
-        new = self.env.advance_remote()
-        for fetched in (False, True):
-            with self.subTest(fetched=fetched):
-                if fetched:
-                    self.git("fetch", "-q", "origin")
-                self.stops(f"local main is at {local[:12]} but origin's main is at {new[:12]}; run git pull --ff-only in "
-                           f"{self.path} and start the runner again")
-
     def test_a_checkout_without_a_commit_is_refused(self):
         fresh = self.env.root / "fresh"
         self.env.git("init", "-q", "-b", "main", str(fresh), cwd=self.env.root)
@@ -3202,6 +3334,564 @@ class CheckoutDefaultBranchTests(CheckoutCase):
         self.env.redirect_origin(fresh, self.env.ORIGIN)
         self.stops(f"local main has no commit but origin's main is at {self.env.remote_head[:12]}; run git pull "
                    f"--ff-only in {fresh} and start the runner again", str(fresh))
+
+
+class FastForwardCase(CheckoutCase):
+    """A checkout strictly behind origin's tip is fast-forwarded at startup to exactly that tip (kjelly/pilot#425).
+    Real git throughout: a bare origin, a clone of it, a second clone that pushes."""
+
+    def push(self, files=None, remove=(), name="push", stage=True):
+        """Another commit on origin's `main` (writing `files`, deleting `remove`); its SHA."""
+        work = self.env.root / "work"
+        for path, text in (files or {}).items():
+            (work / path).parent.mkdir(parents=True, exist_ok=True)
+            (work / path).write_text(text)
+        for path in remove:
+            self.env.git("rm", "-q", path, cwd=work)
+        (work / f"{name}.txt").write_text(name + "\n")
+        self.env.git("add", "-A" if stage else f"{name}.txt", cwd=work)  # (`-A` would drop a gitlink with no directory)
+        self.env.git("commit", "-q", "-m", name, cwd=work)
+        self.env.git("push", "-q", str(self.env.remote), "main", cwd=work)
+        self.env.remote_head = self.env.git("rev-parse", "main", cwd=self.env.remote)
+        return self.env.remote_head
+
+    def push_gitlink(self, path, sha, name="gitlink"):
+        work = self.env.root / "work"
+        self.env.git("update-index", "--add", "--cacheinfo", f"160000,{sha},{path}", cwd=work)
+        return self.push(name=name, stage=False)
+
+    def fresh(self):
+        """A new origin and a new clone of it: the state a test sets up starts from the same place every time."""
+        self.env.make_remote()
+        self.path = self.env.make_checkout()
+
+    def has(self, sha):
+        done = subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=self.path, env=self.env.git_env,
+                              capture_output=True)
+        return done.returncode == 0
+
+    def objects(self, path=None):
+        root = Path(path or self.path) / ".git/objects"
+        return sorted((str(file.relative_to(root)), file.stat().st_size) for file in root.rglob("*") if file.is_file())
+
+    def tree(self, path=None):
+        """Every file of the work tree outside .git, with its content."""
+        top = Path(path or self.path)
+        return {str(file.relative_to(top)): file.read_bytes() for file in sorted(top.rglob("*"))
+                if file.is_file() and ".git" not in file.relative_to(top).parts}
+
+    def refs(self, path=None):
+        return self.git("for-each-ref", "--format=%(refname) %(objectname)", cwd=path)
+
+    def ignore(self, *lines):
+        with self.exclude().open("a") as stream:
+            stream.writelines(line + "\n" for line in lines)
+
+    def untouched(self, local, *, objects=None):
+        """What a refusal leaves: the branch at `local`, HEAD on it, a clean work tree."""
+        self.assertEqual((local, "refs/heads/main"), (self.tip(), self.git("symbolic-ref", "HEAD")))
+        self.assertEqual(local, self.git("rev-parse", "refs/heads/main"))
+        self.assertEqual("", self.git("status", "--porcelain=v1", "--untracked-files=all"))
+        if objects is not None:
+            self.assertEqual(objects, self.objects(), "nothing was fetched")
+
+    def line(self, branch, local, tip):
+        return f"Fast-forwarded {branch} from {local[:12]} to {tip[:12]}, origin's tip"
+
+
+class CheckoutFastForwardTests(FastForwardCase):
+    """The runner brings a checkout that is strictly behind origin's tip up to exactly that tip, and refuses every
+    other state without touching it."""
+
+    def test_a_checkout_behind_origin_is_fast_forwarded_to_the_tip(self):
+        old = self.tip()
+        new = self.push()
+        self.env.git("tag", "release", new, cwd=self.env.remote)
+        self.assertFalse(self.has(new), "origin's new commit is not in the checkout yet")
+        found = self.checkout()
+        self.assertEqual((new, "refs/heads/main"), (self.tip(), self.git("symbolic-ref", "HEAD")))
+        self.assertEqual((new, (old, new)), (found.head, found.forwarded))
+        self.assertEqual("refs/heads/main", found.branch)
+        self.assertEqual(self.line("main", old, new), self.told[0], "said first, before anything else is")
+        self.assertEqual("", self.git("status", "--porcelain=v1", "--untracked-files=all"))
+        self.assertTrue((self.path / "push.txt").is_file(), "the work tree is the tip's")
+        self.assertEqual(new, self.git("rev-parse", "refs/remotes/origin/main"), "the tracking ref moved, as in git pull")
+        self.assertFalse((self.path / ".git/FETCH_HEAD").exists(), "no FETCH_HEAD")
+        self.assertEqual("", self.git("tag", "--list"), "no tag came with it")
+        self.assertEqual(old, self.git("rev-parse", "ORIG_HEAD"), "the commit it was at is easy to find")
+        self.assertIn("merge", self.git("reflog", "-1", "--format=%gs", "main"), "and so is the reflog")
+        found.verify()  # the run goes on from the new commit
+
+    def test_a_tip_that_is_already_in_the_checkout_is_fast_forwarded_too(self):
+        old = self.tip()
+        new = self.push()
+        self.git("fetch", "-q", "origin")
+        fetch_head = (self.path / ".git/FETCH_HEAD").read_bytes()  # the operator's own fetch wrote it
+        self.assertTrue(self.has(new))
+        self.assertEqual(old, self.tip())
+        found = self.checkout()
+        self.assertEqual((new, self.line("main", old, new)), (self.tip(), self.told[0]))
+        self.assertEqual(new, found.head)
+        self.assertEqual(fetch_head, (self.path / ".git/FETCH_HEAD").read_bytes(), "the runner's fetch left it alone")
+
+    def test_what_lands_is_the_commit_origin_reported_even_when_origin_moves_on(self):
+        old = self.tip()
+        first = self.push()
+        real, moved = pr_loop.git, []
+
+        def racing(cwd, *args, **kwargs):
+            done = real(cwd, *args, **kwargs)
+            if args[:1] == ("ls-remote",) and not moved:
+                moved.append(self.env.advance_remote("later.txt"))  # origin moves between the listing and the fetch
+            return done
+        with patch.object(pr_loop, "git", racing):
+            found = self.checkout()
+        self.assertEqual(1, len(moved))
+        self.assertNotEqual(first, moved[0])
+        self.assertEqual((first, first, self.line("main", old, first)), (self.tip(), found.head, self.told[0]))
+        self.assertFalse((self.path / "later.txt").exists())
+        self.assertEqual(first, self.git("rev-parse", "refs/remotes/origin/main"))
+
+    def test_a_ref_named_like_origins_branch_cannot_divert_it(self):
+        old = self.tip()
+        new = self.push()
+        decoy = self.commit("decoy.txt")
+        self.git("branch", "origin/main", decoy)
+        self.git("update-ref", f"refs/heads/{new}", decoy)
+        self.git("reset", "-q", "--hard", old)
+        self.git("update-ref", "refs/heads/main", old)
+        self.assertEqual(old, self.tip())
+        self.assertEqual(decoy, self.git("rev-parse", "origin/main^{commit}"), "the decoy shadows origin/main")
+        found = self.checkout()
+        self.assertEqual((new, new), (self.tip(), found.head))
+        self.assertFalse((self.path / "decoy.txt").exists())
+
+    def test_a_checkout_ahead_of_origin_is_refused_and_nothing_is_fetched(self):
+        new = self.push()
+        self.git("pull", "-q", "--ff-only", "origin", "main")
+        local = self.commit()
+        before, refs = self.objects(), self.refs()
+        self.stops(f"local main at {local[:12]} has commits that origin's main ({new[:12]}) does not have; the skills "
+                   "must come from origin's default branch")
+        self.assertEqual((before, refs), (self.objects(), self.refs()), "no fetch, no ref written")
+        self.untouched(local)
+
+    def test_a_diverged_checkout_is_refused_whether_or_not_origins_tip_was_fetched(self):
+        local = self.commit()
+        new = self.push()
+        message = (f"local main at {local[:12]} and origin's main at {new[:12]} have diverged (each has commits the other "
+                   "does not have); the runner only fast-forwards: put main at origin's tip yourself and start the runner "
+                   "again")
+        tree = self.tree()
+        for fetched in (False, True):
+            with self.subTest(fetched=fetched):
+                if fetched:
+                    self.git("fetch", "-q", "origin")
+                self.assertEqual(fetched, self.has(new))
+                self.stops(message)
+                self.untouched(local)
+                self.assertEqual(tree, self.tree())
+        with self.assertRaises(pr_loop.Stop) as dry:
+            self.checkout(dry_run=True)
+        self.assertEqual(message, str(dry.exception), "a dry run refuses it for the same reason once the tip is known")
+
+    def test_a_checkout_without_a_commit_is_refused_and_fetches_nothing(self):
+        fresh = self.env.root / "fresh"
+        self.env.git("init", "-q", "-b", "main", str(fresh), cwd=self.env.root)
+        self.env.git("remote", "add", "origin", self.env.ORIGIN, cwd=fresh)
+        self.env.redirect_origin(fresh, self.env.ORIGIN)
+        before = self.objects(fresh)
+        self.stops(f"local main has no commit but origin's main is at {self.env.remote_head[:12]}; run git pull --ff-only "
+                   f"in {fresh} and start the runner again", str(fresh))
+        self.assertEqual(before, self.objects(fresh))
+        self.assertEqual("", self.git("for-each-ref", cwd=fresh), "no ref was written")
+
+    def test_a_partial_clone_is_refused_before_anything_is_fetched(self):
+        self.env.git("config", "uploadpack.allowFilter", "true", cwd=self.env.remote)
+        self.env.git("clone", "-q", "--filter=blob:none", f"file://{self.env.remote}", "partial", cwd=self.env.root)
+        partial = self.env.root / "partial"
+        self.env.git("remote", "set-url", "origin", self.env.ORIGIN, cwd=partial)
+        self.env.redirect_origin(partial, self.env.ORIGIN)
+        self.assertEqual("true", self.git("config", "remote.origin.promisor", cwd=partial), "it is a partial clone")
+        old = self.git("rev-parse", "HEAD", cwd=partial)
+        new = self.push()
+        before = self.objects(partial)
+        self.stops(f"local main is at {old[:12]} but origin's main is at {new[:12]}; {partial} is a partial clone, which "
+                   f"the runner does not fast-forward: run git pull --ff-only in {partial} and start the runner again",
+                   str(partial))
+        self.assertEqual((old, before), (self.git("rev-parse", "HEAD", cwd=partial), self.objects(partial)))
+        with self.assertRaises(pr_loop.Stop):
+            self.checkout(str(partial), dry_run=True)
+        self.checkout()  # control: the same remote, a full clone, is fast-forwarded
+        self.assertEqual(new, self.tip())
+
+    def test_a_tip_without_a_helper_is_refused_and_the_branch_stays(self):
+        old = self.tip()
+        new = self.push(remove=(HELPER_PATHS[1],))
+        message = (f"origin's default branch main at {new[:12]} lacks {HELPER_PATHS[1]}; the skills it hosts could not "
+                   "report or sign")
+        found = self.checkout(dry_run=True)  # the tip is not in the checkout: a dry run cannot tell, and does not refuse
+        self.assertEqual((old, new, False), found.would_forward)
+        self.stops(message)
+        self.untouched(old)
+        self.assertTrue(self.has(new), "the tip was fetched: the helpers are judged on it before the branch moves")
+        self.stops(message, dry_run=True)  # now that the tip is in the checkout, a dry run reads it and says the same
+
+    def test_a_tip_that_moves_a_submodule_is_refused(self):
+        old = self.tip()
+        added = self.push_gitlink("vendor/sub", old)
+        message = (f"origin's main at {added[:12]} moves the submodule vendor/sub; the runner does not update submodules: "
+                   f"run git pull --ff-only and git submodule update in {self.path} and start the runner again")
+        self.stops(message)
+        self.untouched(old)
+        # a gitlink the checkout already has, moved by the tip
+        self.git("pull", "-q", "--ff-only", "origin", "main")
+        self.assertEqual(added, self.tip())
+        moved = self.push_gitlink("vendor/sub", added, name="move")
+        self.stops(message.replace(added[:12], moved[:12]))
+        self.untouched(added)
+
+    def test_a_tip_that_would_write_into_ignored_paths_is_refused_and_the_tree_stays_as_it_is(self):
+        def nested():
+            where = self.path / "vendor/x"
+            where.mkdir(parents=True)
+            self.env.git("init", "-q", "-b", "main", cwd=where)
+            (where / "mine.txt").write_text("the operator's own repository\n")
+            self.ignore("vendor/")
+            return {"vendor/x/tracked.txt": "from origin\n"}, "vendor/x/tracked.txt"
+
+        def ignored_file():
+            (self.path / "notes.log").write_text("ignored, and mine\n")
+            self.ignore("*.log")
+            return {"notes.log": "from origin\n"}, "notes.log"
+
+        def ignored_directory():
+            (self.path / "build").mkdir()
+            (self.path / "build/out.txt").write_text("ignored, and mine\n")
+            self.ignore("build/")
+            return {"build": "a file where a directory stands\n"}, "build"
+        for name, setup in (("a nested repository", nested), ("a file", ignored_file), ("a directory", ignored_directory)):
+            with self.subTest(case=name):
+                self.fresh()
+                (self.path / ".git/info/exclude").write_text("")
+                old = self.tip()
+                files, example = setup()
+                new = self.push(files=files, name="tracks-" + name.replace(" ", "-"))
+                before = self.tree()
+                self.assertEqual("", self.git("status", "--porcelain=v1", "--untracked-files=all"))
+                error = str(self.refused())
+                self.assertRegex(error, rf"(?s)^fast-forwarding main to {new[:12]} would overwrite, delete or write into "
+                                        rf"ignored paths in {re.escape(str(self.path))} \(\d+ paths, e.g. [^)]*"
+                                        rf"{re.escape(example.split('/')[0])}[^)]*\); move them out of the way and start the "
+                                        "runner again; the runner never deletes them$")
+                self.untouched(old)
+                self.assertEqual(before, self.tree(), "every file, ignored ones too, is as it was")
+                self.assertTrue(self.has(new), "the tip was fetched, which is all that was written")
+
+    def test_git_itself_still_refuses_to_overwrite_an_ignored_file_when_the_check_is_blind(self):
+        # The backstop: `--no-overwrite-ignore`. The collision check is replaced by one that finds nothing.
+        old = self.tip()
+        (self.path / "notes.log").write_text("ignored, and mine\n")
+        self.ignore("*.log")
+        new = self.push(files={"notes.log": "from origin\n"})
+        with patch.object(pr_loop, "check_ignored_collisions", lambda *args: []):
+            error = str(self.refused())
+        self.assertRegex(error, rf"(?s)^git merge --ff-only {new[:12]} failed \(\d+\): .*notes\.log.*; main is still at "
+                                rf"{old[:12]} and clean$")
+        self.untouched(old)
+        self.assertEqual("ignored, and mine\n", (self.path / "notes.log").read_text())
+
+    def test_a_dry_run_writes_nothing_whether_or_not_the_tip_is_in_the_checkout(self):
+        for fetched in (False, True):
+            with self.subTest(fetched=fetched):
+                self.fresh()
+                old = self.tip()
+                new = self.push(name=f"dry-{fetched}")
+                if fetched:
+                    self.git("fetch", "-q", "origin")
+                os.utime(self.path / "README.txt", (1, 1))  # a plain `git status` would rewrite the index
+                subprocess.run(["git", "status", "--porcelain"], cwd=self.path, env=self.env.git_env, check=True,
+                               capture_output=True)
+                os.utime(self.path / "README.txt", (2, 2))
+                before = self.written()
+                found = self.checkout(dry_run=True)
+                self.assertEqual(before, self.written())
+                self.assertEqual((old, None, (old, new, fetched)), (found.head, found.forwarded, found.would_forward))
+                found.announce()
+                self.assertEqual(f"would fetch origin's main at {new[:12]} and fast-forward main from {old[:12]} to it",
+                                 self.told[1])
+                unchecked = "because " + new[:12] + " is not in the checkout and a dry run does not fetch it"
+                self.assertEqual(not fetched, unchecked in self.told[-1])
+                self.assertEqual(before, self.written(), "announcing writes nothing either")
+                self.told.clear()
+
+    def written(self):
+        git = self.path / ".git"
+
+        def read(name):
+            return (git / name).read_bytes() if (git / name).exists() else None
+        index = git / "index"
+        return dict(refs=self.refs(), head=read("HEAD"), packed=read("packed-refs"), objects=self.objects(),
+                    fetch_head=read("FETCH_HEAD"), orig_head=read("ORIG_HEAD"), config=read("config"),
+                    index=(sha256_of(index), index.stat().st_mtime_ns), exclude=read("info/exclude"),
+                    lock=(git / "pilot-pr-loop.lock").exists(), tasks=(self.path / ".pr-loop").exists(),
+                    tmux=self.env.tmux_calls(), tree=self.tree())
+
+    def test_the_task_files_are_judged_against_the_tree_the_fast_forward_brought(self):
+        old = self.tip()
+        new = self.push(files={".gitignore": "!/.pr-loop/\n"})
+        self.stops(f"{self.path} does not ignore .pr-loop/ and .pr-ready/ even after they were added to {self.exclude()}: "
+                   "a tracked .gitignore overrides it, so the task files would count as uncommitted work")
+        self.assertEqual((new, self.line("main", old, new)), (self.tip(), self.told[0]),
+                         "the .gitignore of the tip is what git reads now, and the run was told the branch moved")
+        self.fresh()
+        old = self.tip()
+        new = self.push(files={".gitignore": "/dist/\n"})
+        found = self.checkout()  # control: a tip whose .gitignore is unrelated
+        self.assertEqual((new, ["/.pr-ready/", "/.pr-loop/"]),
+                         (found.head, [line for line in self.exclude().read_text().splitlines() if line.startswith("/.pr-")]))
+
+    def test_a_failed_fetch_leaves_the_checkout_and_its_refs_as_they_were(self):
+        old = self.tip()
+        self.push()
+        real = pr_loop.git
+        made_up = "c" * 40
+
+        def listing(cwd, *args, **kwargs):
+            if args[:1] == ("ls-remote",):
+                return subprocess.CompletedProcess(args, 0, f"ref: refs/heads/main\tHEAD\n{made_up}\tHEAD\n", "")
+            return real(cwd, *args, **kwargs)
+        before = self.refs()
+        with patch.object(pr_loop, "git", listing):
+            error = str(self.refused())
+        self.assertRegex(error, rf"(?s)^cannot fetch origin's main at {made_up[:12]} into {re.escape(str(self.path))}: git "
+                                r"fetch failed \(\d+\): .+; main was not changed$")
+        self.untouched(old)
+        self.assertEqual(before, self.refs())
+
+    def test_what_a_failed_fetch_says_never_carries_a_url_with_a_token(self):
+        # SYNTHETIC: git quotes the URL back, userinfo and all, in some failures.
+        token = "tok" + uuid.uuid4().hex
+        url = f"https://x-access-token:{token}@github.com/acme/demo.git"
+        self.git("remote", "set-url", "origin", url)
+        self.env.redirect_origin(self.path, url, replace=True)
+        new = self.push()
+        quoting = lambda cwd, sub, *args: subprocess.CompletedProcess(args, 128, "", f"fatal: unable to access '{url}/': boom {url}")
+        with patch.object(pr_loop, "git_change", quoting):
+            error = str(self.refused())
+        self.assertNotIn(token, error)
+        self.assertEqual(f"cannot fetch origin's main at {new[:12]} into {self.path}: git fetch failed (128): fatal: unable "
+                         "to access '<origin>/': boom <origin>; main was not changed", error)
+
+    def test_a_merge_git_refuses_is_reported_with_gits_words_and_the_state_it_left(self):
+        old = self.tip()
+        new = self.push()
+        self.git("config", "merge.verifySignatures", "true")
+        error = str(self.refused())
+        self.assertRegex(error, rf"(?s)^git merge --ff-only {new[:12]} failed \(\d+\): .+; main is still at {old[:12]} and "
+                                "clean$")
+        self.untouched(old)
+        self.git("config", "--unset", "merge.verifySignatures")
+        self.checkout()  # control: without it the same checkout is fast-forwarded
+        self.assertEqual(new, self.tip())
+
+    def test_a_merge_that_changed_something_before_it_failed_says_where_the_checkout_is(self):
+        old = self.tip()
+        new = self.push()
+        real = pr_loop.git_change
+
+        def leaves_it_dirty(cwd, sub, *args):
+            if sub == "merge":
+                (Path(cwd) / "left.txt").write_text("x\n")
+                self.git("switch", "-q", "-c", "elsewhere")
+                return subprocess.CompletedProcess(args, 1, "", "synthetic failure\n")
+            return real(cwd, sub, *args)
+        with patch.object(pr_loop, "git_change", leaves_it_dirty):
+            error = str(self.refused())
+        self.assertEqual(f"git merge --ff-only {new[:12]} failed (1): synthetic failure; the checkout is now on elsewhere at "
+                         f"{old[:12]} with uncommitted changes: inspect it before starting the runner again", error)
+
+    def test_a_configured_squash_cannot_turn_the_fast_forward_into_a_squash(self):
+        old = self.tip()
+        new = self.push()
+        self.git("config", "branch.main.mergeOptions", "--squash")
+        found = self.checkout()
+        self.assertEqual((new, new), (self.tip(), found.head))
+        self.assertEqual("", self.git("status", "--porcelain=v1"), "a squash would leave the tree changed, uncommitted")
+        self.assertNotEqual(old, self.tip())
+
+    def test_a_merge_that_reports_success_without_moving_the_branch_is_refused(self):
+        old = self.tip()
+        new = self.push()
+        real = pr_loop.git_change
+        shim = lambda cwd, sub, *args: subprocess.CompletedProcess(args, 0, "", "") if sub == "merge" else real(cwd, sub, *args)
+        with patch.object(pr_loop, "git_change", shim):
+            error = str(self.refused())
+        self.assertEqual(f"git merge --ff-only {new[:12]} reported success but did not leave main at {new[:12]}, clean, "
+                         f"with no git operation in progress; main is still at {old[:12]} and clean", error)
+        self.untouched(old)
+
+    def test_hooks_do_not_run_for_the_fetch_or_the_merge(self):
+        marker = self.env.root / "hook-ran"
+        for hook in ("post-merge", "reference-transaction", "post-checkout", "pre-merge-commit"):
+            path = self.path / ".git/hooks" / hook
+            path.write_text(f"#!/bin/sh\necho {hook} >> {marker}\n")
+            path.chmod(0o755)
+        subprocess.run(["git", "hook", "run", "post-merge"], cwd=self.path, env=self.env.git_env, check=True)
+        self.assertTrue(marker.is_file(), "control: the hook runs when git is asked to run it")
+        marker.unlink()
+        new = self.push()
+        self.checkout()
+        self.assertEqual(new, self.tip())
+        self.assertFalse(marker.exists(), marker.read_text() if marker.exists() else "")
+
+    def test_a_refusal_that_comes_first_comes_first_and_nothing_is_fetched(self):
+        held = []
+
+        def pane():
+            self.env.update_tmux(listing=[f"pilot-pr-7-draft-0123456789|%3|0|{self.path}"])
+            return (f"^agent pane %3 \\(session pilot-pr-7-draft-0123456789\\) is still running in "
+                    f"{re.escape(str(self.path))}")
+
+        def dirty():
+            (self.path / "stray.txt").write_text("x")
+            return "^checkout .* has uncommitted changes or untracked files"
+
+        def locked():
+            fd = os.open(self.path / ".git/pilot-pr-loop.lock", os.O_RDWR | os.O_CREAT, 0o600)
+            held.append(fd)
+            pr_loop.fcntl.flock(fd, pr_loop.fcntl.LOCK_EX | pr_loop.fcntl.LOCK_NB)
+            return "^another pr_loop runner is using the checkout"
+        for name, setup in (("a live agent pane", pane), ("uncommitted work", dirty), ("another runner", locked)):
+            with self.subTest(name=name):
+                self.fresh()
+                self.env.reset_tmux()
+                old = self.tip()
+                self.push(name=name.replace(" ", "-"))
+                before = self.objects()
+                pattern = setup()
+                self.assertRegex(str(self.refused()), pattern)
+                self.assertEqual((before, old), (self.objects(), self.tip()), "nothing was fetched, the branch stayed")
+                while held:
+                    os.close(held.pop())
+        self.fresh()
+        self.env.reset_tmux()
+        old = self.tip()
+        self.push(name="control")
+        self.checkout()  # control: with all three out of the way, the same checkout is fast-forwarded
+        self.assertNotEqual(old, self.tip())
+
+    def test_the_run_says_what_it_changed_when_it_ends(self):
+        old = self.tip()
+        new = self.push()
+        found = self.checkout()
+        self.told.clear()
+        found.finish()
+        self.assertEqual([f"Kept: the task files under {self.path / '.pr-loop'} and any agent window still open in tmux "
+                          f"session {pr_loop.session_name(self.path)}; close the agents still running in {self.path} before "
+                          f"the next run. The runner changed {self.path} only by fast-forwarding main from {old[:12]} to "
+                          f"{new[:12]} at the start; nothing else in it was deleted or reset."], self.told)
+
+    def test_ctrl_c_during_the_fast_forward_says_what_to_check(self):
+        old = self.tip()
+        new = self.push()
+        real = pr_loop.git_change
+        text = (f"Interrupted while fast-forwarding main in {self.path} (from {old[:12]} to {new[:12]}); check it with git "
+                "status before the next run.\n")
+        for sub in ("fetch", "merge"):
+            with self.subTest(interrupted=sub):
+                def interrupts(cwd, name, *args, _sub=sub):
+                    if name == _sub:
+                        raise KeyboardInterrupt
+                    return real(cwd, name, *args)
+                argv = ["pr_loop.py", "7", "--repo", "acme/demo", "--checkout", str(self.path)]
+                errors = io.StringIO()
+                with patch.object(sys, "argv", argv), patch.object(pr_loop, "git_change", interrupts), \
+                     contextlib.redirect_stderr(errors):
+                    code = pr_loop.main()
+                self.assertEqual((130, text), (code, errors.getvalue()))
+                self.untouched(old)
+                pr_loop.os.close(pr_loop.lock_checkout(self.path, self.path / ".git/pilot-pr-loop.lock"))  # the lock was given back
+
+    def test_ctrl_c_before_the_fast_forward_began_says_that_nothing_was_written(self):
+        self.push()
+        argv = ["pr_loop.py", "7", "--repo", "acme/demo", "--checkout", str(self.path)]
+        errors = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.object(pr_loop, "check_panes", side_effect=KeyboardInterrupt), \
+             contextlib.redirect_stderr(errors):
+            self.assertEqual(130, pr_loop.main())
+        self.assertEqual("Interrupted; nothing was written.\n", errors.getvalue())
+
+
+class GitChangeTests(unittest.TestCase):
+    """`git_change`, the one call that changes a checkout: what it runs, with what, and how it ends."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="pr-loop-git-change-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        (self.root / "bin").mkdir()
+        (self.root / "work").mkdir()
+        self.log = self.root / "log"
+        self.signal = self.root / "after"
+        patcher = patch.dict(os.environ, PATH=f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}", GIT_FOO="inherited")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # A test run started in the background has SIGINT ignored: the interrupt these tests send would go nowhere.
+        before = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, before)
+
+    def fake_git(self, body):
+        path = self.root / "bin/git"
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+
+    def test_it_runs_the_subcommand_with_hooks_off_and_nothing_to_prompt_for(self):
+        self.fake_git(f'{{ pwd; echo "$@"; echo "$GIT_TERMINAL_PROMPT $GIT_NO_LAZY_FETCH $LC_ALL $GIT_FOO"; }} > {self.log}\n'
+                      "echo out; echo err >&2; exit 3\n")
+        done = pr_loop.git_change(self.root / "work", "fetch", "--no-tags", "origin")
+        self.assertEqual((3, "out\n", "err\n"), (done.returncode, done.stdout, done.stderr), "the caller judges the status")
+        self.assertEqual([str(self.root / "work"),
+                          "-c core.hooksPath=/dev/null -c maintenance.auto=false fetch --no-tags origin",
+                          "0 1 C inherited"], self.log.read_text().splitlines())
+
+    def test_it_changes_a_checkout_with_fetch_and_merge_only(self):
+        self.fake_git(f"echo ran > {self.log}\n")
+        for sub in ("pull", "reset", "checkout", "clean", "stash", "config", "switch", "update-ref"):
+            with self.subTest(sub=sub):
+                with self.assertRaisesRegex(pr_loop.Stop, rf"^git {sub} is not a command this runner changes a checkout with$"):
+                    pr_loop.git_change(self.root / "work", sub)
+        self.assertFalse(self.log.exists(), "nothing was run")
+
+    def interrupt_soon(self, delay=0.3):
+        timer = threading.Timer(delay, os.kill, (os.getpid(), signal.SIGINT))
+        timer.start()
+        self.addCleanup(timer.cancel)
+
+    def test_an_interrupted_merge_is_waited_for_and_the_interrupt_raised_afterwards(self):
+        self.fake_git(f"sleep 1.2\necho finished > {self.signal}\n")
+        self.interrupt_soon()
+        with self.assertRaises(KeyboardInterrupt):
+            pr_loop.git_change(self.root / "work", "merge", "--ff-only")
+        self.assertEqual("finished\n", self.signal.read_text(), "the merge ran to its end before the interrupt left")
+
+    def test_an_interrupted_fetch_is_ended_first(self):
+        self.fake_git(f"sleep 5\necho finished > {self.signal}\n")
+        self.interrupt_soon()
+        with self.assertRaises(KeyboardInterrupt):
+            pr_loop.git_change(self.root / "work", "fetch")
+        time.sleep(0.3)
+        self.assertFalse(self.signal.exists(), "the fetch was ended, not left running")
+
+    def test_a_command_that_outlives_its_limit_is_ended_even_when_it_ignores_sigterm(self):
+        self.fake_git(f"trap '' TERM\nsleep 3\necho finished > {self.signal}\n")
+        began = time.monotonic()
+        with patch.dict(pr_loop.GIT_CHANGES, {"fetch": 0.3}), patch.object(pr_loop, "KILL_AFTER", 0.3):
+            with self.assertRaisesRegex(pr_loop.Stop, r"^git fetch timed out after 0\.3 seconds$"):
+                pr_loop.git_change(self.root / "work", "fetch")
+        self.assertLess(time.monotonic() - began, 2.5, "it did not wait for the command to end by itself")
+        time.sleep(0.5)
+        self.assertFalse(self.signal.exists())
 
 
 class CheckoutCleanTests(CheckoutCase):
@@ -3620,14 +4310,18 @@ class CheckoutDryRunTests(CheckoutCase):
         top = self.path
         def dirty(): (self.path / "stray.txt").write_text("x")
         def other(): self.git("switch", "-q", "-c", "other")
-        def behind(): self.env.advance_remote()
+        def diverged():
+            self.commit()
+            self.env.advance_remote()
+            self.git("fetch", "-q", "origin")  # (a dry run cannot tell, without the tip, that a checkout has diverged)
         def origin(): self.git("remote", "set-url", "origin", "https://github.com/other/demo.git")
         def merging(): Path(self.git("rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD")).write_text("x\n")
         return (("dirty", dirty, f"checkout {top} has uncommitted changes or untracked files (1 paths, e.g. stray.txt); "
                                  "commit or remove them; the runner never stashes or discards work"),
                 ("another branch", other, f"checkout {top} is on other, not on main, the default branch of origin"),
-                ("behind", behind, f"local main is at {self.env.remote_head[:12]} but origin's main is at "
-                                   "%s; run git pull --ff-only in " + f"{top} and start the runner again"),
+                ("diverged", diverged, "local main at <L> and origin's main at <T> have diverged (each has commits the "
+                                       "other does not have); the runner only fast-forwards: put main at origin's tip "
+                                       "yourself and start the runner again"),
                 ("another origin", origin, f"origin of {top} is github.com/other/demo, not {self.IDENTITY}"),
                 ("a git operation", merging, f"a git operation is in progress in {top} (MERGE_HEAD); finish or abort it"))
 
@@ -3636,7 +4330,7 @@ class CheckoutDryRunTests(CheckoutCase):
             with self.subTest(name=name):
                 self.env.make_checkout()
                 setup()
-                message = message % self.env.remote_head[:12] if "%s" in message else message
+                message = message.replace("<L>", self.tip()[:12]).replace("<T>", self.env.remote_head[:12])
                 with self.assertRaises(pr_loop.Stop) as dry:
                     self.checkout(dry_run=True)
                 with self.assertRaises(pr_loop.Stop) as real:
@@ -4163,6 +4857,40 @@ class ProgramTests(unittest.TestCase):
         self.assertEqual(before, self.written(), "no lock, no exclude line, no task directory, no index refresh, no tmux")
         self.assertEqual([["pr", "view"]], [call[:2] for call in self.env.gh_calls()])
 
+    def test_a_run_in_a_checkout_behind_origin_fast_forwards_it_and_goes_on_to_read_the_pr(self):
+        top, old = self.env.checkout, self.env.remote_head
+        new = self.env.advance_remote()
+        proc = self.blocked_run()
+        self.assertEqual(new, self.env.git("rev-parse", "HEAD", cwd=top), "the checkout is at origin's tip")
+        lines = proc.stdout.splitlines()
+        self.assertIn(f"Fast-forwarded main from {old[:12]} to {new[:12]}, origin's tip", lines)
+        self.assertIn(f"Checkout: {top} (main at {new[:12]})", lines)
+        self.assertLess(lines.index(f"Fast-forwarded main from {old[:12]} to {new[:12]}, origin's tip"),
+                        lines.index(f"Checkout: {top} (main at {new[:12]})"))
+        self.assertTrue(any(line.startswith("Kept:") and f"only by fast-forwarding main from {old[:12]} to {new[:12]}" in line
+                            for line in lines), "and the end of the run says what changed")
+        self.assertEqual(1, len(self.pastes()), "the agent was dispatched")
+
+    def test_a_dry_run_in_a_checkout_behind_origin_says_what_it_would_do_and_writes_nothing(self):
+        top, old = self.env.checkout, self.env.remote_head
+        new = self.env.advance_remote()
+        self.stale_index()
+        git = lambda: (self.env.git("for-each-ref", "--format=%(refname) %(objectname)", cwd=top),
+                       self.env.git("count-objects", "-v", cwd=top), (top / ".git/FETCH_HEAD").exists(),
+                       (top / ".git/ORIG_HEAD").exists(), self.env.git("rev-parse", "HEAD", cwd=top))
+        before, written = git(), self.written()
+        proc = self.run_program("--dry-run")
+        expected = (f"PR #7: draft\nCheckout: {top} (main at {old[:12]})\n"
+                    f"would fetch origin's main at {new[:12]} and fast-forward main from {old[:12]} to it\n"
+                    f"would add /.pr-ready/, /.pr-loop/ to {top}/.git/info/exclude\n"
+                    f"would start the agents in tmux session {pr_loop.session_name(top)}\n"
+                    f"not checked in a dry run: whether another runner holds {top}/.git/pilot-pr-loop.lock; whether an agent "
+                    f"pane kept from an earlier run is still open in {top}; whether origin's main at {new[:12]} is a "
+                    f"fast-forward of main, has the two helpers and leaves ignored files alone, because {new[:12]} is not in "
+                    "the checkout and a dry run does not fetch it\n")
+        self.assertEqual((0, expected, ""), (proc.returncode, proc.stdout, proc.stderr))
+        self.assertEqual((before, written), (git(), self.written()), "no fetch, no ref, no file, no lock, no tmux")
+
     def refused_states(self):
         """Each state the real run refuses, as `(name, set up, working directory, a fragment of the reason)`."""
         top, git = self.env.checkout, lambda *args: self.env.git(*args, cwd=self.env.checkout)
@@ -4172,12 +4900,19 @@ class ProgramTests(unittest.TestCase):
         def dirty():
             (top / "stray.txt").write_text("x")
 
+        def diverged():
+            (top / "mine.txt").write_text("x\n")
+            git("add", "-A")
+            git("commit", "-q", "-m", "mine")
+            self.env.advance_remote()
+            git("fetch", "-q", "origin")
+
         def without_helper():
             self.env.make_remote({"other.txt": "x\n"})
             self.env.make_checkout()
         return (("not in a work tree", lambda: None, plain, "the current directory is not inside a git work tree"),
                 ("dirty", dirty, None, "has uncommitted changes or untracked files (1 paths, e.g. stray.txt)"),
-                ("behind", self.env.advance_remote, None, "run git pull --ff-only in"),
+                ("diverged", diverged, None, "have diverged (each has commits the other does not have)"),
                 ("another origin", lambda: git("remote", "set-url", "origin", "https://github.com/other/demo.git"), None,
                  "is github.com/other/demo, not github.com/acme/demo"),
                 ("a default branch without the helpers", without_helper, None,
