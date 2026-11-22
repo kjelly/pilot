@@ -55,7 +55,7 @@ def alive(pid):
     """Whether process `pid` runs: a killed process stays a zombie until its parent (init, for an orphan) reaps it."""
     try:
         with open(f'/proc/{pid}/stat') as stat_file:
-            return stat_file.read().rsplit(')', 1)[1].split()[0] != 'Z'
+            return stat_file.read().rsplit(')', 1)[1].split()[0] not in ('Z', 'X', 'x')  # X: for an instant while init reaps it
     except OSError:
         return False
 

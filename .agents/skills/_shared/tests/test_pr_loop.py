@@ -4587,12 +4587,18 @@ class CheckoutSwitchTests(FastForwardCase):
         self.assertEqual("refs/heads/main", self.git("symbolic-ref", "HEAD"), "it is not switched back")
 
 
+# A killed process is a zombie (Z) until its parent (init, for an orphan) reaps it, and shows X (dead) for an instant while it is
+# reaped: a check that counts X as running reads Z, then X, then nothing, and fails a test whose process was killed (the flake of
+# kjelly/pilot#427: the same code failed one run in about twenty on Python 3.12).
+DEAD_STATES = ("Z", "X", "x")
+
+
 def alive(pid):
     """Whether process `pid` runs: a killed process stays a zombie until its parent (init, for an orphan) reaps it."""
     try:
         os.kill(pid, 0)
         with open(f"/proc/{pid}/stat") as stat_file:
-            return stat_file.read().rsplit(")", 1)[1].split()[0] != "Z"
+            return stat_file.read().rsplit(")", 1)[1].split()[0] not in DEAD_STATES
     except OSError:  # gone between the two calls, or /proc says so
         return False
 
@@ -4607,7 +4613,7 @@ def group_members(pgid):
                     state, _, group = stat_file.read().rsplit(")", 1)[1].split()[:3]
             except OSError:
                 continue
-            if state != "Z" and int(group) == pgid:
+            if state not in DEAD_STATES and int(group) == pgid:
                 found.append(int(name))
     return found
 
@@ -4680,9 +4686,7 @@ class GitChangeTests(unittest.TestCase):
         self.assertFalse(self.log.exists(), "nothing was run")
 
     def interrupt_soon(self, delay=0.3):
-        timer = threading.Timer(delay, os.kill, (os.getpid(), signal.SIGINT))
-        timer.start()
-        self.addCleanup(timer.cancel)
+        self.interrupt_at(delay)
 
     def test_an_interrupted_merge_is_waited_for_and_the_interrupt_raised_afterwards(self):
         self.fake_git(f"sleep 1.2\necho finished > {self.signal}\n")
@@ -4749,11 +4753,37 @@ class GitChangeTests(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual([], group_members(pgid), "a process of git's group is still running")
 
-    def interrupt_at(self, *delays):
-        for delay in delays:
-            timer = threading.Timer(delay, os.kill, (os.getpid(), signal.SIGINT))
-            timer.start()
-            self.addCleanup(timer.cancel)
+    def interrupt_at(self, *delays, after="leader"):
+        """SIGINT to this process once for each of `delays`, that many seconds after the pid file `after` (`leader`, which the
+        fake git writes first, or `child`/`helper`, which it writes once it has started that process) appeared: git is running
+        then, and the call under test holds the process it started. A timer started BEFORE the call can fire between the fork
+        and the helper's `try:`, where an interrupt leaves the command running (a window the helper documents). The wait is
+        bounded: a file that does not appear within 5 s sends nothing and fails the test when it ends. The sender stops when
+        the test does."""
+        stop, missing = threading.Event(), []
+
+        def send():
+            marker, end = self.root / after, time.monotonic() + 5
+            while not marker.exists():
+                if stop.wait(0.01):
+                    return
+                if time.monotonic() > end:
+                    missing.append(after)
+                    return
+            began = time.monotonic()
+            for delay in delays:
+                if stop.wait(max(0.0, began + delay - time.monotonic())):
+                    return
+                os.kill(os.getpid(), signal.SIGINT)
+        sender = threading.Thread(target=send, daemon=True)
+        sender.start()
+
+        def finish():
+            stop.set()
+            sender.join(2)
+            if missing:
+                raise AssertionError(f"{after} did not appear within 5 s: no SIGINT was sent")
+        self.addCleanup(finish)
 
     def test_a_timeout_ends_what_a_leader_that_ended_on_sigterm_left_holding_its_pipes(self):
         self.fake_git(self.child_holding_the_pipes() + self.LEADER_ENDS_ON_SIGTERM)
@@ -4776,7 +4806,7 @@ class GitChangeTests(unittest.TestCase):
 
     def test_an_interrupted_fetch_ends_what_a_leader_that_ended_on_sigterm_left_holding_its_pipes(self):
         self.fake_git(self.child_holding_the_pipes() + self.LEADER_ENDS_ON_SIGTERM)
-        self.interrupt_at(0.3)
+        self.interrupt_at(0.3, after="child")
         began = time.monotonic()
         with self.assertRaises(KeyboardInterrupt):
             pr_loop.git_change(self.root / "work", "fetch")
@@ -4798,7 +4828,7 @@ class GitChangeTests(unittest.TestCase):
 
     def test_an_interrupted_switch_with_a_lingering_child_is_ended_at_its_limit(self):
         self.fake_git(self.child_holding_the_pipes() + self.LEADER_ENDS_ON_SIGTERM)
-        self.interrupt_at(0.3)
+        self.interrupt_at(0.3, after="child")
         began = time.monotonic()
         with patch.dict(pr_loop.GIT_CHANGES, {"switch": 1.0}):
             with self.assertRaises(KeyboardInterrupt):
@@ -4893,7 +4923,7 @@ class GitChangeTests(unittest.TestCase):
         if not (self.root / "probed").exists():
             self.skipTest("this git does not run an ext:: helper here (protocol.ext.allow), so the case cannot be made")
         if mode == "interrupt":
-            self.interrupt_at(1.2)
+            self.interrupt_at(1.2, after="helper")
         patches = [patch.object(pr_loop, "KILL_AFTER", 1.0), patch.object(pr_loop, "DRAIN", 1.0)]
         if mode == "timeout":
             patches.append(patch.dict(pr_loop.GIT_CHANGES, {"fetch": 1.5}))

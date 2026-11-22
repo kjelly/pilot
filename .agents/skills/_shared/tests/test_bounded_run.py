@@ -62,11 +62,16 @@ time.sleep(30)
 LEADER_ENDS_ON_SIGTERM = "trap 'kill $!; wait $!; exit 143' TERM\nsleep 30 &\nwait\n"
 
 
+# A killed process is a zombie (Z) until its parent (init, for an orphan) reaps it, and shows X (dead) for an instant while it is
+# reaped: a check that counts X as running reads Z, then X, then nothing, and fails a test whose process was killed.
+DEAD_STATES = ("Z", "X", "x")
+
+
 def alive(pid):
     """Whether process `pid` runs: a killed process stays a zombie until its parent (init, for an orphan) reaps it."""
     try:
         with open(f"/proc/{pid}/stat") as stat_file:
-            return stat_file.read().rsplit(")", 1)[1].split()[0] != "Z"
+            return stat_file.read().rsplit(")", 1)[1].split()[0] not in DEAD_STATES
     except OSError:
         return False
 
@@ -81,7 +86,7 @@ def group_members(pgid):
                     state, _, group = stat_file.read().rsplit(")", 1)[1].split()[:3]
             except OSError:
                 continue
-            if state != "Z" and int(group) == pgid:
+            if state not in DEAD_STATES and int(group) == pgid:
                 found.append(int(name))
     return found
 
@@ -93,6 +98,8 @@ class Case(unittest.TestCase):
         self.root = Path(temp.name).resolve()
         self.marker = uuid.uuid4().hex[:12]  # in the command line of everything the test starts: its pids are checked
         self.armed = False  # a SIGINT counts only while the call under test runs; a late one is dropped
+        self.signal_problems = []  # a signal that was never sent, because the command never said it was running
+        self.addCleanup(self.assertNoSignalProblems)
 
         def on_sigint(_signum, _frame):
             if self.armed:
@@ -158,18 +165,28 @@ class Case(unittest.TestCase):
             self.armed = False
             self.took = time.monotonic() - began
 
-    def interrupts(self, *gaps, after="ready"):
-        """SIGINT to this process `gaps[0]` seconds after file `after` appeared, then `gaps[1]` after that, and so on."""
+    def interrupts(self, *gaps, after="ready", sig=signal.SIGINT):
+        """`sig` to this process `gaps[0]` seconds after file `after` appeared, then `gaps[1]` after that, and so on. The
+        command writes `after` once it runs, so the signal never lands before `run()` has the process it started in hand
+        (a timer started before the call could fire between the fork and the helper's `try:`, where an interrupt leaves the
+        command running: a window the helper documents). The wait is bounded: a file that does not appear within 5 s sends
+        nothing and fails the test when it ends."""
         def work():
             end = time.monotonic() + 5
-            while not (self.root / after).exists() and time.monotonic() < end:
+            while not (self.root / after).exists():
+                if time.monotonic() > end:
+                    self.signal_problems.append(f"{after} did not appear within 5 s: no {sig.name} was sent")
+                    return
                 time.sleep(0.01)
             for gap in gaps:
                 time.sleep(gap)
-                if not self.armed:  # the call under test is over (it failed early): a late SIGINT would reach the runner
+                if not self.armed:  # the call under test is over (it failed early): a late signal would reach the runner
                     return
-                os.kill(os.getpid(), signal.SIGINT)
+                os.kill(os.getpid(), sig)
         threading.Thread(target=work, daemon=True).start()
+
+    def assertNoSignalProblems(self):
+        self.assertEqual([], self.signal_problems)
 
     def assertGone(self, name, within=3.0):
         pid, end = self.pid(name), time.monotonic() + within
@@ -208,6 +225,14 @@ class FinishedCommandTests(Case):
                          "the command's own exit code and output, not a timeout")
         self.assertLess(took, 3, "poll + drain, not the 10 second limit and not the descendant's 30 seconds")
         self.assertTrue(alive(self.pid("child")), "what a finished command left behind is not signalled")
+
+    def test_a_leaked_descendant_that_left_half_a_character_in_the_pipe_does_not_hide_the_result(self):
+        # The command exited 3; what a descendant wrote before it stopped ends in the middle of a character. The result is
+        # returned, the half character is a replacement character (strict decoding raised UnicodeDecodeError instead).
+        body = f"( printf '\\344\\270'; sleep 5 ) &\necho $! > {self.root}/child\nexit 3\n"
+        done, took = self.run_bounded(self.sh(body), limit=10)
+        self.assertEqual((3, "\ufffd", ""), (done.returncode, done.stdout, done.stderr))
+        self.assertLess(took, 3, "poll + drain, not the descendant's 5 seconds")
 
     def test_the_constants_are_read_at_each_call(self):
         script = self.member("child", HOLDER, holds_pipes=True, wait=False)
@@ -313,6 +338,15 @@ class DeadlineTests(Case):
         self.assertIn("x\n", caught.exception.stderr, "the output read so far is kept, decoded")
         self.assertGone("escaped", within=3.0)  # its next write meets a closed pipe
 
+    def test_a_timeout_whose_partial_output_ends_in_the_middle_of_a_character_is_still_a_timeout(self):
+        # What was read stops wherever the command was: here after two of the three bytes of a character. Decoded with the
+        # pipe's strict errors that raised UnicodeDecodeError in place of the Timeout (kjelly/pilot#427, review F2).
+        body = "printf 'out \\344\\270'\nprintf 'err \\344' >&2\nsleep 30\n"
+        with self.assertRaises(bounded_run.Timeout) as caught:
+            self.run_bounded(self.sh(body), limit=0.5)
+        self.assertEqual(("out \ufffd", "err \ufffd"), (caught.exception.output, caught.exception.stderr))
+        self.assertEqual("SIGTERM", caught.exception.ended)
+
     def test_a_timeout_in_binary_mode_keeps_what_was_read_as_bytes(self):
         body = "printf 'part\\377'\nsleep 30\n"
         with self.assertRaises(bounded_run.Timeout) as caught:
@@ -332,12 +366,12 @@ class DeadlineTests(Case):
 
     def test_an_exception_of_any_other_kind_ends_the_group_and_is_raised(self):
         def explode(_signum, _frame):
-            raise SystemExit("from a signal handler")
+            if self.armed:
+                raise SystemExit("from a signal handler")
         before = signal.signal(signal.SIGALRM, explode)
         self.addCleanup(signal.signal, signal.SIGALRM, before)
-        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
-        body = f"sleep 30 &\necho $! > {self.root}/child\nwait\n"
-        signal.setitimer(signal.ITIMER_REAL, 0.6)
+        body = f"sleep 30 &\necho $! > {self.root}/child\ntouch {self.root}/ready\nwait\n"
+        self.interrupts(0.2, sig=signal.SIGALRM)  # once the command runs, as the interrupt tests do
         with self.assertRaises(SystemExit):
             self.run_bounded(self.sh(body), limit=10)
         self.assertLess(self.took, 3)

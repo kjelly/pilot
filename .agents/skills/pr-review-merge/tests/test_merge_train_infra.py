@@ -505,7 +505,7 @@ esac
 def alive(pid):
     """Is the process running (a zombie nobody has reaped yet is not)?"""
     try:
-        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] != 'Z'
+        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] not in ('Z', 'X', 'x')  # X: for an instant while init reaps it
     except (FileNotFoundError, ProcessLookupError):
         return False
 

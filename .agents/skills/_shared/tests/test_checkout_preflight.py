@@ -762,7 +762,7 @@ def alive(pid):
     """Whether process `pid` runs: a killed process stays a zombie until its parent (init, for an orphan) reaps it."""
     try:
         with open(f"/proc/{pid}/stat") as stat_file:
-            return stat_file.read().rsplit(")", 1)[1].split()[0] != "Z"
+            return stat_file.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X", "x")  # X: for an instant while init reaps it
     except OSError:
         return False
 
@@ -915,9 +915,14 @@ class BoundedGitTests(unittest.TestCase):
         # A tree update must finish or fail whole: the terminal's Ctrl-C no longer reaches git (a session of its own).
         self.mode("slowswitch")
 
+        problems = []
+
         def interrupt_when_running():
-            end = time.monotonic() + 5
-            while not (self.root / "ready").exists() and time.monotonic() < end:
+            end = time.monotonic() + 5  # the fake switch says it runs by creating `ready`; bounded, and then nothing is sent
+            while not (self.root / "ready").exists():
+                if time.monotonic() > end:
+                    problems.append("ready did not appear within 5 s: no SIGINT was sent")
+                    return
                 time.sleep(0.01)
             time.sleep(0.2)
             if self.armed:  # the call under test is over (it failed early): a late SIGINT would reach the runner
@@ -929,6 +934,7 @@ class BoundedGitTests(unittest.TestCase):
                 self.cp.execute(self.execution())
         finally:
             self.armed = False
+        self.assertEqual([], problems)
         self.assertEqual("finished\n", (self.root / "finished").read_text(), "the switch ran to its end before the interrupt left")
 
 

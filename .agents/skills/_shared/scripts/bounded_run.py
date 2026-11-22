@@ -31,16 +31,20 @@ group can be signalled and the terminal cannot be asked anything. There is ONE d
   propagates: nothing was started.
 
 What it does not do. It is not a sandbox: a member that leaves the group by itself (`setsid`) is not signalled, only
-its pipes are closed. A command in its own session is not reached when the CALLER is killed by a signal to the caller's
-group (`timeout(1)`, an agent tool's timeout): there is no SIGTERM handler here (kjelly/pilot#309). It reports "exit 0
-and a descendant that holds the pipes" as the command's success, where Go's `WaitDelay` reports an error (kjelly/pilot#261).
-A caller that must not start descendants has to say so to its command.
+its pipes are closed. An interrupt that arrives while the command is being STARTED (after the fork, before `run()` holds
+the process handle) is raised with the command left running, as it was at every site this helper replaced; the window is
+the few milliseconds of `Popen`, and hardening it is tracked in the follow-up comment of kjelly/pilot#428. A command in
+its own session is not reached when the CALLER is killed by a signal to the caller's group (`timeout(1)`, an agent
+tool's timeout): there is no SIGTERM handler here (kjelly/pilot#309). It reports "exit 0 and a descendant that holds the
+pipes" as the command's success, where Go's `WaitDelay` reports an error (kjelly/pilot#261). A caller that must not start
+descendants has to say so to its command.
 
 `input` goes to the first read only (a retry with input would raise ValueError in `communicate`). `limit` is required, a
 positive finite number: there is no default, and the lint rejects a call that does not name it.
 """
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import signal
@@ -78,17 +82,26 @@ def _seconds(name, value, *, zero_ok):
 
 def _decoded(data, encoding):
     """Partial output as a timed-out `communicate` carries it: bytes, also in text mode on Python 3.10. `encoding` is
-    `(encoding, errors)` of the pipe in text mode and None in binary mode."""
+    `(encoding, errors)` of the pipe in text mode and None in binary mode. What was read stops wherever the command was
+    when it was cut off, so it can end in the middle of a character: it is decoded with `errors="replace"` (the pipe's own
+    strict error handling would raise UnicodeDecodeError here, in place of the Timeout or of the result)."""
     if encoding is None:
         return data or b""
     if isinstance(data, str):
         return data
-    return (data or b"").decode(*encoding).replace("\r\n", "\n").replace("\r", "\n")
+    return (data or b"").decode(encoding[0], "replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _drain(proc, drain, text):
     """What is left in `proc`'s pipes, `(stdout, stderr)`, read for at most `drain` seconds: then both pipes are closed,
-    `proc` is collected (for `drain` seconds at most) and what was read so far is returned."""
+    `proc` is collected (for `drain` seconds at most) and what was read so far is returned. What is left was cut off
+    wherever the command was, so it can end in the middle of a character, and the last read decodes it: the pipes are told
+    to replace what they cannot decode first (the strict default would raise UnicodeDecodeError out of the read, in place
+    of the Timeout or of the result). The read that ends a command that finished is not touched: it decodes as it always did."""
+    if text:
+        for pipe in (proc.stdout, proc.stderr):
+            with contextlib.suppress(ValueError):  # a pipe that is closed already has nothing left to decode
+                pipe.reconfigure(errors="replace")
     try:
         return proc.communicate(timeout=drain)
     except subprocess.TimeoutExpired as exc:
