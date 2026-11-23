@@ -15,7 +15,7 @@
 
 ## Delegation contract
 
-Task envelope for each subagent: `{repo, pr, url, base_sha, head_sha, checkout_path, role, acceptance_criteria, explicit_scope, known_findings}`. Supply paths to diff/log artifacts instead of flooding parent context.
+Task envelope for each subagent: `{repo, pr, url, base_sha, head_sha, checkout_path, role, acceptance_criteria, explicit_scope, known_findings}`. Supply paths to diff/log artifacts instead of flooding parent context. When the diff touches `.agents/skills`, the Coder's envelope carries a validation item: "the tests of what it changed; not the full `make skill-test` (Root runs that once, as the receipt)" (`.agents/skills/_shared/local-validation.md`).
 
 For pilot, also supply `pilot_history_checks` (absolute path to the shared history
 reference), relevant fix/review links, finding ledger and the `target_validation`
@@ -28,13 +28,14 @@ Use the ready-to-copy prompts in
 Expected concise result: `{role, head_sha, status, root_causes, changed_files, commits, findings:[{severity,file,line,evidence,remediation}], validation:[{command,result,head_sha,log_path}], blockers, next_action}`.
 
 - SA/Reviewer: analytical roles; no code edits, commit, push or Ready transition.
-- Coder: can edit/test/commit only in the assigned verified checkout (no worktrees, no branch switching). Parent owns Github mutations (push/Ready) after verification.
+- Coder: can edit/test/commit only in the assigned verified checkout (no worktrees, no branch switching). Parent owns GitHub mutations: the push of each scanned commit (SKILL.md, cycle-time rule 9) and Ready after the final gate.
 - Reviewer must inspect the actual current diff, not just Coder's claims, and independently assess whether the stated acceptance criteria are met.
 - Review comments Root would dispute go to the reviewer as `{url, text, path/line}` without Root's disposition or counter-evidence; compare its verdict with Root's afterwards ([review comments](review-comments.md)).
 
 ## Loop and interruption
 
 - Make an effective round count when Coder changed a causal hypothesis or implementation and ran impacted checks; a no-op transient CI retry is not a fix round. A reviewer PASS with only P3/P4 remarks ends the round: answer them on the PR, do not dispatch a Coder for them (SKILL.md, cycle-time rule 3).
+- A round starts with one Coder dispatch that carries everything known that this PR must change: the reviewer's blocking findings, failing checks, `valid` review comments and the user's requests for it. A request that arrives while the review runs joins the next round, which is started when the review has no blocker; `--wait --ready` is not started with a known request outstanding (SKILL.md, cycle-time rule 10, with its two exceptions).
 - After 3 failed rounds invoke SA again with new evidence. If no sound alternative, mark Draft-blocked and end this invocation without starting another PR.
 - Permission errors, rate limiting, no true independent agent, unknown check requirements, and push conflicts are **external blockers**. Never mark Ready by inference.
 - A review claim raised again without new evidence after a reviewer-confirmed dispute, or a Root/reviewer disagreement that a fresh SA diagnosis does not settle, is a **human decision**: leave Draft and report both comment URLs.
