@@ -38,12 +38,14 @@ import pr_loop
 import ready_signal as rs
 import ready_signal_world as rw
 from pr_loop_result import load_task, write_result
-from pr_loop_fakes import (HELPER_PATHS, LOGIN, NO_SERVER, NO_SOCKET, UPDATE_ENVIRONMENT, FakeEnv, FakeTime, pr_view_json,
-                           ready_view, signal_world)
+from pr_loop_fakes import (HELPER_PATHS, LIST_FORMAT, LOGIN, NO_SERVER, NO_SOCKET, SOCKET, UPDATE_ENVIRONMENT, FakeEnv, FakeTime,
+                           pr_view_json, ready_view, signal_world)
 from test_skill_links import link_targets
 
 HEAD = "a" * 40
 NEW = "b" * 40
+# What a refusal because of a live pane says it can be listed with (kjelly/pilot#442): the one place the tests spell it.
+CLEAN_POINTER = "(python3 scripts/pr_loop.py --clean lists what an earlier run left)"
 
 
 class PRLoopTests(unittest.TestCase):
@@ -1622,10 +1624,32 @@ class ImportsTests(unittest.TestCase):
                      "check-ref-format", "diff-tree", "worktree"}
     SPAWNS = {"command", "run", "Popen", "check_output", "check_call", "call"}
 
+    # The ONE place the runner deletes (kjelly/pilot#442): `--clean --remove-task-dirs --yes` unlinks the two files of a finished task
+    # directory and removes the empty directory, each through the descriptor of the directory it is in (`dir_fd`: nothing is
+    # looked up by a path that a symlink could redirect), in this one module-level function. Every other way to delete is
+    # what it was: a violation.
+    REMOVER = "remove_task_directory"
+    SANCTIONED = {"unlink", "rmdir"}
+
+    @classmethod
+    def sanctioned(cls, tree):
+        """The ids of the `os.unlink` and `os.rmdir` attributes that are CALLED WITH `dir_fd` inside the module-level function
+        REMOVER: the deletions the guard lets through."""
+        found = set()
+        for function in tree.body:
+            if isinstance(function, ast.FunctionDef) and function.name == cls.REMOVER:
+                for node in ast.walk(function):
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in cls.SANCTIONED \
+                            and isinstance(node.func.value, ast.Name) and node.func.value.id == "os" \
+                            and any(keyword.arg == "dir_fd" for keyword in node.keywords):
+                        found.add(id(node.func))
+        return found
+
     @classmethod
     def ephemeral(cls, source):
         """What in `source` could create a workspace for the agents or destroy something of the operator's."""
         tree = ast.parse(source)
+        allowed = cls.sanctioned(tree)
         found = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -1640,7 +1664,7 @@ class ImportsTests(unittest.TestCase):
                               if alias.name in cls.DELETES_ON_OS | cls.DELETES_ANYWHERE]
             elif isinstance(node, ast.Attribute):
                 receiver = node.value.id if isinstance(node.value, ast.Name) else None
-                if node.attr in cls.DELETES_ANYWHERE:
+                if node.attr in cls.DELETES_ANYWHERE and id(node) not in allowed:
                     found.append(f"uses {node.attr}")
                 if receiver == "os" and node.attr in cls.DELETES_ON_OS:
                     found.append(f"uses os.{node.attr}")
@@ -1850,8 +1874,10 @@ class ImportsTests(unittest.TestCase):
                 "shutil.which('claude')\ngit(cwd, 'rev-parse', '--show-toplevel')\n"
                 "git(cwd, 'config', '--get-all', '-z', 'remote.origin.url')\ncommand('tmux', 'list-panes')\n"
                 "git(cwd, 'worktree', 'list', '--porcelain')\n"
-                "exclude.open('a', encoding='utf-8')\npath.open('x', encoding='utf-8')\ntext.replace('a', 'b')\n")
+                "exclude.open('a', encoding='utf-8')\npath.open('x', encoding='utf-8')\ntext.replace('a', 'b')\n"
+                "def remove_task_directory(base, nonce):\n    os.unlink(name, dir_fd=fd)\n    os.rmdir(nonce, dir_fd=base)\n")
         self.assertEqual([], self.ephemeral(good), "control: what the runner does is accepted")
+        elsewhere = lambda body, name="remove_task_directories": f"def {name}(base, nonce):\n    {body}\n"
         for case, extra, expected in (
                 ("a temporary directory", "import tempfile\n", "imports tempfile"),
                 ("one from the module", "from tempfile import mkdtemp\n", "imports from tempfile"),
@@ -1882,9 +1908,43 @@ class ImportsTests(unittest.TestCase):
                 ("git pull", "git(cwd, 'pull')\n", "calls git pull"),
                 ("git clone", "git(cwd, 'clone', url)\n", "calls git clone"),
                 ("git config that writes", "git(cwd, 'config', 'user.name', 'x')\n", "calls git config without --get-all"),
-                ("a subcommand that is computed", "git(cwd, verb)\n", "calls git with a subcommand that is not a literal")):
+                ("a subcommand that is computed", "git(cwd, verb)\n", "calls git with a subcommand that is not a literal"),
+                # the sanctioned deletion is that and no more (kjelly/pilot#442)
+                ("the same unlink in another function", elsewhere("os.unlink(name, dir_fd=fd)"), "uses unlink"),
+                ("the same rmdir in another function", elsewhere("os.rmdir(nonce, dir_fd=base)"), "uses rmdir"),
+                ("the same unlink at the top of the module", "os.unlink(name, dir_fd=fd)\n", "uses unlink"),
+                ("a method of that name", "class C:\n    def remove_task_directory(self):\n        os.unlink(name, dir_fd=fd)\n",
+                 "uses unlink"),
+                ("an unlink inside it that is not through a descriptor", elsewhere("os.unlink(name)", "remove_task_directory"),
+                 "uses unlink"),
+                ("an rmdir by path inside it", elsewhere("os.rmdir(path)", "remove_task_directory"), "uses rmdir"),
+                ("a Path.unlink inside it", elsewhere("path.unlink()", "remove_task_directory"), "uses unlink"),
+                ("a Path.rmdir inside it", elsewhere("path.rmdir()", "remove_task_directory"), "uses rmdir"),
+                ("an unlink of another receiver inside it", elsewhere("link.unlink(name, dir_fd=fd)", "remove_task_directory"),
+                 "uses unlink"),
+                ("an rmtree inside it", elsewhere("shutil.rmtree(path)", "remove_task_directory"), "uses rmtree"),
+                ("os.remove inside it", elsewhere("os.remove(name, dir_fd=fd)", "remove_task_directory"), "uses os.remove"),
+                ("os.removedirs inside it", elsewhere("os.removedirs(path)", "remove_task_directory"), "uses removedirs"),
+                ("a write inside it", elsewhere("path.write_text('x')", "remove_task_directory"), "uses write_text"),
+                ("os.rename inside it", elsewhere("os.rename(a, b)", "remove_task_directory"), "uses os.rename")):
             with self.subTest(case=case):
                 self.assertIn(expected, "; ".join(self.ephemeral(good + extra)))
+        self.assertEqual([], self.ephemeral(good.replace("def remove_task_directory(base, nonce):\n    os.unlink(name, dir_fd=fd)"
+                                                         "\n    os.rmdir(nonce, dir_fd=base)\n", "def remove_task_directory(base, "
+                                                         "nonce):\n    for name in names:\n        os.unlink(name, dir_fd=fd)\n"
+                                                         "    os.rmdir(nonce, dir_fd=base)\n")), "control: in a loop, as the runner does it")
+
+    def test_the_only_deletion_is_the_removal_of_a_task_directory_through_the_descriptors_of_that_directory(self):
+        tree = ast.parse(self.SOURCE)
+        removers = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == self.REMOVER]
+        self.assertEqual(1, len(removers), "one function, at the top level of the module")
+        allowed = self.sanctioned(tree)
+        called = sorted(node.func.attr for node in ast.walk(removers[0])
+                        if isinstance(node, ast.Call) and id(node.func) in allowed)
+        self.assertEqual(["rmdir", "unlink"], called, "one unlink (of each of the two files) and ONE rmdir, nothing else")
+        every = [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in self.DELETES_ANYWHERE]
+        self.assertEqual({id(node) for node in every}, allowed, "no unlink and no rmdir anywhere else in the runner")
+        self.assertNotIn("rmtree", self.SOURCE)
 
     # The runner closes only panes it started, one pane at a time, and never kills, renames or reuses a window or a session
     # (kjelly/pilot#425): every tmux subcommand it names is on this list, spelled out, and none of them kills or renames
@@ -2011,7 +2071,10 @@ class DocumentationTests(unittest.TestCase):
              # to go back; the old requirement and the old advice about an interrupted agent no longer hold
              "HEAD is on the default branch that `origin` itself reports", "may leave the checkout on a PR branch or with "
              "uncommitted work; the next run refuses it", "not on main, the default branch of origin",
-             "must be clean, on the default branch of origin, at origin's tip")
+             "must be clean, on the default branch of origin, at origin's tip",
+             # what the runner promised before `--clean` (kjelly/pilot#442): it deletes a task directory when asked, and closes
+             # panes it did not start in this run, so these sentences are no longer true
+             "and it never deletes the task files", "and it closes only panes it started in this run")
     # What DOC must say: the option and its default (the runner's own words), the way to update a stale
     # checkout, where the ignore lines go, and what the runner does in a directory the agents do not trust.
     DOC_SAYS = ("--checkout DIR", pr_loop.CHECKOUT_DEFAULT, "git pull --ff-only", EXCLUDE_FILE,
@@ -2034,7 +2097,18 @@ class DocumentationTests(unittest.TestCase):
                 "is not switched back when the run ends", "git fetch . <tip>:refs/heads/<b>", "never forced",
                 "git switch --no-guess --no-recurse-submodules --no-overwrite-ignore -- <b>",
                 "never created", "also a prunable one", "to go back: git -C <path> switch <x>",
-                "leaves for the default branch (the branch and its commits stay)")
+                "leaves for the default branch (the branch and its commits stay)",
+                # `--clean` (kjelly/pilot#442): the four flags, what each does and does not, which panes are the runner's, when a
+                # pane is idle, what is closed and in what way, what is removed and in what way, and what it cannot know
+                "It is not `git clean`", "reads no GitHub (no `gh` call)", "`--yes` is the confirmation: nothing asks again",
+                "`--include-busy` and `--remove-task-dirs` without `--yes` are still a listing",
+                "`--yes`, `--include-busy` and `--remove-task-dirs` without `--clean` are errors",
+                "never builds the checkout the way a run does", "`<PR>-draft` or `<PR>-ready`",
+                "its start command is `exec <absolute path>`", "the real paths are equal",
+                "at least a second apart", "Busy panes are closed only with `--include-busy`",
+                "each with `kill-pane` on its ID and never a window or a session",
+                "a pane started again with `respawn-pane` is not closed", "It never closes the pane the command runs in",
+                "the lock is held by this run", "never a recursive delete", "do not paste a listing into GitHub or a chat")
     # What DOC says about --phase-timeout: the default the runner has (read from the code and spelled out) and why
     PHASE_TIMEOUT_SAYS = (f"defaults to {pr_loop.PHASE_TIMEOUT} seconds (4 hours)", "defaults to 14400 seconds (4 hours)",
                           "can take more than two hours", f"({pr_loop.PHASE_TIMEOUT} seconds by default)",
@@ -2045,7 +2119,10 @@ class DocumentationTests(unittest.TestCase):
                       "never switches it back",
                       "never kills or renames a window or a session",
                       "adds a window to the session named for the checkout when that exists",
-                      "still that pane on the same tmux server")
+                      "still that pane on the same tmux server",
+                      "`--clean --yes` takes the checkout's lock and closes the dead and idle panes",
+                      "it never closes the pane the command itself runs in", "It never touches the git checkout",
+                      "`--remove-task-dirs` removes the task directories of finished runs")
 
     @staticmethod
     def flat(text):
@@ -2153,8 +2230,9 @@ class DocumentationTests(unittest.TestCase):
         agent = by_word["agent: %"][0].replace("PR #7 draft agent: %12 in window 7-draft", "PR #N <phase> agent: %<id> in window "
                                                                                            "<PR>-<phase>")
         with tempfile.TemporaryDirectory() as top:
-            row = subprocess.CompletedProcess([], 0, f"pilot-pr-x-0123abcd|%3|0|{top}\n", "")
-            with patch.object(pr_loop, "run", return_value=row):
+            row = pr_loop.Pane("%3", "@1", False, False, "4242", ("1", "2"), "<socket>", "pilot-pr-x-0123abcd", "7-draft", top, "",
+                               top, "claude")
+            with patch.object(pr_loop, "list_panes", return_value=([row], "")):
                 try:
                     pr_loop.check_panes(top)
                 except pr_loop.Stop as exc:
@@ -2164,7 +2242,33 @@ class DocumentationTests(unittest.TestCase):
         return [by_word["Agents run as"][0], by_word["would start"][0], agent, refusal,
                 placed(by_word["Fast-forwarded"][0]), placed(by_word["would fetch"][0]),
                 placed(by_word["would switch"][0]).replace("/x/checkout", "<path>"),
-                placed(by_word["Switched"][0]).replace("/x/checkout", "<path>").replace("'<x>'", "<x>")]
+                placed(by_word["Switched"][0]).replace("/x/checkout", "<path>").replace("'<x>'", "<x>"),
+                *DocumentationTests.cleaned_lines()]
+
+    @staticmethod
+    def cleaned_lines():
+        """What `--clean` prints (kjelly/pilot#442), read from the code that formats it, with a placeholder for what varies: the
+        header, a pane in each state it is told in (dead, idle, busy, one whose closing ends a session), a pane in the way that is
+        not the runner's, a task directory that would be removed and one that is kept, and the summary of a listing and of a run
+        that acted."""
+        pane = pr_loop.Pane("%N", "@N", False, False, "1", ("1", "1"), "<socket>", "<session>", "<PR>-<phase>", "<checkout>", "",
+                            "<path>", "<command>")
+        task = pr_loop.TaskDir("<nonce>", "PR #<n> <phase>", 0.0, "<OUTCOME>", None, ())
+        with patch.object(pr_loop, "age_text", return_value="<age>"):
+            return [pr_loop.header_line("<checkout>", "<session>", "<socket>"),
+                    pr_loop.pane_line(pane, pr_loop.State("dead", "", ""), "would close", "it is dead"),
+                    pr_loop.pane_line(pane, pr_loop.State("idle", "at its prompt", ""), "would close", "it is idle"),
+                    pr_loop.pane_line(pane, pr_loop.State("busy", "<reason>", ""), "left open",
+                                      "it is busy; busy panes are closed only with --include-busy"),
+                    pr_loop.pane_line(pane, pr_loop.State("idle", "at its prompt", ""), "closed", "it is idle",
+                                      "window <PR>-<phase> and session <session>; an attached client is detached"),
+                    pr_loop.foreign_line(pane._replace(window="<window>")),
+                    pr_loop.task_line(task, "would remove", "no pane of the runner is left and it holds only its task and "
+                                                           "result"),
+                    pr_loop.task_line(task, "kept", "task directories are removed only with --remove-task-dirs"),
+                    pr_loop.summary_line(False, "<k>", "<m>", []),
+                    pr_loop.summary_line(False, "<k>", "<m>", ["%N"]),
+                    pr_loop.summary_line(True, "<k>", "<m>", [])]
 
     @classmethod
     def skill_lines(cls, name):
@@ -2233,16 +2337,33 @@ class DocumentationTests(unittest.TestCase):
     def test_the_runner_document_quotes_the_lines_the_runner_prints(self):
         section = self.doc_section()
         lines = self.printed_by_the_runner()
-        self.assertEqual(8, len(lines))
+        self.assertEqual(19, len(lines))
         self.assertEqual(["Agents run as windows of tmux session <session>; watch them read-only with: tmux attach -r -t "
                           "<session>", "would start the agents in tmux session <session>",
                           "PR #N <phase> agent: %<id> in window <PR>-<phase> of tmux session <session>",
                           "pr-loop: agent pane %N (session <session>) is still running in <checkout>; inspect and close it "
-                          "before starting the runner again",
+                          "before starting the runner again (python3 scripts/pr_loop.py --clean lists what an earlier run left)",
                           "Fast-forwarded <branch> from <L12> to <T12>, origin's tip",
                           "would fetch origin's <branch> at <T12> and fast-forward <branch> from <L12> to it",
                           "would switch <path> from <x> (at <X12>) to <b>",
-                          "Switched <path> from <x> (at <X12>) to <b>; to go back: git -C <path> switch <x>"],
+                          "Switched <path> from <x> (at <X12>) to <b>; to go back: git -C <path> switch <x>",
+                          # `--clean` (kjelly/pilot#442): the listing, and what a run that acted says in its place
+                          "Residue of earlier runs in <checkout> (tmux session <session> on <socket>):",
+                          "pane %N window <PR>-<phase>: dead, <command>; would close: it is dead",
+                          "pane %N window <PR>-<phase>: alive, idle (at its prompt), <command>; would close: it is idle",
+                          "pane %N window <PR>-<phase>: alive, busy (<reason>), <command>; left open: it is busy; busy panes "
+                          "are closed only with --include-busy",
+                          "pane %N window <PR>-<phase>: alive, idle (at its prompt), <command>; closed: it is idle; closing it "
+                          "ends window <PR>-<phase> and session <session>; an attached client is detached",
+                          "not the runner's: pane %N (session <session>, window <window>) in <path>: left alone; the next run "
+                          "refuses because of it",
+                          "task <nonce>: PR #<n> <phase>, <age> old, result <OUTCOME>; would remove: no pane of the runner is "
+                          "left and it holds only its task and result",
+                          "task <nonce>: PR #<n> <phase>, <age> old, result <OUTCOME>; kept: task directories are removed only "
+                          "with --remove-task-dirs",
+                          "would close <k> panes and remove <m> task directories; the next run would start",
+                          "would close <k> panes and remove <m> task directories; the next run would still be refused (%N)",
+                          "closed <k> panes and removed <m> task directories; the next run would start"],
                          lines, "what the code prints, with placeholders")
         self.assertEqual([], self.missing(section, lines), self.DOC)
 
@@ -3198,8 +3319,7 @@ class FakeTmuxTests(unittest.TestCase):
         self.assertEqual((0, "", ""), self.tmux("kill-pane", "-t", "%1"))
         self.assertIsNone(self.env.server())
         self.assertEqual((1, "", NO_SERVER), self.read("%1"), "no server: tmux says so and exits 1")
-        self.assertEqual((1, "", NO_SERVER), self.tmux("list-panes", "-a", "-F", "#{session_name}|#{pane_id}|#{pane_dead}|"
-                                                                          "#{pane_current_path}"))
+        self.assertEqual((1, "", NO_SERVER), self.tmux("list-panes", "-a", "-F", pr_loop.LIST_FORMAT))
         rc, out, _ = self.session("S")
         second = self.env.server()
         self.assertNotEqual(first, second, "another PID and start time")
@@ -3215,16 +3335,31 @@ class FakeTmuxTests(unittest.TestCase):
         self.assertEqual({}, self.env.tmux()["buffers"])
 
     def test_the_panes_listing_is_derived_from_the_model_the_way_tmux_prints_it(self):
-        format = "#{session_name}|#{pane_id}|#{pane_dead}|#{pane_current_path}"
-        self.assertEqual((1, "", NO_SERVER), self.tmux("list-panes", "-a", "-F", format), "no session, no server")
+        self.assertEqual(LIST_FORMAT, pr_loop.LIST_FORMAT, "the fake answers the format the runner asks for, and no other")
+        self.assertEqual((1, "", NO_SERVER), self.tmux("list-panes", "-a", "-F", LIST_FORMAT), "no session, no server")
         self.session("S")
         self.window("=S:")
         self.env.add_twin("S", "S-eink")
-        self.env.set_pane("%2", status=["1|0|claude"])  # exited, kept by remain-on-exit: no path
-        self.assertEqual((0, "S|%1|0|/\nS|%2|1|\nS-eink|%1|0|/\nS-eink|%2|1|\n", ""), self.tmux("list-panes", "-a", "-F", format),
-                         "sorted by session name, a twin repeats the rows of its session")
+        self.env.set_pane("%2", status=["1|0|sleep"])  # exited, kept by remain-on-exit: no process and no path
+        rc, out, err = self.tmux("list-panes", "-a", "-F", LIST_FORMAT)
+        self.assertEqual((0, ""), (rc, err))
+        identity, pid = self.env.server(), 1000000000 + 1000 * 1 + 10 * 1  # (a synthetic PID: no real process has it)
+        self.assertEqual([f"%1|@0|0|0|{pid}|{identity}|{SOCKET}|S|w|/|x|/|claude",
+                          f"%2|@1|1|0||{identity}|{SOCKET}|S|v|/|x||sleep",
+                          f"%1|@0|0|0|{pid}|{identity}|{SOCKET}|S-eink|w|/|x|/|claude",
+                          f"%2|@1|1|0||{identity}|{SOCKET}|S-eink|v|/|x||sleep"], out.splitlines(),
+                         "sorted by session name, a twin repeats the rows of its session, a dead pane keeps what it was "
+                         "started with and has no process and no path")
         self.env.update_tmux(listing=["x|%1|0|/y"])
-        self.assertEqual((0, "x|%1|0|/y\n", ""), self.tmux("list-panes", "-a", "-F", format), "a listing a test sets wins")
+        self.assertEqual((0, "x|%1|0|/y\n", ""), self.tmux("list-panes", "-a", "-F", LIST_FORMAT), "a listing a test sets wins")
+        self.assertEqual(98, self.tmux("list-panes", "-a", "-F", "#{pane_id}")[0], "and any other format is refused")
+
+    def test_a_listing_row_is_read_back_into_the_pane_it_describes(self):
+        self.session("S")
+        pane = pr_loop.read_pane(pr_loop.split_listing(self.tmux("list-panes", "-a", "-F", LIST_FORMAT)[1])[0])
+        self.assertEqual(("%1", "@0", False, False, tuple(self.env.server().split("|")), SOCKET, "S", "w", "/", "x", "/", "claude"),
+                         (pane.pane, pane.window_id, pane.dead, pane.in_mode, pane.server, pane.socket, pane.session, pane.window,
+                          pane.start_path, pane.start_command, pane.path, pane.command))
 
     def test_the_environment_a_new_session_takes_is_tmuxs_default_list(self):
         self.session("S")
@@ -4072,7 +4207,7 @@ class CheckoutFastForwardTests(FastForwardCase):
         held = []
 
         def pane():
-            self.env.update_tmux(listing=[f"pilot-pr-7-draft-0123456789|%3|0|{self.path}"])
+            self.env.update_tmux(listing=[self.env.row("pilot-pr-7-draft-0123456789", "%3", path=self.path)])
             return (f"^agent pane %3 \\(session pilot-pr-7-draft-0123456789\\) is still running in "
                     f"{re.escape(str(self.path))}")
 
@@ -4510,7 +4645,7 @@ class CheckoutSwitchTests(FastForwardCase):
         held = []
 
         def pane():
-            self.env.update_tmux(listing=[f"pilot-pr-7-draft-0123456789|%3|0|{self.path}"])
+            self.env.update_tmux(listing=[self.env.row("pilot-pr-7-draft-0123456789", "%3", path=self.path)])
             return "^agent pane %3 "
 
         def dirty():
@@ -5497,54 +5632,62 @@ class CheckoutPaneTests(CheckoutCase):
     def listing(self, *rows):
         self.env.update_tmux(listing=list(rows))
 
+    def row(self, session, pane, **more):
+        """A row of the listing, as tmux 3.8 prints it: by default a live pane in the checkout (`path` is where it is now)."""
+        return self.env.row(session, pane, **more)
+
     def refusal(self, pane="%3", session=SESSION):
         return (f"agent pane {pane} (session {session}) is still running in {self.path}; "
-                "inspect and close it before starting the runner again")
+                f"inspect and close it before starting the runner again {CLEAN_POINTER}")
 
     def test_a_live_pilot_pane_in_the_checkout_is_refused(self):
         for where in (str(self.path), str(self.path / "sub")):
             with self.subTest(where=where):
-                self.listing(f"{self.SESSION}|%3|0|{where}")
+                self.listing(self.row(self.SESSION, "%3", path=where))
                 self.stops(self.refusal())
-        self.listing(f"other|%1|0|{self.env.root}", f"{self.SESSION}|%3|0|{self.path}")
+        self.listing(self.row("other", "%1", path=self.env.root), self.row(self.SESSION, "%3"))
         self.stops(self.refusal())
-        self.assertEqual(["list-panes", "-a", "-F", "#{session_name}|#{pane_id}|#{pane_dead}|#{pane_current_path}"],
-                         self.env.tmux_calls("list-panes")[-1])
+        self.assertEqual(["list-panes", "-a", "-F", pr_loop.LIST_FORMAT], self.env.tmux_calls("list-panes")[-1])
 
     def test_panes_that_are_not_in_the_way_pass(self):
-        self.listing(f"{self.SESSION}|%3|1|",                              # dead (tmux reports no path for it)
-                     f"{self.SESSION}|%4|1|{self.path}",                   # dead, whatever its path
-                     f"{self.SESSION}|%5|0|{self.env.root}",               # live, elsewhere
-                     f"{self.SESSION}|%6|0|{self.path}-other",             # live, a sibling whose name starts the same
-                     f"mine|%7|0|{self.path}",                             # the operator's own session in the checkout
-                     f"pilot-pr|%8|0|{self.path}")                         # not the runner's prefix
+        self.listing(self.row(self.SESSION, "%3", dead=True),                              # dead (tmux reports no path for it)
+                     self.row(self.SESSION, "%4", dead=True, path=self.path),              # dead, whatever its path
+                     self.row(self.SESSION, "%5", path=self.env.root),                     # live, elsewhere
+                     self.row(self.SESSION, "%6", path=f"{self.path}-other"),              # live, a sibling whose name starts the same
+                     self.row("mine", "%7"),                                               # the operator's own session in the checkout
+                     self.row("pilot-pr", "%8"))                                           # not the runner's prefix
         self.checkout()
 
     def test_a_pane_that_reaches_the_checkout_through_a_symlink_counts(self):
         link = self.env.root / "link"
         link.symlink_to(self.path)
-        self.listing(f"{self.SESSION}|%3|0|{link}/sub")
+        self.listing(self.row(self.SESSION, "%3", path=f"{link}/sub"))
         self.stops(self.refusal())
 
     def test_a_live_pane_is_refused_in_a_session_of_the_new_names_and_of_the_old_ones(self):
         new = pr_loop.session_name(self.path)
         for session in (new, "pilot-pr-7-draft-0123456789", "pilot-pr-" + "x" * 24 + "-0123abcd"):
             with self.subTest(session=session):
-                self.listing(f"{session}|%3|0|{self.path}")
+                self.listing(self.row(session, "%3"))
                 self.stops(self.refusal(session=session))
 
     def test_a_twin_repeats_the_rows_of_its_session_and_does_not_hide_a_live_pane(self):
         session = pr_loop.session_name(self.path)
-        self.listing(f"{session}|%3|0|{self.path}", f"{session}-eink|%3|0|{self.path}")
+        self.listing(self.row(session, "%3"), self.row(f"{session}-eink", "%3"))
         self.stops(self.refusal(session=session))
-        self.listing(f"{session}-eink|%3|0|{self.path}")  # a twin alone is a session of the runner's prefix too
+        self.listing(self.row(f"{session}-eink", "%3"))  # a twin alone is a session of the runner's prefix too
         self.stops(self.refusal(session=f"{session}-eink"))
-        self.listing(f"{session}|%3|1|", f"{session}-eink|%3|1|")
+        self.listing(self.row(session, "%3", dead=True), self.row(f"{session}-eink", "%3", dead=True))
         self.checkout().release()  # control: dead in both
 
+    def test_a_pane_listed_under_a_twin_with_the_runners_prefix_blocks_though_its_first_row_does_not(self):
+        # tmux lists the pane once for each session of the group: the row of the session that does not carry the prefix comes first.
+        self.listing(self.row("another-session", "%3"), self.row(self.SESSION, "%3"))
+        self.stops(self.refusal())
+
     def test_sessions_that_do_not_carry_the_runners_prefix_are_not_its_business(self):
-        self.listing(f"pilot-prx-checkout|%3|0|{self.path}", f"my-pilot-pr-checkout|%4|0|{self.path}",
-                     f"pilot|%5|0|{self.path}", f"|%6|0|{self.path}")
+        self.listing(self.row("pilot-prx-checkout", "%3"), self.row("my-pilot-pr-checkout", "%4"),
+                     self.row("pilot", "%5"), self.row("", "%6"))
         self.checkout().release()
 
     def test_an_agent_the_runner_started_is_seen_in_the_panes_tmux_lists_until_it_is_dead(self):
@@ -5553,14 +5696,17 @@ class CheckoutPaneTests(CheckoutCase):
         agent = pr_loop.Agent("claude", first, 7, "draft")  # the real Agent, over the fake tmux's sessions and windows
         self.stops(self.refusal(pane=agent.pane, session=first.session))
         self.env.set_pane(agent.pane, status=["1|0|claude"])  # it exited: remain-on-exit keeps the pane, dead, with no path
-        self.assertEqual([f"{first.session}|{agent.pane}|1|"], self.panes_tmux_lists())
+        (found,) = self.panes_tmux_lists()
+        self.assertEqual((first.session, agent.pane, True, "", "", "7-draft", str(self.path)),
+                         (found.session, found.pane, found.dead, found.path, found.pid, found.window, found.start_path),
+                         "dead: no process and no path, and what it was started with is still there")
+        self.assertEqual(str(self.env.bin / "claude"), pr_loop.started_with(found.start_command))
         self.checkout().release()
 
     @staticmethod
     def panes_tmux_lists():
-        done = subprocess.run(["tmux", "list-panes", "-a", "-F",
-                               "#{session_name}|#{pane_id}|#{pane_dead}|#{pane_current_path}"], capture_output=True, text=True)
-        return done.stdout.splitlines()
+        done = subprocess.run(["tmux", "list-panes", "-a", "-F", pr_loop.LIST_FORMAT], capture_output=True, text=True)
+        return [pr_loop.read_pane(row) for row in pr_loop.split_listing(done.stdout)]
 
     def test_no_tmux_server_means_no_pane(self):
         for error in (NO_SERVER, NO_SOCKET):
@@ -5578,7 +5724,7 @@ class CheckoutPaneTests(CheckoutCase):
 
     def test_the_panes_are_read_after_the_lock_and_before_anything_else_of_the_checkout(self):
         first = self.checkout()
-        self.env.update_tmux(log=[], listing=[f"{self.SESSION}|%3|0|{self.path}"])
+        self.env.update_tmux(log=[], listing=[self.row(self.SESSION, "%3")])
         self.stops(f"another pr_loop runner is using the checkout {first.path} (lock {first.lock_path}); "
                    "wait for it to finish or stop it")
         self.assertEqual([], self.env.tmux_calls(), "the lock refuses first: tmux is not asked")
@@ -5646,7 +5792,7 @@ class CheckoutDryRunTests(CheckoutCase):
 
     def test_a_dry_run_does_not_mind_the_lock_or_the_panes_a_real_run_refuses(self):
         first = self.checkout()
-        self.env.update_tmux(listing=[f"pilot-pr-7-draft-0123456789|%3|0|{self.path}"])
+        self.env.update_tmux(listing=[self.env.row("pilot-pr-7-draft-0123456789", "%3", path=self.path)])
         asked = len(self.env.tmux_calls())
         self.assertEqual(self.path, self.checkout(dry_run=True).path)
         self.assertEqual(asked, len(self.env.tmux_calls()), "a dry run never calls tmux, not even to list the panes")
@@ -5994,7 +6140,8 @@ class ProgramTests(unittest.TestCase):
         reads = len(self.env.gh_calls())
         again = self.run_program()
         self.assertEqual((1, "", f"pr-loop: agent pane %1 (session {session}) is still running in {top}; inspect and close "
-                                 "it before starting the runner again\n"), (again.returncode, again.stdout, again.stderr))
+                                 f"it before starting the runner again {CLEAN_POINTER}\n"),
+                         (again.returncode, again.stdout, again.stderr))
         self.assertEqual(reads, len(self.env.gh_calls()), "refused before it read the PR")
         # The agent exited (remain-on-exit keeps the dead pane, with no path): the same start goes through, in a window of the
         # session that is still there, and nothing of the earlier run is closed, renamed or reused.
@@ -6366,14 +6513,14 @@ class ProgramTests(unittest.TestCase):
 
     def test_a_pane_kept_from_an_earlier_run_in_the_checkout_refuses_the_start(self):
         session = "pilot-pr-7-draft-0123456789"
-        self.env.update_tmux(listing=[f"{session}|%3|0|{self.env.checkout}/sub"])
+        self.env.update_tmux(listing=[self.env.row(session, "%3", path=f"{self.env.checkout}/sub")])
         proc = self.run_program()
         self.assertEqual((1, "", f"pr-loop: agent pane %3 (session {session}) is still running in {self.env.checkout}; "
-                                 "inspect and close it before starting the runner again\n"),
+                                 f"inspect and close it before starting the runner again {CLEAN_POINTER}\n"),
                          (proc.returncode, proc.stdout, proc.stderr))
         self.assertEqual([], self.env.gh_calls())
         self.only_listed_panes()
-        self.env.update_tmux(listing=[f"{session}|%3|1|"], log=[])  # closed (dead): the same start goes through
+        self.env.update_tmux(listing=[self.env.row(session, "%3", dead=True)], log=[])  # closed (dead): the same start goes through
         self.assertIn("is Ready without", self.run_with_ready_pr().stderr)
 
     def run_with_ready_pr(self):
@@ -6438,3 +6585,1495 @@ class ProgramTests(unittest.TestCase):
         self.only_listed_panes()
         self.assertEqual({("pr", "view")}, {tuple(call[:2]) for call in self.env.gh_calls()})
         self.assertIn("GitHub read failed (2/3)", proc.stdout)
+
+
+# ---- (F) `--clean`: what a stopped or interrupted run left (kjelly/pilot#442) ---------------------------------------
+
+def model(name, *args):
+    """A function of the fake tmux's model (the one that is also embedded in the fake), for the pure checks below."""
+    from pr_loop_fakes import _model
+    return _model[name](*args)
+
+
+def q34(text):
+    """`#{q:text}` as tmux 3.4 prints it (captured on 3.4.1 of Ubuntu 24.04, kjelly/pilot#442): a backslash before the characters
+    of `|&;<>()$`\\\"'*?[# =%` and before a backslash, and NOT before `{`, `}` or a newline, which 3.8 quotes (`model("q")`)."""
+    return "".join("\\" + char if char in "|&;<>()`\\\"'*?[# =%" else char for char in text)
+
+
+class ListingParserTests(unittest.TestCase):
+    """The rows of `list-panes -a -F LIST_FORMAT` (kjelly/pilot#442). The free text of them (names, directories, commands) comes
+    in tmux's `q:` quoting, and no value may end its field or its row early: a name with a `|`, a directory with a newline.
+    Everything else about a row is of a fixed shape, and a row that is not is a Stop (fail closed). Read in both quotings that
+    the runner meets: tmux 3.8's, which puts a backslash before a newline in a value, and tmux 3.4's, which does not."""
+    HOSTILE = ["plain", "a|b", "a\\b", "a\\|b", "two\nlines", "\\\n", "quote'\"s", "$HOME `x` $(y)", "sp ace", "tab\there", "é日本",
+               "%#=;&<>()*?[]{}!~^", "", "|", "||", "\\", "x\n", "\n|"]
+
+    def row(self, *free, quote=None, **fixed):
+        shape = ["%1", "@1", "0", "0", "4242", "4007", "1700000013"]
+        text = list(free) or ["/tmp/tmux-1000/default", "pilot-pr-x-0123abcd", "7-draft", "/work", "exec /bin/claude", "/work",
+                              "claude"]
+        return "|".join(shape + [(quote or (lambda value: model("q", value)))(value) for value in text]) + "\n"
+
+    def test_a_row_is_read_into_the_pane_it_describes(self):
+        (fields,) = pr_loop.split_listing(self.row())
+        pane = pr_loop.read_pane(fields)
+        self.assertEqual(("%1", "@1", False, False, "4242", ("4007", "1700000013"), "/tmp/tmux-1000/default",
+                          "pilot-pr-x-0123abcd", "7-draft", "/work", "exec /bin/claude", "/work", "claude"), tuple(pane))
+
+    def test_quoting_is_undone_for_every_character_tmux_quotes_and_for_a_newline(self):
+        for value in self.HOSTILE + [chr(code) for code in range(32, 127)]:
+            with self.subTest(value=value):
+                self.assertEqual(value, pr_loop.unquote(model("q", value)))
+
+    def test_a_value_that_looks_like_a_separator_stays_in_its_field_and_its_row(self):
+        for name, quote in (("tmux 3.8", None), ("tmux 3.4", q34)):
+            for value in self.HOSTILE:
+                with self.subTest(tmux=name, value=value):
+                    rows = pr_loop.split_listing(self.row("/s", value, value, value, value, value, value, quote=quote) * 2)
+                    self.assertEqual(2, len(rows), "two rows, whatever the values hold")
+                    for fields in rows:
+                        pane = pr_loop.read_pane(fields)
+                        self.assertEqual([value] * 6, [pane.session, pane.window, pane.start_path, pane.start_command, pane.path,
+                                                       pane.command])
+                        self.assertEqual(("/s", "%1"), (pane.socket, pane.pane))
+
+    def test_a_newline_that_is_not_quoted_ends_a_row_only_where_a_row_starts(self):
+        # tmux 3.4 does not quote a newline in a value. What follows it says whether it ends the row or is in a field.
+        two = self.row(quote=q34) + self.row("/s", "S", "w", "/a\nb", "c", "/a\nb", "x", quote=q34)
+        rows = pr_loop.split_listing(two)
+        self.assertEqual(2, len(rows))
+        self.assertEqual("/a\nb", pr_loop.read_pane(rows[1]).start_path)
+        forged = self.row("/s", "S", "w", "/a\n%9|@9|0|0|1|4007|1700000013|/s|S|w|/a|exec /x|/a|x", "c", "/a", "x", quote=lambda v: v)
+        self.assertEqual(2, len(pr_loop.split_listing(forged)), "(a value made to look like a row is one: 3.8 quotes the newline "
+                                                                "in it, 3.4 does not, and nothing can tell the two apart)")
+        quoted = self.row("/s", "S", "w", "/a\n%9|@9|0|0|1|4007|1700000013|/s|S|w|/a|exec /x|/a|x", "c", "/a", "x")
+        self.assertEqual(1, len(pr_loop.split_listing(quoted)), "while the newline tmux 3.8 quotes is never the end of a row")
+
+    def test_the_unquoted_separators_split_and_nothing_else_does(self):
+        first, second = "%1|@1|0|0|4|5|6|a|b", "%2|@2|1|0||5|6|c|d"
+        self.assertEqual([first.split("|"), second.split("|")], pr_loop.split_listing(f"{first}\n{second}\n"))
+        self.assertEqual([["%1", "@1", "0", "0", "4", "5", "6", "a\\|b"]], pr_loop.split_listing("%1|@1|0|0|4|5|6|a\\|b\n"),
+                         "a quoted bar stays")
+        self.assertEqual([["%1", "@1", "0", "0", "4", "5", "6", "a\\\nb"]], pr_loop.split_listing("%1|@1|0|0|4|5|6|a\\\nb\n"),
+                         "a quoted newline stays")
+        self.assertEqual([["%1", "@1", "0", "0", "4", "5", "6", "a\\\\", "b"]],
+                         pr_loop.split_listing("%1|@1|0|0|4|5|6|a\\\\|b\n"), "a quoted backslash quotes nothing after it")
+        self.assertEqual([], pr_loop.split_listing(""))
+
+    def test_a_listing_that_ends_inside_a_row_or_a_quoting_cannot_be_read(self):
+        for text in ("a|b", "a|b\nc", "a\\", "a|b\\", "|"):
+            with self.subTest(text=text):
+                self.assertIsNone(pr_loop.split_listing(text))
+
+    def test_a_row_of_another_shape_is_a_stop(self):
+        good = self.row().rstrip("\n").split("|")
+        for case, fields in (("a field short", good[:-1]), ("a field too many", good + ["x"]), ("no fields", []),
+                             ("a pane that is not an ID", ["1"] + good[1:]), ("a window that is not an ID", [good[0], "1"] + good[2:]),
+                             ("dead that is not 0 or 1", good[:2] + ["2"] + good[3:]),
+                             ("in-mode that is not 0 or 1", good[:3] + ["x"] + good[4:]),
+                             ("a process that is not a number", good[:4] + ["12x"] + good[5:]),
+                             ("a server PID that is empty", good[:5] + [""] + good[6:]),
+                             ("a start time that is not a number", good[:6] + ["now"] + good[7:])):
+            with self.subTest(case=case), self.assertRaisesRegex(pr_loop.Stop, "^tmux list-panes returned a line that cannot be read$"):
+                pr_loop.read_pane(fields)
+        self.assertEqual("", pr_loop.read_pane(good[:4] + [""] + good[5:]).pid, "control: a dead pane has no process")
+
+    def test_the_format_quotes_every_free_text_field_and_none_of_the_others(self):
+        parts = pr_loop.LIST_FORMAT.split("|")
+        self.assertEqual(7 + len(pr_loop.LIST_TEXT), len(parts))
+        self.assertEqual([f"#{{q:{name}}}" for name in pr_loop.LIST_TEXT], parts[7:])
+        self.assertTrue(all("q:" not in part for part in parts[:7]), "an ID or a number needs no quoting")
+        self.assertEqual(len(parts) - 1, len(pr_loop.Pane._fields), "the server's PID and start time are one field of a Pane")
+
+
+class StartedWithTests(unittest.TestCase):
+    """The start command of a pane as tmux shows it: the runner's is `exec <absolute path>`, and only that is the runner's. tmux
+    3.8 shows the command in double quotes when it holds a space (a path that needs quoting for a shell is quoted again inside),
+    an older one may show it as it was given: both are read, and everything else is not the runner's."""
+
+    def test_the_command_the_runner_starts_an_agent_with_is_read_back_whatever_the_path_is(self):
+        for path in ("/usr/bin/claude", "/opt/my tools/agent x", "/o'brien/bin/claude", '/q"uote/agent', "/a$b/c", "/a b#c/d",
+                     "/back\\slash/agent", "/new\nline/agent", "/é日本/agent", "/a;b|c&d/agent", "/tab\there/agent"):
+            with self.subTest(path=path):
+                given = "exec " + shlex.quote(path)
+                self.assertEqual(path, pr_loop.started_with(model("start_shown", [given])), "as tmux 3.8 shows it")
+                self.assertEqual(path, pr_loop.started_with(given), "as it was given")
+
+    def test_the_forms_tmux_3_8_and_3_4_were_captured_showing_are_read(self):
+        # Captured (kjelly/pilot#442) on tmux 3.8 and on tmux 3.4.1 (Ubuntu 24.04) for `new-window -- "exec <quoted path>"`. tmux 3.4
+        # writes a `$` in a command between double quotes as `\\$` (a backslash that is not a quoting of the `$`): the shape is
+        # still read, the path in it is not the path (`/a\\$b`), which nothing here uses.
+        for tmux, shown, path in (("3.8", '"exec /usr/bin/claude"', "/usr/bin/claude"),
+                                  ("3.4", '"exec /usr/bin/claude"', "/usr/bin/claude"),
+                                  ("3.8", "\"exec '/opt/my tools/agent x'\"", "/opt/my tools/agent x"),
+                                  ("3.4", "\"exec '/opt/my tools/agent x'\"", "/opt/my tools/agent x"),
+                                  ("3.8", "\"exec '/o'\\\"'\\\"'brien/bin/claude'\"", "/o'brien/bin/claude"),
+                                  ("3.4", "\"exec '/o'\\\"'\\\"'brien/bin/claude'\"", "/o'brien/bin/claude"),
+                                  ("3.8", "\"exec '/a\\$b/c'\"", "/a$b/c"), ("3.4", "\"exec '/a\\\\$b/c'\"", "/a\\$b/c")):
+            with self.subTest(tmux=tmux, shown=shown):
+                self.assertEqual(path, pr_loop.started_with(shown))
+
+    def test_anything_that_is_not_that_command_is_not(self):
+        for shown in ("", '""', "bash", '"tail -f /dev/null"', "tail -f /dev/null", '"exec"', '"exec "', '"exec bin/claude"',
+                      '"exec ./claude"', '"exec /bin/claude --resume"', '"exec /bin/claude;rm"', '"exec /bin/sh -c x"',
+                      "exec", "exec /a /b", '"exec \'/unbalanced"', "exec 'x", '"exec /a" "exec /b"', "EXEC /bin/claude",
+                      '"exec\\ /bin/claude"', "'exec /bin/claude'", "x exec /bin/claude", "\"exec /bin/claude\" extra"):
+            with self.subTest(shown=shown):
+                self.assertIsNone(pr_loop.started_with(shown))
+
+
+class ScreenStateTests(unittest.TestCase):
+    """The ONE reader of an agent's screen: `wait_for_prompt` waits for `prompt`, `--clean` reads all four. Screens are
+    SYNTHETIC: they exercise the PROMPT, CHOICE and BUSY rules, not any real agent's UI."""
+
+    def test_each_state_is_told_from_the_screen(self):
+        for case, screen, state in (("an input prompt", "synthetic banner\n\n❯", "prompt"),
+                                    ("a prompt with text typed", "synthetic\n❯ typed", "prompt"),
+                                    ("working", "synthetic\n❯\nWorking (12s • esc to interrupt)", "working"),
+                                    ("ctrl+c to interrupt", "run (ctrl+c to interrupt)", "working"),
+                                    ("a numbered choice", "Do you trust this folder?\n❯ 1. Yes, proceed\n  2. No, exit", "asking"),
+                                    ("a loading screen", "synthetic: loading", "unknown"),
+                                    ("a shell prompt", "user@host:~$", "unknown"),
+                                    ("a prompt too far up", "❯\n" + "line\n" * 6, "unknown"),
+                                    ("nothing", "", "unknown"), ("only blank lines", "\n  \n\t\n", "unknown")):
+            with self.subTest(case=case):
+                self.assertEqual(state, pr_loop.screen_state(screen))
+                self.assertEqual(state, pr_loop.screen_state(screen, strict=True))
+
+    def test_strict_also_reads_to_interrupt_wherever_it_stands(self):
+        for screen in ("❯\nWorking (12s • esc to interrupt) · 3 background tasks", "❯\nto interrupt, press esc",
+                       "❯\nPress ESC TO INTERRUPT now", "❯\nesc to interrupt)  x"):
+            with self.subTest(screen=screen):
+                self.assertEqual("prompt", pr_loop.screen_state(screen), "the runner's own wait only reads the end of a line")
+                self.assertEqual("working", pr_loop.screen_state(screen, strict=True))
+
+    def test_only_the_last_sixteen_non_blank_lines_count(self):
+        old = "Working (12s • esc to interrupt)\n" + "\n".join(f"line {n}" for n in range(16)) + "\n❯"
+        self.assertEqual("prompt", pr_loop.screen_state(old, strict=True), "the 17th line from the end is out of sight")
+        recent = "Working (12s • esc to interrupt)\n" + "\n".join(f"line {n}" for n in range(14)) + "\n❯"
+        self.assertEqual("working", pr_loop.screen_state(recent, strict=True), "the 16th line from the end counts")
+
+
+class RunnersOwnTests(unittest.TestCase):
+    """A pane is the runner's only if ALL five conditions hold on one row (kjelly/pilot#442): each is a pass case beside the
+    row that fails exactly it."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="pr-loop-own-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+        self.top = self.root / "co"
+        self.top.mkdir()
+        self.session = pr_loop.session_name(self.top)
+        self.command = model("start_shown", ["exec /usr/bin/claude"])
+
+    def pane(self, **change):
+        pane = pr_loop.Pane("%3", "@1", False, False, "4242", ("4007", "1"), "/s", self.session, "7-draft", str(self.top),
+                            self.command, str(self.top), "claude")
+        return pane._replace(**change)
+
+    def own(self, **change):
+        return pr_loop.runners_own(self.pane(**change), self.top, self.session)
+
+    def test_the_pane_the_runner_started_is_its_own(self):
+        self.assertTrue(self.own())
+        for window in ("1-draft", "7-ready", "371-draft", "99999-ready"):
+            self.assertTrue(self.own(window=window), window)
+        self.assertTrue(self.own(dead=True, pid="", path=""), "a dead pane is the runner's too, with no process and no path")
+
+    def test_condition_1_the_session_is_exactly_the_one_named_for_the_checkout(self):
+        other = pr_loop.session_name(self.root / "other")
+        for session in (other, self.session + "-eink", self.session + "x", self.session[:-1], "x" + self.session,
+                        "pilot-pr-7-draft-0123456789", "", self.session.upper()):
+            with self.subTest(session=session):
+                self.assertFalse(self.own(session=session))
+
+    def test_condition_2_the_window_is_named_for_an_agent(self):
+        for window in ("", "draft", "7", "7-", "-draft", "0-draft", "07-draft", "7-drafts", "7-DRAFT", "7-draft ", " 7-draft",
+                       "x7-draft", "7-draft\n", "7-merge", "a-draft", "7_draft", "claude", "bash", "7-draft-2", "1.5-ready"):
+            with self.subTest(window=window):
+                self.assertFalse(self.own(window=window))
+
+    def test_condition_3_it_was_started_in_the_checkout_itself(self):
+        (self.root / "co-other").mkdir()
+        (self.top / "sub").mkdir()
+        link = self.root / "link"
+        link.symlink_to(self.top)
+        self.assertTrue(self.own(start_path=str(link)), "the same directory through a symlink is the same directory")
+        self.assertTrue(self.own(start_path=f"{self.top}/."), "and so is a path that is spelled differently")
+        for path in (str(self.root / "co-other"), str(self.top / "sub"), str(self.root), "/", "", str(self.root / "nothing"),
+                     "co"):
+            with self.subTest(path=path):
+                self.assertFalse(self.own(start_path=path))
+        self.assertFalse(self.own(start_path="", path=str(self.top)), "where it is NOW is not where it was started")
+
+    def test_condition_4_it_was_started_with_exec_and_an_absolute_path(self):
+        # (`exec` and `/bin/claude` as two arguments would show as `exec /bin/claude`, which an older tmux shows for the single
+        # argument too: that is a command that cannot run, `exec` being a shell builtin, so it is not a case to tell apart.)
+        for command in ("", model("start_shown", ["tail", "-f", "x"]), model("start_shown", ["exec /bin/claude --resume"]),
+                        model("start_shown", ["exec claude"]), model("start_shown", ["claude"]),
+                        model("start_shown", ["exec  /bin/claude"]), model("start_shown", ["exec '/bin/claude'"]),
+                        model("start_shown", ["exec /bin/claude;rm"]), '"exec /a /b"', "exec"):
+            with self.subTest(command=command):
+                self.assertFalse(self.own(start_command=command))
+        self.assertTrue(self.own(start_command="exec /bin/claude"), "as it was given")
+        self.assertTrue(self.own(start_command=model("start_shown", ["exec '/a b/claude'"])))
+
+    def test_where_it_is_now_what_runs_in_it_and_its_mode_are_not_conditions(self):
+        self.assertTrue(self.own(path="/anywhere", command="bash", pid="1", in_mode=True))
+
+
+class CleanCase(unittest.TestCase):
+    """`--clean` over the fake tmux and a real checkout of a real scratch remote (kjelly/pilot#442). The agents are started
+    by the real `Agent`, the way a run starts them, so that the panes are the ones a run leaves; their screens and states are
+    scripted and SYNTHETIC. Nothing here can reach the developer's tmux server (FakeEnv refuses to go on unless `which` finds
+    the fake) and a test that kills a pane kills it in the fake."""
+    repo = pr_loop.Repo.parse("acme/demo")
+    WORKING = "synthetic\n❯\nWorking (12s • esc to interrupt)"
+
+    def setUp(self):
+        self.env = FakeEnv(self)
+        self.clock = FakeTime()
+        self.told = []
+        for target, value in (("time", self.clock), ("tell", self.told.append)):
+            patcher = patch.object(pr_loop, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.top = self.env.checkout
+        self.session = pr_loop.session_name(self.top)
+        self.where = SimpleNamespace(path=self.top, session=self.session)
+        # What an earlier run did to the checkout's exclude file, so that its task directories are not uncommitted work.
+        with (self.top / ".git/info/exclude").open("a") as stream:
+            stream.write(f"/.pr-ready/\n/{pr_loop.TASK_DIR}/\n")
+
+    def state(self):
+        """Everything of the checkout a listing must leave as it is: HEAD, the refs, the index (and when it was written), the exclude
+        file, the lock file (it must not be made), every file of the work tree, and what the fake tmux has."""
+        git = lambda *args: self.env.git(*args, cwd=self.top)
+        index = self.top / ".git/index"
+        files = {str(path.relative_to(self.top)): sha256_of(path) if path.is_file() and not path.is_symlink() else str(path.readlink())
+                 if path.is_symlink() else "dir" for path in sorted(self.top.rglob("*")) if ".git" not in path.relative_to(self.top).parts[:1]}
+        return dict(head=git("rev-parse", "HEAD"), symbolic=git("symbolic-ref", "-q", "HEAD"),
+                    refs=git("for-each-ref", "--format=%(refname) %(objectname)"), index=(sha256_of(index), index.stat().st_mtime_ns),
+                    exclude=sha256_of(self.top / ".git/info/exclude"), lock=(self.top / ".git" / pr_loop.LOCK_NAME).exists(),
+                    fetch_head=(self.top / ".git/FETCH_HEAD").exists(), files=files, live=self.env.live())
+
+    def agent(self, number=7, phase="draft", **pane):
+        """An agent the way a run starts it (the real `Agent` over the fake tmux); `pane` scripts its pane."""
+        found = pr_loop.Agent("claude", self.where, number, phase)
+        self.told.clear()
+        if pane:
+            self.env.set_pane(found.pane, **pane)
+        return found
+
+    def args(self, **flags):
+        return SimpleNamespace(**{**dict(clean=True, yes=False, include_busy=False, remove_task_dirs=False, dry_run=False, pr=[],
+                                         checkout=str(self.top), repo="acme/demo"), **flags})
+
+    def clean(self, **flags):
+        """`--clean` with these flags; `(exit status, the lines it printed)`."""
+        del self.told[:]
+        code = pr_loop.Clean(self.repo, self.args(**flags)).run()
+        return code, list(self.told)
+
+    def kills(self):
+        return [call[2] for call in self.env.tmux_calls("kill-pane")]
+
+    def line(self, lines, pane):
+        """The one line about `pane` in `lines`."""
+        (found,) = [line for line in lines if line.startswith(f"pane {pane} ") or f"pane {pane} (" in line]
+        return found
+
+    def task(self, *, pr=7, phase="draft", result=None, age=3 * 3600 + 20 * 60, nonce=None):
+        """A task directory the way a run writes it (the runner's own `Checkout.task`), `age` seconds old by the fake clock, with a
+        result the real `write_result` writes when `result` names an outcome; its nonce."""
+        path, task = pr_loop.Checkout.task(SimpleNamespace(path=self.top), self.repo, pr, phase, HEAD)
+        if nonce:
+            (path.parent).rename(path.parent.parent / nonce)
+            path = path.parent.parent / nonce / "task.json"
+            path.write_text(json.dumps(dict(task, nonce=nonce)))
+        if result:
+            write_result(path, json.loads(path.read_text()), outcome=result, head=HEAD, reason="synthetic")
+        stamp = self.clock.time() - age
+        for entry in path.parent.iterdir():
+            os.utime(entry, (stamp, stamp))
+        return path.parent.name
+
+    def task_dir(self, nonce):
+        return self.top / pr_loop.TASK_DIR / nonce
+
+
+class CleanListingTests(CleanCase):
+    """The listing (`--clean` without `--yes`): what it says about each pane, and that it changes nothing."""
+    SOCKET = SOCKET
+
+    def header(self):
+        return f"Residue of earlier runs in {self.top} (tmux session {self.session} on {self.SOCKET}):"
+
+    def test_the_listing_of_one_idle_agent_and_of_nothing(self):
+        agent = self.agent()
+        code, lines = self.clean()
+        self.assertEqual(0, code)
+        self.assertEqual([self.header(),
+                          f"pane {agent.pane} window 7-draft: alive, idle (at its prompt), claude; would close: it is idle; "
+                          f"closing it ends window 7-draft and session {self.session}; an attached client is detached",
+                          "  | ❯", "would close 1 panes and remove 0 task directories; the next run would start"], lines)
+        self.env.kill_server()
+        code, lines = self.clean()
+        self.assertEqual((0, [f"Residue of earlier runs in {self.top} (tmux session {self.session}):", NO_SERVER,
+                              "would close 0 panes and remove 0 task directories; the next run would start"]), (code, lines))
+
+    def test_a_listing_changes_nothing_and_asks_tmux_only_to_list_and_to_capture(self):
+        idle = self.agent(7, "draft")
+        self.agent(7, "ready", status=["1|0|claude"])
+        self.agent(8, "draft", screens=[self.WORKING])
+        self.env.add_split(idle.pane)
+        self.task(result="DRAFT-BLOCKED")
+        self.env.update_tmux(log=[])
+        before = self.state()
+        for flags in ({}, {"include_busy": True}, {"remove_task_dirs": True}, {"include_busy": True, "remove_task_dirs": True}):
+            with self.subTest(flags=flags):
+                code, lines = self.clean(**flags)
+                self.assertEqual(0, code)
+                self.assertEqual({"list-panes", "capture-pane"}, {call[0] for call in self.env.tmux_calls()},
+                                 "tmux is asked to list and to capture, never to change anything")
+                self.assertEqual([], self.kills())
+                self.assertEqual([], self.env.gh_calls(), "no GitHub")
+                self.assertEqual(before, self.state(), "no checkout file, ref, index, lock or task directory, and no pane")
+                self.assertTrue(any("would close" in line for line in lines))
+                self.assertFalse(any(line.startswith(("closed", "removed")) or ": closed" in line or ": removed" in line
+                                     for line in lines))
+
+    def test_each_state_a_pane_can_be_in_is_told_with_its_reason(self):
+        asking = "Do you trust this folder?\n❯ 1. Yes, proceed\n  2. No, exit"
+        for case, pane, expected in (
+                ("dead", dict(status=["1|0|claude"]), ("dead", "dead")),
+                ("idle", {}, ("alive, idle (at its prompt)", "idle")),
+                ("working", dict(screens=[self.WORKING]), ("alive, busy (working)", "busy")),
+                ("working, the words in the middle of a line", dict(screens=["❯\nWorking (12s • esc to interrupt) · 3 tasks"]),
+                 ("alive, busy (working)", "busy")),
+                ("asking", dict(screens=[asking]), ("alive, busy (asking)", "busy")),
+                ("copy mode", dict(status=["0|1|claude"]), ("alive, busy (copy-mode)", "busy")),
+                ("a shell in the foreground", dict(status=["0|0|bash"]), ("alive, busy (unknown: no agent in the foreground)", "busy")),
+                ("a login shell", dict(status=["0|0|-zsh"]), ("alive, busy (unknown: no agent in the foreground)", "busy")),
+                ("nothing in the foreground", dict(status=["0|0|"]), ("alive, busy (unknown: no agent in the foreground)", "busy")),
+                ("a screen with no prompt", dict(screens=["synthetic: loading"]),
+                 ("alive, busy (unknown: no input prompt on the screen)", "busy")),
+                ("a screen that changes", dict(screens=["❯ a", "❯ b"]), ("alive, busy (the screen is still changing)", "busy"))):
+            with self.subTest(case=case):
+                self.setUp()
+                agent = self.agent(**pane)
+                what, kind = expected
+                command = pane.get("status", ["0|0|claude"])[0].split("|")[2] or "-"
+                code, lines = self.clean()
+                found = self.line(lines, agent.pane)
+                self.assertTrue(found.startswith(f"pane {agent.pane} window 7-draft: {what}, "), found)
+                self.assertIn(f", {command}; ", found)
+                self.assertIn("would close: it is dead" if kind == "dead" else "would close: it is idle" if kind == "idle" else
+                              "left open: it is busy; busy panes are closed only with --include-busy", found)
+
+    def test_busy_panes_would_be_closed_with_include_busy_and_nothing_else_changes(self):
+        busy = self.agent(7, "draft", screens=[self.WORKING])
+        idle = self.agent(7, "ready")
+        lines = self.clean()[1]
+        self.assertIn("left open: it is busy; busy panes are closed only with --include-busy", self.line(lines, busy.pane))
+        self.assertIn("would close: it is idle", self.line(lines, idle.pane))
+        self.assertEqual("would close 1 panes and remove 0 task directories; the next run would still be refused (%1)", lines[-1])
+        lines = self.clean(include_busy=True)[1]
+        self.assertIn("would close: it is busy, and --include-busy was given", self.line(lines, busy.pane))
+        self.assertEqual("would close 2 panes and remove 0 task directories; the next run would start", lines[-1])
+
+    def test_an_idle_pane_is_read_twice_at_least_a_second_apart_and_a_busy_one_once(self):
+        busy = self.agent(7, "draft", screens=[self.WORKING])
+        idle = self.agent(7, "ready")
+        self.env.update_tmux(log=[])
+        self.clean()
+        captured = [call[-1] for call in self.env.tmux_calls("capture-pane")]
+        self.assertEqual([busy.pane, idle.pane, idle.pane], captured, "the busy one needs no second read, the idle one does")
+        self.assertEqual([pr_loop.SETTLE], self.clock.sleeps, "one wait for all of them, a second long")
+        self.assertGreaterEqual(pr_loop.SETTLE, 1.0)
+        self.setUp()
+        self.agent(status=["1|0|claude"])
+        self.clean()
+        self.assertEqual([], self.clock.sleeps, "nothing to wait for when no pane may be idle")
+
+    def test_the_last_three_lines_of_the_screen_are_shown_printable_and_cut(self):
+        long = "x" * 200
+        screen = f"first\n\nsecond\n  third \x1b[31mred\x07\n\n{long}\n❯\n\n"
+        agent = self.agent(screens=[screen])
+        lines = self.clean()[1]
+        shown = lines[lines.index(self.line(lines, agent.pane)) + 1:-1]
+        self.assertEqual(["  | third ?[31mred?", "  | " + "x" * 120, "  | ❯"][-3:], shown[-3:])
+        self.assertEqual(3, len(shown))
+        self.assertTrue(all("\x1b" not in line and "\x07" not in line for line in lines))
+
+    def test_a_pane_the_next_run_would_refuse_but_that_is_not_the_runners_is_listed_and_left_alone(self):
+        agent = self.agent()
+        split = self.env.add_split(agent.pane)  # a split of yours in the agent's window: its start command is the shell
+        old = self.env.session("pilot-pr-7-draft-0123456789", "w", self.top / "sub")  # a session of the older names, below the checkout
+        yours = self.env.session("scratch", "w", self.top)  # your own session in the checkout: the next run does not mind it
+        sibling = self.env.session("pilot-pr-x-00000000", "w", f"{self.top}-other")  # a sibling that is not in the way
+        dead = self.env.session("pilot-pr-y-00000000", "w", self.top)
+        self.env.set_pane(dead, status=["1|0|bash"])
+        lines = self.clean()[1]
+        self.assertIn(f"not the runner's: pane {split} (session {self.session}, window 7-draft) in {self.top}: left alone; the "
+                      "next run refuses because of it", lines)
+        self.assertIn(f"not the runner's: pane {old} (session pilot-pr-7-draft-0123456789, window w) in {self.top / 'sub'}: left "
+                      "alone; the next run refuses because of it", lines)
+        self.assertEqual(2, len([line for line in lines if line.startswith("not the runner's")]),
+                         "not your own session, not the sibling, not the dead one")
+        self.assertEqual(f"would close 1 panes and remove 0 task directories; the next run would still be refused ({split}, {old})",
+                         lines[-1])
+        self.assertTrue(all(pane not in "\n".join(lines) for pane in (yours, sibling, dead)))
+
+    def test_what_is_printed_of_a_hostile_name_stays_on_one_line_and_is_not_taken_for_a_command(self):
+        forged = "pilot-pr-x\nclosed 5 panes and removed 0 task directories; the next run would start"
+        self.env.update_tmux(listing=[self.env.row(forged, "%3", window="a|b\nc")])
+        lines = self.clean()[1]
+        self.assertEqual(1, len([line for line in lines if line.startswith("not the runner's")]))
+        (found,) = [line for line in lines if line.startswith("not the runner's")]
+        self.assertEqual(1, len(found.splitlines()), "a newline in a name cannot start a line of the listing")
+        self.assertIn("pilot-pr-x?closed 5 panes", found)
+        self.assertEqual(f"would close 0 panes and remove 0 task directories; the next run would still be refused (%3)", lines[-1])
+
+    def test_no_server_and_a_server_that_cannot_be_asked(self):
+        for error in (NO_SERVER, NO_SOCKET):
+            with self.subTest(error=error):
+                self.env.update_tmux(no_server=error)
+                self.assertEqual((0, [f"Residue of earlier runs in {self.top} (tmux session {self.session}):", error,
+                                      "would close 0 panes and remove 0 task directories; the next run would start"]),
+                                 self.clean())
+        self.env.update_tmux(no_server="", fail={"list-panes": 1})
+        with self.assertRaisesRegex(pr_loop.Stop, r"^tmux list-panes failed \(1\): fake tmux: injected failure of list-panes$"):
+            self.clean()
+        self.env.update_tmux(fail={}, listing=["garbage"])
+        with self.assertRaisesRegex(pr_loop.Stop, "^tmux list-panes returned a line that cannot be read$"):
+            self.clean()
+        self.env.update_tmux(listing=[self.env.row(self.session, "%3")[:-8]])
+        with self.assertRaisesRegex(pr_loop.Stop, "^tmux list-panes returned a line that cannot be read$"):
+            self.clean(yes=True)
+        self.assertEqual([], self.kills(), "a listing that cannot be read closes nothing")
+
+    def test_a_pane_it_cannot_read_the_screen_of_is_busy_and_unknown(self):
+        agent = self.agent()
+        self.env.update_tmux(answers={"capture-pane": [{"rc": 1, "stderr": f"can't find pane: {agent.pane}"}]})
+        found = self.line(self.clean()[1], agent.pane)
+        self.assertIn("alive, busy (unknown: its screen could not be read)", found)
+        self.env.update_tmux(answers={"capture-pane": [{"rc": 1, "stderr": "protocol version mismatch"}]})
+        with self.assertRaisesRegex(pr_loop.Stop, r"^tmux capture-pane failed \(1\): protocol version mismatch$"):
+            self.clean()
+
+    def test_the_lock_is_probed_not_taken_and_a_held_one_is_reported(self):
+        lock = self.top / ".git" / pr_loop.LOCK_NAME
+        self.assertFalse(lock.exists())
+        self.assertNotIn("lock", "\n".join(self.clean()[1]))
+        self.assertFalse(lock.exists(), "a lock that nobody holds is not created by looking at it")
+        held = pr_loop.lock_checkout(self.top, lock)
+        try:
+            lines = self.clean()[1]
+        finally:
+            os.close(held)
+        self.assertIn(f"lock {lock}: held by a running runner; --clean --yes would be refused", lines)
+        self.assertNotIn("lock", "\n".join(self.clean()[1]), "control: nobody holds it now (the file is still there)")
+        self.assertTrue(lock.is_file())
+
+    def test_a_lock_that_cannot_be_probed_is_reported_and_not_followed(self):
+        lock = self.top / ".git" / pr_loop.LOCK_NAME
+        elsewhere = self.env.root / "elsewhere.lock"
+        elsewhere.write_text("")
+        lock.symlink_to(elsewhere)
+        lines = self.clean()[1]
+        self.assertTrue(any(line.startswith(f"lock {lock}: cannot be probed (") and line.endswith("); --clean --yes would be refused")
+                         for line in lines), lines)
+        lock.unlink()
+        os.mkfifo(lock)
+        self.assertIn(f"lock {lock}: cannot be probed (not a regular file); --clean --yes would be refused", self.clean()[1])
+
+    def test_uncommitted_work_and_a_git_operation_in_progress_are_reported_and_left(self):
+        (self.top / "stray.txt").write_text("mine\n")
+        (self.top / "README.txt").write_text("changed\n")
+        before = self.state()
+        lines = self.clean()[1]
+        self.assertIn("the checkout has uncommitted changes or untracked files (2 paths, e.g. README.txt, stray.txt): left alone; "
+                      "the next run refuses until you commit or remove them", lines)
+        self.assertEqual("would close 0 panes and remove 0 task directories; the next run would still be refused (uncommitted work)",
+                         lines[-1])
+        self.assertEqual(before, self.state())
+        marker = Path(self.env.git("rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD", cwd=self.top))
+        marker.write_text("x\n")
+        lines = self.clean()[1]
+        self.assertIn("a git operation is in progress in the checkout (MERGE_HEAD): left alone; the next run refuses until you "
+                      "finish or abort it", lines)
+        self.assertEqual("would close 0 panes and remove 0 task directories; the next run would still be refused "
+                         "(a git operation in progress, uncommitted work)", lines[-1])
+        self.assertEqual("mine\n", (self.top / "stray.txt").read_text())
+
+    def test_the_clean_path_does_not_build_the_checkout_that_a_run_builds(self):
+        # A run's `Checkout` refuses on the very panes `--clean` is for (check_panes), may fast-forward or switch the checkout,
+        # and writes the exclude file and the lock: none of that may happen here, however the checkout stands.
+        self.agent()
+        self.env.advance_remote()
+        self.env.git("switch", "-q", "-c", "feature", cwd=self.top)
+        before = self.state()
+        built = []
+        real = pr_loop.Checkout.__init__
+        with patch.object(pr_loop.Checkout, "__init__", lambda *a, **k: built.append(a) or real(*a, **k)):
+            for flags in ({}, {"yes": True}):
+                code, lines = self.clean(**flags)
+                self.assertEqual(0, code)
+                self.assertTrue(any(line.startswith("pane %1 ") for line in lines))
+        self.assertEqual([], built, "no Checkout")
+        self.assertEqual({**before, "live": self.env.live(), "lock": True}, self.state(),
+                         "HEAD, refs, index, files, exclude file: unchanged (a run that acts makes the lock file, which is in .git)")
+        self.assertEqual("refs/heads/feature", self.env.git("symbolic-ref", "HEAD", cwd=self.top))
+
+
+class CleanClosingTests(CleanCase):
+    """`--clean --yes`: which panes it closes, and every rule that keeps it from closing one (kjelly/pilot#442). A rule's trigger
+    case is a pane that must NOT be closed although everything else about it says the runner's; its pass case is the pane beside
+    it that is."""
+
+    def shown(self, *words):
+        """The start command of the agent the runner starts, as tmux shows it (or of `words`)."""
+        return model("start_shown", list(words) or ["exec " + shlex.quote(str(self.env.bin / "claude"))])
+
+    def agent_command(self):
+        return ["exec " + shlex.quote(str(self.env.bin / "claude"))]
+
+    def test_yes_closes_the_dead_and_the_idle_and_leaves_the_busy_one_open(self):
+        idle = self.agent(7, "draft")
+        dead = self.agent(7, "ready", status=["1|0|claude"])
+        busy = self.agent(8, "draft", screens=[self.WORKING])
+        self.env.keeper()
+        code, lines = self.clean(yes=True)
+        self.assertEqual(0, code)
+        self.assertEqual([idle.pane, dead.pane], self.kills())
+        self.assertEqual({self.session: ["8-draft"], "operator": ["keeper"]}, self.env.live())
+        self.assertIn(f"pane {idle.pane} window 7-draft: alive, idle (at its prompt), claude; closed: it is idle; closing it ends "
+                      "window 7-draft", self.line(lines, idle.pane))
+        self.assertTrue(self.line(lines, dead.pane).startswith(f"pane {dead.pane} window 7-ready: dead, claude; closed: it is dead"))
+        self.assertEqual(f"pane {busy.pane} window 8-draft: alive, busy (working), claude; left open: it is busy; busy panes are "
+                         "closed only with --include-busy", self.line(lines, busy.pane))
+        self.assertEqual(f"closed 2 panes and removed 0 task directories; the next run would still be refused ({busy.pane})",
+                         lines[-1])
+
+    def test_a_pane_is_checked_again_right_before_it_is_closed_and_one_at_a_time(self):
+        idle = self.agent(7, "draft")
+        self.env.keeper()
+        self.env.update_tmux(log=[])
+        self.clean(yes=True)
+        self.assertEqual(["list-panes", "capture-pane", "capture-pane",           # the listing, and the second read of the screen
+                          "list-panes", "capture-pane", "display-message", "kill-pane",   # right before: listed, read, probed, closed
+                          "list-panes"], [call[0] for call in self.env.tmux_calls()], "and one list at the end: what is left")
+        self.assertEqual([["kill-pane", "-t", idle.pane]], self.env.tmux_calls("kill-pane"), "kill-pane on the pane ID, nothing else")
+        self.setUp()
+        dead = self.agent(7, "draft", status=["1|0|claude"])
+        self.env.keeper()
+        self.env.update_tmux(log=[])
+        self.clean(yes=True)
+        self.assertEqual(["list-panes", "capture-pane", "list-panes", "display-message", "kill-pane", "list-panes"],
+                         [call[0] for call in self.env.tmux_calls()], "a dead pane is not read again, only shown")
+        self.assertEqual([dead.pane], self.kills())
+
+    def test_include_busy_closes_the_busy_panes_too_and_never_a_window_or_a_session(self):
+        panes = [self.agent(7, "draft", screens=[self.WORKING]), self.agent(7, "ready", status=["0|0|bash"]),
+                 self.agent(8, "draft", status=["0|1|claude"]), self.agent(8, "ready", screens=["synthetic: loading"]),
+                 self.agent(9, "draft", screens=["❯ a", "❯ b"])]
+        self.env.keeper()
+        code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([agent.pane for agent in panes], self.kills())
+        self.assertEqual({"operator": ["keeper"]}, self.env.live(), "the last pane took the runner's session with it")
+        self.assertTrue(all("closed: it is busy, and --include-busy was given" in self.line(lines, agent.pane) for agent in panes))
+        self.assertEqual(["kill-pane"] * 5, [call[0] for call in self.env.tmux_calls() if call[0].startswith("kill")],
+                         "no kill-window, no kill-session")
+        self.assertEqual("closed 5 panes and removed 0 task directories; the next run would start", lines[-1])
+
+    def test_a_second_run_finds_nothing_more_to_do(self):
+        self.agent(7, "draft")
+        self.agent(7, "ready", status=["1|0|claude"])
+        self.env.keeper()
+        self.clean(yes=True)
+        self.env.update_tmux(log=[])
+        code, lines = self.clean(yes=True)
+        self.assertEqual((0, [self.header_line(), "closed 0 panes and removed 0 task directories; the next run would start"]),
+                         (code, lines))
+        self.assertEqual([], self.env.tmux_calls("kill-pane"))
+
+    def header_line(self):
+        return f"Residue of earlier runs in {self.top} (tmux session {self.session} on {SOCKET}):"
+
+    def test_a_kill_that_fails_is_a_stop_and_says_what_was_closed_before_it(self):
+        first = self.agent(7, "draft")
+        self.agent(7, "ready")
+        self.env.keeper()
+        self.env.update_tmux(fail={"kill-pane": 1})
+        with self.assertRaisesRegex(pr_loop.Stop, r"^tmux kill-pane failed \(1\): fake tmux: injected failure of kill-pane$"):
+            self.clean(yes=True)
+        self.assertEqual([["kill-pane", "-t", first.pane]], self.env.tmux_calls("kill-pane"), "it stopped at the first failure")
+
+    # ---- rule: the session is the runner's ------------------------------------------------------------------------------
+    def test_a_pane_of_another_session_is_never_closed_whatever_else_it_matches(self):
+        agent = self.agent()
+        command = self.agent_command()
+        others = {"the grouped twin's name": self.session + "-eink", "a longer name": self.session + "x",
+                  "a shorter name": self.session[:-1], "another checkout's session": pr_loop.session_name(self.env.root / "other"),
+                  "a session of the older names": "pilot-pr-7-draft-0123456789", "only the prefix": "pilot-pr-", "yours": "work"}
+        panes = {name: self.env.session(session, "7-draft", self.top, command) for name, session in others.items()}
+        code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([agent.pane], self.kills(), "the one pane that is the runner's, and nothing in any other session")
+        after = self.env.live()
+        for name, session in others.items():
+            with self.subTest(name=name):
+                self.assertEqual(["7-draft"], after[session], "every other session is still there, with its window")
+                self.assertEqual(session.startswith("pilot-pr-"),
+                                 any(line.startswith(f"not the runner's: pane {panes[name]} ") for line in lines),
+                                 "the next run would refuse because of the ones in the runner's prefix; they are listed, and left")
+
+    # ---- rule: it was started in the checkout itself ----------------------------------------------------------------------
+    def test_a_pane_started_in_another_directory_is_never_closed(self):
+        agent = self.agent()
+        command = self.agent_command()
+        elsewhere = {"a sibling that starts the same": f"{self.top}-other", "a subdirectory": self.top / "sub",
+                     "the parent": self.top.parent, "the root": "/", "a directory that is gone": self.top / "gone"}
+        (self.top / "sub").mkdir()
+        panes = {name: self.env.window(self.session, f"{n}-draft", path, command) for n, (name, path) in enumerate(elsewhere.items(), 8)}
+        code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([agent.pane], self.kills(), "only the pane started in the checkout itself")
+        for name, pane in panes.items():
+            with self.subTest(name=name):
+                self.assertEqual(name in ("a subdirectory", "a directory that is gone"),
+                                 any(line.startswith(f"not the runner's: pane {pane} ") for line in lines),
+                                 "a pane below the checkout is in the next run's way and is listed as such; the others are not")
+        self.assertEqual([f"{n}-draft" for n in range(8, 8 + len(elsewhere))], self.env.live()[self.session],
+                         "the agent's window went, the others are as they were")
+
+    def test_a_pane_that_was_started_through_a_symlink_to_the_checkout_is_the_same_directory(self):
+        link = self.env.root / "link"
+        link.symlink_to(self.top)
+        agent = self.agent()
+        pane = self.env.window(self.session, "9-draft", link, self.agent_command())
+        self.clean(yes=True)
+        self.assertEqual(sorted([pane, agent.pane]), sorted(self.kills()))
+
+    # ---- rule: how it was started and what its window is called --------------------------------------------------------------
+    def test_a_pane_you_opened_is_never_closed_in_the_runners_own_session_and_directory(self):
+        agent = self.agent()
+        command = self.agent_command()
+        yours = {"a split with a command": self.env.add_split(agent.pane, ["tail", "-f", "x"], self.top),
+                 "a split with the shell": self.env.add_split(agent.pane, None, self.top),
+                 "a split that runs exec with a relative path": self.env.add_split(agent.pane, ["exec claude"], self.top),
+                 "a window of the shell named like an agent's": self.env.window(self.session, "8-draft", self.top, None),
+                 "a window with another name": self.env.window(self.session, "claude", self.top, command),
+                 "a window you renamed": self.env.window(self.session, "scratch", self.top, command),
+                 "a window named for no PR": self.env.window(self.session, "x-draft", self.top, command),
+                 "a window of another phase": self.env.window(self.session, "9-merge", self.top, command),
+                 "an agent with arguments": self.env.window(self.session, "10-draft", self.top, ["exec /bin/claude --resume"])}
+        code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([agent.pane], self.kills())
+        for name, pane in yours.items():
+            with self.subTest(name=name):
+                self.assertTrue(any(line.startswith(f"not the runner's: pane {pane} ") for line in lines),
+                                "they are in the next run's way, so they are listed, and left")
+        self.assertEqual(f"closed 1 panes and removed 0 task directories; the next run would still be refused "
+                         f"({', '.join(sorted(yours.values(), key=lambda name: int(name[1:])))})", lines[-1])
+
+    def test_a_window_the_operator_renamed_after_the_run_is_not_the_runners(self):
+        agent = self.agent()
+        self.env.rename_window(agent.pane, "mine")
+        code, lines = self.clean(yes=True)
+        self.assertEqual([], self.kills())
+        self.assertTrue(any(line.startswith(f"not the runner's: pane {agent.pane} ") for line in lines))
+
+    # ---- rule: still the pane that was listed, on the server that listed it ----------------------------------------------------
+    def second_listing(self, hook):
+        """Something happens between the listing and the check right before the kill (the fake's hook of the second `list-panes`)."""
+        self.env.update_tmux(before={"list-panes": [None, hook]})
+
+    def test_a_pane_another_server_has_that_id_now_is_not_closed(self):
+        agent = self.agent()
+        self.env.keeper()
+        self.second_listing({"call": "reborn", "args": [self.session, "7-draft", str(self.top), agent.pane, self.shown()]})
+        old = self.env.server()
+        code, lines = self.clean(yes=True, include_busy=True)
+        self.assertNotEqual(old, self.env.server(), "the setup: another server")
+        self.assertEqual([], self.kills(), "the ID names another pane now, with the same names, directory and command")
+        self.assertIn("left open: another tmux server answers now, and the pane ID may belong to another pane",
+                      self.line(lines, agent.pane))
+        self.assertEqual({self.session: ["7-draft"]}, self.env.live(), "the new server's pane is alive")
+        self.assertEqual(f"closed 0 panes and removed 0 task directories; the next run would still be refused ({agent.pane})",
+                         lines[-1])
+
+    def test_a_server_that_is_another_one_between_the_check_and_the_kill_is_not_acted_on_either(self):
+        agent = self.agent()
+        self.env.keeper()
+        self.env.update_tmux(before={"display-message": [{"call": "reborn", "args": [
+            self.session, "7-draft", str(self.top), agent.pane, self.shown()]}]})
+        code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([], self.kills(), "the probe that comes with kill-pane compares the server too")
+        self.assertIn("left open: another tmux server answers now", self.line(lines, agent.pane))
+
+    def test_a_pane_that_was_started_again_is_not_closed(self):
+        alive = self.agent(7, "draft")
+        dead = self.agent(7, "ready", status=["1|0|claude"])
+        self.env.keeper()
+        self.second_listing({"call": "respawn", "args": [alive.pane]})
+        code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([dead.pane], self.kills(), "the dead one is closed; the alive one was started again meanwhile")
+        self.assertIn("left open: it was started again since it was listed", self.line(lines, alive.pane))
+        self.setUp()
+        dead = self.agent(7, "draft", status=["1|0|claude"])
+        self.env.keeper()
+        self.second_listing({"call": "respawn", "args": [dead.pane]})
+        code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([], self.kills(), "a pane that was dead when it was listed and runs again is not closed")
+        self.assertIn("left open: it was dead when it was listed and runs again", self.line(lines, dead.pane))
+
+    def test_a_pane_that_was_renamed_after_it_was_listed_is_left_and_one_that_vanishes_while_it_is_read_counts_as_closed(self):
+        alive = self.agent(7, "draft", screens=[self.WORKING])
+        self.env.keeper()
+        self.second_listing({"call": "rename_window", "args": [alive.pane, "mine"]})
+        code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([], self.kills())
+        self.assertIn("left open: it is not the pane that was listed any more", self.line(lines, alive.pane))
+        self.setUp()
+        gone = self.agent(7, "draft")
+        self.env.keeper()
+        self.env.update_tmux(before={"capture-pane": [None, None, {"call": "kill_pane", "args": [gone.pane]}]})
+        code, lines = self.clean(yes=True)
+        self.assertEqual([], self.kills(), "nothing to close: it is gone")
+        self.assertIn("closed: it was already gone", self.line(lines, gone.pane))
+
+    def test_a_pane_or_a_server_that_is_gone_counts_as_closed(self):
+        for case, hook, what in (("the pane", None, "it was already gone"),
+                                 ("the server", {"call": "kill_server"}, "it was already gone: no tmux server runs any more")):
+            with self.subTest(case=case):
+                self.setUp()
+                agent = self.agent()
+                self.env.keeper()
+                if hook is None:
+                    hook = {"call": "kill_pane", "args": [agent.pane]}
+                self.second_listing(hook)
+                code, lines = self.clean(yes=True)
+                self.assertEqual((0, []), (code, self.kills()))
+                self.assertIn(f"closed: {what}", self.line(lines, agent.pane))
+                self.assertTrue(lines[-1].startswith("closed 1 panes and removed 0 task directories"))
+        self.setUp()
+        agent = self.agent()
+        self.env.update_tmux(answers={"kill-pane": [{"rc": 1, "stderr": f"can't find pane: {agent.pane}"}]})
+        code, lines = self.clean(yes=True)
+        self.assertIn("closed: it is idle", self.line(lines, agent.pane), "it vanished between the probe and the kill: closed")
+
+    def test_a_pane_that_became_busy_after_it_was_listed_is_left_open_unless_busy_ones_are_closed(self):
+        for flags, closed in (({}, False), ({"include_busy": True}, True)):
+            with self.subTest(flags=flags):
+                self.setUp()
+                agent = self.agent(screens=["❯", "❯", self.WORKING])
+                self.env.keeper()
+                code, lines = self.clean(yes=True, **flags)
+                self.assertEqual([agent.pane] if closed else [], self.kills())
+                self.assertIn("alive, busy (working)", self.line(lines, agent.pane))
+                self.assertIn("closed: it is busy, and --include-busy was given" if closed else
+                              "left open: it is busy; busy panes are closed only with --include-busy", self.line(lines, agent.pane))
+        self.setUp()
+        agent = self.agent(screens=["❯ a", "❯ a", "❯ b"])
+        self.env.keeper()
+        code, lines = self.clean(yes=True)
+        self.assertEqual([], self.kills(), "a screen that changed since the second read is not at rest")
+        self.assertIn("alive, busy (the screen is still changing)", self.line(lines, agent.pane))
+
+    def test_a_pane_that_was_not_at_rest_when_it_was_listed_is_left_open_whatever_the_next_read_says(self):
+        agent = self.agent(screens=["❯ a", "❯ b", "❯ b"])  # it changed between the two reads, and is the same in the third
+        self.env.keeper()
+        code, lines = self.clean(yes=True)
+        self.assertEqual([], self.kills())
+        self.assertIn("left open: it is busy; busy panes are closed only with --include-busy", self.line(lines, agent.pane))
+        self.assertIn("alive, busy (the screen is still changing)", self.line(lines, agent.pane))
+
+    # ---- rule: never the pane the command runs in -----------------------------------------------------------------------------
+    def test_it_never_closes_the_pane_the_command_runs_in(self):
+        mine = self.agent(7, "draft")
+        other = self.agent(7, "ready")
+        self.env.keeper()
+        server = self.env.server().split("|")[0]
+        with patch.dict(os.environ, {"TMUX_PANE": mine.pane, "TMUX": f"{SOCKET},{server},0"}):
+            code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([other.pane], self.kills())
+        self.assertIn("left open: the command runs in this pane", self.line(lines, mine.pane))
+        # the same pane ID on another tmux server is not this pane
+        with patch.dict(os.environ, {"TMUX_PANE": mine.pane, "TMUX": f"{SOCKET},{int(server) + 1},0"}):
+            code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([other.pane, mine.pane], self.kills(), "TMUX names another server: control, it is closed")
+
+    def test_a_pane_id_in_the_environment_that_cannot_be_compared_is_not_closed_either(self):
+        mine = self.agent()
+        self.env.keeper()
+        for tmux in (None, "", "garbage", f"{SOCKET},notanumber,0"):
+            with self.subTest(tmux=tmux):
+                env = {"TMUX_PANE": mine.pane, **({"TMUX": tmux} if tmux is not None else {})}
+                with patch.dict(os.environ, env):
+                    self.clean(yes=True)
+                self.assertEqual([], self.kills())
+
+    def test_it_never_closes_a_pane_whose_process_is_above_the_command(self):
+        for case, pid in (("this very process", os.getpid()), ("its parent", os.getppid())):
+            with self.subTest(case=case):
+                self.setUp()
+                above = self.agent(7, "draft", pid=pid)
+                beside = self.agent(7, "ready")
+                self.env.keeper()
+                code, lines = self.clean(yes=True, include_busy=True)
+                self.assertEqual([beside.pane], self.kills())
+                self.assertIn("left open: the command runs below this pane's process", self.line(lines, above.pane))
+
+    def test_without_proc_only_a_dead_pane_is_closed(self):
+        alive = self.agent(7, "draft")
+        dead = self.agent(7, "ready", status=["1|0|claude"])
+        self.env.keeper()
+        with patch.object(pr_loop, "ancestors", return_value=None):
+            code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([dead.pane], self.kills())
+        self.assertIn("left open: /proc cannot be read, so it cannot be told whether the command runs in it",
+                      self.line(lines, alive.pane))
+
+    def test_a_pane_whose_process_the_listing_does_not_give_is_left(self):
+        self.env.update_tmux(listing=[self.env.row(self.session, "%3", pid="")])
+        code, lines = self.clean(yes=True, include_busy=True)
+        self.assertIn("left open: its process is unknown, so it cannot be told whether the command runs in it",
+                      self.line(lines, "%3"))
+        self.assertEqual([], self.kills())
+
+    def test_the_ancestors_are_read_from_proc_and_a_pid_above_is_found(self):
+        found = pr_loop.ancestors()
+        self.assertIn(os.getpid(), found)
+        self.assertIn(os.getppid(), found)
+        self.assertNotIn(1000000000, found, "the synthetic PID of the fake's panes is no process")
+        with patch.object(pr_loop, "open", side_effect=OSError("no /proc"), create=True):
+            self.assertIsNone(pr_loop.ancestors())
+
+    # ---- a grouped twin ---------------------------------------------------------------------------------------------------------
+    def test_the_last_pane_of_a_session_with_a_grouped_twin_is_closed_and_the_line_says_what_goes_with_it(self):
+        agent = self.agent()
+        twin = self.session + "-eink"
+        self.env.add_twin(self.session, twin)
+        lines = self.clean()[1]
+        self.assertEqual(f"pane {agent.pane} window 7-draft: alive, idle (at its prompt), claude; would close: it is idle; closing "
+                         f"it ends window 7-draft and session {self.session} and the sessions grouped with it ({twin}); an attached "
+                         "client is detached", self.line(lines, agent.pane))
+        code, lines = self.clean(yes=True)
+        self.assertEqual([agent.pane], self.kills())
+        self.assertEqual({}, self.env.live(), "the session and its twin: a group shares its windows, and had none left")
+        self.assertIn(f"closed: it is idle; closing it ends window 7-draft and session {self.session} and the sessions grouped "
+                      f"with it ({twin}); an attached client is detached", self.line(lines, agent.pane))
+
+    def test_a_twin_that_has_outlived_the_session_is_not_the_runners_and_is_left_alone(self):
+        agent = self.agent()
+        twin = self.session + "-eink"
+        self.env.add_twin(self.session, twin)
+        self.env.kill_session(self.session)
+        code, lines = self.clean(yes=True, include_busy=True)
+        self.assertEqual([], self.kills())
+        self.assertEqual({twin: ["7-draft"]}, self.env.live())
+        self.assertIn(f"not the runner's: pane {agent.pane} (session {twin}, window 7-draft) in {self.top}: left alone; the next "
+                      "run refuses because of it", lines)
+
+    def test_closing_what_is_not_the_last_pane_says_nothing_about_a_window_or_a_session(self):
+        first = self.agent(7, "draft")
+        second = self.agent(7, "ready")
+        self.env.add_split(first.pane)
+        lines = self.clean()[1]
+        self.assertNotIn("closing it ends", self.line(lines, first.pane), "a pane of yours is left in its window")
+        self.assertTrue(self.line(lines, second.pane).endswith("; closing it ends window 7-ready"),
+                        "the last pane of a window ends the window, and not the session: the first window is left")
+
+
+class CleanTaskDirectoryTests(CleanCase):
+    """The task directories (`<checkout>/<TASK_DIR>/<nonce>/`): listed with what they say, kept unless `--remove-task-dirs`, and
+    removed only when every condition holds. The case that must be removed sits beside each case that must not."""
+    KEPT = "kept: task directories are removed only with --remove-task-dirs"
+
+    def task_lines(self, lines):
+        return [line for line in lines if line.startswith("task ") and not line.startswith("task directory ")]
+
+    def test_every_task_directory_is_listed_oldest_first_with_what_it_says(self):
+        old = self.task(pr=7, phase="draft", result="DRAFT-BLOCKED", age=2 * 86400 + 3 * 3600 + 100)
+        mid = self.task(pr=8, phase="ready", age=3 * 3600 + 20 * 60 + 5)
+        new = self.task(pr=9, phase="draft", result="READY", age=45)
+        lines = self.clean()[1]
+        self.assertEqual([f"task {old}: PR #7 draft, 2d 3h old, result DRAFT-BLOCKED; {self.KEPT}",
+                          f"task {mid}: PR #8 ready, 3h 20m old, result none; {self.KEPT}",
+                          f"task {new}: PR #9 draft, 45s old, result READY; {self.KEPT}"], self.task_lines(lines))
+        self.assertEqual("would close 0 panes and remove 0 task directories; the next run would start", lines[-1])
+        lines = self.clean(remove_task_dirs=True)[1]
+        why = "no pane of the runner is left and it holds only its task and result"
+        self.assertEqual([f"task {old}: PR #7 draft, 2d 3h old, result DRAFT-BLOCKED; would remove: {why}",
+                          f"task {mid}: PR #8 ready, 3h 20m old, result none; would remove: {why}",
+                          f"task {new}: PR #9 draft, 45s old, result READY; would remove: {why}"], self.task_lines(lines))
+        self.assertEqual("would close 0 panes and remove 3 task directories; the next run would start", lines[-1])
+        self.assertEqual(3, len(list((self.top / pr_loop.TASK_DIR).iterdir())), "a listing removes nothing")
+
+    def test_the_age_is_told_in_the_unit_that_fits_it(self):
+        for seconds, text in ((0, "0s"), (59.9, "59s"), (60, "1m"), (3599, "59m"), (3600, "1h 0m"), (86399, "23h 59m"),
+                              (86400, "1d 0h"), (10 * 86400 + 7 * 3600 + 59, "10d 7h"), (-5, "0s")):
+            with self.subTest(seconds=seconds):
+                self.assertEqual(text, pr_loop.age_text(seconds))
+
+    def test_a_task_directory_is_removed_when_the_lock_is_free_and_no_pane_of_the_runner_is_left(self):
+        self.agent(7, "draft", status=["1|0|claude"])
+        self.env.keeper()
+        nonce = self.task(result="DRAFT-BLOCKED")
+        self.assertTrue(self.task_dir(nonce).is_dir())
+        code, lines = self.clean(yes=True, remove_task_dirs=True)
+        self.assertEqual(0, code)
+        self.assertFalse(self.task_dir(nonce).exists(), "task.json, result.json and the directory are gone")
+        self.assertTrue((self.top / pr_loop.TASK_DIR).is_dir(), "the task directory itself is not")
+        self.assertIn(f"task {nonce}: PR #7 draft, 3h 20m old, result DRAFT-BLOCKED; removed: no pane of the runner is left and it "
+                      "holds only its task and result", lines)
+        self.assertEqual("closed 1 panes and removed 1 task directories; the next run would start", lines[-1])
+        code, lines = self.clean(yes=True, remove_task_dirs=True)
+        self.assertEqual("closed 0 panes and removed 0 task directories; the next run would start", lines[-1], "and again: nothing")
+
+    def test_without_remove_task_dirs_a_run_that_acts_keeps_them(self):
+        self.agent(7, "draft", status=["1|0|claude"])
+        nonce = self.task(result="DRAFT-BLOCKED")
+        code, lines = self.clean(yes=True)
+        self.assertTrue(self.task_dir(nonce).is_dir())
+        self.assertIn(f"task {nonce}: PR #7 draft, 3h 20m old, result DRAFT-BLOCKED; {self.KEPT}", lines)
+
+    def test_a_task_directory_of_a_checkout_whose_lock_is_held_is_never_removed(self):
+        nonce = self.task(result="DRAFT-BLOCKED")
+        self.agent(7, "draft", status=["1|0|claude"])
+        lock = self.top / ".git" / pr_loop.LOCK_NAME
+        held = pr_loop.lock_checkout(self.top, lock)
+        try:
+            self.env.update_tmux(log=[])
+            with self.assertRaisesRegex(pr_loop.Stop, f"^another pr_loop runner is using the checkout {re.escape(str(self.top))} "
+                                                      f"\\(lock {re.escape(str(lock))}\\); wait for it to finish or stop it$"):
+                self.clean(yes=True, remove_task_dirs=True)
+            self.assertTrue(self.task_dir(nonce).is_dir(), "nothing was removed")
+            self.assertEqual([], self.env.tmux_calls(), "and tmux was not even asked: the lock comes first")
+            lines = self.clean(remove_task_dirs=True)[1]  # a listing says so, and does not take it
+            self.assertIn(f"task {nonce}: PR #7 draft, 3h 20m old, result DRAFT-BLOCKED; kept: the checkout's lock is not free: "
+                          "held by a running runner", lines)
+        finally:
+            os.close(held)
+        self.clean(yes=True, remove_task_dirs=True)  # control: free, it is removed
+        self.assertFalse(self.task_dir(nonce).exists())
+
+    def test_the_lock_is_held_for_the_whole_run_that_acts_and_given_back_after_it(self):
+        lock = self.top / ".git" / pr_loop.LOCK_NAME
+        self.agent(7, "draft")
+        self.env.update_tmux(lock_path=str(lock))  # the fake tmux tries to take the lock when a pane is made
+        seen = []
+        real = pr_loop.close_pane
+        with patch.object(pr_loop, "close_pane", lambda *a: seen.append(pr_loop.lock_state(lock)) or real(*a)):
+            self.clean(yes=True)
+        self.assertEqual(["held by a running runner"], seen, "while a pane is closed, another runner would be refused")
+        self.assertIsNone(pr_loop.lock_state(lock), "and when it has finished, it is free")
+        self.assertEqual(0o600, lock.stat().st_mode & 0o777)
+
+    def test_a_pane_of_the_runner_that_is_left_keeps_every_task_directory(self):
+        busy = self.agent(7, "draft", screens=[self.WORKING])
+        nonce = self.task()
+        lines = self.clean(yes=True, remove_task_dirs=True)[1]
+        self.assertTrue(self.task_dir(nonce).is_dir())
+        self.assertIn(f"task {nonce}: PR #7 draft, 3h 20m old, result none; kept: a pane of the runner is left ({busy.pane}) and its "
+                      "agent may still write there", lines)
+        self.assertEqual(f"closed 0 panes and removed 0 task directories; the next run would still be refused ({busy.pane})",
+                         lines[-1])
+        self.assertIn("kept: a pane of the runner is left", self.clean(remove_task_dirs=True)[1][-2], "a listing says it too")
+        code, lines = self.clean(yes=True, remove_task_dirs=True, include_busy=True)
+        self.assertFalse(self.task_dir(nonce).exists(), "closed with --include-busy: nothing is left, and it is removed")
+
+    def test_a_pane_that_is_in_the_way_and_not_the_runners_keeps_every_task_directory(self):
+        agent = self.agent(7, "draft", status=["1|0|claude"])
+        split = self.env.add_split(agent.pane)
+        nonce = self.task()
+        lines = self.clean(yes=True, remove_task_dirs=True)[1]
+        self.assertTrue(self.task_dir(nonce).is_dir())
+        self.assertIn(f"kept: a pane of the runner is left ({split}) and its agent may still write there", self.task_lines(lines)[0])
+
+    def test_a_live_pane_of_the_runner_that_moved_out_of_the_checkout_still_keeps_them(self):
+        agent = self.agent(7, "draft", screens=[self.WORKING])
+        self.env.set_pane(agent.pane, path="/tmp")  # it is not in the checkout now: not in the next run's way, still the runner's
+        nonce = self.task()
+        lines = self.clean(yes=True, remove_task_dirs=True)[1]
+        self.assertTrue(self.task_dir(nonce).is_dir())
+        self.assertIn(f"a pane of the runner is left ({agent.pane})", self.task_lines(lines)[0])
+        self.assertEqual("closed 0 panes and removed 0 task directories; the next run would start", lines[-1],
+                         "though the next run would not be refused because of it")
+
+    def test_a_symlinked_task_directory_is_not_followed(self):
+        real = self.env.root / "elsewhere"
+        (real / ("0" * 32)).mkdir(parents=True)
+        (real / ("0" * 32) / "task.json").write_text(json.dumps(dict(version=1, repo="a/b", pr=7, phase="draft", nonce="0" * 32,
+                                                                      start_head=HEAD)))
+        shutil.rmtree(self.top / pr_loop.TASK_DIR, ignore_errors=True)
+        (self.top / pr_loop.TASK_DIR).symlink_to(real)
+        lines = self.clean(yes=True, remove_task_dirs=True)[1]
+        self.assertTrue((real / ("0" * 32) / "task.json").is_file(), "what the link points to is untouched")
+        (said,) = [line for line in lines if line.startswith("task directory")]
+        self.assertRegex(said, rf"^task directory {re.escape(str(self.top / pr_loop.TASK_DIR))}: (Too many levels of symbolic links|"
+                               "Not a directory): left alone; nothing in it is listed or removed$")
+        self.assertEqual([], self.task_lines(lines))
+        self.assertEqual("closed 0 panes and removed 0 task directories; the next run would still be refused (uncommitted work)",
+                         lines[-1], "(git does not ignore a link named like the directory the exclude file names)")
+
+    def test_a_task_directory_that_is_a_symlink_is_not_followed_or_removed(self):
+        real = self.env.root / "elsewhere"
+        real.mkdir()
+        (real / "task.json").write_text(json.dumps(dict(version=1, repo="a/b", pr=7, phase="draft", nonce="1" * 32, start_head=HEAD)))
+        base = self.top / pr_loop.TASK_DIR
+        base.mkdir()
+        (base / ("1" * 32)).symlink_to(real)
+        lines = self.clean(yes=True, remove_task_dirs=True)[1]
+        self.assertTrue((real / "task.json").is_file())
+        self.assertTrue((base / ("1" * 32)).is_symlink(), "the link itself stays")
+        self.assertEqual(1, len(self.task_lines(lines)))
+        self.assertIn("kept: it is not a real directory (", self.task_lines(lines)[0])
+
+    def test_a_task_directory_that_holds_anything_else_is_kept_whole(self):
+        for case, make in (("a stray temporary file of an interrupted write", lambda d: (d / "tmpab12cd34").write_text("x")),
+                           ("a subdirectory", lambda d: (d / "sub").mkdir()),
+                           ("a result that is a symlink", lambda d: (d / "result.json").symlink_to("task.json")),
+                           ("a result that is a directory", lambda d: (d / "result.json").mkdir()),
+                           ("a hidden file", lambda d: (d / ".x").write_text("x"))):
+            with self.subTest(case=case):
+                self.setUp()
+                nonce = self.task()
+                directory = self.task_dir(nonce)
+                make(directory)
+                before = sorted(path.name for path in directory.iterdir())
+                lines = self.clean(yes=True, remove_task_dirs=True)[1]
+                self.assertEqual(before, sorted(path.name for path in directory.iterdir()), "not a file of it was removed")
+                self.assertRegex(self.task_lines(lines)[0], r"; kept: (it holds other files \(|result\.json is not a regular file)")
+                self.assertTrue((directory / "task.json").is_file())
+
+    def test_a_task_directory_whose_task_is_not_its_own_is_kept(self):
+        good = dict(version=1, repo="a/b", pr=7, phase="draft", nonce="2" * 32, start_head=HEAD)
+        not_its_own = ("task.json is not this directory's task", "its task.json is not this directory's task")
+        unreadable = ("task.json unreadable", "its task.json cannot be read (")
+        for case, content, (subject, reason) in (
+                ("another nonce", json.dumps(dict(good, nonce="3" * 32)), not_its_own), ("a list", "[]", not_its_own),
+                ("a PR that is a string", json.dumps(dict(good, pr="7")), not_its_own),
+                ("a PR that is a bool", json.dumps(dict(good, pr=True)), not_its_own),
+                ("a phase it does not know", json.dumps(dict(good, phase="merge")), not_its_own),
+                ("too long", json.dumps(dict(good, reason="x" * 5000)), not_its_own),
+                ("not JSON", "{", unreadable), ("empty", "", unreadable)):
+            with self.subTest(case=case):
+                self.setUp()
+                directory = self.top / pr_loop.TASK_DIR / ("2" * 32)
+                directory.mkdir(parents=True)
+                (directory / "task.json").write_text(content)
+                (line,) = self.task_lines(self.clean(yes=True, remove_task_dirs=True)[1])
+                self.assertTrue((directory / "task.json").is_file(), "kept")
+                self.assertTrue(line.startswith(f"task {'2' * 32}: {subject}, "), line)
+                self.assertIn(f"; kept: {reason}", line)
+        self.setUp()
+        directory = self.top / pr_loop.TASK_DIR / ("2" * 32)
+        directory.mkdir(parents=True)
+        (line,) = self.task_lines(self.clean(yes=True, remove_task_dirs=True)[1])
+        self.assertTrue(directory.is_dir(), "no task.json at all: kept")
+        self.assertIn(f"task {'2' * 32}: no task.json, ", line)
+        self.assertIn("; kept: it has no task.json", line)
+        (directory / "task.json").write_text(json.dumps(good))
+        (line,) = self.task_lines(self.clean(yes=True, remove_task_dirs=True)[1])
+        self.assertFalse(directory.exists(), "control: its own task, and nothing else in it: removed")
+        self.assertIn("; removed:", line)
+
+    def test_a_result_that_cannot_be_read_does_not_keep_the_directory_and_is_reported(self):
+        nonce = self.task(result="DRAFT-BLOCKED")
+        (self.task_dir(nonce) / "result.json").write_text("{")
+        self.assertIn("result unreadable;", self.task_lines(self.clean()[1])[0])
+        (self.task_dir(nonce) / "result.json").write_text(json.dumps({"outcome": "NOT-AN-OUTCOME"}))
+        self.assertIn("result unreadable;", self.task_lines(self.clean()[1])[0])
+        self.clean(yes=True, remove_task_dirs=True)
+        self.assertFalse(self.task_dir(nonce).exists())
+
+    def test_a_directory_that_is_not_the_users_is_kept(self):
+        nonce = self.task()
+        with patch.object(pr_loop.os, "getuid", return_value=os.getuid() + 1):
+            lines = self.clean(yes=True, remove_task_dirs=True)[1]
+        self.assertTrue(self.task_dir(nonce).is_dir())
+        self.assertIn("kept: it is not owned by this user", self.task_lines(lines)[0])
+
+    def test_names_that_are_not_nonces_and_the_evidence_of_the_other_skills_are_never_touched(self):
+        base = self.top / pr_loop.TASK_DIR
+        sentinels = {"0ld/task.json": "{}\n", "0ld/result.json": "{}\n", "tmux-ai-pr-x/task.json": "{}\n", "README": "x\n",
+                     "A" * 32 + "/task.json": "{}\n", "0" * 31 + "/task.json": "{}\n", "0" * 33 + "/task.json": "{}\n"}
+        for name, text in sentinels.items():
+            (base / name).parent.mkdir(parents=True, exist_ok=True)
+            (base / name).write_text(text)
+        for name in (".pr-ready/7/evidence.json", ".tmux-ai-pr/tmux-ai-pr-1/task.json"):
+            (self.top / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.top / name).write_text("{}\n")
+        nonce = self.task()
+        lines = self.clean(yes=True, remove_task_dirs=True)[1]
+        self.assertEqual([nonce], [line.split()[1].rstrip(":") for line in self.task_lines(lines)], "only a nonce is listed")
+        for name, text in sentinels.items():
+            self.assertEqual(text, (base / name).read_text(), name)
+        self.assertTrue((self.top / ".pr-ready/7/evidence.json").is_file())
+        self.assertTrue((self.top / ".tmux-ai-pr/tmux-ai-pr-1/task.json").is_file())
+        self.assertFalse(self.task_dir(nonce).exists(), "and the one that is, is removed")
+
+    def test_the_removal_is_two_unlinks_through_the_directory_and_one_rmdir_and_never_a_tree(self):
+        nonce = self.task(result="DRAFT-BLOCKED")
+        calls = []
+        real_unlink, real_rmdir = os.unlink, os.rmdir
+        with patch.object(pr_loop.os, "unlink", lambda *a, **k: calls.append(("unlink", a[0], sorted(k))) or real_unlink(*a, **k)), \
+             patch.object(pr_loop.os, "rmdir", lambda *a, **k: calls.append(("rmdir", a[0], sorted(k))) or real_rmdir(*a, **k)):
+            self.clean(yes=True, remove_task_dirs=True)
+        self.assertEqual([("unlink", "result.json", ["dir_fd"]), ("unlink", "task.json", ["dir_fd"]), ("rmdir", nonce, ["dir_fd"])],
+                         calls, "the result first: an interrupted removal leaves a task that is still a task")
+
+    def test_removing_a_task_directory_does_not_follow_a_symlink(self):
+        real = self.env.root / "elsewhere"
+        real.mkdir()
+        (real / "task.json").write_text(json.dumps(dict(version=1, repo="a/b", pr=7, phase="draft", nonce="1" * 32, start_head=HEAD)))
+        base = self.top / pr_loop.TASK_DIR
+        base.mkdir()
+        (base / ("1" * 32)).symlink_to(real)
+        fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, fd)
+        self.assertRegex(pr_loop.remove_task_directory(fd, "1" * 32), r"^it cannot be opened as a directory \(")
+        self.assertTrue((real / "task.json").is_file(), "what the link points to is untouched, though it is a task of its own")
+        self.assertTrue((base / ("1" * 32)).is_symlink())
+
+    def test_a_directory_that_changed_since_it_was_listed_is_read_again_before_it_is_removed(self):
+        nonce = self.task()
+        base = os.open(self.top / pr_loop.TASK_DIR, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, base)
+        (self.task_dir(nonce) / "tmpab12").write_text("x")
+        self.assertEqual("it holds other files (tmpab12)", pr_loop.remove_task_directory(base, nonce))
+        self.assertTrue((self.task_dir(nonce) / "task.json").is_file())
+        (self.task_dir(nonce) / "tmpab12").unlink()
+        self.assertIsNone(pr_loop.remove_task_directory(base, nonce), "control: nothing else in it")
+        self.assertRegex(pr_loop.remove_task_directory(base, nonce), r"^it cannot be opened as a directory \(")
+
+
+class CleanCheckoutTests(CleanCase):
+    """It never changes the git checkout, however the checkout stands: behind origin (a run fast-forwards it), on another branch (a
+    run switches it), with uncommitted work or a git operation in progress (a run refuses). All it does is read them out."""
+
+    def residue(self):
+        self.agent(7, "draft")
+        self.agent(7, "ready", status=["1|0|claude"])
+        self.env.keeper()
+        self.task(result="DRAFT-BLOCKED")
+
+    def acting_leaves_alone(self, prepare):
+        """Run `--clean --yes --remove-task-dirs` on a checkout `prepare` put in some state: HEAD, the refs, the index, the exclude
+        file and every file of the work tree are as they were, but for what it is there to do (the lock file it takes, the panes it
+        closes, the task directories it removes)."""
+        self.residue()
+        prepare()
+        before = self.state()
+        code, lines = self.clean(yes=True, remove_task_dirs=True)
+        after = self.state()
+        self.assertEqual(0, code)
+        for key in ("head", "symbolic", "refs", "index", "exclude", "fetch_head"):
+            self.assertEqual(before[key], after[key], key)
+        outside = lambda files: {name: sha for name, sha in files.items() if not name.startswith(pr_loop.TASK_DIR)}
+        self.assertEqual(outside(before["files"]), outside(after["files"]))
+        self.assertEqual({}, {name: sha for name, sha in after["files"].items() if name.startswith(pr_loop.TASK_DIR + "/")},
+                         "the task directory was removed: that is the one thing it deletes")
+        self.assertTrue(any(line.startswith("pane %1 ") and "closed" in line for line in lines))
+        return lines
+
+    def test_a_checkout_behind_origin_is_not_fast_forwarded(self):
+        self.acting_leaves_alone(self.env.advance_remote)
+        self.assertNotEqual(self.env.remote_head, self.env.git("rev-parse", "HEAD", cwd=self.top), "origin moved on, the checkout did not")
+        self.assertNotEqual(self.env.remote_head, self.env.git("rev-parse", "origin/main", cwd=self.top), "and nothing was fetched")
+
+    def test_a_checkout_on_another_branch_is_not_switched(self):
+        self.acting_leaves_alone(lambda: self.env.git("switch", "-q", "-c", "feature", cwd=self.top))
+        self.assertEqual("refs/heads/feature", self.env.git("symbolic-ref", "HEAD", cwd=self.top))
+
+    def test_a_dirty_checkout_is_neither_stashed_nor_cleaned(self):
+        def dirty():
+            (self.top / "stray.txt").write_text("mine\n")
+            (self.top / "README.txt").write_text("changed\n")
+        lines = self.acting_leaves_alone(dirty)
+        self.assertEqual("mine\n", (self.top / "stray.txt").read_text())
+        self.assertEqual("changed\n", (self.top / "README.txt").read_text())
+        self.assertEqual("", self.env.git("stash", "list", cwd=self.top))
+        self.assertIn("(uncommitted work)", lines[-1])
+
+    def test_a_git_operation_in_progress_is_left_as_it_is(self):
+        marker = Path(self.env.git("rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD", cwd=self.top))
+        lines = self.acting_leaves_alone(lambda: marker.write_text("x\n"))
+        self.assertTrue(marker.is_file())
+        self.assertIn("(a git operation in progress)", lines[-1])
+
+    def test_a_checkout_that_is_not_a_clone_of_the_repository_is_not_asked_about_its_origin(self):
+        self.env.git("remote", "set-url", "origin", "https://github.com/other/thing.git", cwd=self.top)
+        self.agent()
+        code, lines = self.clean()
+        self.assertEqual(0, code)
+        self.assertTrue(any(line.startswith("pane %1 ") for line in lines))
+
+
+class CleanProgramTests(unittest.TestCase):
+    """`python3 scripts/pr_loop.py --clean ...` as a real process (kjelly/pilot#442): the command line, the exit status and what is
+    printed, from the entry point to the last line. Time is real (the second read of a screen waits a second); tmux, gh and the
+    agents are the fakes."""
+    SCRIPT = ROOT / "scripts" / "pr_loop.py"
+    CLEAN = "--clean"
+
+    def setUp(self):
+        self.env = FakeEnv(self)
+        self.top = self.env.checkout
+        self.session = pr_loop.session_name(self.top)
+        self.where = SimpleNamespace(path=self.top, session=self.session)
+        with (self.top / ".git/info/exclude").open("a") as stream:
+            stream.write(f"/.pr-ready/\n/{pr_loop.TASK_DIR}/\n")
+
+    def agent(self, number=7, phase="draft", **pane):
+        """An agent the way a run starts it, scripted by `pane`; its ID."""
+        with patch.object(pr_loop, "tell"):
+            found = pr_loop.Agent("claude", self.where, number, phase)
+        if pane:
+            self.env.set_pane(found.pane, **pane)
+        return found.pane
+
+    def run_program(self, *argv, cwd=None, env=None):
+        return subprocess.run([sys.executable, "-B", str(self.SCRIPT), *argv], capture_output=True, text=True, timeout=120,
+                              cwd=cwd or self.top, env=env)
+
+    def kills(self):
+        return [call[2] for call in self.env.tmux_calls("kill-pane")]
+
+    def header(self):
+        return f"Residue of earlier runs in {self.top} (tmux session {self.session} on {SOCKET}):"
+
+    def test_the_listing_is_printed_to_stdout_with_status_0_and_nothing_is_changed(self):
+        idle = self.agent(7, "draft")
+        dead = self.agent(7, "ready", status=["1|0|claude"])
+        self.env.keeper()
+        self.env.update_tmux(log=[])
+        before = (sha256_of(self.top / ".git/index"), self.env.live(), (self.top / ".git" / pr_loop.LOCK_NAME).exists())
+        proc = self.run_program(self.CLEAN, "--repo", "acme/demo")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertEqual("", proc.stderr)
+        lines = proc.stdout.splitlines()
+        self.assertEqual(self.header(), lines[0])
+        self.assertEqual(f"pane {idle} window 7-draft: alive, idle (at its prompt), claude; would close: it is idle; closing it ends "
+                         "window 7-draft", lines[1])
+        self.assertEqual(f"pane {dead} window 7-ready: dead, claude; would close: it is dead; closing it ends window 7-ready",
+                         lines[3])
+        self.assertEqual("would close 2 panes and remove 0 task directories; the next run would start", lines[-1])
+        self.assertEqual([], self.env.gh_calls(), "no gh call")
+        self.assertEqual({"list-panes", "capture-pane"}, {call[0] for call in self.env.tmux_calls()})
+        self.assertEqual(before, (sha256_of(self.top / ".git/index"), self.env.live(),
+                                  (self.top / ".git" / pr_loop.LOCK_NAME).exists()))
+
+    def test_yes_closes_what_the_listing_said_and_a_second_run_finds_nothing(self):
+        idle = self.agent(7, "draft")
+        busy = self.agent(7, "ready", screens=["synthetic\n❯\nWorking (3s • esc to interrupt)"])
+        self.env.keeper()
+        proc = self.run_program(self.CLEAN, "--yes")
+        self.assertEqual((0, ""), (proc.returncode, proc.stderr))
+        self.assertEqual([idle], self.kills())
+        self.assertEqual(f"closed 1 panes and removed 0 task directories; the next run would still be refused ({busy})",
+                         proc.stdout.splitlines()[-1])
+        proc = self.run_program(self.CLEAN, "--yes", "--include-busy")
+        self.assertEqual([idle, busy], self.kills())
+        proc = self.run_program(self.CLEAN, "--yes", "--include-busy")
+        self.assertEqual((0, [self.header(), "closed 0 panes and removed 0 task directories; the next run would start"]),
+                         (proc.returncode, proc.stdout.splitlines()))
+        self.assertEqual([idle, busy], self.kills())
+
+    def test_a_wrong_command_line_is_status_2_and_changes_and_asks_nothing(self):
+        self.agent()
+        self.env.update_tmux(log=[])
+        for argv, message in ((["--clean", "7"], "--clean takes no PR numbers and no --dry-run: without --yes it only lists"),
+                              (["--clean", "--dry-run"], "--clean takes no PR numbers and no --dry-run: without --yes it only lists"),
+                              (["7", "--yes"], "--yes, --include-busy and --remove-task-dirs go with --clean"),
+                              (["7", "--include-busy"], "--yes, --include-busy and --remove-task-dirs go with --clean"),
+                              (["7", "--remove-task-dirs"], "--yes, --include-busy and --remove-task-dirs go with --clean"),
+                              (["--yes"], "the following arguments are required: PR"),
+                              ([], "the following arguments are required: PR"),
+                              (["--clean", "--yes", "--phase-timeout", "-1"], None)):
+            with self.subTest(argv=argv):
+                proc = self.run_program(*argv)
+                if message is None:
+                    self.assertEqual(2, proc.returncode, "an option that is not valid is still checked")
+                    continue
+                self.assertEqual((2, ""), (proc.returncode, proc.stdout))
+                self.assertTrue(proc.stderr.rstrip().endswith(f"pr_loop.py: error: {message}"), proc.stderr)
+        self.assertEqual([], self.env.tmux_calls(), "nothing was asked of tmux, and nothing of GitHub")
+        self.assertEqual([], self.env.gh_calls())
+
+    def test_the_existing_command_lines_are_still_checked_the_way_they_were(self):
+        for argv, message in ((["7", "7"], "PR numbers must be positive and unique, and --max-actions must be positive"),
+                              (["0"], "PR numbers must be positive and unique, and --max-actions must be positive"),
+                              (["7", "--draft-command", " "], "agent commands must be nonempty single lines")):
+            with self.subTest(argv=argv):
+                proc = self.run_program(*argv)
+                self.assertEqual(2, proc.returncode)
+                self.assertTrue(proc.stderr.rstrip().endswith(f"pr_loop.py: error: {message}"), proc.stderr)
+
+    def test_a_directory_that_is_not_a_work_tree_or_not_its_root_is_a_refusal_with_status_1(self):
+        plain = self.env.root / "plain"
+        plain.mkdir()
+        with patch.dict(os.environ, GIT_CEILING_DIRECTORIES=str(self.env.root)):
+            proc = self.run_program(self.CLEAN, "--repo", "acme/demo", cwd=plain)
+            self.assertEqual((1, ""), (proc.returncode, proc.stdout))
+            self.assertEqual("pr-loop: the current directory is not inside a git work tree; start the runner in a checkout of "
+                             "github.com/acme/demo or pass --checkout DIR\n", proc.stderr)
+            below = self.top / "sub"
+            below.mkdir()
+            proc = self.run_program(self.CLEAN, "--checkout", str(below), cwd=plain)
+            self.assertEqual((1, f"pr-loop: --checkout {below} is not the root of its git work tree {self.top}; pass {self.top}\n"),
+                             (proc.returncode, proc.stderr))
+            proc = self.run_program(self.CLEAN, "--checkout", str(self.top), cwd=plain)
+            self.assertEqual(0, proc.returncode, "control: the checkout named, from another directory")
+        self.assertEqual([], self.env.gh_calls())
+
+    def test_a_directory_below_the_root_cleans_the_checkout_it_is_in(self):
+        self.agent()
+        (self.top / "sub").mkdir()
+        proc = self.run_program(self.CLEAN, cwd=self.top / "sub")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertEqual(self.header(), proc.stdout.splitlines()[0])
+
+    def test_a_held_lock_refuses_the_run_that_acts_and_is_reported_by_the_one_that_lists(self):
+        idle = self.agent()
+        lock = self.top / ".git" / pr_loop.LOCK_NAME
+        held = pr_loop.lock_checkout(self.top, lock)
+        try:
+            self.env.update_tmux(log=[])
+            proc = self.run_program(self.CLEAN, "--yes", "--remove-task-dirs")
+            self.assertEqual((1, "", f"pr-loop: another pr_loop runner is using the checkout {self.top} (lock {lock}); wait for it "
+                                     "to finish or stop it\n"), (proc.returncode, proc.stdout, proc.stderr))
+            self.assertEqual([], self.env.tmux_calls(), "it was refused before tmux was asked anything")
+            proc = self.run_program(self.CLEAN)
+            self.assertEqual(0, proc.returncode)
+            self.assertIn(f"lock {lock}: held by a running runner; --clean --yes would be refused", proc.stdout.splitlines())
+            self.assertEqual([], self.kills())
+        finally:
+            os.close(held)
+        proc = self.run_program(self.CLEAN, "--yes")
+        self.assertEqual(0, proc.returncode)
+        self.assertEqual([idle], self.kills(), "control: the lock is free")
+
+    def test_it_never_closes_the_pane_it_was_started_in_or_one_above_it(self):
+        mine = self.agent(7, "draft")
+        above = self.agent(7, "ready", pid=os.getpid())  # the process of this pane is above the runner's: this test's own
+        other = self.agent(8, "draft")
+        self.env.keeper()
+        server = self.env.server().split("|")[0]
+        env = dict(os.environ, TMUX_PANE=mine, TMUX=f"{SOCKET},{server},0")
+        proc = self.run_program(self.CLEAN, "--yes", "--include-busy", env=env)
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertEqual([other], self.kills())
+        self.assertIn("left open: the command runs in this pane", [line for line in proc.stdout.splitlines()
+                                                                  if line.startswith(f"pane {mine} ")][0])
+        self.assertIn("left open: the command runs below this pane's process", [line for line in proc.stdout.splitlines()
+                                                                                if line.startswith(f"pane {above} ")][0])
+
+    def test_an_interrupt_says_what_was_reported_and_is_status_130(self):
+        argv = ["pr_loop.py", self.CLEAN, "--yes", "--checkout", str(self.top)]
+        errors = io.StringIO()
+        with patch.object(sys, "argv", argv), patch.object(pr_loop.Clean, "run", side_effect=KeyboardInterrupt), \
+             contextlib.redirect_stderr(errors):
+            self.assertEqual(130, pr_loop.main())
+        self.assertEqual("Interrupted; the lines above say what was closed or removed so far.\n", errors.getvalue())
+
+    def test_the_help_names_the_four_flags(self):
+        done = subprocess.run([sys.executable, "-B", str(self.SCRIPT), "--help"], capture_output=True, text=True, timeout=60)
+        text = " ".join(done.stdout.split())
+        for flag in ("--clean", "--yes", "--include-busy", "--remove-task-dirs"):
+            self.assertIn(flag, text)
+        self.assertIn("[PR ...]", text)
+        self.assertIn("changes nothing, reads no GitHub and takes no PR numbers", text)
+
+    # ---- the scenario of kjelly/pilot#442: a stopped run, the refusal, the listing, the cleaning, the next run -------------
+    def runner(self, *extra):
+        argv = [sys.executable, "-B", str(self.SCRIPT), "7", "--repo", "acme/demo", "--poll-interval", "0.01",
+                "--startup-timeout", "2", *extra]
+        return subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=self.top)
+
+    def test_a_stopped_run_is_refused_listed_and_cleaned_and_then_the_runner_starts_again(self):
+        self.env.set_pane("%1", enter=[{"result": {"outcome": "DRAFT-BLOCKED", "reason": "synthetic blocker"}}])
+        first = self.runner()
+        self.assertEqual(1, first.returncode, first.stdout + first.stderr)
+        self.assertIn("DRAFT-BLOCKED", first.stderr)
+        self.assertEqual({self.session: ["7-draft"]}, self.env.live(), "the run left its agent")
+        refusal = (f"pr-loop: agent pane %1 (session {self.session}) is still running in {self.top}; inspect and close it before "
+                   f"starting the runner again {CLEAN_POINTER}\n")
+        again = self.runner()
+        self.assertEqual((1, "", refusal), (again.returncode, again.stdout, again.stderr), "the same command is refused")
+        self.env.update_tmux(log=[])
+        listing = self.run_program(self.CLEAN)
+        self.assertEqual((0, ""), (listing.returncode, listing.stderr))
+        lines = listing.stdout.splitlines()
+        self.assertEqual(self.header(), lines[0])
+        self.assertEqual(f"pane %1 window 7-draft: alive, idle (at its prompt), claude; would close: it is idle; closing it ends "
+                         f"window 7-draft and session {self.session}; an attached client is detached", lines[1])
+        self.assertRegex(lines[3], r"^task [0-9a-f]{32}: PR #7 draft, [0-9]+s old, result DRAFT-BLOCKED; kept: task directories "
+                                   r"are removed only with --remove-task-dirs$")
+        self.assertEqual("would close 1 panes and remove 0 task directories; the next run would start", lines[-1])
+        self.assertEqual([], self.kills(), "the listing closed nothing")
+        done = self.run_program(self.CLEAN, "--yes", "--remove-task-dirs")
+        self.assertEqual((0, ""), (done.returncode, done.stderr))
+        self.assertEqual([["kill-pane", "-t", "%1"]], self.env.tmux_calls("kill-pane"))
+        self.assertEqual({}, self.env.live())
+        self.assertEqual([], list((self.top / pr_loop.TASK_DIR).iterdir()), "and the finished run's task directory with it")
+        self.assertEqual("closed 1 panes and removed 1 task directories; the next run would start", done.stdout.splitlines()[-1])
+        self.env.set_pane("%1", enter=[{"result": {"outcome": "DRAFT-BLOCKED", "reason": "synthetic blocker"}}])
+        second = self.runner()
+        self.assertEqual(1, second.returncode, second.stdout + second.stderr)
+        self.assertIn(f"PR #7 draft agent: %1 in window 7-draft of tmux session {self.session}", second.stdout)
+        self.assertIn("DRAFT-BLOCKED", second.stderr, "the runner started again and went as far as the first one")
+
+
+class CleanAgreesWithTheRefusalTests(CleanCase):
+    """ONE predicate says which panes are in the way of the next run (`blocking_panes`): the startup refusal and the listing's
+    summary both read it (AGENTS.md section 5.7), so they agree for every row, and a row that one of them thinks is in the way
+    and the other does not would be a pane `--clean` reports as fixed that the runner still refuses."""
+
+    def test_they_agree_for_every_kind_of_row(self):
+        session, twin = self.session, self.session + "-eink"
+        row = self.env.row
+        for case, rows, in_the_way in (
+                ("a live pane of the runner's", [row(session, "%3")], ["%3"]),
+                ("a dead pane of the runner's", [row(session, "%3", dead=True)], []),
+                ("a live pane below the checkout", [row(session, "%3", path=self.top / "sub")], ["%3"]),
+                ("a live pane in a sibling", [row(session, "%3", path=f"{self.top}-other")], []),
+                ("a live pane that moved out", [row(session, "%3", path="/tmp")], []),
+                ("a pane of the older names", [row("pilot-pr-7-draft-0123456789", "%3")], ["%3"]),
+                ("a pane of another checkout's session", [row(pr_loop.session_name(self.env.root / "other"), "%3")], ["%3"]),
+                ("a pane of your own session", [row("work", "%3")], []),
+                ("the twin alone", [row(twin, "%3")], ["%3"]),
+                ("the pane and its twin", [row(session, "%3"), row(twin, "%3")], ["%3"]),
+                ("the pane of a session of yours, and its twin of the runner's prefix", [row("work", "%3"), row(session, "%3")], ["%3"]),
+                ("a split of yours in the runner's window", [row(session, "%3"), row(session, "%4", window="7-draft",
+                                                                                         start_command="")], ["%3", "%4"]),
+                ("two panes, one dead", [row(session, "%3", dead=True), row(session, "%4")], ["%4"]),
+                ("no pane", [], [])):
+            with self.subTest(case=case):
+                self.env.update_tmux(listing=rows)
+                try:
+                    pr_loop.check_panes(self.top)
+                    refusal = None
+                except pr_loop.Stop as exc:
+                    refusal = str(exc)
+                lines = self.clean()[1]
+                self.assertEqual(in_the_way, [pane.pane for pane in pr_loop.blocking_panes(self.top, pr_loop.list_panes()[0])])
+                self.assertEqual(bool(in_the_way), refusal is not None, refusal)
+                if in_the_way:
+                    self.assertIn(f"agent pane {in_the_way[0]} ", refusal)
+                    self.assertTrue(lines[-1].endswith(f"the next run would still be refused ({', '.join(in_the_way)})"), lines[-1])
+                else:
+                    self.assertTrue(lines[-1].endswith("the next run would start"), lines[-1])
+
+    def test_the_two_read_the_one_predicate(self):
+        source = ast.parse((ROOT / "scripts" / "pr_loop.py").read_text())
+        users = {function.name for function in ast.walk(source) if isinstance(function, ast.FunctionDef)
+                 and any(isinstance(node, ast.Name) and node.id == "blocking_panes" for node in ast.walk(function))}
+        self.assertTrue({"check_panes", "left"} <= users, users)
+        spelled = {function.name for function in ast.walk(source) if isinstance(function, ast.FunctionDef)
+                   and any(isinstance(node, ast.Name) and node.id == "PANE_SESSION_PREFIX" for node in ast.walk(function))}
+        self.assertEqual({"blocking_panes", "session_name"}, spelled,
+                         "the prefix is read to decide it in one place, and to build the name of the session in another")
