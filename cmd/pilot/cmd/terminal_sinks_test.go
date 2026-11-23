@@ -48,6 +48,8 @@ var terminalSinks = []terminalSink{
 		"RunWriter.Finish detaches from the cancellation itself"},
 	{"cmd/pilot/cmd/verify.go", "runVerifyOne", "Finish", "T3", "already (RunWriter.Finish)",
 		"RunWriter.Finish detaches from the cancellation itself (and the one with context.Background() never had a cancellation)"},
+	{"cmd/pilot/cmd/verify.go", "var finishVerifyRun", "Finish", "T3", "already (RunWriter.Finish); seam added by #343",
+		"the test seam runVerifyOne calls inside delivery.RetryTransientEvidence; its default is writer.Finish, which detaches from the cancellation itself"},
 	{"cmd/pilot/cmd/reconcile_golang_apply.go", "finishGolangApply", "commitOutput", "T4", "P2-6",
 		"a local file write that takes no context: it is made on the way out of a cancelled run like any other"},
 	{"cmd/pilot/cmd/reconcile_golang.go", "golangPreviewPlan", "commitOutput", "T4", "P2-6",
