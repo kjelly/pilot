@@ -4,6 +4,12 @@ Use this contract for `issue-to-pr`, `pr-ready` and `pr-review-merge`. Role iden
 and the transport's `agent_type` are separate: an independent child must follow
 the verified role contract even when the host cannot dispatch its custom name.
 
+Terminal permissions are established earlier, before the first process and the
+checkout contract, by the entrypoint's inline startup rule. Read its details in
+`.agents/skills/_shared/codex-terminal-permissions.md` as that rule directs.
+A permission failure stops under that contract. This child-dispatch contract
+does not repair or expand a retained terminal's grants.
+
 1. Run the checkout contract's `verify-role` before each dispatch. STOP still
    blocks; PASS and DRIFT permit dispatch. Read the complete role TOML at the
    returned `snapshot_role` path, including `model`, `model_reasoning_effort` and

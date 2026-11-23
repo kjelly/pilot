@@ -5,6 +5,23 @@ description: Repair and verify existing GitHub Draft pull requests until merge-r
 
 # PR Ready — multi-agent Draft PR remediation
 
+## Codex terminal permissions (before the first process)
+
+For Codex, before the first shell/process execution, including `realpath`,
+`git`, `gh` or snapshot/checkout helpers, apply this startup rule. The retained
+audited terminal needs GitHub network access and the `.git` writes required by
+this workflow. If the current grants are insufficient, request the normal,
+narrowly justified permission grant when starting that terminal. Do not start it
+under insufficient permissions and wait for a later `git fetch` or `gh` failure.
+Adequate existing grants need no repeat approval. A rejected or unavailable
+required grant stops under the workflow's existing blocked-outcome protocol.
+Keep sandbox, branch protections and terminal auditing intact.
+
+Read `.agents/skills/_shared/codex-terminal-permissions.md` from the repo root
+through a non-process reader when available, or in that approved recorded
+terminal before the single-item checkout contract below. This inline rule is
+sufficient to establish the terminal when file reading itself needs a process.
+
 ## Single-item checkout contract (mandatory)
 
 Follow the single-item scope and branch checkout contract,
