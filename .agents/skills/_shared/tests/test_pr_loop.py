@@ -1989,6 +1989,9 @@ class DocumentationTests(unittest.TestCase):
              "the runner never updates the checkout", "run `git pull --ff-only` yourself: the runner never",
              "The runner never deletes, resets, cleans or stashes anything", "Everything here READS it, except two things",
              "at origin's tip, or the runner refuses",
+             # the default of --phase-timeout before it became four hours (a Draft phase that fixes a review finding, runs the
+             # checks and waits for CI took about two and a half hours)
+             "defaults to 7200 seconds", "(7200 seconds by default)",
              # the checkout on another branch (kjelly/pilot#425): the runner leaves it for the default branch and says how
              # to go back; the old requirement and the old advice about an interrupted agent no longer hold
              "HEAD is on the default branch that `origin` itself reports", "may leave the checkout on a PR branch or with "
@@ -2017,6 +2020,10 @@ class DocumentationTests(unittest.TestCase):
                    "git switch --no-guess --no-recurse-submodules --no-overwrite-ignore -- <b>",
                    "never created", "also a prunable one", "to go back: git -C <path> switch <x>",
                    "leaves for the default branch (the branch and its commits stay)")
+    # What the README says about --phase-timeout: the default the runner has (read from the code and spelled out) and why
+    PHASE_TIMEOUT_SAYS = (f"defaults to {pr_loop.PHASE_TIMEOUT} seconds (4 hours)", "defaults to 14400 seconds (4 hours)",
+                          "can take more than two hours", f"({pr_loop.PHASE_TIMEOUT} seconds by default)",
+                          "(14400 seconds by default)")
     # What the runner's docstring says about the session, which `--help` shows
     DOCSTRING_SAYS = ("pilot-pr-<directory name>-<8 hex>", "tmux attach -r -t", "is fast-forwarded to exactly the tip",
                       "one `git merge --ff-only`", "it switches the checkout to origin's default branch",
@@ -2104,6 +2111,24 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("python3 scripts/pr_loop.py", section, "control: this is the section about the runner")
         self.assertEqual([], self.missing(section) + self.stale(section),
                          "README.md, section 'Process a batch of pull requests'")
+
+    def test_the_readme_states_the_phase_timeout_the_runner_defaults_to_and_no_other(self):
+        section = self.section((ROOT / "README.md").read_text())
+        self.assertIsNotNone(section)
+        self.assertEqual([], self.missing(section, self.PHASE_TIMEOUT_SAYS), "README.md, section 'Process a batch'")
+        self.assertNotIn("7200", section, "the old default must not be stated anywhere in the section")
+        self.assertEqual([], [stale for stale in self.stale(section) if "7200" in stale])
+
+    def test_the_check_fails_when_the_readme_states_the_old_phase_timeout(self):
+        good = "The phase timeout defaults to 14400 seconds (4 hours): a phase can take more than two hours; (14400 seconds by default)."
+        self.assertEqual([], self.missing(good, self.PHASE_TIMEOUT_SAYS), "control: a text that says all of it is accepted")
+        self.assertEqual(len(self.PHASE_TIMEOUT_SAYS), len(self.missing("", self.PHASE_TIMEOUT_SAYS)))
+        for case, text in (("the first sentence", good.replace("14400", "7200", 1)),
+                           ("the parenthesis", good.replace("(14400 seconds by default)", "(7200 seconds by default)"))):
+            with self.subTest(case=case):
+                self.assertTrue(self.missing(text, self.PHASE_TIMEOUT_SAYS), "the new default is no longer stated")
+        self.assertIn("still says 'defaults to 7200 seconds'", "; ".join(self.stale("The phase timeout defaults to 7200 seconds.")))
+        self.assertIn("still says '(7200 seconds by default)'", "; ".join(self.stale("until `--phase-timeout` (7200 seconds by default).")))
 
     def test_the_runners_docstring_describes_the_checkout_the_agents_start_in(self):
         self.assertGreater(len(self.flat(pr_loop.__doc__ or "")), 500, "the docstring is missing: nothing was scanned")
@@ -4587,12 +4612,18 @@ class CheckoutSwitchTests(FastForwardCase):
         self.assertEqual("refs/heads/main", self.git("symbolic-ref", "HEAD"), "it is not switched back")
 
 
+# A killed process is a zombie (Z) until its parent (init, for an orphan) reaps it, and shows X (dead) for an instant while it is
+# reaped: a check that counts X as running reads Z, then X, then nothing, and fails a test whose process was killed (the flake of
+# kjelly/pilot#427: the same code failed one run in about twenty on Python 3.12).
+DEAD_STATES = ("Z", "X", "x")
+
+
 def alive(pid):
     """Whether process `pid` runs: a killed process stays a zombie until its parent (init, for an orphan) reaps it."""
     try:
         os.kill(pid, 0)
         with open(f"/proc/{pid}/stat") as stat_file:
-            return stat_file.read().rsplit(")", 1)[1].split()[0] != "Z"
+            return stat_file.read().rsplit(")", 1)[1].split()[0] not in DEAD_STATES
     except OSError:  # gone between the two calls, or /proc says so
         return False
 
@@ -4607,7 +4638,7 @@ def group_members(pgid):
                     state, _, group = stat_file.read().rsplit(")", 1)[1].split()[:3]
             except OSError:
                 continue
-            if state != "Z" and int(group) == pgid:
+            if state not in DEAD_STATES and int(group) == pgid:
                 found.append(int(name))
     return found
 
@@ -4680,9 +4711,7 @@ class GitChangeTests(unittest.TestCase):
         self.assertFalse(self.log.exists(), "nothing was run")
 
     def interrupt_soon(self, delay=0.3):
-        timer = threading.Timer(delay, os.kill, (os.getpid(), signal.SIGINT))
-        timer.start()
-        self.addCleanup(timer.cancel)
+        self.interrupt_at(delay)
 
     def test_an_interrupted_merge_is_waited_for_and_the_interrupt_raised_afterwards(self):
         self.fake_git(f"sleep 1.2\necho finished > {self.signal}\n")
@@ -4749,11 +4778,37 @@ class GitChangeTests(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual([], group_members(pgid), "a process of git's group is still running")
 
-    def interrupt_at(self, *delays):
-        for delay in delays:
-            timer = threading.Timer(delay, os.kill, (os.getpid(), signal.SIGINT))
-            timer.start()
-            self.addCleanup(timer.cancel)
+    def interrupt_at(self, *delays, after="leader"):
+        """SIGINT to this process once for each of `delays`, that many seconds after the pid file `after` (`leader`, which the
+        fake git writes first, or `child`/`helper`, which it writes once it has started that process) appeared: git is running
+        then, and the call under test holds the process it started. A timer started BEFORE the call can fire between the fork
+        and the helper's `try:`, where an interrupt leaves the command running (a window the helper documents). The wait is
+        bounded: a file that does not appear within 5 s sends nothing and fails the test when it ends. The sender stops when
+        the test does."""
+        stop, missing = threading.Event(), []
+
+        def send():
+            marker, end = self.root / after, time.monotonic() + 5
+            while not marker.exists():
+                if stop.wait(0.01):
+                    return
+                if time.monotonic() > end:
+                    missing.append(after)
+                    return
+            began = time.monotonic()
+            for delay in delays:
+                if stop.wait(max(0.0, began + delay - time.monotonic())):
+                    return
+                os.kill(os.getpid(), signal.SIGINT)
+        sender = threading.Thread(target=send, daemon=True)
+        sender.start()
+
+        def finish():
+            stop.set()
+            sender.join(2)
+            if missing:
+                raise AssertionError(f"{after} did not appear within 5 s: no SIGINT was sent")
+        self.addCleanup(finish)
 
     def test_a_timeout_ends_what_a_leader_that_ended_on_sigterm_left_holding_its_pipes(self):
         self.fake_git(self.child_holding_the_pipes() + self.LEADER_ENDS_ON_SIGTERM)
@@ -4776,7 +4831,7 @@ class GitChangeTests(unittest.TestCase):
 
     def test_an_interrupted_fetch_ends_what_a_leader_that_ended_on_sigterm_left_holding_its_pipes(self):
         self.fake_git(self.child_holding_the_pipes() + self.LEADER_ENDS_ON_SIGTERM)
-        self.interrupt_at(0.3)
+        self.interrupt_at(0.3, after="child")
         began = time.monotonic()
         with self.assertRaises(KeyboardInterrupt):
             pr_loop.git_change(self.root / "work", "fetch")
@@ -4798,7 +4853,7 @@ class GitChangeTests(unittest.TestCase):
 
     def test_an_interrupted_switch_with_a_lingering_child_is_ended_at_its_limit(self):
         self.fake_git(self.child_holding_the_pipes() + self.LEADER_ENDS_ON_SIGTERM)
-        self.interrupt_at(0.3)
+        self.interrupt_at(0.3, after="child")
         began = time.monotonic()
         with patch.dict(pr_loop.GIT_CHANGES, {"switch": 1.0}):
             with self.assertRaises(KeyboardInterrupt):
@@ -4893,7 +4948,7 @@ class GitChangeTests(unittest.TestCase):
         if not (self.root / "probed").exists():
             self.skipTest("this git does not run an ext:: helper here (protocol.ext.allow), so the case cannot be made")
         if mode == "interrupt":
-            self.interrupt_at(1.2)
+            self.interrupt_at(1.2, after="helper")
         patches = [patch.object(pr_loop, "KILL_AFTER", 1.0), patch.object(pr_loop, "DRAIN", 1.0)]
         if mode == "timeout":
             patches.append(patch.dict(pr_loop.GIT_CHANGES, {"fetch": 1.5}))
@@ -4921,6 +4976,96 @@ class GitChangeTests(unittest.TestCase):
     def test_an_interrupted_real_git_fetch_whose_helper_ignores_sigterm_is_bounded(self):
         with self.assertRaises(KeyboardInterrupt):
             self.real_git_fetch("interrupt")
+
+
+class RunTests(unittest.TestCase):
+    """`run`, the one call of this runner that starts every other command (tmux, gh, git reads): a command that outlives its
+    timeout is a Stop and its WHOLE process group ends; one that exited is judged by its exit code, whatever something it
+    started does with its output (kjelly/pilot#427). The command is a script named `tool` in front of PATH; the processes
+    it starts carry an environment marker, and only those are ever killed by the test."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="pr-loop-run-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        (self.root / "bin").mkdir()
+        patcher = patch.dict(os.environ, PATH=f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}", BR_TEST_MARKER=str(self.root))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name, value in (("KILL_AFTER", 0.5), ("DRAIN", 0.5), ("POLL", 0.2)):
+            patcher = patch.object(pr_loop, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(self.kill_leftovers)
+        watchdog = threading.Timer(12, self.kill_leftovers)
+        watchdog.daemon = True
+        watchdog.start()
+        self.addCleanup(watchdog.cancel)
+
+    def tool(self, body):
+        path = self.root / "bin/tool"
+        path.write_text(f"#!/bin/sh\necho $$ > {self.root}/leader\n" + body)
+        path.chmod(0o755)
+
+    def pid(self, name):
+        return int((self.root / name).read_text())
+
+    def owned(self, pid):
+        try:
+            return f"BR_TEST_MARKER={self.root}".encode() in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        except OSError:
+            return False
+
+    def kill_leftovers(self):
+        for name in ("leader", "child"):
+            with contextlib.suppress(OSError, ValueError):
+                pid = self.pid(name)
+                if alive(pid) and self.owned(pid):
+                    group = os.getpgid(pid)
+                    if group != os.getpgid(0):  # never the runner's own group (a command that was not given one of its own)
+                        with contextlib.suppress(OSError):
+                            os.killpg(group, signal.SIGKILL)
+                    os.kill(pid, signal.SIGKILL)
+
+    def assertGone(self, name, within=3.0):
+        pid, end = self.pid(name), time.monotonic() + within
+        while alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertFalse(alive(pid), f"{name} (pid {pid}) is still running")
+
+    def test_a_command_that_exited_is_judged_by_its_exit_code_when_a_leftover_holds_its_output(self):
+        for code in (0, 3):
+            with self.subTest(code=code):
+                self.tool(f"sleep 6 &\necho $! > {self.root}/child\necho out\necho err >&2\nexit {code}\n")
+                began = time.monotonic()
+                done = pr_loop.run(["tool", "sub"], timeout=30)
+                self.assertEqual((code, "out\n", "err\n"), (done.returncode, done.stdout, done.stderr))
+                self.assertLess(time.monotonic() - began, 3, "the command's own exit, not the 30 second timeout or the leftover's 6")
+                self.assertTrue(alive(self.pid("child")), "what a finished command left behind is not signalled")
+                self.kill_leftovers()
+
+    def test_a_command_that_outlives_its_timeout_is_a_stop_and_its_whole_group_is_ended(self):
+        self.tool(f"trap 'exit 143' TERM\nsleep 30 &\necho $! > {self.root}/child\nwait\n")
+        began = time.monotonic()
+        with self.assertRaisesRegex(pr_loop.Stop, r"^tool sub timed out after 0\.5 seconds$"):
+            pr_loop.run(["tool", "sub", "ignored"], timeout=0.5)
+        self.assertLess(time.monotonic() - began, 4)
+        self.assertGone("leader")
+        self.assertGone("child")  # the leader alone is what `subprocess.run(timeout=)` ends
+
+    def test_a_command_that_ignores_sigterm_is_killed_after_kill_after(self):
+        self.tool(f"trap '' TERM\nsleep 30 &\necho $! > {self.root}/child\nwait\n")
+        began = time.monotonic()
+        with self.assertRaisesRegex(pr_loop.Stop, r"^tool sub timed out after 0\.5 seconds$"):
+            pr_loop.run(["tool", "sub"], timeout=0.5)
+        self.assertGreaterEqual(time.monotonic() - began, 0.5 + 0.5 - 0.2, "SIGTERM first, SIGKILL KILL_AFTER seconds later")
+        self.assertGone("leader")
+        self.assertGone("child")
+
+    def test_data_is_the_standard_input_and_without_it_the_input_is_closed(self):
+        self.tool("cat\n")
+        self.assertEqual("hello", pr_loop.run(["tool", "sub"], data="hello").stdout)
+        self.assertEqual("", pr_loop.run(["tool", "sub"]).stdout, "`cat` met end of input at once")
 
 
 class CheckoutCleanTests(CheckoutCase):
@@ -6071,6 +6216,35 @@ class ProgramTests(unittest.TestCase):
         text = " ".join(done.stdout.split())
         self.assertIn("--checkout DIR", text)
         self.assertIn(f"(default: {pr_loop.CHECKOUT_DEFAULT})", text)
+
+    def parsed_args(self, *extra):
+        """What `main()` hands the Batch for this command line, with a Batch that starts nothing."""
+        seen = []
+
+        class Capture:
+            def __init__(self, repo, args):
+                seen.append(args)
+
+            def run(self):
+                return None
+        argv = ["pr_loop.py", "7", "--repo", "acme/demo", *extra]
+        with patch.object(sys, "argv", argv), patch.object(pr_loop, "Batch", Capture):
+            self.assertEqual(0, pr_loop.main())
+        self.assertEqual(1, len(seen))
+        return seen[0]
+
+    def test_the_phase_timeout_defaults_to_four_hours_and_the_flag_overrides_it(self):
+        self.assertEqual(14400, self.parsed_args().phase_timeout, "the value the runner would wait per phase")
+        self.assertEqual(14400, pr_loop.PHASE_TIMEOUT)
+        self.assertEqual(5.0, self.parsed_args("--phase-timeout", "5").phase_timeout)
+        self.assertEqual(7200.0, self.parsed_args("--phase-timeout", "7200").phase_timeout, "the old default is still allowed")
+        self.assertEqual(14400, self.parsed_args("--poll-interval", "1").phase_timeout, "another flag does not change it")
+
+    def test_the_help_of_phase_timeout_says_its_default(self):
+        done = subprocess.run([sys.executable, "-B", str(self.SCRIPT), "--help"], capture_output=True, text=True, timeout=60)
+        text = " ".join(done.stdout.split())
+        self.assertIn("--phase-timeout PHASE_TIMEOUT seconds waiting per phase (default: 14400)", text)
+        self.assertNotIn("(default: 7200)", text)
 
     def test_a_pr_that_cannot_be_read_stops_without_starting_anything(self):
         self.env.update_gh(seq=[{"exit": 1, "stderr": "synthetic outage"}])

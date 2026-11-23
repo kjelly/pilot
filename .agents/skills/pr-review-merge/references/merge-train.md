@@ -215,10 +215,20 @@ python3 "$SNAP/.agents/skills/pr-review-merge/scripts/merge_train.py" status --r
   `--push-timeout` (120 s; a push runs under the mutation lock) and `--git-timeout` (120 s; everything
   local). A command runs in its own process group and session (so ssh, the remote helper and hooks end
   with it, and nothing can prompt on a terminal: `GIT_TERMINAL_PROMPT=0`). At the limit the group gets
-  SIGTERM, which lets git remove its own lock and temporary files, and SIGKILL 30 s later if it is still
-  there; the result is `GitTimeout`, an infrastructure failure. A stalled network call therefore holds
-  neither the consumer lock nor the mutation lock for longer than its limit, and the PR stays enqueued.
-  `gh` calls have their own limit (75 s) and fail as GitHub errors.
+  SIGTERM, which lets git remove its own lock and temporary files, and SIGKILL 30 s later (`GIT_KILL_GRACE`)
+  to whatever is still in the group: also when git itself has already gone and a member that ignores SIGTERM
+  stays. What is then left in git's pipes is read for at most 5 s (the grace,
+  when it is shorter) and the pipes are closed, so that a process that left the group cannot hold the train.
+  The result is `GitTimeout` ("... was ended (SIGTERM)" or "(SIGTERM, then SIGKILL)"), an infrastructure
+  failure. A stalled network call therefore holds neither the consumer lock nor the mutation lock for longer
+  than its limit plus the grace and the read, and the PR stays enqueued. A git that exits is judged by its
+  exit code, not by what it left behind: a descendant that keeps git's output open (a hook's background job)
+  is not waited for beyond that read and is not signalled, and its git is not a timeout.
+  `gh` calls have their own limit (75 s, `gh_runtime.GH_TIMEOUT`) and fail as GitHub errors; their group is ended
+  and a finished `gh` is judged the same way. All of it is one implementation,
+  `.agents/skills/_shared/scripts/bounded_run.py`, which `scripts/pr_loop.py` and `checkout_preflight.py` use too.
+  A command's session is its own, so a signal sent to the process group of the train itself (`timeout(1)`, a
+  tool's time limit) does not reach git; there is no SIGTERM handler yet (kjelly/pilot#309).
 - **Exit codes.** 0: the run ended with nothing failed (any of MERGED, DRAFTED, DEQUEUED, SKIP, WAITING,
   `NOT_AT_HEAD`, `BUSY`). 1: a PR ended in `ERROR`. 2: status `INFRA`, or an exception nobody
   classified (never a traceback with exit 1, which would be taken for a PR's `ERROR`).

@@ -1,15 +1,20 @@
 """The real `gh_runtime` read wrappers fed with answers recorded from real `gh` (AGENTS.md section 5.6).
 
-`subprocess.run` is replaced by a replay of fixtures/github_api.json (`pr_checks`, `issue_comments`,
-`user`, `labels`, `timeline`), so `run_gh` and the wrappers run unchanged. The train's and the gate's tests use fake clients,
+`bounded_run.run` (what `run_gh` starts `gh` through since kjelly/pilot#427) is replaced by a replay of
+fixtures/github_api.json (`pr_checks`, `issue_comments`, `user`, `labels`, `timeline`), so `run_gh` and the wrappers run
+unchanged, and a `gh` that must never run is first on PATH meanwhile: a replay that stops intercepting reaches it and
+fails the test, instead of calling the real `gh`. The train's and the gate's tests use fake clients,
 and the integration tests' fake gh executable is only as truthful as this replay: a PR with no check at all
 is answered by real gh with rc 1, empty stdout and a stderr line (never `[]`), which the adapter must read
 as "no checks" while every other empty answer stays a GitHubError.
 """
+import contextlib
 import copy
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,11 +29,39 @@ REPO = Repo.parse('kjelly/pilot')
 API = json.loads((HERE / 'fixtures' / 'github_api.json').read_text())
 
 
+@contextlib.contextmanager
+def no_real_gh():
+    """A `gh` that must never run, first on PATH: it records that it ran and exits 97. Leaving the block fails when it ran."""
+    with tempfile.TemporaryDirectory(prefix='gh-guard-') as tmp:
+        ran, guard = Path(tmp) / 'ran', Path(tmp) / 'gh'
+        guard.write_text(f'#!/bin/sh\necho "$@" >> {ran}\nexit 97\n')
+        guard.chmod(0o755)
+        try:
+            with mock.patch.dict(os.environ, {'PATH': f'{tmp}{os.pathsep}{os.environ["PATH"]}'}):
+                yield
+        finally:
+            if ran.exists():
+                raise AssertionError(f'the real gh ran ({ran.read_text().strip()}): the test replaced the wrong seam')
+
+
+@contextlib.contextmanager
 def replay(capture):
-    """A `subprocess.run` that answers with a recorded gh result."""
+    """A `bounded_run.run` that answers with a recorded gh result (yields the mock, for its call arguments)."""
     def run(argv, **kwargs):
         return subprocess.CompletedProcess(argv, capture['rc'], capture['stdout'], capture['stderr'])
-    return mock.patch.object(gh_runtime.subprocess, 'run', side_effect=run)
+    with no_real_gh(), mock.patch.object(gh_runtime.bounded_run, 'run', side_effect=run) as seam:
+        yield seam
+
+
+class SeamGuardTests(unittest.TestCase):
+    def test_a_replay_that_stops_intercepting_is_caught_instead_of_calling_the_real_gh(self):
+        with self.assertRaisesRegex(AssertionError, 'the real gh ran'), no_real_gh():
+            gh_runtime.run_gh(['pr', 'view', '1'], check=False)  # nothing replaces bounded_run.run: the guard is what runs
+
+    def test_the_replay_answers_without_starting_anything(self):
+        with replay(API['user']['ok']) as run:
+            self.assertEqual(API['user']['ok']['stdout'], gh_runtime.run_gh(['api', 'user']).stdout)
+        self.assertEqual(['gh', 'api', 'user'], run.call_args.args[0])
 
 
 class ChecksReplay(unittest.TestCase):

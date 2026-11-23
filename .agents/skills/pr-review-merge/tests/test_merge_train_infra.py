@@ -449,7 +449,9 @@ class LabelCleanupTests(DeliveryTests):
 # A stand-in for `git` that runs first on PATH. `<command>` in $FAKE_GIT_DIR names what it does for that git
 # subcommand: nothing listed, or "pass": the real git; "hang": sleep in a child process (a grandchild of the
 # train, as ssh or a remote helper would be) and leave a marker when it gets SIGTERM; "stubborn": ignore
-# SIGTERM (marker only) so that only SIGKILL ends it; "run-then-hang": run the real git, then hang.
+# SIGTERM (marker only) so that only SIGKILL ends it; "run-then-hang": run the real git, then hang; "leaked": print and exit 0
+# at once, leaving a descendant that holds git's stdout and stderr; "member-nopipe": git ends on SIGTERM and leaves a member of
+# its process group that ignores SIGTERM and holds neither pipe (kjelly/pilot#427).
 FAKE_GIT = r'''#!/bin/sh
 dir="$FAKE_GIT_DIR"
 command="$3"
@@ -472,9 +474,28 @@ stubborn() {
     trap 'echo term > "$dir/$command.term"' TERM
     while :; do sleep 1; done
 }
+leaked() {
+    record
+    sleep 600 &
+    echo $! > "$dir/$command.child"
+    echo leaked-out
+    exit 0
+}
+member_nopipe() {
+    record
+    ( trap 'echo term > "$dir/$command.mterm"' TERM
+      echo ready > "$dir/$command.mready"
+      while :; do sleep 1; done ) >/dev/null 2>&1 &
+    echo $! > "$dir/$command.member"
+    while [ ! -e "$dir/$command.mready" ]; do sleep 0.05; done
+    trap 'exit 143' TERM
+    wait
+}
 case "$mode" in
     hang) hang ;;
     stubborn) stubborn ;;
+    leaked) leaked ;;
+    member-nopipe) member_nopipe ;;
     run-then-hang) "$REAL_GIT" "$@"; hang ;;
     *) exec "$REAL_GIT" "$@" ;;
 esac
@@ -484,7 +505,7 @@ esac
 def alive(pid):
     """Is the process running (a zombie nobody has reaped yet is not)?"""
     try:
-        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] != 'Z'
+        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] not in ('Z', 'X', 'x')  # X: for an instant while init reaps it
     except (FileNotFoundError, ProcessLookupError):
         return False
 
@@ -517,7 +538,7 @@ class GitHarness(DeliveryTests):
         return int((self.gitdir / name).read_text().strip())
 
     def kill_leftovers(self):
-        for path in list(self.gitdir.glob('*.leader')) + list(self.gitdir.glob('*.child')):
+        for path in list(self.gitdir.glob('*.leader')) + list(self.gitdir.glob('*.child')) + list(self.gitdir.glob('*.member')):
             with contextlib.suppress(OSError, ValueError):
                 pid = int(path.read_text().strip())
                 if path.suffix == '.leader':
@@ -656,6 +677,31 @@ class GitTimeoutTests(GitHarness):
         self.assertGreaterEqual(took, 3 - 0.2, 'the timeout, then the grace, before SIGKILL')
         self.assertLess(took, 12)
         self.assertTrue((self.gitdir / 'fetch.term').exists(), 'it was asked first')
+        self.assertGone('fetch.leader')
+        self.assertStillEnqueued()
+
+    def test_a_git_that_exited_is_judged_by_its_exit_code_when_a_descendant_holds_its_output(self):
+        # Before kjelly/pilot#427 this was a GitTimeout after the limit plus two graces (an INFRA stop of a run whose git
+        # had succeeded); now it is what git returned, after one poll and one drain, and the descendant is left alone.
+        self.mode(fetch='leaked')
+        train = self.train(git_kill_grace=0.3)
+        done, took = self.bounded(lambda: train.git('fetch', timeout=4))
+        self.assertEqual((0, 'leaked-out\n'), (done.returncode, done.stdout))
+        self.assertLess(took, 3, 'one poll and the grace as the drain, not the limit of 4 s')
+        self.assertTrue(alive(self.pid('fetch.child')), 'what a finished git left behind is not signalled')
+
+    def test_a_member_that_ignores_sigterm_and_holds_no_pipe_is_killed_when_git_itself_ended_on_sigterm(self):
+        # git ends on SIGTERM and is reaped; a member of its group that ignores SIGTERM stays. Before kjelly/pilot#427 the
+        # train reported "(SIGTERM)" and left it running: SIGKILL went only to a leader that had not been reaped.
+        self.queue()
+        self.mode(fetch='member-nopipe')
+        out, took = self.bounded(self.train(fetch_timeout=1, git_kill_grace=0.5).run)
+        self.assertEqual(('INFRA', 'GitTimeout'), (out['status'], out['error_kind']), out)
+        self.assertIn('git fetch did not finish within 1 s and was ended (SIGTERM, then SIGKILL)', out['error'])
+        self.assertTrue((self.gitdir / 'fetch.mterm').exists(), 'the member was asked first, and kept running')
+        self.assertGreaterEqual(took, 1.5 - 0.2, 'the timeout, then the grace, before SIGKILL')
+        self.assertLess(took, 8)
+        self.assertGone('fetch.member')
         self.assertGone('fetch.leader')
         self.assertStillEnqueued()
 
