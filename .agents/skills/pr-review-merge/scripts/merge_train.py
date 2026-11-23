@@ -3,7 +3,8 @@
 
 Enqueue (`apply_decision.py --execute` on a MERGE gate): the gate-checked review evidence is saved
 in the train's state directory, with the HEAD the review covers (`reviewed_head`), the HEAD the
-gate saw (`enqueued_head`) and an `entry_id` that names this enqueue, and the PR gets the
+gate saw (`enqueued_head`), an `entry_id` that names this enqueue, the number of checks the gate saw
+(`checks_at_enqueue`) and the live base tip it decided on (`base_at_enqueue`), and the PR gets the
 `merge-queue` label.
 
 Process (this script; one consumer per repository and host, from a timer or by hand): take the PR
@@ -21,9 +22,14 @@ to Draft with the reason (`pr-ready` repairs it). A review that no longer covers
 outside the train, and a gate result only a person can change (an unresolved approval, a requested
 change, a disputed finding, a failing check the reviewer confirmed unrelated, a merge state that is
 not clean for another reason, a comparison GitHub cut) dequeue it: Ready, with the reasons in a
-comment, and the run goes on with the next PR. Transient states (CI that is pending, a base that
-keeps moving, mergeability GitHub has not computed, an API or infrastructure failure, a secret scan
-that could not run) leave it enqueued and stop this run.
+comment, and the run goes on with the next PR. Transient states (CI that is pending, no check on HEAD
+after `registration_grace` for a PR that was enqueued with checks (CI has not started), or for a
+PR that was enqueued with none but is no longer on the HEAD and the live base the gate decided
+that no-CI case on (`base_at_enqueue`: an integration or a base that moved can bring a workflow the
+rationale never covered, so the train waits for checks on the new HEAD; only a PR still on that HEAD
+and base goes on to the gate, which decides the no-CI case), a base that keeps moving,
+mergeability GitHub has not computed, an API or infrastructure failure, a secret scan that could not
+run) leave it enqueued and stop this run.
 
 An infrastructure failure is never the PR's verdict (kjelly/pilot#310). Anything that is not one of the
 outcomes above (a GitHub or git failure, a git command that timed out, an unreadable state directory, a
@@ -41,9 +47,19 @@ and the run looks at the PR again (`RETRY`). `tests/test_merge_train_guard.py` c
 write in the class. After the merge is read back as MERGED the saved entry is dropped and the label is
 removed, both inside that guard and neither able to change the outcome.
 
+The train needs no Ready signal and never reads one. The actor refuses a PR without a valid signal before it
+saves the entry and labels the PR, so the saved entry (`enqueued_head`, plus the commits in `train_commits`) is
+what the train trusts; the integration commits it pushes itself would make a signal bound to the enqueued HEAD
+stale, and a PR queued before the signal existed is merged as it was queued. The one thing it does with the
+signal's label is take it off a PR it returned to Draft (hygiene: the PR is Ready again only through pr-ready,
+which signs it afresh); that never changes an outcome. `review_gate.evaluate`, which the train calls on its own
+commits, reads no signal either (tests/test_merge_train.py `NoSignalRequirementTests`).
+
 Every git command has a time limit (`--fetch-timeout`, `--push-timeout`, `--git-timeout`) and runs in
-its own process group: on expiry the group gets SIGTERM (git removes its lock files), then SIGKILL.
-A stalled network call therefore holds neither the consumer lock nor the mutation lock for longer.
+its own process group (`_shared/scripts/bounded_run.py`): on expiry the group gets SIGTERM (git removes its lock files),
+then SIGKILL, also to a member that ignores SIGTERM when git itself has already gone. A git that exited is judged by its
+exit code, whatever its descendants do with its pipes. A stalled network call therefore holds neither the consumer lock
+nor the mutation lock for longer.
 
 The consumer never touches a working tree: it fetches into private refs (`refs/merge-train/*`),
 builds the merge commit with `git merge-tree`/`git commit-tree` and pushes the commit object. Use a
@@ -57,7 +73,6 @@ import fcntl
 import hashlib
 import json
 import os
-import signal
 import subprocess
 import sys
 import tempfile
@@ -72,6 +87,7 @@ from typing import Any, Callable, Sequence
 sys.dont_write_bytecode = True
 import gh_runtime  # noqa: E402
 from gh_runtime import GitHubError, MutationLockHeld, Repo  # noqa: E402
+import bounded_run  # noqa: E402  (gh_runtime has put the shared scripts on the import path; every git call goes through it)
 import review_gate  # noqa: E402
 
 QUEUE_LABEL = "merge-queue"
@@ -199,6 +215,13 @@ def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _check_count(gate: dict[str, Any]) -> int | None:
+    counts = gate.get("checks")
+    if not isinstance(counts, dict) or not counts or not all(type(v) is int for v in counts.values()):
+        return None
+    return sum(counts.values())
+
+
 def enqueue(repo: Repo, number: int, evidence: dict[str, Any], gate: dict[str, Any], *,
             client: Any = gh_runtime) -> dict[str, Any]:
     """Queue a PR the gate decided MERGE. Saves the evidence first, so a labelled PR always has it.
@@ -216,7 +239,11 @@ def enqueue(repo: Repo, number: int, evidence: dict[str, Any], gate: dict[str, A
     record = {"schema": SCHEMA, "repo": repo.raw, "pr": number, "entry_id": uuid.uuid4().hex, "queued_at": _now(),
               "reviewed_head": reviewed, "enqueued_head": gate["head_sha"], "train_commits": [], "errors": 0,
               "reviewed_base": gate.get("base_sha"), "live_base": gate.get("live_base_sha"),
-              "alignment": gate.get("alignment"), "evidence": evidence}
+              "alignment": gate.get("alignment"), "evidence": evidence,
+              "checks_at_enqueue": _check_count(gate),
+              # The live base tip the no-CI decision (checks_at_enqueue == 0) was made on; None when the
+              # gate result carries none, which the train reads as "the base moved".
+              "base_at_enqueue": gate.get("live_base_sha")}
     save_entry(repo, number, record)
     client.edit_label(repo, number, QUEUE_LABEL, add=True)
     out = {"outcome": "ENQUEUED", "pr": number, "reviewed_head": reviewed, "enqueued_head": gate["head_sha"]}
@@ -374,53 +401,19 @@ class Train:
         return proc
 
     def _run_git(self, args: tuple[str, ...], limit: float) -> subprocess.CompletedProcess[str]:
-        # Its own session: no terminal to prompt on, and one process group to signal, so that what git
-        # started (ssh, the remote helper, a hook) ends with it. GIT_TERMINAL_PROMPT=0 makes a credential
-        # prompt fail instead of waiting for a person who is not there.
-        child = subprocess.Popen(["git", "-C", str(self.worktree), *args], stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, text=True, start_new_session=True,
-                                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        # `bounded_run`: its own session and process group, no terminal to prompt on, and one deadline for the whole
+        # group, so that what git started (ssh, the remote helper, a hook) ends with it: SIGTERM first (git removes
+        # its own lock and temporary files on it), SIGKILL `git_kill_grace` seconds later to whatever is still in the
+        # group, also when git itself has already gone. A git that exited is judged by its exit code, also when a
+        # descendant still holds its output (read for at most `drain` seconds, then the pipes are closed). An
+        # interrupt ends the group before it goes on. GIT_TERMINAL_PROMPT=0 makes a credential prompt fail instead of
+        # waiting for a person who is not there.
         try:
-            out, err = child.communicate(timeout=limit)
-        except subprocess.TimeoutExpired:
-            ended = self._end_group(child)
-            raise GitTimeout(f"git {args[0]} did not finish within {limit:g} s and was ended ({ended})") from None
-        except BaseException:
-            self._end_group(child)  # an interrupt must not leave git running in a session of its own
-            raise
-        return subprocess.CompletedProcess(child.args, child.returncode, out, err)
-
-    def _end_group(self, child: "subprocess.Popen[str]") -> str:
-        """End `child` and everything it started: SIGTERM to its process group first (git removes its own
-        lock and temporary files on it), SIGKILL after `git_kill_grace` seconds. Returns how it ended.
-
-        Only our own group is signalled (it exists because `_run_git` made the child a session leader),
-        and only while the leader has not been reaped: a reaped leader's id may be anyone's by now."""
-        def signal_group(number: int) -> None:
-            if child.returncode is None:
-                try:
-                    os.killpg(child.pid, number)
-                except ProcessLookupError:
-                    pass
-        signal_group(signal.SIGTERM)
-        try:
-            child.communicate(timeout=self.git_kill_grace)
-            return "SIGTERM"
-        except subprocess.TimeoutExpired:
-            pass
-        signal_group(signal.SIGKILL)
-        try:
-            child.communicate(timeout=self.git_kill_grace)
-        except subprocess.TimeoutExpired:
-            # Something left the group and still holds the pipes: give up on its output.
-            for pipe in (child.stdout, child.stderr):
-                if pipe is not None:
-                    pipe.close()
-            try:
-                child.wait(timeout=self.git_kill_grace)
-            except subprocess.TimeoutExpired:
-                pass
-        return "SIGTERM, then SIGKILL"
+            return bounded_run.run(["git", "-C", str(self.worktree), *args], limit=limit,
+                                   env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, kill_after=self.git_kill_grace,
+                                   drain=min(bounded_run.DRAIN, self.git_kill_grace))
+        except bounded_run.Timeout as exc:
+            raise GitTimeout(f"git {args[0]} did not finish within {limit:g} s and was ended ({exc.ended})") from None
 
     def fetch(self, number: int, base: str) -> tuple[str, str]:
         """Bring the PR head and the base branch into private refs; (fetched PR head, fetched base tip).
@@ -574,6 +567,13 @@ class Train:
             raise GitHubError("gh pr view did not report the PR's labels")
         return any(isinstance(label, dict) and label.get("name") == QUEUE_LABEL for label in labels)
 
+    @staticmethod
+    def _shows_label(view: dict[str, Any], name: str) -> bool:
+        """Whether a PR view lists the label `name` (a read: a view without labels shows none)."""
+        labels = view.get("labels")
+        return isinstance(labels, list) and any(isinstance(label, dict) and label.get("name") == name
+                                                for label in labels)
+
     def label_gone(self, number: int, entry: dict[str, Any] | None) -> dict[str, Any] | _Signal:
         """Removing the label withdraws the PR: drop the saved entry and touch nothing on GitHub. The
         entry dropped is the one that was read: an entry enqueued since survives."""
@@ -698,6 +698,24 @@ class Train:
             return NEXT if outcome is None else outcome
         # aligned: HEAD contains the live tip.
         state = self.wait_ci(number, view["headRefOid"], view["baseRefName"], align["live_base_sha"])
+        # No check registered within the grace: only a PR the gate queued with no checks at all (the no-CI
+        # rationale) goes on to the gate, and only on the HEAD and the live base that decision was made on.
+        # For any other PR, CI has not started on HEAD yet (the train just pushed it, or GitHub Actions is
+        # late): the gate would read that as missing CI and dequeue it. A zero-check PR whose HEAD or base
+        # changed since may now have a workflow the rationale never covered, so it waits for checks on the
+        # new HEAD instead of merging an untested one.
+        if state == "no-checks":
+            if entry.get("checks_at_enqueue") != 0:
+                return self.waiting(number, f"GitHub reports no checks for HEAD {view['headRefOid'][:12]} "
+                                    f"{self.registration_grace:g} s after the train started waiting; CI has not "
+                                    "started on it, and it stays enqueued")
+            if view["headRefOid"] != entry["enqueued_head"] or \
+                    align["live_base_sha"] != entry.get("base_at_enqueue"):
+                return self.waiting(number, f"GitHub reports no checks for HEAD {view['headRefOid'][:12]} "
+                                    f"{self.registration_grace:g} s after the train started waiting, and the "
+                                    "no-CI decision for this PR was made on another HEAD or live base "
+                                    f"(`{entry['enqueued_head'][:12]}` on `{str(entry.get('base_at_enqueue'))[:12]}`): "
+                                    "the train waits for checks on this HEAD, and it stays enqueued")
         if state in ("base-moved", "left"):
             return NEXT
         if state == "head-moved":
@@ -798,8 +816,9 @@ class Train:
                 return "base-moved"
             checks = self.client.pr_checks(self.repo, number)
             elapsed = self.monotonic() - start
-            pending = any(check.get("bucket") == "pending" for check in checks) or \
-                (not checks and elapsed < self.registration_grace)
+            if not checks and elapsed >= self.registration_grace:
+                return "no-checks"
+            pending = not checks or any(check.get("bucket") == "pending" for check in checks)
             if not pending:
                 return "settled"
             if elapsed > self.ci_timeout:
@@ -976,6 +995,15 @@ class Train:
                         # Only a confirmed Draft takes the PR out of the queue, and only then the label goes.
                         self.client.edit_label(self.repo, number, QUEUE_LABEL, add=False)
                         drop_entry(self.repo, number)
+                        if self._shows_label(after, review_gate.READY_LABEL):
+                            # Housekeeping after the Draft stands: it never changes the outcome (a failure is
+                            # logged, never an infrastructure failure), and pr-ready removes the label again
+                            # before the PR is Ready.
+                            try:
+                                self.client.edit_label(self.repo, number, review_gate.READY_LABEL, add=False)
+                            except GitHubError as exc:
+                                self.log.append(f"#{number}: returned to Draft, but the "
+                                                f"`{review_gate.READY_LABEL}` label could not be removed: {exc}")
                 else:
                     self.log.append(f"#{number}: the Draft comment for HEAD {head[:12]} was posted, then "
                                     f"{CHANGED[held.reason]}: voided; the PR was not converted")

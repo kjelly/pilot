@@ -42,7 +42,7 @@ func TestRegression_IdentityRetirementFixtureReentry(t *testing.T) {
 		"Normalize canonical hostgroups for the compatibility reconciler", "Normalize canonical netgroups for the compatibility reconciler",
 		"Normalize canonical HBAC rules for the compatibility reconciler", "Normalize absent static HBAC rules for deletion (spec 2026-09-07 §6.1)",
 		"Normalize canonical sudo rules for the compatibility reconciler", "Append v3.0 compiled grant HBAC rules (spec.md §9)",
-		"Append v3.0 compiled grant sudo rules (spec.md §10)", "Select legacy admin settings", "Select active identity objects"}
+		"Append v3.0 compiled grant sudo rules (spec.md §10)", "Select legacy admin settings", "Select the credentials of the active users", "Select active identity objects"}
 	pre := []any{}
 	for _, value := range apply[0]["pre_tasks"].([]any) {
 		task := value.(map[string]any)

@@ -78,7 +78,10 @@ Notes on the table:
 - **What the entry holds.** The evidence, `entry_id` (a random id, new for every enqueue),
   `reviewed_head` (the HEAD the evidence names), `enqueued_head` (the HEAD the gate decided MERGE
   for), `train_commits` (every commit the train pushed to the PR branch) and `errors` (consecutive
-  ERROR runs). An entry without an `entry_id`, written by a version before this one, is not trusted:
+  ERROR runs), `checks_at_enqueue` (how many checks the gate saw when it decided MERGE, 0 for a PR
+  with none, null when the gate result had no counts; an entry from before the field existed has none
+  and counts as a PR whose CI is expected) and `base_at_enqueue` (the live base tip the gate decided
+  on; null when the gate result had none, and an entry without it counts as "the base moved"). An entry without an `entry_id`, written by a version before this one, is not trusted:
   the PR leaves the queue with "no saved review evidence" and `pr-review-merge` enqueues it again.
 - **Binding.** The train works only on a PR whose HEAD is `enqueued_head` or one of `train_commits`.
   It checks this before it integrates, and again in the final step with a fresh read of the HEAD.
@@ -94,6 +97,22 @@ Notes on the table:
   change). The train removes the label itself when it drafts or dequeues a PR, after the Draft is
   confirmed, and when it merges one, after the PR reads back as `MERGED` (the queue lists open PRs
   only, so a label left on a merged PR was harmless, but it no longer is).
+
+## The Ready signal: not required here
+
+The actor refuses a PR without a valid Ready signal (`review_gate.ready_signal_gate`, SKILL.md "Ready
+signal") before it saves the entry and adds the label, so what reaches the queue was signed. The train
+itself requires no signal and never reads one (`tests/test_merge_train.py`, `NoSignalRequirementTests`):
+
+- It trusts the saved entry, bound to `enqueued_head` and its own `train_commits` (Binding, above), as it
+  always did.
+- The integration commit it pushes is exactly what would make a signal bound to the enqueued HEAD stale. It creates no Ready event, so the Ready transition the signal certifies still matches.
+- A PR enqueued before the check existed is merged as it was enqueued. One that leaves the queue is an
+  ordinary Ready PR again: it follows the signal rules, and a PR without a valid signal needs Draft and
+  `pr-ready`.
+- `review_gate.evaluate()`, which the train calls on its own commits, reads no signal either: the check is
+  the separate top-level `ready_signal_gate`, called by the command line and by the actor.
+- The only thing the train does with the signal is take its label off a PR it returned to Draft (above).
 
 ## Every write is guarded
 
@@ -134,8 +153,9 @@ steps then give the outcome that fits what changed:
 What each write does under the guard:
 
 - **Draft.** Guard, comment, read again under the same lock, mark Draft, confirm `isDraft`, remove the
-  label, drop the entry. Only a confirmed Draft takes the label off, so a conversion GitHub did not
-  perform leaves the PR enqueued (`ERROR`, counted).
+  label, drop the entry, then take the Ready-signal label (`pr-ready-verified`) off a PR that shows it
+  (housekeeping: a failure is logged, never an outcome and never `INFRA`). Only a confirmed Draft takes
+  a label off, so a conversion GitHub did not perform leaves the PR enqueued (`ERROR`, counted).
 - **A voided comment.** A comment cannot be taken back. When the PR changed after the Draft comment was
   posted, the train does not mark it Draft and does not touch the label. It posts a second comment,
   "Draft comment superseded", that names the HEAD the first one judged and says the train did not
@@ -195,10 +215,20 @@ python3 "$SNAP/.agents/skills/pr-review-merge/scripts/merge_train.py" status --r
   `--push-timeout` (120 s; a push runs under the mutation lock) and `--git-timeout` (120 s; everything
   local). A command runs in its own process group and session (so ssh, the remote helper and hooks end
   with it, and nothing can prompt on a terminal: `GIT_TERMINAL_PROMPT=0`). At the limit the group gets
-  SIGTERM, which lets git remove its own lock and temporary files, and SIGKILL 30 s later if it is still
-  there; the result is `GitTimeout`, an infrastructure failure. A stalled network call therefore holds
-  neither the consumer lock nor the mutation lock for longer than its limit, and the PR stays enqueued.
-  `gh` calls have their own limit (75 s) and fail as GitHub errors.
+  SIGTERM, which lets git remove its own lock and temporary files, and SIGKILL 30 s later (`GIT_KILL_GRACE`)
+  to whatever is still in the group: also when git itself has already gone and a member that ignores SIGTERM
+  stays. What is then left in git's pipes is read for at most 5 s (the grace,
+  when it is shorter) and the pipes are closed, so that a process that left the group cannot hold the train.
+  The result is `GitTimeout` ("... was ended (SIGTERM)" or "(SIGTERM, then SIGKILL)"), an infrastructure
+  failure. A stalled network call therefore holds neither the consumer lock nor the mutation lock for longer
+  than its limit plus the grace and the read, and the PR stays enqueued. A git that exits is judged by its
+  exit code, not by what it left behind: a descendant that keeps git's output open (a hook's background job)
+  is not waited for beyond that read and is not signalled, and its git is not a timeout.
+  `gh` calls have their own limit (75 s, `gh_runtime.GH_TIMEOUT`) and fail as GitHub errors; their group is ended
+  and a finished `gh` is judged the same way. All of it is one implementation,
+  `.agents/skills/_shared/scripts/bounded_run.py`, which `scripts/pr_loop.py` and `checkout_preflight.py` use too.
+  A command's session is its own, so a signal sent to the process group of the train itself (`timeout(1)`, a
+  tool's time limit) does not reach git; there is no SIGTERM handler yet (kjelly/pilot#309).
 - **Exit codes.** 0: the run ended with nothing failed (any of MERGED, DRAFTED, DEQUEUED, SKIP, WAITING,
   `NOT_AT_HEAD`, `BUSY`). 1: a PR ended in `ERROR`. 2: status `INFRA`, or an exception nobody
   classified (never a traceback with exit 1, which would be taken for a PR's `ERROR`).
@@ -233,7 +263,21 @@ The consumer takes the oldest PR in the queue and:
         landed and the run goes on; at the old HEAD, nothing was pushed (INFRA); anywhere else, the PR
         branch moved and the next look decides.
      4. Repeat at most `--max-align` times when the base keeps moving, then WAITING.
-4. Wait for CI on HEAD. Checks that have not registered count as pending for 5 minutes.
+4. Wait for CI on HEAD. Checks that have not registered count as pending for 5 minutes
+   (`gh pr checks` answers "no checks reported" while nothing is registered; the adapter reads that
+   exact answer as an empty CI, see `quality-gate.md`). After the 5 minutes, zero checks on HEAD:
+   - a PR enqueued with checks (`checks_at_enqueue` above zero, or an entry that does not record it):
+     WAITING. CI has not started on HEAD (the train just pushed it, or Actions is late); the PR stays
+     enqueued, nothing is counted, commented or dequeued, and the run stops. The next run looks again.
+   - a PR enqueued with no checks at all (`checks_at_enqueue` is 0), still on `enqueued_head` and with
+     the live base equal to `base_at_enqueue` (nothing was integrated or moved since the no-CI decision):
+     step 5, where the gate decides (the no-CI rationale, which it accepts only for a HEAD tree without
+     GitHub Actions workflows, or the required-checks hand-off).
+   - a PR enqueued with no checks at all, but on another HEAD (the train integrated the base) or with a
+     live base that is not `base_at_enqueue` (or an entry that records no base): WAITING. The no-CI
+     decision was made on another HEAD and base, and main may have brought a workflow that applies; the
+     PR stays enqueued, nothing is counted, commented or dequeued, and the train waits for checks on this
+     HEAD (a PR whose HEAD never registers any is a person's: remove the label, or push a change).
    - The base moved: back to step 3.
    - HEAD changed outside the train: leave the queue, so a new review is needed.
    - Label removed, PR closed or made Draft: back to step 1.
@@ -241,7 +285,11 @@ The consumer takes the oldest PR in the queue and:
 5. Finish:
    - The saved review no longer covers HEAD: leave the queue (needs a new `pr-review-merge` run).
    - The target record no longer covers HEAD (for example, main brought in a `rerun_paths` file):
-     Draft, so `pr-ready` runs the chain again or records `unrelated_runtime_changes`.
+     Draft, so `pr-ready` runs the chain again or records `unrelated_runtime_changes`. The gate
+     already decides this Draft before the queue when the base it sees brings a file that is neither
+     evidence-only nor in `non_execution_paths` (`train_import_rerun`), so a PR reaches it here when
+     the base moved again after the enqueue, or when an imported non-execution file is one the
+     recorded closure reaches (only the train, after integrating, reads that).
    - A GitHub or infrastructure failure while checking either of those: WAITING. A failure to read
      says nothing about the review or the record, so it never dequeues or drafts the PR.
    - Otherwise rerun `review_gate.evaluate()` with the saved evidence:
@@ -258,12 +306,18 @@ emits it (`WaitKinds`); a reason nobody registered needs a person.
 
 | `wait_kind` | Which reasons | The train |
 |---|---|---|
-| `transient` | CI pending; the PR or base moved during the gate; mergeability or merge state (`UNKNOWN`, `BEHIND`) GitHub has not computed; an API or infrastructure failure (PR, base, ancestry, checks, threads, rules, review coverage, target record, base manifest); a secret scan that could not run; the mutation lock held by another actor | stays enqueued; the run stops (nothing the train does changes the answer, so the PRs behind it keep their place) |
+| `transient` | CI pending; the PR or base moved during the gate; mergeability or merge state (`UNKNOWN`, `BEHIND`) GitHub has not computed; no check on HEAD after the registration grace for a PR that was enqueued with checks (CI has not started); an API or infrastructure failure (PR, base, ancestry, checks, threads, rules, review coverage, target record, base manifest); a secret scan that could not run; the mutation lock held by another actor | stays enqueued; the run stops (nothing the train does changes the answer, so the PRs behind it keep their place) |
 | `person` | requested changes; approval required (by decision or by rule); a failing check the reviewer confirmed unrelated; a finding disputed without new evidence; a merge state that is not clean for another reason (`BLOCKED`, `UNSTABLE`, ...); stale or invalid review evidence; no CI without a rationale; a branch with a GitHub merge queue; auto-merge already set; a comparison GitHub cut | leaves the queue with a comment that lists the reasons; the PR stays Ready; **the PRs behind it keep going** |
 
 A merge state that is not clean is `derived`: it says only that something else is wrong, so it keeps
 a PR enqueued when another transient reason (a pending check) explains it, and needs a person alone.
 A transient reason next to a reason that needs a person needs a person.
+
+The train's `person` is a catch-all, not a statement that only a person can act: stale or missing
+review evidence is `person` here because the train cannot fix it, yet the next `pr-review-merge`
+run can. The `needs-person` label (`apply_decision.py`) therefore does not follow `wait_kind`; it
+follows `person_handoff`, which is true only for reasons registered as person-owned
+(`WaitKinds.person`; `references/quality-gate.md`).
 
 The run stops at the first WAITING or ERROR, so later PRs keep their place; a PR that leaves the
 queue (`MERGED`, `DRAFTED`, `DEQUEUED`, `SKIP`) does not stop it. Outcomes are `MERGED`, `DRAFTED`,

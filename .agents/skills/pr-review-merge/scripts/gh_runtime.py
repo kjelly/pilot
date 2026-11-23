@@ -6,10 +6,24 @@ import binascii
 import json
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+# Running from the skill snapshot must not add __pycache__ there (`skill_snapshot.py verify` counts any added file): set
+# before the first sibling import. `bounded_run` lives in the `_shared` bundle directory, which goes on the import path
+# LAST and only when absent (review_gate and list_ready do the same): `pr_gate.merge_gate_modules` puts this directory at
+# index 0, imports this module and pops index 0, so nothing here may insert at the front.
+sys.dont_write_bytecode = True
+_SHARED_SCRIPTS = str(Path(__file__).resolve().parents[2] / "_shared" / "scripts")
+if _SHARED_SCRIPTS not in sys.path:
+    sys.path.append(_SHARED_SCRIPTS)
+import bounded_run  # noqa: E402  (every `gh` call goes through it: tests/test_bounded_run_lint.py)
+
+# Seconds one `gh` call may run; SIGKILL for a group that ignores SIGTERM follows up to bounded_run.KILL_AFTER + DRAIN later.
+GH_TIMEOUT = 75
 COMMIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 # GitHub's compare API lists at most 300 changed files for the whole comparison and says
 # nothing when it cuts the list (a 1554-commit compare of kjelly/pilot returned exactly 300).
@@ -57,9 +71,11 @@ class Repo:
 
 
 def run_gh(args: list[str], *, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """One `gh` call. It is bounded by `GH_TIMEOUT` and its whole process group is ended at the deadline; a `gh` that
+    exited is judged by its exit code, also when something it started still holds its output."""
     try:
-        completed = subprocess.run(["gh", *args], input=input_text, text=True, capture_output=True, timeout=75)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        completed = bounded_run.run(["gh", *args], limit=GH_TIMEOUT, input=input_text)
+    except (OSError, bounded_run.Timeout) as exc:
         raise GitHubError(f"gh unavailable or timed out: {exc}") from exc
     if check and completed.returncode != 0:
         raise GitHubError(f"gh {' '.join(args[:4])} failed ({completed.returncode}): {completed.stderr.strip()[:500]}")
@@ -95,9 +111,18 @@ def pr_view(repo: Repo, number: int) -> dict[str, Any]:
     return data
 
 
+# `gh pr checks` for a PR whose head commit has no check run and no status at all exits 1, prints nothing on
+# stdout and, on stderr, exactly this line (gh 2.104.0, kjelly/pilot#106: tests/fixtures/github_api.json
+# `pr_checks.zero_checks`). gh answers before its JSON exporter, so `--json` never prints `[]`.
+# Case-sensitive and anchored to the whole of stderr: anything else stays a GitHubError.
+NO_CHECKS = re.compile(r"no checks reported on the '[^\n]+' branch\n?")
+
+
 def pr_checks(repo: Repo, number: int) -> list[dict[str, Any]]:
     cp = run_gh(["pr", "checks", str(number), "-R", repo.raw,
                  "--json", "name,state,bucket,link,workflow"], check=False)
+    if cp.returncode == 1 and not cp.stdout.strip() and NO_CHECKS.fullmatch(cp.stderr):
+        return []
     # gh checks may exit nonzero for failing or pending checks; valid JSON still describes them.
     # Empty stdout with a nonzero rc is *not* proof there is no CI.
     if not cp.stdout.strip():
@@ -369,6 +394,61 @@ def label_added_at(repo: Repo, number: int, label: str) -> str | None:
                 raise GitHubError("Invalid labeled event time")
             added = created if added is None or created > added else added
     return added
+
+
+def timeline_events(repo: Repo, number: int) -> list[dict[str, Any]]:
+    """Every event on the PR's timeline, oldest first. One list gives the order of the label events, the
+    Ready/Draft transitions and the comments, which no per-kind endpoint does (ready_signal.assess)."""
+    endpoint = f"repos/{repo.owner}/{repo.name}/issues/{number}/timeline?per_page=100"
+    result = gh_json(["api", *host_args(repo), "--paginate", "--slurp", endpoint])
+    if not isinstance(result, list) or not all(isinstance(page, list) for page in result):
+        raise GitHubError("gh api --paginate --slurp did not return pages")
+    events = [event for page in result for event in page]
+    if not all(isinstance(event, dict) for event in events):
+        raise GitHubError("Invalid timeline event entry")
+    return events
+
+
+def label_exists(repo: Repo, label: str) -> bool:
+    """True when the repository has `label`; False only for GitHub's exact 404 (`_not_found`); anything else raises.
+
+    A label is never created here: it is a one-time maintainer action (ready_signal.prepare says so).
+    """
+    endpoint = f"repos/{repo.owner}/{repo.name}/labels/{quote(label, safe='')}"
+    cp = run_gh(["api", *host_args(repo), endpoint], check=False)
+    if cp.returncode != 0:
+        if _not_found(cp):
+            return False
+        raise GitHubError(f"gh api label {label} failed ({cp.returncode}): {cp.stderr.strip()[:300]}")
+    data = parse_json(cp.stdout, "label")
+    if not isinstance(data, dict) or data.get("name") != label:
+        raise GitHubError(f"GitHub did not answer with the label {label!r}")
+    return True
+
+
+def issue_comments(repo: Repo, number: int) -> list[dict[str, Any]]:
+    """Every conversation comment on the PR, oldest first: `[{"body": str, "login": str}]`."""
+    endpoint = f"repos/{repo.owner}/{repo.name}/issues/{number}/comments?per_page=100"
+    result = gh_json(["api", *host_args(repo), "--paginate", "--slurp", endpoint])
+    if not isinstance(result, list) or not all(isinstance(page, list) for page in result):
+        raise GitHubError("gh api --paginate --slurp did not return pages")
+    comments = []
+    for item in (entry for page in result for entry in page):
+        user = item.get("user") if isinstance(item, dict) else None
+        if not isinstance(item, dict) or not isinstance(item.get("body"), str) or not isinstance(user, dict) \
+                or not isinstance(user.get("login"), str):
+            raise GitHubError("Invalid issue comment entry")
+        comments.append({"body": item["body"], "login": user["login"]})
+    return comments
+
+
+def viewer_login(repo: Repo) -> str:
+    """The login `gh` is authenticated as on the repository's host (the author of the actor's comments)."""
+    data = gh_json(["api", *host_args(repo), "user"])
+    login = data.get("login") if isinstance(data, dict) else None
+    if not isinstance(login, str) or not login:
+        raise GitHubError("gh api user returned no login")
+    return login
 
 
 def edit_label(repo: Repo, number: int, label: str, *, add: bool) -> None:
