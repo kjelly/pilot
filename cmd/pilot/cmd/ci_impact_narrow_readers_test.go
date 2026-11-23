@@ -27,10 +27,18 @@
 //     repository root: the first argument of a filepath.Join is a repoRoot*()
 //     call or an identifier assigned one (or a path below it), or the string
 //     climbs exactly from the package directory to the root with "../" (a
-//     package-level string constant counts). A directory prefix the constants
-//     name (.agents/skills, docs/evidence, ...) also counts anywhere in a
-//     literal. A path like .claude/settings.json is a full-profile path, so it
-//     is no reader.
+//     package-level string constant counts). A path the constants name also
+//     counts anywhere in a literal, anchored or not (ciFastPaths.dirRun): from
+//     a component equal to the first one of a fast-path directory, the following
+//     components equal its next ones (or are globs that match them); a complete
+//     directory (.agents/skills, docs/evidence, ...) counts, and so does a proper
+//     ancestor of one that the literal ends on or a non-literal follows, when it
+//     is specific: two or more components, or one hidden one (.agents, .claude).
+//     A generic one-component ancestor (docs, scripts) counts only anchored. A
+//     filepath.Join is judged as a whole, never through one literal argument. A
+//     path like .claude/settings.json is a full-profile path, so it is no
+//     reader. The unanchored and the anchored rule (match) must agree on every
+//     ancestor, which TestCIImpactNarrowPathMatchingAgreesWithPathKind checks.
 //  2. No heavy job (HEAVY_JOBS and ci-receipt) has a fast-path path among its
 //     inputs other than through a Go test: its `run:` commands, the Makefile
 //     recipes they run (variables expanded, prerequisites and $(MAKE) followed),
@@ -264,13 +272,34 @@ func (p ciFastPaths) match(rel string) string {
 	return ""
 }
 
-// dirRun returns the fast-path directory whose components appear as one
-// contiguous run in parts, "" if none does. It needs no anchoring: it is how a
-// test mentioning .agents/skills or docs/evidence has always been found.
+// dirRun returns the fast-path directory that parts, the components of an
+// unanchored path literal or of the literal arguments of a filepath.Join ("\x00"
+// stands for a non-literal argument), name; "" if none. It needs no anchoring:
+// it is how a test mentioning .agents/skills or docs/evidence has always been
+// found, and it counts the same ancestors that the anchored rule (match) counts:
+//
+// From any component equal to the first component of a fast-path directory D,
+// each following component must equal D's next component or be a glob that
+// matches it. When D is completed the run names D (what follows is below it).
+// When the literal ends, or reaches a non-literal, before D is complete, the
+// run is a proper ancestor of D and counts only when it is specific: two or
+// more matched components, or exactly one hidden one (.agents, .claude). A
+// generic one-component ancestor (docs, scripts) counts only when anchored.
 func (p ciFastPaths) dirRun(parts []string) string {
 	for _, d := range p.dirs() {
-		for i := 0; i+len(d) <= len(parts); i++ {
-			if slices.Equal(parts[i:i+len(d)], d) {
+		for i := range parts {
+			if parts[i] != d[0] {
+				continue
+			}
+			j := 1
+			for j < len(d) && i+j < len(parts) && parts[i+j] != "\x00" {
+				if ok, err := path.Match(parts[i+j], d[j]); err != nil || !ok {
+					break
+				}
+				j++
+			}
+			ends := i+j == len(parts) || parts[i+j] == "\x00"
+			if j == len(d) || (ends && (j >= 2 || strings.HasPrefix(d[0], "."))) {
 				return strings.Join(d, "/")
 			}
 		}
@@ -500,9 +529,20 @@ func scanFuncDecl(fn *ast.FuncDecl, dir string, paths ciFastPaths, consts map[st
 
 	var narrow, named []string
 	access := false
+	// A filepath.Join is judged as a whole (narrowLiteral): its literal
+	// arguments are no paths of their own, or Join(root, ".claude",
+	// "settings.json") would be flagged through its ".claude" argument.
+	joinArg := map[ast.Node]bool{}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		switch v := n.(type) {
 		case *ast.CallExpr:
+			if name := selectorName(v.Fun); name == "filepath.Join" || name == "path.Join" {
+				for _, a := range v.Args {
+					if lit, ok := a.(*ast.BasicLit); ok {
+						joinArg[lit] = true
+					}
+				}
+			}
 			if id, ok := v.Fun.(*ast.Ident); ok {
 				facts.calls[id.Name] = true
 			}
@@ -538,7 +578,7 @@ func scanFuncDecl(fn *ast.FuncDecl, dir string, paths ciFastPaths, consts map[st
 				}
 			}
 		}
-		if dir := paths.narrowLiteral(n); dir != "" {
+		if dir := paths.narrowLiteral(n); dir != "" && !joinArg[n] {
 			narrow = append(narrow, dir)
 		}
 		return true
@@ -983,6 +1023,80 @@ func TestA(t *testing.T) { _, _ = os.ReadFile("../../../scripts/pr_loop.py") }`
 	srcCustomEntry = `package p
 import ("os";"testing")
 func TestA(t *testing.T) { _, _ = os.ReadFile("../../tools/runner.py"); _, _ = os.ReadFile("../../scripts/pr_loop.py") }`
+
+	// Unanchored literals that name a proper ancestor of a fast-path directory
+	// (.agents, .claude, docs/superpowers): the walk or read that follows opens
+	// the skills below it. Each is one the guard flagged before the complete
+	// directory was required as a contiguous run.
+	srcChdirWalkAgents = `package p
+import ("io/fs";"os";"path/filepath";"testing")
+func TestA(t *testing.T) {
+	t.Chdir(repoRootForTest(t))
+	_ = filepath.WalkDir(".agents", func(p string, d fs.DirEntry, err error) error { _, _ = os.ReadFile(p); return nil })
+}`
+	srcReadDirClaude = `package p
+import ("os";"testing")
+func TestA(t *testing.T) { t.Chdir(repoRootForTest(t)); _, _ = os.ReadDir(".claude") }`
+	srcReadDirDocsSuperpowers = `package p
+import ("os";"testing")
+func TestA(t *testing.T) { t.Chdir(repoRootForTest(t)); _, _ = os.ReadDir("docs/superpowers") }`
+	srcJoinAgentsName = `package p
+import ("os";"path/filepath";"testing")
+func TestA(t *testing.T) { name := "x"; _, _ = os.ReadFile(filepath.Join(".agents", name)) }`
+	srcGlobAgentsSkillMD = `package p
+import ("path/filepath";"testing")
+func TestA(t *testing.T) { _, _ = filepath.Glob(".agents/*/SKILL.md") }`
+	srcHelperRootParamClaude = `package p
+import ("os";"path/filepath";"testing")
+func readClaude(root string) { _, _ = os.ReadDir(filepath.Join(root, ".claude")) }
+func TestA(t *testing.T) { readClaude(repoRootForTest(t)) }`
+	srcHelperRootParamDocs = `package p
+import ("os";"path/filepath";"testing")
+func readDocs(root string) { _, _ = os.ReadDir(filepath.Join(root, "docs", "superpowers")) }
+func TestA(t *testing.T) { readDocs(repoRootForTest(t)) }`
+	srcHelperRootParamClaudeIdent = `package p
+import ("os";"path/filepath";"testing")
+func readClaude(root string) { claude := filepath.Join(root, ".claude"); _, _ = os.ReadDir(claude) }
+func TestA(t *testing.T) { readClaude(repoRootForTest(t)) }`
+	srcDirFSWalkAgents = `package p
+import ("io/fs";"os";"testing")
+func TestA(t *testing.T) {
+	_ = fs.WalkDir(os.DirFS(repoRootForTest(t)), ".agents", func(p string, d fs.DirEntry, err error) error { return nil })
+}`
+	srcChdirHelperReadDirClaude = `package p
+import ("os";"testing")
+func chdirRepoRoot(t *testing.T) { t.Chdir(repoRootForTest(t)) }
+func TestA(t *testing.T) { chdirRepoRoot(t); _, _ = os.ReadDir(".claude") }`
+
+	// The same directories with a full-profile path below them: no reader.
+	srcReadClaudeSettings = `package p
+import ("os";"testing")
+func TestA(t *testing.T) { t.Chdir(repoRootForTest(t)); _, _ = os.ReadFile(".claude/settings.json") }`
+	srcReadAgentsWorkflow = `package p
+import ("os";"testing")
+func TestA(t *testing.T) { t.Chdir(repoRootForTest(t)); _, _ = os.ReadFile(".agents/workflows/x.md") }`
+	srcReadAgentsAgents = `package p
+import ("os";"testing")
+func TestA(t *testing.T) { _, _ = os.ReadFile(".agents/agents/x.md") }`
+	srcReadDocsSuperpowersOther = `package p
+import ("os";"testing")
+func TestA(t *testing.T) { _, _ = os.ReadFile("docs/superpowers/other/x.md") }`
+	srcJoinRootClaudeSettings = `package p
+import ("os";"path/filepath";"testing")
+func TestA(t *testing.T) { root := repoRootForTest(t); _, _ = os.ReadFile(filepath.Join(root, ".claude", "settings.json")) }`
+	srcJoinParamAgentsWorkflows = `package p
+import ("os";"path/filepath";"testing")
+func read(root string) { _, _ = os.ReadDir(filepath.Join(root, ".agents", "workflows")) }
+func TestA(t *testing.T) { read(repoRootForTest(t)) }`
+	srcJoinClaudeSettings = `package p
+import ("os";"path/filepath";"testing")
+func TestA(t *testing.T) { _, _ = os.ReadFile(filepath.Join(".claude", "settings.json")) }`
+	srcJoinDocsSuperpowersOther = `package p
+import ("os";"path/filepath";"testing")
+func TestA(t *testing.T) { _, _ = os.ReadDir(filepath.Join("docs", "superpowers", "other")) }`
+	srcReadDirDocsUnanchored = `package p
+import ("os";"testing")
+func TestA(t *testing.T) { t.Chdir(repoRootForTest(t)); _, _ = os.ReadDir("docs") }`
 )
 
 func TestCIImpactNarrowPathReaderDetector(t *testing.T) {
@@ -1006,6 +1120,25 @@ func TestCIImpactNarrowPathReaderDetector(t *testing.T) {
 		{name: "walk of a temp dir", src: srcTempDirWalk},
 		{name: "mentioning the paths without reading anything", src: srcMentionOnly},
 		{name: "a variable in the middle breaks the component run", src: srcJoinBreaksAdjacency},
+		{name: "walk of .agents after a chdir to the root", src: srcChdirWalkAgents, want: []string{"TestA"}},
+		{name: "listing .claude after a chdir to the root", src: srcReadDirClaude, want: []string{"TestA"}},
+		{name: "listing docs/superpowers after a chdir to the root", src: srcReadDirDocsSuperpowers, want: []string{"TestA"}},
+		{name: "join of .agents with a variable", src: srcJoinAgentsName, want: []string{"TestA"}},
+		{name: "glob of .agents/*/SKILL.md", src: srcGlobAgentsSkillMD, want: []string{"TestA"}},
+		{name: ".claude joined to a root parameter", src: srcHelperRootParamClaude, want: []string{"TestA"}},
+		{name: "docs/superpowers joined to a root parameter", src: srcHelperRootParamDocs, want: []string{"TestA"}},
+		{name: ".claude joined to a root parameter and listed through an identifier", src: srcHelperRootParamClaudeIdent, want: []string{"TestA"}},
+		{name: "fs.WalkDir of .agents in os.DirFS of the root", src: srcDirFSWalkAgents, want: []string{"TestA"}},
+		{name: "listing .claude after a helper changed to the root", src: srcChdirHelperReadDirClaude, want: []string{"TestA"}},
+		{name: "a full-profile file below .claude is no reader", src: srcReadClaudeSettings},
+		{name: "a full-profile directory below .agents is no reader", src: srcReadAgentsWorkflow},
+		{name: ".agents/agents is not .claude/agents", src: srcReadAgentsAgents},
+		{name: "a full-profile directory below docs/superpowers is no reader", src: srcReadDocsSuperpowersOther},
+		{name: "a join of the root, .claude and a full-profile file is judged as a whole", src: srcJoinRootClaudeSettings},
+		{name: "a join of a root parameter, .agents and workflows is judged as a whole", src: srcJoinParamAgentsWorkflows},
+		{name: "a join of .claude and a full-profile file is judged as a whole", src: srcJoinClaudeSettings},
+		{name: "a join of docs/superpowers/other is no reader", src: srcJoinDocsSuperpowersOther},
+		{name: "listing docs without an anchor is generic", src: srcReadDirDocsUnanchored},
 
 		{name: "read of the runner by a ../ literal", src: srcReadRunner, want: []string{"TestA"}},
 		{name: "read of the runner below the root helper", src: srcReadRunnerViaRoot, want: []string{"TestA"}},
@@ -1107,6 +1240,43 @@ func TestCIImpactNarrowPathMatching(t *testing.T) {
 	}
 }
 
+// TestCIImpactNarrowPathUnanchoredMatching shows what ciFastPaths.dirRun decides
+// for the components of a literal that has no anchor ("\x00" is a non-literal
+// argument of a filepath.Join).
+func TestCIImpactNarrowPathUnanchoredMatching(t *testing.T) {
+	real := loadCIFastPaths(t)
+	cases := []struct {
+		name  string
+		paths ciFastPaths
+		parts []string
+		want  bool
+	}{
+		{"a hidden directory that holds skills", real, []string{".agents"}, true},
+		{"a hidden directory that holds skills and agents", real, []string{".claude"}, true},
+		{"the directory that holds the design documents", real, []string{"docs", "superpowers"}, true},
+		{"an ancestor followed by a non-literal", real, []string{".agents", "\x00"}, true},
+		{"an ancestor continued by a glob and the file name", real, []string{".agents", "*", "SKILL.md"}, true},
+		{"a complete directory below another component", real, []string{"x", ".agents"}, true},
+		{"a complete directory and what is below it", real, []string{".agents", "skills", "x", "SKILL.md"}, true},
+		{"a one-component hidden ancestor of a made-up directory", ciFastPaths{SkillPrefixes: []string{".a/b/"}}, []string{".a"}, true},
+		{"a generic directory", real, []string{"docs"}, false},
+		{"another generic directory", real, []string{"scripts"}, false},
+		{"a glob cannot start a run", real, []string{"*"}, false},
+		{"a full-profile directory below .agents", real, []string{".agents", "workflows"}, false},
+		{"a full-profile file below .claude", real, []string{".claude", "settings.json"}, false},
+		{"a non-literal between the components", real, []string{"docs", "\x00", "superpowers"}, false},
+		{"a generic ancestor of a made-up directory", ciFastPaths{SkillPrefixes: []string{"a/b/"}}, []string{"a"}, false},
+		{"the same made-up directory, complete", ciFastPaths{SkillPrefixes: []string{"a/b/"}}, []string{"a", "b"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.paths.dirRun(tc.parts) != ""; got != tc.want {
+				t.Fatalf("dirRun(%q) = %q, want a match: %v", tc.parts, tc.paths.dirRun(tc.parts), tc.want)
+			}
+		})
+	}
+}
+
 // TestCIImpactNarrowPathMatchingAgreesWithPathKind makes sure the matcher
 // never misses what path_kind calls a reduced path, and does not take paths
 // that path_kind calls full: a corpus built from the constants, and look-alikes,
@@ -1117,6 +1287,9 @@ func TestCIImpactNarrowPathMatchingAgreesWithPathKind(t *testing.T) {
 	for _, prefix := range slices.Concat(paths.SkillPrefixes, paths.DocPrefixes) {
 		corpus = append(corpus, prefix+"x", prefix+"x.md", prefix+"x.yaml", prefix+"a/b/c.py", prefix+"a b/c.md")
 	}
+	// What lies under a directory prefix: the unanchored rule (dirRun) has to find
+	// it as well, wherever the literal stands.
+	underPrefix := len(corpus)
 	for _, file := range paths.SkillFiles {
 		corpus = append(corpus, file, file+"/x.go", file+".bak", file+"~", file+"/")
 	}
@@ -1144,6 +1317,98 @@ func TestCIImpactNarrowPathMatchingAgreesWithPathKind(t *testing.T) {
 	}
 	if reduced == 0 {
 		t.Fatal("no path of the corpus is a reduced-profile path: the comparison proves nothing")
+	}
+
+	// The unanchored rule must agree with the anchored one (match). They are two
+	// rules over the same constants, and a PR #436 review found them apart: the
+	// unanchored one needed a complete directory, so a walk of ".agents" or a
+	// read of ".claude" passed unselected while match counted both.
+	under := 0
+	for i := 0; i < underPrefix; i++ {
+		if kinds[i] == "full" {
+			continue
+		}
+		under++
+		if got := paths.dirRun(splitPathLit(corpus[i])); got == "" {
+			t.Errorf("path_kind(%q) = %q but the unanchored rule does not find it", corpus[i], kinds[i])
+		}
+	}
+	if under == 0 {
+		t.Fatal("no path under a directory prefix is a reduced-profile path: the comparison proves nothing")
+	}
+	ancestors := 0
+	for _, d := range paths.dirs() {
+		if paths.dirRun(d) == "" {
+			t.Errorf("the unanchored rule does not find the directory %s itself", strings.Join(d, "/"))
+		}
+		for k := 1; k < len(d); k++ {
+			a := d[:k]
+			// A proper ancestor counts unanchored when it is specific: two or
+			// more components, or one hidden one. match always counts it.
+			specific := len(a) >= 2 || strings.HasPrefix(a[0], ".")
+			ancestors++
+			if got := paths.dirRun(a) != ""; got != specific {
+				t.Errorf("the unanchored rule on the ancestor %s = %v, want %v (specific)", strings.Join(a, "/"), got, specific)
+			}
+			if paths.match(strings.Join(a, "/")) == "" {
+				t.Errorf("match does not count the ancestor %s of %s", strings.Join(a, "/"), strings.Join(d, "/"))
+			}
+		}
+	}
+	if ancestors == 0 {
+		t.Fatal("no fast-path directory has an ancestor: the comparison proves nothing")
+	}
+	for _, u := range unrelated {
+		if dir := paths.dirRun(splitPathLit(u)); dir != "" {
+			t.Errorf("the unanchored rule takes the unrelated path %q for %s", u, dir)
+		}
+	}
+}
+
+// TestCIImpactNarrowPathReadersOfAncestorsRunInSkillsJob runs the whole guard on
+// two readers that walk or list a proper ancestor of a fast-path directory
+// after a chdir to the root: neither is selected by the skills job, so both
+// must be reported.
+func TestCIImpactNarrowPathReadersOfAncestorsRunInSkillsJob(t *testing.T) {
+	root := repoRootForTest(t)
+	ci, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectors := skillsJobSelectors(t, string(ci), string(mk))
+	const src = `package p
+import ("io/fs";"os";"path/filepath";"testing")
+func TestNewReaderWalksAgents(t *testing.T) {
+	t.Chdir(repoRootForTest(t))
+	_ = filepath.WalkDir(".agents", func(p string, d fs.DirEntry, err error) error { _, _ = os.ReadFile(p); return nil })
+}
+func TestNewReaderListsClaude(t *testing.T) { t.Chdir(repoRootForTest(t)); _, _ = os.ReadDir(".claude") }`
+	f, err := parser.ParseFile(token.NewFileSet(), "x_test.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := scanNarrowPathReaders("internal/spec", []*ast.File{f}, loadCIFastPaths(t))
+	// The real exemptions have no hit among these two tests: their staleness is
+	// the business of TestCIImpactNarrowPathReadersRunInSkillsJob.
+	missing, _ := unselectedNarrowReaders(hits, selectors, nil)
+	want := map[string]string{
+		"internal/spec.TestNewReaderWalksAgents": "opens a path under .agents/skills",
+		"internal/spec.TestNewReaderListsClaude": "opens a path under .claude/skills",
+	}
+	for key, why := range want {
+		found := false
+		for _, m := range missing {
+			if strings.HasPrefix(m, key+" ") && strings.Contains(m, why) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s with %q is not among the unselected readers %v", key, why, missing)
+		}
 	}
 }
 
