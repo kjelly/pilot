@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_issue_gate as base  # noqa: E402
-from test_issue_gate import create_pr, issue_gate, mark_ready  # noqa: E402
+from test_issue_gate import create_pr, issue_gate, mark_ready, rw  # noqa: E402
 from test_umbrella import BATCH, body as umbrella_body, child_view, umbrella_view  # noqa: E402
 
 REPO = "OWNER/REPO"
@@ -308,12 +308,14 @@ class UmbrellaGateTests(base.LocalGitFixture):
         pr = {"number": 9, "state": "OPEN", "isDraft": True, "headRefName": "issue/123-fix",
               "headRefOid": self.sha, "mergeable": "MERGEABLE", "url": "u", "body": body}
         calls = []
+        world = rw.World(head=self.sha)  # the Ready signal's GitHub state
         a, b, c = self.fakes()
         with a, b, c, patch.object(issue_gate, "remote_head", return_value=self.sha), \
                 patch.object(mark_ready, "command", side_effect=[pr, base.NO_REVIEW_THREADS,
                                                                  {"isDraft": False, "headRefOid": self.sha, "url": "u"}]), \
                 patch.object(mark_ready.pr_ci, "inspect", return_value={"status": "CI_PASSED"}), \
-                patch.object(mark_ready, "execute", side_effect=lambda a, cwd: calls.append(a) or ""):
+                patch.object(mark_ready, "execute", side_effect=rw.pr_ready_executor(world, calls)), \
+                rw.mark_ready_signal(mark_ready, world):
             result = mark_ready.mark_ready(repo=REPO, issue=U, pr=9, worktree=self.worktree,
                                            evidence=self.path, confirm_complete=True)
         return result, calls

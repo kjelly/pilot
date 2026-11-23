@@ -49,6 +49,16 @@ class Fake:
         self.ancestor = True
         # {(base, head): bool}; pairs not listed answer `ancestor`.
         self.ancestry = {}
+        # {revision: {path: (mode, oid)}}; a revision not listed has an empty tree (no workflow files).
+        self.trees = {}
+        # An exception raised by tree_entries (an unreadable tree), or None.
+        self.tree_error = None
+
+    def tree_entries(self, repo, revision):
+        self.calls.append(('tree_entries', revision))
+        if self.tree_error is not None:
+            raise self.tree_error
+        return dict(self.trees.get(revision, {}))
 
     def is_ancestor(self, repo, base, head):
         self.calls.append(('is_ancestor', base, head))
@@ -514,7 +524,7 @@ class WaitKindTests(unittest.TestCase):
         e = sample(); e['coverage']['security'] = False
         reasons['coverage incomplete'] = (Fake(), e, None)
         e = sample(); e['dependencies']['resolved'] = False
-        reasons['inter-PR dependencies'] = (Fake(), e, None)
+        reasons['Unresolved inter-PR dependency'] = (Fake(), e, None)
         f = Fake(); f.ancestor = False
         f.compares[(B, H)] = {'files': ['pkg/a.go'], 'merge_base': 'e' * 40, 'ancestor': False}
         def cut(repo, base, head):

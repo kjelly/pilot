@@ -34,7 +34,7 @@ Use the snapshot's `.agents/skills/_shared/scripts/local_test_plan.py --repo DIR
 Go packages and their transitive importers, including test imports; go.mod/go.sum
 changes expand scope to all packages. Workflow/build/skill changes also select
 the command package's repository consistency tests. Skill changes add
-`make skill-test`.
+`make skill-test` (once, as the receipt: below).
 Test-only Go changes select their own package without expanding to importers.
 
 The large `cmd/pilot/cmd` and `internal/spec` packages require explicit
@@ -56,3 +56,18 @@ unchanged source, environment and test-contract receipts need not be repeated
 just to create a new copy. Existing gate rules decide whether receipts can be
 reused across evidence-only changes. Startup acknowledgements are not independent
 code reviews, and source changes still invalidate affected checks.
+
+## While the Coder works, and the one receipt (kjelly/pilot#432)
+
+While the Coder works it runs the tests of what it changed (the selected Go tests; for a
+skill, that skill's `tests/` or the changed test modules). The plan's `make skill-test` runs
+once per candidate HEAD, as the `run_check.py` receipt on the committed HEAD (Root's, or the
+Coder's when it takes the receipt; never both). Root takes the receipt unless the dispatch
+envelope tells the Coder to; the Coder's envelope carries the validation item "the tests of
+what it changed; not the full `make skill-test` (Root runs that once, as the receipt)". No
+gate is weaker: that receipt still runs every suite on the exact HEAD the gate checks, and
+CI's `Skill and repository contracts` job runs it again. A narrower selection of suites is
+kjelly/pilot#430; until it changes this text the receipt is the whole suite. This section
+governs the Coder and the receipt of `issue-to-pr` and `pr-ready`; the `make skill-test`
+that `pr-review-merge` runs (its SKILL.md) is a separate gate on a separate candidate, and
+this section does not change it.

@@ -117,5 +117,210 @@
    "stderr": "gh: No commit found for the ref 74eefe26b1f0e7e0a1e7d3c8a7c3f6d1b6f7a2c0 (HTTP 404)\n",
    "stdout": "{\"message\":\"No commit found for the ref 74eefe26b1f0e7e0a1e7d3c8a7c3f6d1b6f7a2c0\",\"documentation_url\":\"https://docs.github.com/v3/repos/contents/\",\"status\":\"404\"}"
   }
+ },
+ "pr_checks": {
+  "_source": "Read-only gh 2.104.0 (2026-11-12) captures on 2026-11-19 against kjelly/pilot (rc, stdout and stderr verbatim) with the command in `args`; env prefixes are named in `env`. `zero_*`: PR #106, the only kjelly/pilot PR whose head commit has no check run and no status (the three forms all print the same stderr line on exit 1, even with --json). `auth_failure`, `network_failure`: an invalid dummy token / a proxy that refuses connections. `with_checks`: PR #389 at capture time, stdout trimmed to its first 3 of 24 entries (the rest repeat the same shape), nothing else edited.",
+  "zero_checks": {
+   "args": [
+    "pr",
+    "checks",
+    "106",
+    "--repo",
+    "kjelly/pilot",
+    "--json",
+    "name,state,bucket,link,workflow"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "no checks reported on the 'fix/freeipa-identity-passwd-failures' branch\n"
+  },
+  "zero_checks_required": {
+   "args": [
+    "pr",
+    "checks",
+    "106",
+    "--repo",
+    "kjelly/pilot",
+    "--required",
+    "--json",
+    "name,state,bucket,link,workflow"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "no checks reported on the 'fix/freeipa-identity-passwd-failures' branch\n"
+  },
+  "zero_checks_plain": {
+   "args": [
+    "pr",
+    "checks",
+    "106",
+    "--repo",
+    "kjelly/pilot"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "no checks reported on the 'fix/freeipa-identity-passwd-failures' branch\n"
+  },
+  "auth_failure": {
+   "args": [
+    "pr",
+    "checks",
+    "106",
+    "--repo",
+    "kjelly/pilot",
+    "--json",
+    "name,state,bucket,link,workflow"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login -h github.com\n",
+   "env": {
+    "GH_TOKEN": "invalid-token-for-capture"
+   }
+  },
+  "no_such_pr": {
+   "args": [
+    "pr",
+    "checks",
+    "999999",
+    "--repo",
+    "kjelly/pilot",
+    "--json",
+    "name,state,bucket,link,workflow"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "GraphQL: Could not resolve to a PullRequest with the number of 999999. (repository.pullRequest)\n"
+  },
+  "network_failure": {
+   "args": [
+    "pr",
+    "checks",
+    "106",
+    "--repo",
+    "kjelly/pilot",
+    "--json",
+    "name,state,bucket,link,workflow"
+   ],
+   "rc": 1,
+   "stdout": "",
+   "stderr": "Post \"https://api.github.com/graphql\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused\n",
+   "env": {
+    "HTTPS_PROXY": "http://127.0.0.1:9",
+    "https_proxy": "http://127.0.0.1:9"
+   }
+  },
+  "with_checks": {
+   "args": [
+    "pr",
+    "checks",
+    "389",
+    "--repo",
+    "kjelly/pilot",
+    "--json",
+    "name,state,bucket,link,workflow"
+   ],
+   "rc": 0,
+   "stdout": "[{\"bucket\":\"pass\",\"link\":\"https://github.com/kjelly/pilot/actions/runs/44473133974/job/135404893209\",\"name\":\"CI required checks\",\"state\":\"SUCCESS\",\"workflow\":\"CI\"},{\"bucket\":\"pass\",\"link\":\"https://github.com/kjelly/pilot/actions/runs/44473133974/job/135404754436\",\"name\":\"Record full candidate validation\",\"state\":\"SUCCESS\",\"workflow\":\"CI\"},{\"bucket\":\"skipping\",\"link\":\"https://github.com/kjelly/pilot/actions/runs/44473133974/job/135404756030\",\"name\":\"promote pilot-cli:latest\",\"state\":\"SKIPPED\",\"workflow\":\"CI\"}]\n",
+   "stderr": ""
+  }
+ },
+ "issue_comments": {
+  "_source": "Read-only gh 2.104.0 (2026-11-12) captures on 2026-11-19 against kjelly/pilot. `no_comments`: kjelly/pilot#1 (rc, stdout and stderr verbatim). `paged`: kjelly/pilot#389 with per_page=2 so that gh --paginate --slurp returns two pages; the PR's three own review comments, reduced to id, created_at, body and user.login/user.type (the other fields are dropped, bodies verbatim, checked against .agents/skills/_shared/committed-secrets.md).",
+  "no_comments": {
+   "args": [
+    "api",
+    "repos/kjelly/pilot/issues/1/comments?per_page=100",
+    "--paginate",
+    "--slurp"
+   ],
+   "rc": 0,
+   "stdout": "[[]]",
+   "stderr": ""
+  },
+  "paged": {
+   "args": [
+    "api",
+    "repos/kjelly/pilot/issues/389/comments?per_page=2",
+    "--paginate",
+    "--slurp"
+   ],
+   "rc": 0,
+   "stdout": "[[{\"id\":7001098858,\"created_at\":\"2026-11-19T05:57:11Z\",\"body\":\"## Automated PR review: Draft required\\n\\nObserved HEAD: `9faa36ae32b6ce9f17729ee8029123fb3fbe2d6b`  \\nObserved Base: `2ab3cc5ca079c30f8b31264a26667ebef23596b0`\\n\\nLive base tip: `8a414d48770e905d333488a945f9a045baf5f2b6`\\n\\n### Blocking issues / verification notes\\n\\n- P2 .agents/skills/pr-review-merge/scripts/review_gate.py:834: When the branch requires status checks and GitHub returns no checks, the gate adds both a generic no-CI gap and an owned required-check gap. The generic gap causes WaitKinds.handoff to return false, so the actor leaves the Ready PR without a needs-person comment or label and list_ready keeps selecting it. Reproduced with Fake.c=[], required_status_checks, and ordinary review evidence. The test at test_handoff.py:249 masks the interaction by supplying a no-CI rationale on a branch that requires CI. | Fix: Decide the empty-CI reason after reading branch rules. When checks are required, keep WAITING and emit the person-owned required-check reason without the generic rationale gap. Add a regression with empty no_ci_rationale and assert actor comment, label, and listing exclusion. Preserve the no-CI rationale gate for branches without required checks.\\n- Test failed: Independent required-checks handoff counterexample: /tmp/pr389-required-checks-regression.log\\n\\n**Next steps:** Address blocking findings, rerun affected tests and CI, and request independent review on the updated HEAD/Base before marking Ready. Use `pr-ready` to reconcile PR metadata and integrate the verified latest base so the live base tip is an ancestor of HEAD.\\n\\nThis comment is an automated technical review, not a human approval.\\n\",\"user\":{\"login\":\"kjelly\",\"type\":\"User\"}},{\"id\":7002106935,\"created_at\":\"2026-11-19T06:55:46Z\",\"body\":\"Re: https://github.com/kjelly/pilot/pull/389#issuecomment-7001098858\\n\\n**Disposition: valid, fixed in 8689614f0d3d7b2cd1abdf7e69462319172b3fd3.**\\n\\nClaim as understood: on a branch whose rules require status checks, a PR with no checks got both the unregistered \\\"No GitHub CI: requires a concrete no-CI rationale\\\" gap and the person-owned \\\"Branch requires status checks, but GitHub returned no completed checks\\\" reason, so `person_handoff` stayed false and the PR was never labelled. Reproduced at 9faa36ae with your counterexample.\\n\\nFix (`review_gate._evaluate`): the empty-CI reason is decided after the branch rules are read. A branch that requires checks gets only the person-owned reason and never merges, with or without a rationale. Without the rule, or when the rules cannot be read (fail closed), the rationale gap stays where it was. An SA sweep of the same class found two more masked registrations, fixed in the same commit: a `BLOCK` verdict with no finding no longer hides a stated unresolved dependency or a blocked target record; and the reviewer contract (`references/evidence-contract.md`, all four prm-reviewer copies) now defines the verdict for those states.\\n\\nRegressions:\\n- `tests/test_handoff.py` `RequiredChecksTests`: contract evidence with an empty `no_ci_rationale` hands off; a rationale never merges; no rule or unreadable rules keep the gap; merge queue plus required checks.\\n- `PERSON_FAMILIES['required checks without results']`: every family is built from the default evidence plus only its own changes, and a meta test rejects masking extras like the rationale your finding pointed at.\\n- An AST lint keeps every `kinds.person` registration and the family table equal both ways.\\n- `tests/test_integration.py` `test_required_checks_without_results_hand_off_with_contract_evidence`: actor comment and label, and `list_ready.py` excludes the PR; plus the negative case without the rule.\\n\\nYour counterexample fails at 9faa36ae and passes at 8689614f. Independent review of 8689614f: PASS.\\n\",\"user\":{\"login\":\"kjelly\",\"type\":\"User\"}}],[{\"id\":7002907653,\"created_at\":\"2026-11-19T07:39:23Z\",\"body\":\"## Automated PR review: Draft required\\n\\nObserved HEAD: `8689614f0d3d7b2cd1abdf7e69462319172b3fd3`  \\nObserved Base: `2ab3cc5ca079c30f8b31264a26667ebef23596b0`\\n\\nLive base tip: `90a2249b5516288f5582b3860d29d80f6d70471b`\\n\\n### Blocking issues / verification notes\\n\\n- P2 .agents/skills/pr-review-merge/scripts/review_gate.py:843: On a branch with required status checks, gh 2.104.0 returns exit 1 and empty stdout for a PR with zero checks, before its [JSON exporter](https://github.com/cli/cli/blob/v2.104.0/pkg/cmd/pr/checks/checks.go#L185-L191). The adapter raises, so the gate sees checks=None and returns WAITING/transient with person_handoff=false. The actor leaves the PR listable with no handoff. An adapter-through-gate counterexample reproduces this result. The earlier fix passes when the client supplies JSON []. | Fix: Use a verified machine-readable zero-checks result in the empty-CI path and keep real API/auth errors transient. Add an adapter-through-actor regression for the gh no-checks response, with an API failure as a negative control.\\n- Test failed: Production adapter zero-checks handoff counterexample: /tmp/pr389-r2-independent-gh-no-checks.log\\n\\n**Next steps:** Address blocking findings, rerun affected tests and CI, and request independent review on the updated HEAD/Base before marking Ready. Use `pr-ready` to reconcile PR metadata and integrate the verified latest base so the live base tip is an ancestor of HEAD.\\n\\nThis comment is an automated technical review, not a human approval.\\n\",\"user\":{\"login\":\"kjelly\",\"type\":\"User\"}}]]\n",
+   "stderr": ""
+  }
+ },
+ "user": {
+  "_source": "Read-only gh 2.104.0 (2026-11-12) captures on 2026-11-19 of `gh api user`. `ok`: stdout reduced to login, id, type and site_admin (every other field, including name, email and profile data, is dropped). `auth_failure`: GH_TOKEN set to an invalid dummy token, verbatim.",
+  "ok": {
+   "args": [
+    "api",
+    "user"
+   ],
+   "rc": 0,
+   "stdout": "{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false}\n",
+   "stderr": ""
+  },
+  "auth_failure": {
+   "args": [
+    "api",
+    "user"
+   ],
+   "rc": 1,
+   "stdout": "{\n  \"message\": \"Bad credentials\",\n  \"documentation_url\": \"https://docs.github.com/rest\",\n  \"status\": \"401\"\n}",
+   "stderr": "gh: Bad credentials (HTTP 401)\n",
+   "env": {
+    "GH_TOKEN": "invalid-token-for-capture"
+   }
+  }
+ },
+ "labels": {
+  "_source": "Read-only gh 2.104.0 (2026-11-12) captures on 2026-11-20 against kjelly/pilot (rc, stdout and stderr verbatim). `exists`: `gh api repos/kjelly/pilot/labels/pr-ready-verified`, the label a maintainer created for kjelly/pilot#421. `missing`: the same call for a name the repository does not have. `pr_view`: the labels of kjelly/pilot#308 as `gh pr view` prints them (its `id` is the label's `node_id`).",
+  "exists": {
+   "args": [
+    "api",
+    "repos/kjelly/pilot/labels/pr-ready-verified"
+   ],
+   "rc": 0,
+   "stdout": "{\"id\":13156352189,\"node_id\":\"LA_kwDOTHN-rs8AAAADEC4AvQ\",\"url\":\"https://api.github.com/repos/kjelly/pilot/labels/pr-ready-verified\",\"name\":\"pr-ready-verified\",\"color\":\"1d76db\",\"default\":false,\"description\":\"Set by pr-ready/issue-to-pr after the post-Ready check; consumers act only on labelled PRs (#421)\",\"archived_at\":null,\"archived_by\":null}",
+   "stderr": ""
+  },
+  "pr_view": {
+   "args": [
+    "pr",
+    "view",
+    "308",
+    "-R",
+    "kjelly/pilot",
+    "--json",
+    "number,labels"
+   ],
+   "rc": 0,
+   "stdout": "{\"labels\":[{\"id\":\"LA_kwDOTHN-rs8AAAADBeMEmQ\",\"name\":\"merge-queue\",\"description\":\"Approved by pr-review-merge; the merge train integrates main, waits for CI and merges (#307)\",\"color\":\"0e8a16\"}],\"number\":308}\n",
+   "stderr": ""
+  },
+  "missing": {
+   "args": [
+    "api",
+    "repos/kjelly/pilot/labels/this-label-does-not-exist-421"
+   ],
+   "rc": 1,
+   "stdout": "{\"message\":\"Not Found\",\"documentation_url\":\"https://docs.github.com/rest/issues/labels#get-a-label\",\"status\":\"404\"}",
+   "stderr": "gh: Not Found (HTTP 404)\n"
+  }
+ },
+ "timeline": {
+  "_source": "Read-only gh 2.104.0 (2026-11-12) capture on 2026-11-20 of the timeline of the merged PR kjelly/pilot#419 (`gh api repos/kjelly/pilot/issues/419/timeline?per_page=4 --paginate --slurp`, rc 0, five pages of 4, 4, 4, 4 and 2 events; per_page=4 so that --slurp returns several pages). Reduced: only the events ready_for_review, convert_to_draft, labeled, unlabeled and commented are kept, in order, each cut to id, event, created_at, actor.{login,id,type,site_admin} (and label.{name,color}, or user.{...} and the body verbatim); the other events (committed carries commit author names and e-mail addresses) and every other field are dropped, and the page structure is kept, so a page can be empty. The PR was made Ready twice (with a convert_to_draft between) and labelled and unlabelled `merge-queue` by the same account that comments on it. Checked against .agents/skills/_shared/committed-secrets.md: no e-mail address, token or credential in any body.",
+  "pr_419_paged": {
+   "args": [
+    "api",
+    "repos/kjelly/pilot/issues/419/timeline?per_page=4",
+    "--paginate",
+    "--slurp"
+   ],
+   "rc": 0,
+   "stdout": "[[],[{\"id\":36743658899,\"event\":\"ready_for_review\",\"created_at\":\"2026-11-20T07:31:18Z\",\"actor\":{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false}},{\"id\":7033615377,\"event\":\"commented\",\"created_at\":\"2026-11-20T07:45:42Z\",\"actor\":{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false},\"user\":{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false},\"body\":\"## Automated PR review: Draft required\\n\\nObserved HEAD: `64ab08f135c9e3a72d7fba4db38d4a04af1ca5d9`  \\nObserved Base: `3e35ab09b9e08d6dbd9a6c8d65307d87f577eb8d`\\n\\nLive base tip: `f9cbd198cc316ecae19384c6a23a9d7dba4a6fc6`\\n\\n### Blocking issues / verification notes\\n\\n- P2 scripts/pr_loop.py:301: When GitHub shows Ready, the runner waits for the Draft agent, clears the active task and starts the Ready agent without reading the Draft task's final result. The existing Ready gate can mark the PR Ready and then return DRAFT-BLOCKED if post-action verification detects a newly active workflow. The runner therefore continues after an explicit blocker and can clean up the failed task's evidence. | Fix: After the previous agent completes the handoff, refresh the PR identity and consume that task's terminal result before clearing it, starting another role or completing the PR. Add a regression where DRAFT-BLOCKED arrives during handoff and assert that it stops before dispatching Ready. Keep delayed READY and ENQUEUED as successful controls.\\n- Test failed: Delayed blocking receipt containment: Independent isolated runner harness dispatched Ready after a delayed same-HEAD DRAFT-BLOCKED receipt and subsequently reported merged.\\n\\n**Next steps:** Address blocking findings, rerun affected tests and CI, and request independent review on the updated HEAD/Base before marking Ready. Use `pr-ready` to reconcile PR metadata and integrate the verified latest base so the live base tip is an ancestor of HEAD.\\n\\nThis comment is an automated technical review, not a human approval.\\n\"},{\"id\":36744735929,\"event\":\"convert_to_draft\",\"created_at\":\"2026-11-20T07:45:44Z\",\"actor\":{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false}}],[{\"id\":7034597040,\"event\":\"commented\",\"created_at\":\"2026-11-20T08:38:37Z\",\"actor\":{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false},\"user\":{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false},\"body\":\"Thanks for the review of `64ab08f1` ([comment](https://github.com/kjelly/pilot/pull/419#issuecomment-7033615377)). I triaged each claim against the code, and a separate independent reviewer (fresh context, read-only) judged them without seeing my conclusions. The fix is `5c14e475`.\\n\\n**1. P2: the handoff does not read the finished task's result. Holds at `64ab08f1`, fixed in `5c14e475`.**\\n`check_result` ran only while GitHub still showed the phase the task was given in. `pr_gate.py` runs `gh pr ready` and only then its post-action verification, which can publish `DRAFT-BLOCKED` while GitHub already shows Ready; the runner then started the Ready agent and could report the PR merged. After the previous agent returns to its prompt (or is gone), the runner now re-reads the PR and applies `check_result` against the fresh HEAD before it clears the task, starts another role or reports the PR done (draft to ready, ready to draft, ready to merged). A blocker judged at the current HEAD stops the run, also when the PR is merged; a result judged at another HEAD, a missing result and the success outcomes (`READY`, `DRAFT`, `ENQUEUED`, `MERGED`) let it go on.\\nRegression, written first: `HandoffResultTests` (16 tests) and `ProgramTests.test_a_blocker_that_arrives_as_github_shows_ready_stops_before_the_ready_agent_starts`, which drives the real result CLI with fake `tmux`/`gh`. The 17 new tests fail on `64ab08f1` (21 failures, counting sub-tests; the run dispatches Ready and reports \\\"merged\\\", exit 0) and pass on `5c14e475`. Eight mutations of the fix (no consumption, stale HEAD, merged skipped, gone agent skipped, consumed before the wait, successes treated as blockers, the Stop swallowed, a blocker ignored once merged) each fail the named test.\\n\\n**2. \\\"It can clean up the failed task's evidence\\\". Holds conditionally; I first triaged it as not holding, which was wrong.**\\n`Checkout.clean_up()` removes the managed checkout, `result.json` included, when the run wrongly completes and the checkout has no `.pr-ready/`, no dirty files, no unpushed commit and no stash. With `.pr-ready/` it is retained. With the fix the run stops before `clean_up()` is reached; I did not change `clean_up()`.\\n\\n**3. \\\"Delayed blocking receipt\\\". Holds at `64ab08f1`; closed for a receipt published before the agent returns to its prompt.**\\nResidual (P3, left out of this PR): a receipt that arrives after the runner's single read, with the agent idle at its prompt while the gate is still running (a background gate, which the `pr-ready` skill says not to do), is still not consumed. It is listed under \\\"Not in this PR\\\" in the description with an optional hardening (re-check the consumed task right before the next role is submitted and before \\\"merged\\\" is reported). I could not tell from the comment whether your harness delays the receipt beyond that read.\\n\\n**4. \\\"Integrate the live base tip so it is an ancestor of HEAD\\\". Does not hold.**\\nThe 32 files `main` changed between the PR base `3e35ab09` and `f9cbd198` share none with this PR's 12 files (the intersection of `git diff --name-only 3e35ab09..f9cbd198` and the PR's files is empty), and `git merge-tree --write-tree 5c14e475 f9cbd198` is clean. `pr_gate.base_alignment` requires integration only for a conflict or a file changed on both sides; the merge train integrates the base otherwise.\\n\\nLocal receipts at `5c14e475`: `make skill-test` passed (1,484 tests across six skills, Python 3.10.16), the Go skill-consistency tests and `make skill-repo-lint` passed, and a second independent review of `5c14e475` found no P0, P1 or P2. CI is running on `5c14e475`.\\n\"},{\"id\":36750750751,\"event\":\"ready_for_review\",\"created_at\":\"2026-11-20T09:02:55Z\",\"actor\":{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false}},{\"id\":36752270477,\"event\":\"labeled\",\"created_at\":\"2026-11-20T09:20:48Z\",\"actor\":{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false},\"label\":{\"name\":\"merge-queue\",\"color\":\"0e8a16\"}},{\"id\":7035591012,\"event\":\"commented\",\"created_at\":\"2026-11-20T09:20:50Z\",\"actor\":{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false},\"user\":{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false},\"body\":\"## Merge train: enqueued\\n\\nReviewed HEAD: `5c14e4753f7e3345ab720951cd0b4cb1e57e0168`  \\nLive base: `f9cbd198cc316ecae19384c6a23a9d7dba4a6fc6`\\n\\nThe train will merge the live base into this branch first (clean merge, no file changed on both sides), wait for CI on that HEAD and merge.\\n\\nRemoving the `merge-queue` label takes the PR out of the queue.\\n\"}],[],[{\"id\":36755337996,\"event\":\"unlabeled\",\"created_at\":\"2026-11-20T09:57:02Z\",\"actor\":{\"login\":\"kjelly\",\"id\":3412050,\"type\":\"User\",\"site_admin\":false},\"label\":{\"name\":\"merge-queue\",\"color\":\"0e8a16\"}}]]",
+   "stderr": ""
+  }
  }
 }

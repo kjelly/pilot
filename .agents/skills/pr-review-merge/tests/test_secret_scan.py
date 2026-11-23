@@ -144,7 +144,8 @@ class SecretScanGate(RealPr):
 
     def test_the_actor_re_runs_the_gate_with_the_same_worktree(self):
         evidence, gh = self.pr(self.b2)
-        with mock.patch.object(apply_decision, 'evaluate', wraps=review_gate.evaluate) as ev:
+        with mock.patch.object(apply_decision, 'evaluate', wraps=review_gate.evaluate) as ev, \
+                mock.patch.object(apply_decision, 'ready_signal_gate', return_value=None):   # not what this test is about
             apply_decision._perform_locked(Repo.parse('acme/demo'), 42, evidence, 'merge', False,
                                            worktree=self.r.path, secret_files=[Path('/x')])
         self.assertEqual(self.r.path, ev.call_args.kwargs['worktree'])
@@ -157,6 +158,8 @@ class SecretScanIntegration(RealPr):
     setUp_integration = integration.Integration.setUp
     state = integration.Integration.state
     patch = integration.Integration.patch
+    sign = integration.IntegrationBase.sign
+    save_world = integration.IntegrationBase.save_world
     actor_args = None
 
     def setUp(self):
@@ -169,6 +172,7 @@ class SecretScanIntegration(RealPr):
         data = integration.fixture()
         data['view'].update(headRefOid=head, baseRefOid=self.base)
         self.fixture_file.write_text(json.dumps(data))
+        self.sign(head)   # signed at this head, as pr-ready leaves a PR
         evidence = integration.evidence()
         evidence.update(head_sha=head, base_sha=self.base)
         evidence['tests'][0]['sha'] = head

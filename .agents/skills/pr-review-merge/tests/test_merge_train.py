@@ -5,6 +5,7 @@ clone. The fake GitHub client reads PR HEAD, base tip, ancestry, file lists and 
 (as GitHub would), so the review-coverage and alignment checks run for real against the merge commit
 the train pushes. Only CI, labels, comments, Draft and merge are simulated.
 """
+import ast
 import contextlib
 import json
 import os
@@ -16,7 +17,11 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+# The shared model of a PR's Ready-signal state (timeline, label, viewer), behind the fake's reads and label writes.
+# Appended: _shared/tests has a test_secret_scan of its own, which must not shadow this directory's under discovery.
+sys.path.append(str(Path(__file__).resolve().parents[2] / '_shared' / 'tests'))
 import merge_train  # noqa: E402
+import ready_signal_world as rw  # noqa: E402
 import review_gate  # noqa: E402
 from gh_runtime import CompareLimitError, GitHubError, Repo  # noqa: E402
 from scan_stub import CleanScan  # noqa: E402
@@ -72,6 +77,10 @@ class FakeGitHub:
         self.pull_ref = {}     # number -> commit refs/pull/<n>/head shows (GitHub lags the branch)
         self.manifest = None   # text of .github/pr-evidence.json at every revision, or None (absent)
         self.rules = []
+        # The Ready signal (the shared ready_signal_world model) of the PRs a test signs: number -> World. The
+        # train never reads it; the fake answers the reads anyway so that a train that did read it is seen in `calls`.
+        self.signals = {}
+        self.failing_labels = {}   # label name -> exception raised by a write of that label (queue label writes: none)
 
     def outage(self, name):
         self.calls.append(name)
@@ -103,6 +112,7 @@ class FakeGitHub:
             state = 'OPEN'
         if draft and self.lagging('draft'):
             draft = False
+        signal_labels = self.signals[number].view_labels() if number in self.signals else []
         return {'number': number, 'url': f'https://github.com/acme/demo/pull/{number}', 'state': state,
                 'isDraft': draft, 'headRefOid': head, 'headRefName': pr['branch'],
                 'isCrossRepository': pr.get('cross', False), 'baseRefOid': pr['base'],
@@ -111,7 +121,7 @@ class FakeGitHub:
                 'mergeStateStatus': pr.get('merge_state') or (
                     'DIRTY' if pr.get('mergeable') == 'CONFLICTING' else 'CLEAN'),
                 'reviewDecision': pr.get('review', ''), 'autoMergeRequest': None,
-                'labels': [{'name': 'merge-queue'}] if labelled else []}
+                'labels': ([{'name': 'merge-queue'}] if labelled else []) + signal_labels}
 
     def branch_head(self, repo, name):
         self.outage('branch_head')
@@ -168,6 +178,21 @@ class FakeGitHub:
         self.outage('branch_rules')
         return self.rules
 
+    def signal(self, number=42):
+        """The Ready-signal state of PR `number` (a ready_signal_world.World; the PR's HEAD is the one it was
+        created with, which only `assess` callers that pass their own head care about)."""
+        if number not in self.signals:
+            self.signals[number] = rw.World(viewer='prm-bot', number=number)
+        return self.signals[number]
+
+    def viewer_login(self, repo):
+        self.outage('viewer_login')
+        return self.signal().s['viewer']
+
+    def timeline_events(self, repo, number):
+        self.outage('timeline_events')
+        return self.signal(number).timeline()
+
     # queue
     def labeled_open_prs(self, repo, label):
         self.outage('labeled_open_prs')
@@ -188,6 +213,14 @@ class FakeGitHub:
     # writes
     def edit_label(self, repo, number, label, *, add):
         self.outage('edit_label')
+        if label == rw.LABEL:
+            # The Ready signal's label lives in the shared model (it is an event on the PR's timeline); the
+            # queue label's bookkeeping below is not touched.
+            self.writes.append(('ready-label+' if add else 'ready-label-', number))
+            if label in self.failing_labels:
+                raise self.failing_labels[label]
+            self.signal(number).label(None, add=add, name=label)
+            return
         self.writes.append(('label+' if add else 'label-', number))
         self.label_before[number] = number in self.labels
         self.stale['label_view'] = self.lag.get('label_view', 0)
@@ -299,6 +332,14 @@ class TrainHarness(unittest.TestCase):
                 'live_base_sha': self.gh.branch_head(REPO, 'main')}
         merge_train.enqueue(REPO, number, dict(self.evidence(head), pr=number), gate, client=self.gh)
         return head
+
+    def sign(self, head=None, number=42, **kw):
+        """Draft -> Ready, then a complete Ready signal for `head` (the PR's reviewed HEAD by default), written by the
+        account the fake's viewer is, as a producer leaves a PR. Returns the signal's ready_signal_world.World."""
+        world = self.gh.signal(number)
+        world.ready()
+        world.signal(head or self.reviewed, **kw)
+        return world
 
     def lock_hook(self, action):
         """A mutation lock that runs `action` as it is first taken: the moment between a check made before
@@ -1215,6 +1256,362 @@ class HeadOfLineTests(DeliveryTests):
         self.assertEqual('ERROR', out['results'][0]['outcome'], out)
         self.assertEqual(3, merge_train.load_entry(REPO, 42)['errors'])
         self.assertIn(42, self.gh.labels)
+
+
+WITH_CHECKS = {'passed': 1, 'failed': 0, 'pending': 0, 'skipped': 0}
+NO_CHECKS_AT_ALL = {'passed': 0, 'failed': 0, 'pending': 0, 'skipped': 0}
+NO_CI_RATIONALE = 'This repository has no configured CI jobs; the unit test receipt is in the review evidence.'
+
+
+class ZeroChecksTests(TrainHarness):
+    """GitHub reports no check for HEAD (kjelly/pilot#389): real gh answers that with rc 1 and a stderr
+    line, which the adapter reads as an empty CI. For a PR enqueued with checks that is CI that has not
+    started on HEAD (the train just pushed it, or Actions is late), never a missing CI: the gate would
+    dequeue it for that. Only a PR enqueued with no checks at all, with the rationale, goes on to the gate."""
+
+    def queue_with(self, checks, **evidence_changes):
+        gate = {'decision': 'MERGE', 'head_sha': self.reviewed, 'base_sha': self.fork,
+                'live_base_sha': self.gh.branch_head(REPO, 'main')}
+        if checks is not None:
+            gate['checks'] = checks
+        return merge_train.enqueue(REPO, 42, dict(self.evidence(), **evidence_changes), gate, client=self.gh)
+
+    def assertStillQueued(self, number=42):
+        """Enqueued with its saved review, and the train wrote nothing about it but the enqueue's own comment."""
+        self.assertIn(number, self.gh.labels)
+        self.assertIsNotNone(merge_train.load_entry(REPO, number))
+        self.assertEqual([], [w for w in self.gh.writes if w[0] in ('merge', 'draft', 'label-')], self.gh.writes)
+        self.assertEqual(1, len([c for c in self.gh.comments if c[0] == number]), self.gh.comments)
+
+    def run_waiting(self, **kw):
+        out = self.train(registration_grace=300, **kw).run()
+        self.assertEqual('DONE', out['status'], out)
+        self.assertEqual([(42, 'WAITING')], [(r['pr'], r['outcome']) for r in out['results']], out)
+        return out['results'][0]
+
+    def test_enqueue_records_how_many_checks_the_gate_saw(self):
+        for checks, expected in ((WITH_CHECKS, 1), (NO_CHECKS_AT_ALL, 0),
+                                 ({'passed': 2, 'failed': 0, 'pending': 0, 'skipped': 1}, 3),
+                                 (None, None), ({'passed': 'many'}, None), ({}, None), ([], None)):
+            with self.subTest(checks=checks):
+                self.setUp()
+                self.queue_with(checks)
+                self.assertEqual(expected, merge_train.load_entry(REPO, 42)['checks_at_enqueue'])
+
+    def test_zero_checks_after_the_grace_keep_a_pr_enqueued_with_checks_queued(self):
+        # Behind main: the train pushes the merge of the live base, and GitHub shows no check for the new HEAD.
+        self.queue_with(WITH_CHECKS)
+        self.advance_main()
+        self.second_pr()
+        self.gh.checks[42] = [[]]
+        reason = self.run_waiting()
+        self.assertIn('no checks', reason['reason'])
+        self.assertIn('CI has not started', reason['reason'])
+        self.assertStillQueued()
+        self.assertIsNotNone(merge_train.load_entry(REPO, 43), 'the PR behind it was not touched')
+        self.assertIn(43, self.gh.labels)
+
+    def test_an_aligned_pr_is_kept_too(self):
+        self.queue_with(WITH_CHECKS)
+        self.gh.checks[42] = [[]]
+        self.run_waiting()
+        self.assertStillQueued()
+
+    def test_an_entry_saved_before_the_count_existed_counts_as_expecting_ci(self):
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        entry = merge_train.load_entry(REPO, 42)
+        del entry['checks_at_enqueue']
+        merge_train.save_entry(REPO, 42, entry)
+        self.gh.checks[42] = [[]]
+        self.run_waiting()
+        self.assertStillQueued()
+        # An enqueue that recorded nothing (the gate result had no counts) is the same.
+        self.setUp()
+        self.queue_with(None, no_ci_rationale=NO_CI_RATIONALE)
+        self.gh.checks[42] = [[]]
+        self.run_waiting()
+        self.assertStillQueued()
+
+    def test_zero_checks_inside_the_grace_are_pending_and_a_late_check_is_the_ci(self):
+        self.queue_with(WITH_CHECKS)
+        self.gh.checks[42] = [[], [], [PENDING], [PASS]]
+        out = self.train(registration_grace=300).run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        self.assertGreaterEqual(self.gh.polls[42], 4, 'the late check was waited for')
+        self.assertIn(('merge', 42, self.reviewed), self.gh.writes)
+
+    def test_a_pr_enqueued_with_no_checks_and_the_rationale_goes_on_to_the_gate(self):
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        self.gh.checks[42] = [[]]
+        out = self.train(registration_grace=300).run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        self.assertIn(('merge', 42, self.reviewed), self.gh.writes)
+        self.assertGreaterEqual(self.gh.polls[42], 2, 'the grace was waited out first')
+
+    def test_enqueue_records_the_live_base_the_no_ci_decision_was_made_on(self):
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        entry = merge_train.load_entry(REPO, 42)
+        self.assertEqual(self.gh.branch_head(REPO, 'main'), entry['base_at_enqueue'])
+        # A gate result without a live base records None, which the train reads as "the base moved".
+        self.setUp()
+        gate = {'decision': 'MERGE', 'head_sha': self.reviewed, 'base_sha': self.fork,
+                'checks': NO_CHECKS_AT_ALL}
+        merge_train.enqueue(REPO, 42, dict(self.evidence(), no_ci_rationale=NO_CI_RATIONALE), gate, client=self.gh)
+        self.assertIsNone(merge_train.load_entry(REPO, 42)['base_at_enqueue'])
+
+    def assertWaitsForChecksOnTheNewHead(self, reason):
+        self.assertIn('no-CI decision', reason['reason'])
+        self.assertIn('waits for checks on this HEAD', reason['reason'])
+        self.assertStillQueued()
+
+    def test_a_zero_check_pr_waits_when_main_adds_a_workflow_and_the_train_integrates_it(self):
+        # kjelly/pilot#389 round 3: queued with no checks and the rationale, then main gains a workflow
+        # that applies to the PR. The integrated HEAD has no checks past the grace: it must not merge.
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        self.advance_main('.github/workflows/ci.yml', 'name: CI\non: [pull_request]\njobs: {}\n')
+        self.gh.checks[42] = [[]]
+        entry_before = merge_train.load_entry(REPO, 42)
+        reason = self.run_waiting()
+        self.assertWaitsForChecksOnTheNewHead(reason)
+        head = self.gh.head(42)
+        self.assertNotEqual(self.reviewed, head, 'the train integrated the base first')
+        self.assertIn('.github/workflows/ci.yml', git(self.origin, 'ls-tree', '-r', '--name-only', head))
+        entry = merge_train.load_entry(REPO, 42)
+        self.assertEqual(0, entry['errors'], 'nothing is counted')
+        self.assertEqual(entry_before['entry_id'], entry['entry_id'])
+        self.assertEqual([head], entry['train_commits'][-1:])
+        self.assertFalse(any(w[0] in ('merge', 'draft', 'label-') for w in self.gh.writes), self.gh.writes)
+
+    def test_a_zero_check_pr_waits_when_the_base_moved_without_a_workflow_too(self):
+        # The train cannot tell what a moved base changed about CI: the rule is the HEAD and base decided on.
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        self.advance_main()
+        self.gh.checks[42] = [[]]
+        self.assertWaitsForChecksOnTheNewHead(self.run_waiting())
+
+    def test_each_half_of_the_zero_check_condition_is_enough_to_wait(self):
+        # Isolated: the base alone (HEAD is the enqueued HEAD, the live tip differs from the recorded one),
+        # then the HEAD alone (same live tip, HEAD is a commit the train pushed, not the enqueued one).
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        entry = merge_train.load_entry(REPO, 42)
+        entry['base_at_enqueue'] = self.reviewed
+        merge_train.save_entry(REPO, 42, entry)
+        self.gh.checks[42] = [[]]
+        self.assertWaitsForChecksOnTheNewHead(self.run_waiting())
+        self.setUp()
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        entry = merge_train.load_entry(REPO, 42)
+        entry['enqueued_head'], entry['train_commits'] = self.fork, [self.reviewed]
+        merge_train.save_entry(REPO, 42, entry)
+        self.gh.checks[42] = [[]]
+        self.assertWaitsForChecksOnTheNewHead(self.run_waiting())
+
+    def test_a_zero_check_entry_without_the_recorded_base_counts_as_moved(self):
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        entry = merge_train.load_entry(REPO, 42)
+        del entry['base_at_enqueue']
+        merge_train.save_entry(REPO, 42, entry)
+        self.gh.checks[42] = [[]]
+        self.assertWaitsForChecksOnTheNewHead(self.run_waiting())
+
+    def test_a_zero_check_pr_still_on_its_head_and_base_goes_on_to_the_gate(self):
+        # The workflow-free positive case: nothing moved since the no-CI decision, the gate reads the tree
+        # (no workflow) and merges.
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        self.gh.checks[42] = [[]]
+        out = self.train(registration_grace=300).run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        self.assertIn('tree_entries', self.gh.calls, 'the gate read the HEAD tree')
+
+    def test_a_workflow_in_the_tree_stops_the_merge_even_when_nothing_moved(self):
+        # The tree already has a workflow (the gate saw checks==0 for another reason): the gate refuses the
+        # rationale, the PR leaves the queue with the reason and is never merged.
+        self.advance_main('.github/workflows/ci.yml', 'name: CI\non: [pull_request]\njobs: {}\n')
+        git(self.dev, 'fetch', '-q', 'origin')
+        git(self.dev, 'merge', '-q', '--no-edit', 'origin/main')
+        self.reviewed = git(self.dev, 'rev-parse', 'HEAD')
+        git(self.dev, 'push', '-q', 'origin', 'HEAD:refs/heads/feature')
+        self.gh.prs[42]['base'] = self.gh.branch_head(REPO, 'main')
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        self.gh.checks[42] = [[]]
+        out = self.train(registration_grace=300).run()
+        self.assertEqual(['DONE'], [out['status']], out)
+        self.assertFalse(any(w[0] == 'merge' for w in self.gh.writes), self.gh.writes)
+        self.assertIn('GitHub Actions workflows', ' '.join(out['results'][0].get('reasons', [])), out)
+
+    def test_the_bounced_counterexample_with_the_real_adapter_never_merges(self):
+        # The round-3 counterexample (kjelly/pilot#389), replayed: the gate decides MERGE with zero checks
+        # read through gh_runtime.pr_checks over the recorded capture, the PR is enqueued from that gate
+        # result, main adds a workflow, and the train runs over the same capture.
+        import gh_runtime
+        from test_gh_reads import API
+        zero = API['pr_checks']['zero_checks']
+        run = lambda *a, **kw: subprocess.CompletedProcess(['gh'], zero['rc'], zero['stdout'], zero['stderr'])
+        self.gh.pr_checks = lambda repo, number: gh_runtime.pr_checks(repo, number)
+        evidence = dict(self.evidence(), no_ci_rationale=NO_CI_RATIONALE)
+        with mock.patch.object(gh_runtime, 'run_gh', side_effect=run):
+            gate = review_gate.evaluate(REPO, 42, evidence, client=self.gh)
+        self.assertEqual('MERGE', gate['decision'], gate)
+        self.assertEqual(0, sum(gate['checks'].values()), gate)
+        merge_train.enqueue(REPO, 42, evidence, gate, client=self.gh)
+        self.advance_main('.github/workflows/ci.yml',
+                          'name: CI\non: [push, pull_request]\njobs:\n  tests:\n    runs-on: ubuntu-latest\n'
+                          '    steps:\n      - run: exit 1\n')
+        with mock.patch.object(gh_runtime, 'run_gh', side_effect=run):
+            out = self.train(registration_grace=300).run()
+        self.assertEqual([(42, 'WAITING')], [(r['pr'], r['outcome']) for r in out['results']], out)
+        self.assertFalse(any(w[0] == 'merge' for w in self.gh.writes), self.gh.writes)
+        self.assertStillQueued()
+
+    def test_a_pr_enqueued_with_no_checks_and_no_rationale_is_the_gates_decision(self):
+        self.queue_with(NO_CHECKS_AT_ALL)
+        self.gh.checks[42] = [[]]
+        out = self.train(registration_grace=300).run()
+        self.assertEqual(1, len(out['results']), out)
+        self.assertNotEqual('MERGED', out['results'][0]['outcome'])
+        self.assertFalse(any(w[0] == 'merge' for w in self.gh.writes))
+
+    def test_the_real_gh_answer_for_no_checks_goes_through_the_adapter_and_the_train(self):
+        # No fake in between: the train's client reads checks with gh_runtime.pr_checks over the recorded
+        # capture. A failure capture instead of the zero capture is an infrastructure failure (#310).
+        import gh_runtime
+        from test_gh_reads import API
+
+        def run_gh_with(capture):
+            return mock.patch.object(gh_runtime, 'run_gh', lambda args, input_text=None, check=True:
+                                     subprocess.CompletedProcess(['gh', *args], capture['rc'], capture['stdout'],
+                                                                 capture['stderr']))
+        self.gh.pr_checks = lambda repo, number: gh_runtime.pr_checks(repo, number)
+        self.queue_with(WITH_CHECKS)
+        with run_gh_with(API['pr_checks']['zero_checks']):
+            self.run_waiting()
+        self.assertStillQueued()
+        self.setUp()
+        self.gh.pr_checks = lambda repo, number: gh_runtime.pr_checks(repo, number)
+        self.queue_with(NO_CHECKS_AT_ALL, no_ci_rationale=NO_CI_RATIONALE)
+        with run_gh_with(API['pr_checks']['zero_checks']):
+            out = self.train(registration_grace=300).run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        for key in ('auth_failure', 'no_such_pr', 'network_failure'):
+            with self.subTest(key):
+                self.setUp()
+                self.gh.pr_checks = lambda repo, number: gh_runtime.pr_checks(repo, number)
+                self.queue_with(WITH_CHECKS)
+                with run_gh_with(API['pr_checks'][key]):
+                    out = self.train(registration_grace=300).run()
+                self.assertEqual(('INFRA', 'GitHubError', []), (out['status'], out['error_kind'], out['results']), out)
+                self.assertStillQueued()
+
+
+class ReadySignalTests(DeliveryTests):
+    """The train needs no Ready signal, and takes the label off a PR it returns to Draft (the actor refuses a PR
+    without a valid signal BEFORE it queues it; see test_ready_signal_gate.py)."""
+
+    def overlap(self):
+        """Queue the PR, then let main change the file the PR changed: the train returns the PR to Draft."""
+        self.queue()
+        self.advance_main('pkg/a.go', 'package a // main change\n')
+
+    def labels(self):
+        return [label['name'] for label in self.gh.pr_view(REPO, 42)['labels']]
+
+    def read_the_signal(self):
+        return [call for call in self.gh.calls if call in ('timeline_events', 'viewer_login')]
+
+    def test_an_integrated_head_merges_with_the_marker_at_the_enqueued_head(self):
+        world = self.sign()
+        self.queue()
+        live = self.advance_main()
+        out = self.train().run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        head = self.gh.head(42)
+        self.assertEqual(f'{self.reviewed} {live}', git(self.origin, 'log', '-1', '--format=%P', head), 'the train pushed it')
+        # The precondition that makes this a test: the signal names the enqueued HEAD, not the one that merged.
+        shown = review_gate.ready_signal.assess(head, world.view_labels(), world.s['events'], 'prm-bot')
+        self.assertEqual(('stale', self.reviewed), (shown.state, shown.marker_head))
+        self.assertEqual([], self.read_the_signal(), 'the train never reads the signal')
+
+    def test_a_pr_queued_without_any_signal_is_merged_unchanged(self):
+        # Queued by an actor that predates the signal, or by hand: the train trusts its saved entry.
+        self.queue()
+        self.assertEqual({}, self.gh.signals)
+        out = self.train().run()
+        self.assertEqual(['MERGED'], [r['outcome'] for r in out['results']], out)
+        self.assertEqual([], self.read_the_signal())
+
+    def test_a_draft_takes_the_ready_label_off_after_the_draft_is_confirmed(self):
+        self.sign()
+        self.overlap()
+        train = self.train()
+        out = train.run()
+        self.assertEqual(['DRAFTED'], [r['outcome'] for r in out['results']], out)
+        # Draft first, then the queue label, then the signal's label: nothing goes before the Draft stands.
+        self.assertEqual(['comment', 'draft', 'label-', 'ready-label-'], [w[0] for w in self.gh.writes[2:]])
+        self.assertNotIn(rw.LABEL, self.labels())
+        self.assertIsNone(merge_train.load_entry(REPO, 42))
+        self.assertEqual([], self.read_the_signal())
+
+    def test_a_draft_that_is_never_shown_keeps_the_label(self):
+        self.sign()
+        self.overlap()
+        self.gh.lag['draft'] = 10 ** 6
+        out = self.train().run()
+        self.assertEqual(['ERROR'], [r['outcome'] for r in out['results']], out)
+        self.assertEqual('draft-unconfirmed', out['results'][0]['kind'])
+        self.assertEqual(['comment', 'draft'], [w[0] for w in self.gh.writes[2:]], 'no label is touched')
+        self.assertIn(rw.LABEL, self.labels())
+
+    def test_a_label_that_cannot_be_removed_is_logged_and_changes_nothing_else(self):
+        self.sign()
+        self.overlap()
+        self.gh.failing_labels[rw.LABEL] = GitHubError('gh pr edit failed (1): HTTP 502')
+        train = self.train()
+        out = train.run()
+        self.assertEqual(('DONE', ['DRAFTED']), (out['status'], [r['outcome'] for r in out['results']]), out)
+        self.assertEqual(['comment', 'draft', 'label-', 'ready-label-'], [w[0] for w in self.gh.writes[2:]])
+        self.assertIsNone(merge_train.load_entry(REPO, 42), 'the entry is dropped before the label is touched')
+        self.assertTrue([line for line in train.log if 'could not be removed' in line and 'HTTP 502' in line], train.log)
+        self.assertEqual(3, self.gh.counts['edit_label'], 'the enqueue, the queue label, and ONE attempt at the signal label')
+
+    def test_a_draft_of_a_pr_without_the_label_writes_nothing_more(self):
+        # The control of the three tests above (it is what test_overlap_and_conflict... asserts for every PR).
+        self.overlap()
+        out = self.train().run()
+        self.assertEqual(['DRAFTED'], [r['outcome'] for r in out['results']], out)
+        self.assertEqual(['comment', 'draft', 'label-'], [w[0] for w in self.gh.writes[2:]])
+
+
+class NoSignalRequirementTests(unittest.TestCase):
+    """Structure: the train and the gate it calls on its own commits name no Ready signal."""
+
+    SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
+
+    def test_merge_train_never_references_the_ready_signal(self):
+        source = (self.SCRIPTS / 'merge_train.py').read_text()
+        tree = ast.parse(source)
+        names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        names |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        names |= {alias.name for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names}
+        names |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+        self.assertEqual(set(), {'ready_signal', 'ready_signal_gate'} & names)
+        self.assertNotIn('ready_signal', source, 'not even in a comment or a string: the train needs no signal')
+
+    def test_only_the_actor_and_the_cli_ask_for_the_signal(self):
+        # Every place in review_gate.py that touches the signal module: `evaluate` and what it calls must not be one.
+        tree = ast.parse((self.SCRIPTS / 'review_gate.py').read_text())
+        users = set()
+        for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+            for node in ast.walk(function):
+                if isinstance(node, ast.Name) and node.id in ('ready_signal', 'ready_signal_gate'):
+                    users.add(function.name)
+        self.assertEqual({'ready_signal_gate', 'main'}, users)
+
+    def test_the_gate_the_train_calls_names_no_signal(self):
+        # The same property as a behaviour: evaluate answers for a PR nobody signed (test_ready_signal_gate.py
+        # asserts it reads neither the account nor a timeline).
+        import inspect
+        for function in (review_gate.evaluate, review_gate._evaluate, review_gate.review_covers):
+            self.assertNotIn('ready_signal', inspect.getsource(function))
 
 
 if __name__ == '__main__':

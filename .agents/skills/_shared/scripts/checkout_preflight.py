@@ -16,7 +16,10 @@ Usage:
 Without --execute it is a read-only dry run that prints the plan. With --execute it re-runs
 every check and then runs exactly the planned commands (like apply_decision.py --execute).
 Exit 0 = PASS, 1 = STOP (a problem, or a check that could not run: fail closed); argument
-errors also exit non-zero.
+errors also exit non-zero. Every git call has a time limit (GIT_TIMEOUT, and CHANGE_TIMEOUT for the
+commands --execute runs) and runs in a process group of its own through bounded_run.py: a git that
+outlives it has its whole group ended and is a STOP (`unverifiable`) that names the command; a git
+that exited is judged by its exit code, whatever something it started does with its output.
 
 --target     full commit SHA (40 hex): the only tree that may land. Fetch it first.
 --branch     the branch to end on. Without it the checkout is only detached at the target: that
@@ -57,7 +60,25 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Run from a skill snapshot, this script must not add `__pycache__` there (`skill_snapshot.py verify` counts any added
+# file, and a `.pyc` is code CPython would load), and under `python3 -I` its own directory is not on sys.path. So: no
+# bytecode, and the directory is added (last, so that nothing in it shadows the standard library) before the import.
+sys.dont_write_bytecode = True
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.append(_HERE)
+import bounded_run  # noqa: E402  (every git call below goes through it: tests/test_bounded_run_lint.py)
+
 MAX_PATHS = 50
+# How long one git call may run, in seconds, and how long after SIGTERM what is left of its process group gets SIGKILL: a
+# git that hangs (a stalled filesystem, a hook that never ends) is a STOP that names the command, not a wait without end.
+# A read gets GIT_TIMEOUT (the slowest, `ls-files --others --ignored` of a 30,000-file tree, takes about 0.1 s); the commands
+# that `execute` runs to change the checkout get CHANGE_TIMEOUT and, once interrupted, are still waited for until then
+# (a tree update must finish or fail whole). Worst case of a read that ignores SIGTERM: GIT_TIMEOUT + KILL_AFTER + 5 s of
+# draining + one 1 s poll, under the usual 120 s limit of an agent's tool call.
+GIT_TIMEOUT = 60
+CHANGE_TIMEOUT = 120
+KILL_AFTER = 10
 HEX = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 IN_PROGRESS = ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD",
                "REVERT_HEAD", "BISECT_LOG", "sequencer")
@@ -67,9 +88,14 @@ class GitError(Exception):
     """A git command needed for a check failed, so the check cannot be trusted."""
 
 
-def git(repo: Path, *args: str, ok: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess:
+def git(repo: Path, *args: str, ok: tuple[int, ...] = (0,), limit: float | None = None,
+        on_interrupt: str = "end") -> subprocess.CompletedProcess:
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C")
-    p = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env)
+    try:
+        p = bounded_run.run(["git", "-C", str(repo), *args], limit=GIT_TIMEOUT if limit is None else limit, env=env,
+                            text=False, kill_after=KILL_AFTER, on_interrupt=on_interrupt)
+    except bounded_run.Timeout as exc:
+        raise GitError(f"git {' '.join(args)} timed out after {exc.timeout:g} s and was ended ({exc.ended})") from None
     if p.returncode not in ok:
         err = p.stderr.decode(errors="replace").strip()[:300]
         raise GitError(f"git {' '.join(args)} failed (rc={p.returncode}): {err}")
@@ -281,7 +307,7 @@ def execute(report: dict) -> dict:
     failure = None
     try:
         for cmd in report["commands"]:
-            git(top, *cmd[1:])
+            git(top, *cmd[1:], limit=CHANGE_TIMEOUT, on_interrupt="finish")
     except GitError as exc:
         failure = str(exc)
     head = out(top, "rev-parse", "--verify", "--quiet", "HEAD")

@@ -250,17 +250,31 @@ func golangPreviewPlan(ctx context.Context, out io.Writer, prep *golangPrep, pla
 // FreeIPA server the roster is for, the stage, the desired state and the credentials to
 // reach it, from the workspace alone (spec §2.2 steps 1 to 6).
 type golangPrep struct {
-	inv            string
-	host           string
-	stage          string
-	groups         map[string][]string
-	hostVars       map[string]any
-	rosterData     []byte
+	inv        string
+	host       string
+	stage      string
+	groups     map[string][]string
+	hostVars   map[string]any
+	rosterData []byte
+	// runVars are the variables of the run the Ansible engine would make for host
+	// (golangRunVars), read once here and only when a user's password.initial is a
+	// bare reference: nil for every other roster, and for a run whose variables
+	// could not be read. The apply builds its source of the passwords from this
+	// same value, so the plan and the passwords are one answer.
+	runVars        *inventory.RosterRunVars
 	desired        identityreconcile.Desired
 	declaredServer string
 	password       string
 	target         sshdial.Target
 }
+
+// String and GoString never show what a golangPrep holds: the roster's plaintext,
+// the admin password and the run's variables, which are decrypted values. A
+// value receiver, so a prep and a pointer to one are both safe in any verb.
+func (p golangPrep) String() string { return "golang prep for " + p.host }
+
+// GoString is String for %#v.
+func (p golangPrep) GoString() string { return p.String() }
 
 // golangPreflightInput is what a run is prepared from: the inventory file, the --limit, the
 // stage asked for ("" is sandbox) and the --staging-attested-within-hours it came with.
@@ -328,7 +342,8 @@ func golangPreflightFor(ctx context.Context, runtime deployAnsibleRuntime, in go
 	if err := yaml.Unmarshal(rosterData, &root); err != nil {
 		return nil, fmt.Errorf("解析 roster %s: %w", rosterPath, err) // gate: roster-yaml
 	}
-	desired, err := identityreconcile.FromRosterWithForms(root, rosterData)
+	runVars := golangRunVars(ctx, inv, host, rosterData)
+	desired, err := identityreconcile.FromRosterWithForms(root, rosterData, runVars)
 	if err != nil {
 		return nil, fmt.Errorf("roster %s: %w", rosterPath, err) // gate: roster-adapter
 	}
@@ -352,8 +367,85 @@ func golangPreflightFor(ctx context.Context, runtime deployAnsibleRuntime, in go
 	}
 	return &golangPrep{
 		inv: inv, host: host, stage: stage, groups: snapshot.Groups, hostVars: hostVars, rosterData: rosterData,
-		desired: desired, declaredServer: declaredServer, password: password, target: target,
+		runVars: runVars, desired: desired, declaredServer: declaredServer, password: password, target: target,
 	}, nil
+}
+
+// golangRunVarsInput is the vault input of the run whose variables the Go engine reads for a
+// password that is a bare reference: the vars file the Ansible engine's wizard takes under the
+// defaults driver (`--force` and `--preview-only`, the only way the Go engine is reached;
+// promptVault answers its "use the detected vault file" confirmation yes, and an encrypted file
+// is then decrypted with the ambient vault secret, as ViewVaultFileAmbient does), made absolute.
+// TestGolangRunVarsInputIsTheAnsibleEnginesDefaultsVaultInput keeps the two together.
+// ok is false when the workspace has no .vault/main.yaml.
+func golangRunVarsInput(inv string) (vaultInput, bool) {
+	file := defaultVaultFile(inv)
+	if file == "" {
+		return vaultInput{}, false
+	}
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return vaultInput{}, false
+	}
+	return vaultInput{ExtraVarsFile: abs}, true
+}
+
+// golangRunVarsArgs are the arguments of the listing after `-i <inventory> --list`: the run's
+// -e and vault arguments, and the playbook directory of the identity playbook. ansible-inventory
+// loads group_vars and host_vars next to the inventory and next to its base directory, which
+// without --playbook-dir is the working directory; ansible-playbook loads the ones next to the
+// inventory and next to the playbook, and not the working directory's (ansible-core 2.19.2,
+// checked with the same three directories for both). The base directory is the playbook's so that
+// the listing is the variables the playbook run would have, whichever directory pilot runs in.
+func golangRunVarsArgs(vault vaultInput, root string) []string {
+	return append(ansibleExtraVarArgs(nil, vault), "--playbook-dir", filepath.Join(root, "playbooks", "apply"))
+}
+
+// golangRunVars reads the variables of the run the Ansible engine would make for host: the host's
+// variables from `ansible-inventory --list` run with that run's own -e @.vault/main.yaml, which
+// is what a password that is a bare {{ name }} is resolved against (inventory.RosterRunVars). It
+// is asked once, by golangPreflightFor, and only when some user's password.initial is a bare
+// reference: a literal-only roster costs nothing and behaves as before.
+//
+// It returns nil, which every consumer reads as "the run's variables were not read" (the
+// reference is then refused by name, and only when a password operation is planned for it), when
+// the workspace has no vault vars file or ansible-inventory cannot list the variables with it.
+// ansible-inventory's own error is dropped on purpose: with a vault argument it can quote the
+// plaintext of the file it failed to parse. The listing is used for nothing else: not for the SSH
+// target (#322) and not for freeipa_roster_file, which keep the listing without the vault, and
+// its raw text, which holds every decrypted value of every host, is not kept.
+func golangRunVars(ctx context.Context, inv, host string, rosterData []byte) *inventory.RosterRunVars {
+	forms, err := inventory.RosterUserPasswords(rosterData, nil)
+	if err != nil {
+		return nil // FromRosterWithForms reads the same bytes next and reports it
+	}
+	needed := false
+	for _, p := range forms {
+		if p.Form == inventory.PasswordTemplate && p.Var != "" {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return nil
+	}
+	vault, ok := golangRunVarsInput(inv)
+	if !ok {
+		return nil
+	}
+	root, err := resolveContractRoot("")
+	if err != nil {
+		return nil
+	}
+	snapshot, err := loadDeployInventorySnapshotWithArgs(ctx, inv, golangRunVarsArgs(vault, root))
+	if err != nil {
+		return nil
+	}
+	vars, ok := snapshot.HostVars[host]
+	if !ok {
+		return nil
+	}
+	return &inventory.RosterRunVars{HostVars: vars, Consumer: inventory.RosterConsumerFreeIPAIdentity}
 }
 
 // golangSession is a logged-in connection to the FreeIPA server of a run.

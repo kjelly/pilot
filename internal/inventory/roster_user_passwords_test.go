@@ -23,35 +23,39 @@ var passwordSpellings = []struct {
 	scalar string
 	form   PasswordForm
 	value  string
+	// reason and varName are what a template with no run variables read gets: a
+	// bare reference is NoRunVars and names its variable, anything else is NotBare.
+	reason  PasswordValueReason
+	varName string
 }{
-	{"double-quoted", `"Pass-1"`, PasswordLiteral, "Pass-1"},
-	{"plain string", `Pass-1`, PasswordLiteral, "Pass-1"},
-	{"explicit !!str", `!!str Pass-1`, PasswordLiteral, "Pass-1"},
-	{"!unsafe", `!unsafe "Pass-1"`, PasswordLiteral, "Pass-1"},
-	{"!unsafe with Jinja", `!unsafe "Pa{{ss"`, PasswordLiteral, "Pa{{ss"},
-	{"template", `"{{ ipa_admin_password }}"`, PasswordTemplate, ""},
-	{"block template", `"{% if x %}a{% endif %}"`, PasswordTemplate, ""},
-	{"unquoted number", `12345678`, PasswordNotString, ""},
-	{"unquoted base 60", `190:20:30`, PasswordNotString, ""},
-	{"explicit !!int", `!!int 7`, PasswordNotString, ""},
-	{"unquoted boolean", `yes`, PasswordNotString, ""},
-	{"quoted number", `"12345678"`, PasswordLiteral, "12345678"},
-	{"!!str unquoted number", `!!str 012345678`, PasswordLiteral, "012345678"},
-	{"null", `null`, PasswordAbsent, ""},
-	{"empty", `""`, PasswordAbsent, ""},
-	{"inline !vault", "!vault |\n          $ANSIBLE_VAULT;1.1;AES256\n          6162636465", PasswordEncrypted, ""},
-	{"a list", `[a, b]`, PasswordNotString, ""},
-	{"a mapping", `{a: b}`, PasswordNotString, ""},
+	{"double-quoted", `"Pass-1"`, PasswordLiteral, "Pass-1", 0, ""},
+	{"plain string", `Pass-1`, PasswordLiteral, "Pass-1", 0, ""},
+	{"explicit !!str", `!!str Pass-1`, PasswordLiteral, "Pass-1", 0, ""},
+	{"!unsafe", `!unsafe "Pass-1"`, PasswordLiteral, "Pass-1", 0, ""},
+	{"!unsafe with Jinja", `!unsafe "Pa{{ss"`, PasswordLiteral, "Pa{{ss", 0, ""},
+	{"template", `"{{ ipa_admin_password }}"`, PasswordTemplate, "", PasswordReasonNoRunVars, "ipa_admin_password"},
+	{"block template", `"{% if x %}a{% endif %}"`, PasswordTemplate, "", PasswordReasonNotBare, ""},
+	{"unquoted number", `12345678`, PasswordNotString, "", 0, ""},
+	{"unquoted base 60", `190:20:30`, PasswordNotString, "", 0, ""},
+	{"explicit !!int", `!!int 7`, PasswordNotString, "", 0, ""},
+	{"unquoted boolean", `yes`, PasswordNotString, "", 0, ""},
+	{"quoted number", `"12345678"`, PasswordLiteral, "12345678", 0, ""},
+	{"!!str unquoted number", `!!str 012345678`, PasswordLiteral, "012345678", 0, ""},
+	{"null", `null`, PasswordAbsent, "", 0, ""},
+	{"empty", `""`, PasswordAbsent, "", 0, ""},
+	{"inline !vault", "!vault |\n          $ANSIBLE_VAULT;1.1;AES256\n          6162636465", PasswordEncrypted, "", 0, ""},
+	{"a list", `[a, b]`, PasswordNotString, "", 0, ""},
+	{"a mapping", `{a: b}`, PasswordNotString, "", 0, ""},
 }
 
 func TestRosterUserPasswordsFormOfEverySpelling(t *testing.T) {
 	for _, tt := range passwordSpellings {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := RosterUserPasswords(rosterWithInitial(tt.scalar))
+			got, err := RosterUserPasswords(rosterWithInitial(tt.scalar), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := RosterUserPassword{Form: tt.form, Value: tt.value}
+			want := RosterUserPassword{Form: tt.form, Value: tt.value, Reason: tt.reason, Var: tt.varName}
 			if got["alice"] != want || len(got) != 1 {
 				t.Fatalf("got %v (form %s, value kept: %v), want %s", got, got["alice"].Form, got["alice"].Value != "", want.Form)
 			}
@@ -77,7 +81,7 @@ func TestRosterUserPasswordFormsAgreeWithTheVaultSide(t *testing.T) {
 			case VaultAdminPasswordEncrypted(vault):
 				vaultForm = PasswordEncrypted
 			}
-			got, err := RosterUserPasswords(rosterWithInitial(tt.scalar))
+			got, err := RosterUserPasswords(rosterWithInitial(tt.scalar), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -111,7 +115,7 @@ users:
   - name: Mixed-Case
     password: {initial: "Pass-2"}
 `)
-	got, err := RosterUserPasswords(data)
+	got, err := RosterUserPasswords(data, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +143,7 @@ users:
 
 func TestRosterUserPasswordsWithoutUsersIsEmpty(t *testing.T) {
 	for name, doc := range map[string]string{"no key": "schema_version: 3\n", "null": "users:\n", "empty list": "users: []\n"} {
-		got, err := RosterUserPasswords([]byte(doc))
+		got, err := RosterUserPasswords([]byte(doc), nil)
 		if err != nil || len(got) != 0 {
 			t.Errorf("%s: %v, %v", name, got, err)
 		}
@@ -165,7 +169,7 @@ func TestRosterUserPasswordsRefusals(t *testing.T) {
 		"the same name twice": {"users:\n  - name: a\n  - name: a\n    password: {initial: \"" + userPasswordSentinel + "\"}\n", nil, `"a" appears twice`},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := RosterUserPasswords([]byte(tt.data))
+			_, err := RosterUserPasswords([]byte(tt.data), nil)
 			if err == nil {
 				t.Fatal("accepted")
 			}
@@ -185,7 +189,7 @@ func TestRosterUserPasswordsRefusals(t *testing.T) {
 // A password that is not in a mapping at all is not readable: not-a-string,
 // never absent.
 func TestRosterUserPasswordsPasswordThatIsNotAMapping(t *testing.T) {
-	got, err := RosterUserPasswords([]byte("users:\n  - name: a\n    password: \"" + userPasswordSentinel + "\"\n"))
+	got, err := RosterUserPasswords([]byte("users:\n  - name: a\n    password: \""+userPasswordSentinel+"\"\n"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +200,7 @@ func TestRosterUserPasswordsPasswordThatIsNotAMapping(t *testing.T) {
 
 // No formatting of a value, alone or inside a map, shows the password.
 func TestRosterUserPasswordNeverFormatsTheValue(t *testing.T) {
-	got, err := RosterUserPasswords(rosterWithInitial(`"` + userPasswordSentinel + `"`))
+	got, err := RosterUserPasswords(rosterWithInitial(`"`+userPasswordSentinel+`"`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +229,7 @@ func TestPasswordFormsHaveTheirNames(t *testing.T) {
 // A user that is an alias of a mapping is read as that mapping: its name and its
 // password are the anchored ones.
 func TestRosterUserPasswordsReadsAUserThatIsAnAlias(t *testing.T) {
-	got, err := RosterUserPasswords([]byte("x-user: &u\n  name: aliased\n  password: {initial: \"" + userPasswordSentinel + "\"}\nusers:\n  - *u\n"))
+	got, err := RosterUserPasswords([]byte("x-user: &u\n  name: aliased\n  password: {initial: \""+userPasswordSentinel+"\"}\nusers:\n  - *u\n"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

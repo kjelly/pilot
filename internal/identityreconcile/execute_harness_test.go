@@ -12,6 +12,7 @@ import (
 
 	"github.com/kjelly/pilot/internal/identitylock"
 	"github.com/kjelly/pilot/internal/identitylock/identitylocktest"
+	"github.com/kjelly/pilot/internal/inventory"
 )
 
 // The harness of the executor's tests: a FreeIPA model (fakeipa_test.go), a lock
@@ -137,7 +138,11 @@ const testFQDN = "ipa-1.ipa.example.test"
 
 // newRunEnv builds the desired state from the roster document, as the preview and
 // the writer both do, takes the lock, and wires the fake's write gate to the Gate.
-func newRunEnv(t *testing.T, roster string) *runEnv {
+func newRunEnv(t *testing.T, roster string) *runEnv { return newRunEnvWith(t, roster, nil) }
+
+// newRunEnvWith is newRunEnv for a run whose variables are run: the plan and the source of the
+// passwords are both made from the same roster bytes and the same run, as the command does.
+func newRunEnvWith(t *testing.T, roster string, run *inventory.RosterRunVars) *runEnv {
 	t.Helper()
 	e := &runEnv{t: t, f: newFakeIPA(t), roster: roster, gate: NewGate(), journal: &fakeJournal{}}
 	e.lock = &identitylocktest.Fake{Host: "ipa-1"}
@@ -150,11 +155,11 @@ func newRunEnv(t *testing.T, roster string) *runEnv {
 	e.ctx = held.Attach(context.Background())
 	e.entry = &fakeEntry{host: "ipa-1", fqdn: testFQDN}
 	e.f.writeGate = e.gate.Check
-	pw, err := NewRosterPasswords([]byte(roster))
+	pw, err := NewRosterPasswords([]byte(roster), run)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.opts = Options{Desired: desiredForPlan(t, roster), Passwords: pw, Entry: e.entry, Gate: e.gate, Journal: e.journal}
+	e.opts = Options{Desired: desiredForPlanWith(t, roster, run), Passwords: pw, Entry: e.entry, Gate: e.gate, Journal: e.journal}
 	return e
 }
 
