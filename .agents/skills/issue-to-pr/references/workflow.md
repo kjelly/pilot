@@ -24,7 +24,7 @@ DISCOVERED -> CLAIMED -> BRANCH_CHECKED_OUT -> ANALYZED -> IMPLEMENTING
 ```
 
 - A P0–P2 review finding returns `REVIEWED -> IMPLEMENTING`. A new commit invalidates `CHECKED` and `REVIEWED` receipts.
-- `GATE_PASS` is not a permanent certificate. Repeat checks if HEAD or Issue/PR state changes.
+- `GATE_PASS` is not a permanent certificate. Repeat checks if HEAD or Issue/PR state changes. It authorizes the first push and the PR; once the Draft exists, a repair commit goes `COMMITTED -> PUSHED` after Root's read and scan, and `CHECKED` and `REVIEWED` on the new SHA run while its CI runs (SKILL.md, section 4).
 - `PUSHED` is not a completed task. Confirm PR exists and references the intended issue/HEAD.
 - `INVALID` and `NEEDS_DECISION` need the reviewer's independent verdict and a reply on the Issue first ([Issue claims](issue-claims.md)). A claim raised again without new evidence after a confirmed dispute is `NEEDS_DECISION`, not another implementation or reply round.
 - If a post-PR CI check fails, repair on the same Draft PR branch; if unresolved report DRAFT_CI_BLOCKED and leave it Draft. Do not claim CI success. Only `mark_ready.py` moves a PR to Ready, and only after CI_PASSED on the exact HEAD with all follow-ups done; it also signs the PR (the Ready signal `pr-review-merge` and `scripts/pr_loop.py` require).

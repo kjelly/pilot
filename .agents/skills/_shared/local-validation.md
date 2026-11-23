@@ -62,7 +62,12 @@ code reviews, and source changes still invalidate affected checks.
 While the Coder works it runs the tests of what it changed (the selected Go tests; for a
 skill, that skill's `tests/` or the changed test modules). The plan's `make skill-test` runs
 once per candidate HEAD, as the `run_check.py` receipt on the committed HEAD (Root's, or the
-Coder's when it takes the receipt; never both). No gate is weaker: that receipt still runs
-every suite on the exact HEAD the gate checks, and CI's `Skill and repository contracts`
-job runs it again. A narrower selection of suites is kjelly/pilot#430; until it changes this
-text the receipt is the whole suite.
+Coder's when it takes the receipt; never both). Root takes the receipt unless the dispatch
+envelope tells the Coder to; the Coder's envelope carries the validation item "the tests of
+what it changed; not the full `make skill-test` (Root runs that once, as the receipt)". No
+gate is weaker: that receipt still runs every suite on the exact HEAD the gate checks, and
+CI's `Skill and repository contracts` job runs it again. A narrower selection of suites is
+kjelly/pilot#430; until it changes this text the receipt is the whole suite. This section
+governs the Coder and the receipt of `issue-to-pr` and `pr-ready`; the `make skill-test`
+that `pr-review-merge` runs (its SKILL.md) is a separate gate on a separate candidate, and
+this section does not change it.

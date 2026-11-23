@@ -190,14 +190,18 @@ to answer. These rules remove that cost without weakening a gate:
    the same way; CI on the earlier commit is not evidence for it (step 6), and its run time
    is the accepted cost. A commit that adds real captures or other output copied from a
    live service (AGENTS.md section 5.6) is pushed after its review, as before: a push is
-   publication, and the reviewer reads what the scanner cannot see. No gate is weaker: the
+   publication, and the reviewer reads what the scanner cannot see. A `docs/evidence` record
+   commit is pushed after Root's read and scan, like any other evidence-only delta (rule 2).
+   No gate is weaker: the
    secret scan still comes before every push, and the gate still requires the independent
    review, the receipts and CI on the final HEAD.
 10. **One round for the requests a PR has** (kjelly/pilot#432). Every round costs the same
     fixed time (receipts, review, CI) whatever its size. When a round starts, give one Coder
     dispatch everything known that this PR must change: the reviewer's P0-P2 findings,
     failing checks, `valid` review comments and the user's requests for this PR; one that
-    arrives while the review runs joins the next round instead of starting its own.
+    arrives while the review runs joins the next round instead of starting its own; that
+    round is started when the review has no blocker, and `pr_gate.py --wait --ready` is not
+    started while a known request is outstanding.
     Exceptions: a request whose answer changes how another is done (a design question, a
     class-level fix SA plans instead of point fixes) goes first and the others wait for it;
     the user asks for a separate round. P3/P4 remarks still do not start or join a round

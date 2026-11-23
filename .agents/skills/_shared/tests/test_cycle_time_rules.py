@@ -20,6 +20,9 @@ from pathlib import Path
 SKILLS = Path(__file__).resolve().parents[4] / ".agents" / "skills"
 RULES_HEADING = "## Pilot: cycle-time rules"
 
+# The validation item of the Coder's dispatch envelope: one fact in three files (F2 of the review of 986bf7d9).
+ENVELOPE = ("the tests of what it changed; not the full make skill-test (Root runs that once, as the receipt)")
+
 # file (relative to .agents/skills) -> the phrases it must contain
 SAYS = {
     "pr-ready/SKILL.md": (
@@ -34,7 +37,7 @@ SAYS = {
         "(cycle-time rule 9, with its exception for real captures)",
         # rule 9 (item 1)
         "Push a commit before its review, so CI runs beside it (kjelly/pilot#432)",
-        "runs secret_scan.py over the commits to push",
+        "Root reads every line it adds and runs secret_scan.py over the commits to push",
         "anything but exit 0 stops the push",
         "and only then dispatches the reviewer and runs the receipts, while CI runs on that HEAD",
         "The PR stays a Draft, so pr-review-merge and the merge train do not act on it",
@@ -43,23 +46,29 @@ SAYS = {
         "CI on the earlier commit is not evidence for it (step 6), and its run time is the accepted cost",
         "A commit that adds real captures or other output copied from a live service (AGENTS.md section 5.6) is pushed "
         "after its review, as before: a push is publication",
+        "A docs/evidence record commit is pushed after Root's read and scan, like any other evidence-only delta "
+        "(rule 2)",
         "No gate is weaker: the secret scan still comes before every push, and the gate still requires the independent "
         "review, the receipts and CI on the final HEAD",
         # rule 10 (item 6)
         "One round for the requests a PR has (kjelly/pilot#432)",
         "give one Coder dispatch everything known that this PR must change",
-        "one that arrives while the review runs joins the next round instead of starting its own",
-        "goes first and the others wait for it",
+        "one that arrives while the review runs joins the next round instead of starting its own; that round is "
+        "started when the review has no blocker, and pr_gate.py --wait --ready is not started while a known request "
+        "is outstanding",
+        "(a design question, a class-level fix SA plans instead of point fixes) goes first and the others wait for it",
         "the user asks for a separate round",
         "P3/P4 remarks still do not start or join a round (rule 3), and nothing is added that no one asked for",
         "No gate is weaker: the round's review covers its whole delta (rule 4), and each request is still fixed and "
         "verified, or disputed, like a single one",
     ),
     "pr-ready/references/workflow.md": (
+        "When the diff touches .agents/skills, the Coder's envelope carries a validation item: \"" + ENVELOPE + "\"",
         "Parent owns GitHub mutations: the push of each scanned commit (SKILL.md, cycle-time rule 9) and Ready after "
         "the final gate.",
         "A round starts with one Coder dispatch that carries everything known that this PR must change",
-        "(SKILL.md, cycle-time rule 10, with its two exceptions)",
+        "joins the next round, which is started when the review has no blocker; --wait --ready is not started with a "
+        "known request outstanding (SKILL.md, cycle-time rule 10, with its two exceptions)",
     ),
     "pr-ready/references/roles.md": (
         "for a skill change, the tests of the skills it changed: the one full make skill-test is the receipt on the "
@@ -67,18 +76,23 @@ SAYS = {
     ),
     "pr-ready/README.md": (
         "完整的 make skill-test 只在 committed HEAD 上以 receipt 跑一次",
-        "再派 Reviewer 並跑 receipts，讓 CI 與它們同時進行",
+        "再派 Reviewer 並跑 receipts，讓 CI 與它們同時進行（Draft 不會被 pr-review-merge 與 merge train 處理；",
         "真實擷取的輸出等審查後才 push",
         "一輪交給一個 Coder（rule 10）",
     ),
     "pr-ready/PROJECT-CHANGES.md": ("kjelly/pilot#432 items 2, 1 and 6",),
     "issue-to-pr/SKILL.md": (
+        "Only GATE-PASS for the currently checked-out HEAD authorizes the next stage: it authorizes the first push and "
+        "the PR; a repair commit on an existing Draft is pushed after Root's read and scan (section 4)",
+        "also a validation item: \"" + ENVELOPE + "\"",
+        "Once the Draft exists, each repair commit is pushed first, as section 4 says, whatever its reason (a CI "
+        "failure or a review finding); the first push stays after GATE-PASS",
         "the Coder runs that skill's tests while it works and the full make skill-test runs once, as the receipt on the "
         "committed HEAD (.agents/skills/_shared/local-validation.md)",
         "Give the Coder every blocker of the review, with any other request known for this Issue, in one dispatch; a "
         "request whose answer changes another goes first",
         "The first push stays after GATE-PASS: create_pr.py pushes only once issue_gate.py passes (review and receipts "
-        "at HEAD), and a branch with no PR gets no CI; only repairs after the Draft exists push before their review "
+        "at HEAD), and a branch with no PR gets no automatic CI; only repairs after the Draft exists push before their review "
         "(kjelly/pilot#433 asks whether the first one may)",
         "repair on the same branch: commit, read the added lines, run the secret scan and push, then run the renewed "
         "tests and the independent review while CI runs on the new HEAD, and re-check (CI on the earlier commit is not "
@@ -89,23 +103,32 @@ SAYS = {
         "while its CI runs; never create a second PR",
     ),
     "issue-to-pr/references/workflow.md": (
+        "It authorizes the first push and the PR; once the Draft exists, a repair commit goes COMMITTED -> PUSHED after "
+        "Root's read and scan, and CHECKED and REVIEWED on the new SHA run while its CI runs (SKILL.md, section 4)",
         "Root invalidates old evidence, reads the added lines, runs the secret scan and pushes; checks and review on "
         "the new SHA run while its CI runs",
     ),
     "issue-to-pr/README.md": (
         "the full make skill-test runs once, as the receipt on the committed HEAD",
         "one Coder dispatch carries every blocker, with any other request known for the Issue",
-        "The first push stays after the gate",
-        "push the scanned commit, repeat test/review while its CI runs",
+        "The first push stays after the gate (a branch with no PR gets no automatic CI; kjelly/pilot#433)",
+        "push the scanned commit, repeat test/review while its CI runs and re-check CI on it",
     ),
-    "issue-to-pr/PROJECT-CHANGES.md": ("kjelly/pilot#432 items 2, 1 and 6",),
+    "issue-to-pr/PROJECT-CHANGES.md": (
+        "kjelly/pilot#432 items 2, 1 and 6",
+        "../_shared/tests/test_cycle_time_rules.py (new, shared with pr-ready)",
+        "a branch with no PR gets no automatic CI",
+    ),
     "_shared/local-validation.md": (
         "Skill changes add make skill-test (once, as the receipt: below).",
         "The plan's make skill-test runs once per candidate HEAD, as the run_check.py receipt on the committed HEAD "
         "(Root's, or the Coder's when it takes the receipt; never both)",
         "No gate is weaker: that receipt still runs every suite on the exact HEAD the gate checks, and CI's Skill and "
         "repository contracts job runs it again",
+        "Root takes the receipt unless the dispatch envelope tells the Coder to; the Coder's envelope carries the "
+        "validation item \"" + ENVELOPE + "\"",
         "A narrower selection of suites is kjelly/pilot#430; until it changes this text the receipt is the whole suite",
+        "the make skill-test that pr-review-merge runs (its SKILL.md) is a separate gate on a separate candidate",
     ),
 }
 
