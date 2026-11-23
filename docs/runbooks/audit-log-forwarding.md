@@ -177,3 +177,29 @@ Step 10、rescue；spec §5 與 §6 有完整說明）：
   C23 一律回 0。aarch64 同樣沒有實測。
 - Step 8（C18）啟動原本停止的 auditd 不追蹤；host decommission 的 `augenrules --load` 是整機退役的一部分，
   不在範圍內。
+
+## 6. 已知限制
+
+- **`/var/log` 可被 `syslog` 群組改寫，root 的 auditd 輪替會跟著被換掉的目錄走（issue #364，已接受為殘餘風險）。**
+  Ubuntu 24.04 的 `/var/log` 是 `root:syslog 0775`、沒有 sticky bit，以 `syslog` 身分執行的程式可以把
+  `/var/log` 底下的項目改名或換成 symlink，包括 root 擁有的目錄（issue #364 在 Ubuntu 24.04.4 的拋棄式 VM 上，
+  以 `syslog` 身分改名 root 擁有的 `/var/log/apt` 成功）。apply playbook Step 4 寫的
+  `/etc/logrotate.d/auditd` 沒有自己的 `su`，沿用 `/etc/logrotate.conf` 的 `su root adm`，以 root 輪替
+  `/var/log/audit/audit.log`。logrotate 拒絕本身是 symlink 的日誌檔，卻不擋路徑中間被換成 symlink 的目錄
+  （說明見 [log-server spec 的 C12 由來](../verification/log-server.md)），所以 `/var/log/audit` 被換掉時，
+  root 的每日輪替會在 symlink 指向的目錄裡對 `audit.log*` 動手（rename、建立新檔、compress、刪除）。
+  「跟著 symlink 目錄走」這一點在 log-server 的 SIEM 目錄上經 `logrotate.service` 實測過
+  （[#93 的實跑紀錄](../evidence/log-server/issue-93.md)：base 版本的 root 輪替在 symlink 指向的目錄裡 rename
+  並建立新檔；compress 與刪除沒有在 symlink 目錄上單獨量）。auditd 這份 policy 本身沒有實測，以 `syslog` 身分
+  換掉 `/var/log/audit` 也沒有實測。
+  `su` 縮小不了：auditd 以 root 執行，`/var/log/audit` 與其中的檔案擁有者都是 root，沒有更低權限的身分能輪替它們。
+  - 前提：攻擊者已經能以 `syslog` 身分執行程式，例如攻陷降權後的 rsyslogd。
+  - 不修的理由：這是發行版層級的權限，不是本模組的設定。發行版自己以 root 輪替的 policy（例如 apt 的
+    `/var/log/apt`）經過同一個父目錄，auditd 本身也以 root 寫入 `/var/log/audit`，只改本模組的 policy 消除不了；
+    改 `/var/log` 的權限影響每一個寫入 `/var/log` 的服務與套件，這次沒有評估會壞什麼。
+    2026-11-18 決定接受這個風險，不改 `/var/log` 的權限。
+  - 重新評估的時機：發行版或支援的平台改變 `/var/log` 的擁有者或權限（例如加上 sticky bit、拿掉群組寫入）；
+    pilot 讓其他身分取得 `/var/log` 的寫入權；或 pilot 新增以 root 輪替或寫入 `/var/log` 底下目錄的 policy 或服務。
+    不帶 `su` 的新 policy 會被 `internal/spec/logrotate_rotation_identity_regression_test.go` 擋下，要加 `su`
+    或在 allowlist 寫明理由；帶 `su root …` 的 policy 與其他服務它擋不到，要在 review 時判斷。
+  - 同類的讀取端情況（log-shipping 的 root promtail bind mount `/var/log/siem`）另見 issue #406，尚未決定。
