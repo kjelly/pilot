@@ -9,9 +9,11 @@ tried on real git state, with the case that must pass beside the case that must 
 import ast
 import contextlib
 import hashlib
+import importlib.util
 import io
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -38,6 +40,7 @@ import ready_signal_world as rw
 from pr_loop_result import load_task, write_result
 from pr_loop_fakes import (HELPER_PATHS, LOGIN, NO_SERVER, NO_SOCKET, UPDATE_ENVIRONMENT, FakeEnv, FakeTime, pr_view_json,
                            ready_view, signal_world)
+from test_skill_links import link_targets
 
 HEAD = "a" * 40
 NEW = "b" * 40
@@ -1963,15 +1966,27 @@ class ImportsTests(unittest.TestCase):
 
 
 class DocumentationTests(unittest.TestCase):
-    """What the README, the runner's own docstring and the two skills that name it say is true of a runner that starts
-    its agents in the operator's own checkout (class `ephemeral-agent-workspace`, kjelly/pilot#423). The words of the
-    design it replaced (a managed clone, a trust dialog the operator answers in the printed session, `.git/info/exclude`)
-    must not come back, and the README must say what `--checkout` defaults to and what the runner does in a directory
-    the agents do not trust. They must also say where the agents run (kjelly/pilot#425): one tmux session per checkout, one
-    window per agent, how to watch it and how to close what a stop keeps, and say it the way the code does (the lines the
-    runner prints are read from the code, not copied). Text is compared with its white space collapsed: the README is
-    hard-wrapped."""
+    """What the runner's document (`DOC`), the runner's own docstring and the two skills that name it say is true of a
+    runner that starts its agents in the operator's own checkout (class `ephemeral-agent-workspace`, kjelly/pilot#423). The
+    words of the design it replaced (a managed clone, a trust dialog the operator answers in the printed session,
+    `.git/info/exclude`) must not come back, and the document must say what `--checkout` defaults to and what the runner
+    does in a directory the agents do not trust. They must also say where the agents run (kjelly/pilot#425): one tmux
+    session per checkout, one window per agent, how to watch it and how to close what a stop keeps, and say it the way the
+    code does (the lines the runner prints are read from the code, not copied). Text is compared with its white space
+    collapsed: the document is hard-wrapped.
+
+    The document lives under `.agents/skills/` (kjelly/pilot#438), where a change to it takes the `skills` CI profile; the
+    root README keeps a pointer to it, and `pointer_problems` keeps that pointer short enough that a runner change never
+    needs a README edit (the root README is `full`)."""
+    # The runner's document and its H1: the whole file is the text that is pinned to the runner.
+    DOC = ".agents/skills/_shared/pr-loop.md"
+    DOC_HEADING = "# Process a batch of pull requests"
+    # The README keeps a section with this heading, as a pointer to DOC (the heading is an anchor other pages may link to).
     HEADING = "## Process a batch of pull requests"
+    # The command the README pointer shows, the runner's entry point.
+    POINTER_COMMAND = "python3 scripts/pr_loop.py"
+    # The most the README pointer may say, with its white space collapsed: a pointer, not a second copy of DOC.
+    POINTER_MAX = 1000
     SKILLS = ("pr-ready", "pr-review-merge")
     EXCLUDE_FILE = "git rev-parse --git-path info/exclude"
     # What the replaced design said, or an over-broad claim about the trust dialog, and no longer holds. The runner DOES
@@ -1997,30 +2012,30 @@ class DocumentationTests(unittest.TestCase):
              "HEAD is on the default branch that `origin` itself reports", "may leave the checkout on a PR branch or with "
              "uncommitted work; the next run refuses it", "not on main, the default branch of origin",
              "must be clean, on the default branch of origin, at origin's tip")
-    # What the README section must say: the option and its default (the runner's own words), the way to update a stale
+    # What DOC must say: the option and its default (the runner's own words), the way to update a stale
     # checkout, where the ignore lines go, and what the runner does in a directory the agents do not trust.
-    README_SAYS = ("--checkout DIR", pr_loop.CHECKOUT_DEFAULT, "git pull --ff-only", EXCLUDE_FILE,
-                   "must already trust the checkout", "stops at a trust dialog only when its options are numbered",
-                   # where the agents run (kjelly/pilot#425): the name rule (the cut is the code's constant), how to watch
-                   # (from outside tmux, and from inside it, where that fails), how to close what a stop keeps (the `=`
-                   # matters), the environment the windows get, and the one tmux version this was verified on
-                   "pilot-pr-<directory name>-<8 hex>", f"at most {pr_loop.SESSION_LABEL_MAX} characters",
-                   "tmux attach -r -t", "sessions should be nested with care", "tmux switch-client -t", "prefix s",
-                   "tmux kill-pane -t %N", "tmux kill-session -t =", "update-environment", "verified on tmux 3.8",
-                   # what the runner does and does not do to windows and sessions, and why it checks a pane before it kills it
-                   "never kills or renames a window or a session", "still that pane on the same tmux server",
-                   "adds a window to the session named for the checkout when that exists", "glob pattern",
-                   # the fast-forward: what it fetches and merges, what it leaves alone, what refuses it, and that it is startup only
-                   "strictly behind", "fast-forwarded by the runner, at startup only", "by its SHA", "git merge --ff-only",
-                   "hooks and automatic maintenance switched off", "ORIG_HEAD", "does not move a submodule",
-                   "write into an ignored path", "is a partial clone", "Apart from the fast-forward at startup",
-                   # the switch from another branch: when, what it runs, what it never does, what refuses it, how to go back
-                   "another clean branch that the runner leaves for it", "is switched to the default branch",
-                   "is not switched back when the run ends", "git fetch . <tip>:refs/heads/<b>", "never forced",
-                   "git switch --no-guess --no-recurse-submodules --no-overwrite-ignore -- <b>",
-                   "never created", "also a prunable one", "to go back: git -C <path> switch <x>",
-                   "leaves for the default branch (the branch and its commits stay)")
-    # What the README says about --phase-timeout: the default the runner has (read from the code and spelled out) and why
+    DOC_SAYS = ("--checkout DIR", pr_loop.CHECKOUT_DEFAULT, "git pull --ff-only", EXCLUDE_FILE,
+                "must already trust the checkout", "stops at a trust dialog only when its options are numbered",
+                # where the agents run (kjelly/pilot#425): the name rule (the cut is the code's constant), how to watch
+                # (from outside tmux, and from inside it, where that fails), how to close what a stop keeps (the `=`
+                # matters), the environment the windows get, and the one tmux version this was verified on
+                "pilot-pr-<directory name>-<8 hex>", f"at most {pr_loop.SESSION_LABEL_MAX} characters",
+                "tmux attach -r -t", "sessions should be nested with care", "tmux switch-client -t", "prefix s",
+                "tmux kill-pane -t %N", "tmux kill-session -t =", "update-environment", "verified on tmux 3.8",
+                # what the runner does and does not do to windows and sessions, and why it checks a pane before it kills it
+                "never kills or renames a window or a session", "still that pane on the same tmux server",
+                "adds a window to the session named for the checkout when that exists", "glob pattern",
+                # the fast-forward: what it fetches and merges, what it leaves alone, what refuses it, and that it is startup only
+                "strictly behind", "fast-forwarded by the runner, at startup only", "by its SHA", "git merge --ff-only",
+                "hooks and automatic maintenance switched off", "ORIG_HEAD", "does not move a submodule",
+                "write into an ignored path", "is a partial clone", "Apart from the fast-forward at startup",
+                # the switch from another branch: when, what it runs, what it never does, what refuses it, how to go back
+                "another clean branch that the runner leaves for it", "is switched to the default branch",
+                "is not switched back when the run ends", "git fetch . <tip>:refs/heads/<b>", "never forced",
+                "git switch --no-guess --no-recurse-submodules --no-overwrite-ignore -- <b>",
+                "never created", "also a prunable one", "to go back: git -C <path> switch <x>",
+                "leaves for the default branch (the branch and its commits stay)")
+    # What DOC says about --phase-timeout: the default the runner has (read from the code and spelled out) and why
     PHASE_TIMEOUT_SAYS = (f"defaults to {pr_loop.PHASE_TIMEOUT} seconds (4 hours)", "defaults to 14400 seconds (4 hours)",
                           "can take more than two hours", f"({pr_loop.PHASE_TIMEOUT} seconds by default)",
                           "(14400 seconds by default)")
@@ -2037,10 +2052,63 @@ class DocumentationTests(unittest.TestCase):
         return " ".join(text.split())
 
     @classmethod
-    def section(cls, readme):
-        """The README's batch section, from its heading to the next `## ` heading, flattened; None without the heading."""
+    def raw_section(cls, readme):
+        """The README's batch section as written, from its heading to the next `## ` heading; None without the heading."""
         found = re.search(rf"^{re.escape(cls.HEADING)}[ \t]*$(.*?)(?=^## |\Z)", readme, re.M | re.S)
+        return found.group(1) if found else None
+
+    @classmethod
+    def section(cls, readme):
+        """The README's batch section (the pointer to DOC), flattened; None without the heading."""
+        raw = cls.raw_section(readme)
+        return None if raw is None else cls.flat(raw)
+
+    @classmethod
+    def doc_body(cls, text):
+        """What follows the H1 of the runner's document, to the END of the text (a sub-heading does not end the scan, so
+        nothing below one can escape it), flattened; None when the text does not start with the H1."""
+        found = re.match(rf"\A{re.escape(cls.DOC_HEADING)}[ \t]*$(.*)\Z", text, re.M | re.S)
         return cls.flat(found.group(1)) if found else None
+
+    def doc_section(self, root=None):
+        """The runner's document (`DOC` below `root`, the repository by default): its whole text, flattened. Fails, as a
+        test, when the file is missing or no longer starts with its H1: a check that read nothing must not pass."""
+        path = (ROOT if root is None else Path(root)) / self.DOC
+        self.assertTrue(path.is_file(), f"{self.DOC} is missing: the check scanned nothing")
+        body = self.doc_body(path.read_text())
+        self.assertIsNotNone(body, f"{self.DOC} does not start with {self.DOC_HEADING!r}: the check scanned nothing")
+        return body
+
+    @staticmethod
+    def tracked_files():
+        """The repository's tracked files, relative to its root (`git ls-files -z`): untracked and ignored files are not."""
+        done = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True, timeout=60)
+        return {name.decode() for name in done.stdout.split(b"\0") if name}
+
+    @classmethod
+    def pointer_problems(cls, readme_text, tracked_files):
+        """What is wrong with the README's pointer to DOC: no section with HEADING; no `python3 scripts/pr_loop.py` command
+        in a fenced code block; no link to DOC; a link to a file `tracked_files` does not hold (a link in a tracked document
+        must resolve to a tracked file); a phrase the tests pin to the runner (DOC_SAYS, PHASE_TIMEOUT_SAYS or a line the
+        runner prints) restated, which would make the next runner change a README change again; a section longer than
+        POINTER_MAX characters, white space collapsed. [] when the pointer is as it must be."""
+        raw = cls.raw_section(readme_text)
+        if raw is None:
+            return [f"README.md has no section {cls.HEADING!r}"]
+        flat, tracked, problems = cls.flat(raw), set(tracked_files), []
+        fenced = re.findall(r"^(?:```|~~~)[^\n]*\n(.*?)^(?:```|~~~)[ \t]*$", raw, re.M | re.S)
+        if not any(cls.POINTER_COMMAND in block for block in fenced):
+            problems.append(f"the section has no {cls.POINTER_COMMAND!r} command in a fenced code block")
+        links = list(dict.fromkeys(posixpath.normpath(link) for link in link_targets(raw)))
+        if cls.DOC not in links:
+            problems.append(f"the section does not link to {cls.DOC}")
+        problems += [f"the section links to {link}, which is not a tracked file" for link in links if link not in tracked]
+        pinned = [*cls.DOC_SAYS, *cls.PHASE_TIMEOUT_SAYS, *cls.printed_by_the_runner()]
+        problems += [f"the section restates {phrase!r}, which the tests pin to the runner" for phrase in pinned
+                     if phrase in flat]
+        if len(flat) > cls.POINTER_MAX:
+            problems.append(f"the section is {len(flat)} characters long, more than the {cls.POINTER_MAX} a pointer may be")
+        return problems
 
     @classmethod
     def stale(cls, text):
@@ -2055,7 +2123,7 @@ class DocumentationTests(unittest.TestCase):
 
     @classmethod
     def missing(cls, section, phrases=None):
-        phrases = cls.README_SAYS if phrases is None else phrases
+        phrases = cls.DOC_SAYS if phrases is None else phrases
         return [f"does not say {phrase!r}" for phrase in phrases if phrase not in cls.flat(section)]
 
     @staticmethod
@@ -2104,22 +2172,19 @@ class DocumentationTests(unittest.TestCase):
         text = (ROOT / ".agents" / "skills" / name / "SKILL.md").read_text()
         return [line for line in text.splitlines() if "scripts/pr_loop.py" in line and "--pr-loop-task=" in line]
 
-    def test_the_readme_describes_the_checkout_the_agents_start_in(self):
-        section = self.section((ROOT / "README.md").read_text())
-        self.assertIsNotNone(section, f"README.md has no section {self.HEADING!r}: the check scanned nothing")
-        self.assertGreater(len(section), 2000, "the section is there but nearly empty: the check scanned nothing")
-        self.assertIn("python3 scripts/pr_loop.py", section, "control: this is the section about the runner")
-        self.assertEqual([], self.missing(section) + self.stale(section),
-                         "README.md, section 'Process a batch of pull requests'")
+    def test_the_runner_document_describes_the_checkout_the_agents_start_in(self):
+        section = self.doc_section()
+        self.assertGreater(len(section), 2000, f"{self.DOC} is there but nearly empty: the check scanned nothing")
+        self.assertIn("python3 scripts/pr_loop.py", section, "control: this is the document about the runner")
+        self.assertEqual([], self.missing(section) + self.stale(section), self.DOC)
 
-    def test_the_readme_states_the_phase_timeout_the_runner_defaults_to_and_no_other(self):
-        section = self.section((ROOT / "README.md").read_text())
-        self.assertIsNotNone(section)
-        self.assertEqual([], self.missing(section, self.PHASE_TIMEOUT_SAYS), "README.md, section 'Process a batch'")
-        self.assertNotIn("7200", section, "the old default must not be stated anywhere in the section")
+    def test_the_runner_document_states_the_phase_timeout_the_runner_defaults_to_and_no_other(self):
+        section = self.doc_section()
+        self.assertEqual([], self.missing(section, self.PHASE_TIMEOUT_SAYS), self.DOC)
+        self.assertNotIn("7200", section, f"the old default must not be stated anywhere in {self.DOC}")
         self.assertEqual([], [stale for stale in self.stale(section) if "7200" in stale])
 
-    def test_the_check_fails_when_the_readme_states_the_old_phase_timeout(self):
+    def test_the_check_fails_when_the_runner_document_states_the_old_phase_timeout(self):
         good = "The phase timeout defaults to 14400 seconds (4 hours): a phase can take more than two hours; (14400 seconds by default)."
         self.assertEqual([], self.missing(good, self.PHASE_TIMEOUT_SAYS), "control: a text that says all of it is accepted")
         self.assertEqual(len(self.PHASE_TIMEOUT_SAYS), len(self.missing("", self.PHASE_TIMEOUT_SAYS)))
@@ -2165,9 +2230,8 @@ class DocumentationTests(unittest.TestCase):
                                                  "fast-forwards it to origin's tip)")))
         self.assertNotIn("at origin's tip, whose origin", text, "the old help said the checkout must be AT the tip")
 
-    def test_the_readme_quotes_the_lines_the_runner_prints(self):
-        section = self.section((ROOT / "README.md").read_text())
-        self.assertIsNotNone(section)
+    def test_the_runner_document_quotes_the_lines_the_runner_prints(self):
+        section = self.doc_section()
         lines = self.printed_by_the_runner()
         self.assertEqual(8, len(lines))
         self.assertEqual(["Agents run as windows of tmux session <session>; watch them read-only with: tmux attach -r -t "
@@ -2180,9 +2244,9 @@ class DocumentationTests(unittest.TestCase):
                           "would switch <path> from <x> (at <X12>) to <b>",
                           "Switched <path> from <x> (at <X12>) to <b>; to go back: git -C <path> switch <x>"],
                          lines, "what the code prints, with placeholders")
-        self.assertEqual([], self.missing(section, lines), "README.md, section 'Process a batch of pull requests'")
+        self.assertEqual([], self.missing(section, lines), self.DOC)
 
-    def test_the_check_fails_when_the_readme_quotes_something_the_runner_does_not_print(self):
+    def test_the_check_fails_when_the_runner_document_quotes_something_the_runner_does_not_print(self):
         lines = self.printed_by_the_runner()
         section = "The runner prints " + "; ".join(f"`{line}`" for line in lines) + "."
         self.assertEqual([], self.missing(section, lines), "control: a section that quotes every line is accepted")
@@ -2264,22 +2328,142 @@ class DocumentationTests(unittest.TestCase):
             with self.subTest(case=case):
                 self.assertIn(expected, "; ".join(self.stale(text)))
 
-    def test_the_check_fails_when_the_readme_stops_saying_what_it_must(self):
-        section = "The runner " + ", ".join(self.README_SAYS) + "."  # synthetic: this test must not depend on the README
+    def test_the_check_fails_when_the_runner_document_stops_saying_what_it_must(self):
+        section = "The runner " + ", ".join(self.DOC_SAYS) + "."  # synthetic: this test must not depend on the document
         self.assertEqual([], self.missing(section), "control: a section that says all of it is accepted")
-        for phrase in self.README_SAYS:
+        for phrase in self.DOC_SAYS:
             with self.subTest(phrase=phrase):
                 self.assertEqual([f"does not say {phrase!r}"], self.missing(section.replace(phrase, "...")))
-        self.assertEqual(len(self.README_SAYS), len(self.missing("")), "an empty section says none of it")
+        self.assertEqual(len(self.DOC_SAYS), len(self.missing("")), "an empty section says none of it")
 
     def test_the_check_fails_when_it_would_scan_nothing(self):
+        # shaped like the README: a section that ends at the next `## ` heading (what the pointer test reads)
         readme = f"# Title\n\n{self.HEADING}\n\nAnswer it in the printed tmux session.\n\n## Command map\n\nManaged checkout\n"
         self.assertEqual("Answer it in the printed tmux session.", self.section(readme),
                          "control: the section is cut at the next heading")
         self.assertIsNone(self.section(readme.replace(self.HEADING, "## Process batches of pull requests")),
-                          "a renamed heading is no section: the test above fails instead of passing on an empty scan")
+                          "a renamed heading is no section: the pointer test fails instead of passing on an empty scan")
         self.assertEqual("", self.section(f"{self.HEADING}\n\n## Command map\n"), "an empty section is empty, not None")
         self.assertEqual("", self.section(f"{self.HEADING}\n"), "a heading at the end of the file is an empty section")
+        # shaped like the document: the whole file after its H1, and a sub-heading cuts nothing
+        doc = f"{self.DOC_HEADING}\n\nAnswer it in the printed tmux session.\n\n## A sub-heading\n\nManaged checkout\n"
+        self.assertEqual("Answer it in the printed tmux session. ## A sub-heading Managed checkout", self.doc_body(doc),
+                         "control: the document is read to the end of the file, a sub-heading does not end it")
+        self.assertIn("still says 'Managed checkout'", "; ".join(self.stale(self.doc_body(doc))),
+                      "what stands below a sub-heading is scanned too")
+        self.assertEqual("", self.doc_body(f"{self.DOC_HEADING}\n"), "a heading at the end of the file is an empty document")
+        for case, text in (("a renamed H1", doc.replace(self.DOC_HEADING, "# Process batches of pull requests")),
+                           ("an H1 with more on its line", doc.replace(self.DOC_HEADING, self.DOC_HEADING + " (old)")),
+                           ("the heading demoted to an H2", doc.replace(self.DOC_HEADING, "#" + self.DOC_HEADING)),
+                           ("text before the H1", "Some words.\n" + doc),
+                           ("the README's heading", doc.replace(self.DOC_HEADING, self.HEADING)),
+                           ("an empty file", "")):
+            with self.subTest(case=case):
+                self.assertIsNone(self.doc_body(text), "no H1, no document: doc_section fails instead of passing on a scan of nothing")
+        with tempfile.TemporaryDirectory() as top:
+            with self.assertRaises(AssertionError) as missing:
+                self.doc_section(top)
+            self.assertIn(f"{self.DOC} is missing: the check scanned nothing", str(missing.exception))
+            path = Path(top) / self.DOC
+            path.parent.mkdir(parents=True)
+            path.write_text(doc.replace(self.DOC_HEADING, "# Process batches of pull requests"))
+            with self.assertRaises(AssertionError) as renamed:
+                self.doc_section(top)
+            self.assertIn(f"{self.DOC} does not start with {self.DOC_HEADING!r}: the check scanned nothing", str(renamed.exception))
+            path.write_text(doc)
+            self.assertEqual(self.doc_body(doc), self.doc_section(top), "control: a document with its H1 is read")
+
+    # ---- the README keeps a pointer to the document, and nothing the runner's tests pin --------------------------------
+
+    def test_the_readme_points_to_the_runner_document(self):
+        readme = (ROOT / "README.md").read_text()
+        section = self.section(readme)
+        self.assertIsNotNone(section, f"README.md has no section {self.HEADING!r}: the check scanned nothing")
+        self.assertGreater(len(section), 100, "the section is there but nearly empty: the check scanned nothing")
+        tracked = self.tracked_files()
+        self.assertIn("README.md", tracked, "control: the listing of tracked files is not empty")
+        self.assertEqual([], self.pointer_problems(readme, tracked), f"the pointer of README.md to {self.DOC}")
+
+    def a_pointer(self, command="python3 scripts/pr_loop.py 371 372 --repo o/r", link=None, extra=""):
+        """A README, synthetic, whose batch section is a pointer; `extra` goes at the end of its first sentence. What
+        follows the section (a pinned phrase, a missing file, a long text) is not part of it and must not count."""
+        link = self.DOC if link is None else link
+        return (f"# Title\n\nIntro.\n\n{self.HEADING}\n\n`scripts/pr_loop.py` runs the agents.{extra}\n\n"
+                f"```bash\n{command}\n```\n\nRead [the document]({link}) before the first run.\n\n## Command map\n\n"
+                f"{self.DOC_SAYS[0]} and python3 scripts/pr_loop.py, see [a missing file](nowhere.md): {'long ' * 400}\n")
+
+    def test_the_check_accepts_a_readme_pointer_that_is_one(self):
+        tracked = {self.DOC, "README.md"}
+        self.assertEqual([], self.pointer_problems(self.a_pointer(), tracked),
+                         "control: a short section with the command and a link to the document is accepted, and what "
+                         "follows it (a pinned phrase, a missing file, a long text) is not read")
+        for case, text in (("an anchor on the link", self.a_pointer(link=self.DOC + "#top")),
+                           ("a ./ in front of the link", self.a_pointer(link="./" + self.DOC)),
+                           ("links that name no file", self.a_pointer(extra=" See [the web](https://example.org/x), [here](#top).")),
+                           ("a tilde fence", self.a_pointer().replace("```bash", "~~~").replace("```\n\nRead", "~~~\n\nRead"))):
+            with self.subTest(case=case):
+                self.assertEqual([], self.pointer_problems(text, tracked))
+
+    def test_the_check_fails_when_the_readme_pointer_misses_its_command_or_its_link(self):
+        tracked = {self.DOC, "README.md"}
+        command = ["the section has no 'python3 scripts/pr_loop.py' command in a fenced code block"]
+        link = [f"the section does not link to {self.DOC}"]
+        for case, text, files, expected in (
+                ("no section", self.a_pointer().replace(self.HEADING, "## Process batches of pull requests"), tracked,
+                 [f"README.md has no section {self.HEADING!r}"]),
+                ("no command", self.a_pointer(command="scripts/pr_loop.py 371 372"), tracked, command),
+                ("an empty block", self.a_pointer(command=""), tracked, command),
+                ("the command in the prose only", self.a_pointer(command="", extra=" Run python3 scripts/pr_loop.py 371."),
+                 tracked, command),
+                ("the link as plain text", self.a_pointer().replace(f"[the document]({self.DOC})", f"the document ({self.DOC})"),
+                 tracked, link),
+                ("a link to another file only", self.a_pointer(link="README.md"), tracked, link),
+                ("a link to a copy in another place", self.a_pointer(link="docs/the-runner.md"),
+                 tracked | {"docs/the-runner.md"}, link),
+                ("a link to a file that does not exist", self.a_pointer(extra=" See [more](docs/missing.md)."), tracked,
+                 ["the section links to docs/missing.md, which is not a tracked file"]),
+                ("a link to the document when it is not tracked", self.a_pointer(), tracked - {self.DOC},
+                 [f"the section links to {self.DOC}, which is not a tracked file"])):
+            with self.subTest(case=case):
+                self.assertEqual(expected, self.pointer_problems(text, files))
+
+    def test_the_check_fails_when_the_readme_pointer_restates_what_the_tests_pin(self):
+        tracked = {self.DOC, "README.md"}
+        pinned = [*self.DOC_SAYS, *self.PHASE_TIMEOUT_SAYS, *self.printed_by_the_runner()]
+        self.assertGreater(len(pinned), 50, "the pinned phrases were not collected")
+        for phrase in pinned:
+            with self.subTest(pinned=phrase):
+                problems = self.pointer_problems(self.a_pointer(extra=f" {phrase}"), tracked)
+                self.assertIn(f"the section restates {phrase!r}, which the tests pin to the runner", problems)
+                self.assertEqual([], [problem for problem in problems if "characters long" in problem], "a short section")
+
+    def test_the_check_fails_when_the_readme_pointer_is_longer_than_a_pointer(self):
+        tracked = {self.DOC, "README.md"}
+        room = self.POINTER_MAX - len(self.section(self.a_pointer()))
+        self.assertGreater(room, 100, "the synthetic pointer leaves no room under the cap")
+        at_the_cap = self.a_pointer(extra="x" * room)
+        self.assertEqual(self.POINTER_MAX, len(self.section(at_the_cap)))
+        self.assertEqual([], self.pointer_problems(at_the_cap, tracked), "control: exactly the cap is accepted")
+        too_long = self.a_pointer(extra="x" * (room + 1))
+        self.assertEqual([f"the section is {self.POINTER_MAX + 1} characters long, more than the {self.POINTER_MAX} a pointer "
+                          f"may be"], self.pointer_problems(too_long, tracked))
+        spaced = self.a_pointer(extra=" word" * 400)
+        self.assertEqual(1, len(self.pointer_problems(spaced, tracked)), "words that no test pins are one problem: the length")
+
+    def test_the_runner_document_and_its_tests_take_the_skills_ci_profile(self):
+        """A runner change that must edit its document or its tests is not `full` for that: the document is below
+        `.agents/skills/`, which scripts/ci-impact.py takes as `skills`; the root README is `full`."""
+        spec = importlib.util.spec_from_file_location("ci_impact_for_the_runner_document", ROOT / "scripts" / "ci-impact.py")
+        impact = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(impact)
+        tests = ".agents/skills/_shared/tests/test_pr_loop.py"
+        for path in (self.DOC, tests):
+            with self.subTest(path=path):
+                self.assertEqual("skills", impact.path_kind(path), f"{path} must take the skills profile")
+                self.assertEqual("skills", impact.classify([path]), f"a change to {path} alone must take the skills profile")
+        self.assertEqual("full", impact.path_kind("README.md"), "control: the root README is why the document moved")
+        self.assertEqual(impact.classify(["scripts/pr_loop.py"]), impact.classify(["scripts/pr_loop.py", self.DOC, tests]),
+                         "the document and the tests add nothing to what the runner alone takes")
 
 
 # ---- (C) Agent: the real class driving the fake tmux in a subprocess ----------------------------------------------
