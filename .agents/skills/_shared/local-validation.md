@@ -57,17 +57,24 @@ just to create a new copy. Existing gate rules decide whether receipts can be
 reused across evidence-only changes. Startup acknowledgements are not independent
 code reviews, and source changes still invalidate affected checks.
 
-## While the Coder works, and the one receipt (kjelly/pilot#432)
+## While the Coder works, and the one receipt (kjelly/pilot#432, kjelly/pilot#430)
 
 While the Coder works it runs the tests of what it changed (the selected Go tests; for a
 skill, that skill's `tests/` or the changed test modules). The plan's `make skill-test` runs
 once per candidate HEAD, as the `run_check.py` receipt on the committed HEAD (Root's, or the
 Coder's when it takes the receipt; never both). Root takes the receipt unless the dispatch
 envelope tells the Coder to; the Coder's envelope carries the validation item "the tests of
-what it changed; not the full `make skill-test` (Root runs that once, as the receipt)". No
-gate is weaker: that receipt still runs every suite on the exact HEAD the gate checks, and
-CI's `Skill and repository contracts` job runs it again. A narrower selection of suites is
-kjelly/pilot#430; until it changes this text the receipt is the whole suite. This section
-governs the Coder and the receipt of `issue-to-pr` and `pr-ready`; the `make skill-test`
-that `pr-review-merge` runs (its SKILL.md) is a separate gate on a separate candidate, and
-this section does not change it.
+what it changed; not the planned `make skill-test` (Root runs that once, as the receipt)".
+
+The plan narrows `make skill-test` to the suites the change can reach and prints the reason
+for each (`skill_suites` in its JSON: which changed path reaches which suite, through which
+import, load or read), as `make skill-test SKILL_SUITES="a b"`. Run the planned command
+exactly: a narrower command is not the receipt. A deleted, renamed or unattributed path, and
+any error while deriving the suites, select all of them (the plain `make skill-test`). Keep
+the plan JSON next to the receipt, for the reviewers. CI's `Skill and repository contracts`
+job still runs the full `make skill-test`, and Ready requires it. A CI failure in a suite the
+plan left out is a defect of the selection: repair the selection and the suite, and never
+list it as an `unrelated_failing_checks` entry. `pr-review-merge` ignores the selection: it
+runs the full suite on its own candidate. This section governs the Coder and the receipt of
+`issue-to-pr` and `pr-ready`; the `make skill-test` that `pr-review-merge` runs (its
+SKILL.md) is a separate gate on a separate candidate, and this section does not change it.

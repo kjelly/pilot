@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """Compute local test scope; large cmd/spec packages require explicit regressions.
 
-This is a plan, not a coverage verdict. Full normal/race suites belong in CI.
+This is a plan, not a coverage verdict. Full normal/race suites belong in CI. For a change that reaches skill tests the plan
+runs `make skill-test` for the suites the change can reach (skill_suites.py derives them, with the reason for each), or for
+all of them when the mapping is unknown; CI runs the whole `make skill-test` either way.
 """
 import argparse
 import json
 from pathlib import Path
 import subprocess
 import sys
+
+# Run from a skill snapshot, this script must not add `__pycache__` there, and under `python3 -I` its own directory is not on
+# sys.path: no bytecode, and the directory is added (last) before the import.
+sys.dont_write_bytecode = True
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.append(_HERE)
+import skill_suites  # noqa: E402  (a pure module: it starts no process)
 
 LARGE = {"github.com/kjelly/pilot/cmd/pilot/cmd", "github.com/kjelly/pilot/internal/spec"}
 
@@ -34,7 +44,19 @@ def scope(paths, packages):
     return sorted(affected)
 
 
-def plan(paths, packages, regressions):
+def skill_command(skills, paths):
+    """The `make skill-test` command of a plan, or None when no skill test is needed. `skills` is the result of
+    `skill_suites.select` for the change, or None when it was not derived: the whole suite then, as before the selection."""
+    if skills is None:
+        return ["make", "skill-test"] if any(f.startswith((".agents/", ".codex/", ".claude/")) for f in paths) else None
+    if skills["selection"] == "all":
+        return ["make", "skill-test"]
+    if skills["selection"]:
+        return ["make", "skill-test", "SKILL_SUITES=" + " ".join(skills["selection"])]
+    return None
+
+
+def plan(paths, packages, regressions, skills=None):
     affected = scope(paths, packages)
     commands = []
     missing = []
@@ -47,11 +69,23 @@ def plan(paths, packages, regressions):
         if regex:
             cmd += ["-run", regex]
         commands.append(cmd + [package])
-    if any(f.startswith((".agents/", ".codex/", ".claude/")) for f in paths):
-        commands.append(["make", "skill-test"])
-    return {"status": "NEEDS_SELECTION" if missing else "PLANNED", "packages": affected,
-            "missing_regression_selectors": missing, "commands": commands,
-            "full_suite": "GitHub CI", "requires_review": True}
+    skill = skill_command(skills, paths)
+    if skill is not None:
+        commands.append(skill)
+    result = {"status": "NEEDS_SELECTION" if missing else "PLANNED", "packages": affected,
+              "missing_regression_selectors": missing, "commands": commands,
+              "full_suite": "GitHub CI", "requires_review": True}
+    if skills is not None:
+        result["skill_suites"] = skills
+    return result
+
+
+def select_skill_suites(root, changes):
+    """The skill suites the change can reach (skill_suites.select); a failure to derive them selects every suite."""
+    try:
+        return skill_suites.select(changes, skill_suites.derive(str(root)))
+    except Exception as exc:  # the derivation is advice for a local run: whatever goes wrong, run everything
+        return {"selection": "all", "reasons": {}, "universe": [], "reason": f"the selection failed: {exc}"}
 
 
 def main():
@@ -70,7 +104,8 @@ def main():
             raise ValueError("go list must describe the selected checkout HEAD")
         if git("status", "--porcelain", "--untracked-files=normal").strip():
             raise ValueError("commit the candidate before planning authoritative local receipts")
-        paths = [p.decode() for p in git("diff", "--name-only", "--no-renames", "-z", base, head).split(b"\0") if p]
+        changes = skill_suites.parse_name_status(git("diff", "--name-status", "--no-renames", "-z", base, head))
+        paths = [path for _status, path in changes]
         fmt = '{{.ImportPath}}|{{.Dir}}|{{join .Imports " "}} {{join .TestImports " "}} {{join .XTestImports " "}}'
         output = subprocess.check_output(["go", "list", "-f", fmt, "./..."], cwd=args.repo).decode()
         root = Path(git("rev-parse", "--show-toplevel").decode().strip())
@@ -80,7 +115,9 @@ def main():
             packages.append({"name": name, "dir": str(Path(directory).relative_to(root)),
                              "imports": imports.split()})
         selectors = dict(item.split("=", 1) for item in args.regression)
-        result = {**plan(paths, packages, selectors), "base_sha": base, "head_sha": head}
+        skills = select_skill_suites(root, changes)
+        result = {**plan(paths, packages, selectors, skills), "base_sha": base, "head_sha": head}
+        result["skill_suites"] = {**skills, "base_sha": base, "head_sha": head}
         print(json.dumps(result, indent=2))
         return 2 if result["status"] == "NEEDS_SELECTION" else 0
     except (OSError, ValueError, subprocess.SubprocessError) as exc:

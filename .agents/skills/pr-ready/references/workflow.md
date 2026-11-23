@@ -15,7 +15,7 @@
 
 ## Delegation contract
 
-Task envelope for each subagent: `{repo, pr, url, base_sha, head_sha, checkout_path, role, acceptance_criteria, explicit_scope, known_findings}`. Supply paths to diff/log artifacts instead of flooding parent context. When the diff touches `.agents/skills`, the Coder's envelope carries a validation item: "the tests of what it changed; not the full `make skill-test` (Root runs that once, as the receipt)" (`.agents/skills/_shared/local-validation.md`).
+Task envelope for each subagent: `{repo, pr, url, base_sha, head_sha, checkout_path, role, acceptance_criteria, explicit_scope, known_findings}`. Supply paths to diff/log artifacts instead of flooding parent context. When the diff touches `.agents/skills`, the Coder's envelope carries a validation item: "the tests of what it changed; not the planned `make skill-test` (Root runs that once, as the receipt)" (`.agents/skills/_shared/local-validation.md`).
 
 For pilot, also supply `pilot_history_checks` (absolute path to the shared history
 reference), relevant fix/review links, finding ledger and the `target_validation`

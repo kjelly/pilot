@@ -1,6 +1,10 @@
 """Scope planning and static/runtime readiness must remain distinct."""
+import contextlib
 import importlib.util
+import io
+import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -8,6 +12,8 @@ from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gitrepo import Repo  # noqa: E402
 
 
 def load(name):
@@ -58,6 +64,124 @@ class LocalPlanTests(unittest.TestCase):
 
     def test_evidence_only_has_no_local_test_commands(self):
         self.assertEqual([], planner.plan(["docs/evidence/x.md"], PACKAGES, {})["commands"])
+
+
+def selection(*suites, reason=None):
+    """What skill_suites.select returns: the chosen suites (or "all") with a reason each."""
+    chosen = "all" if suites == ("all",) else sorted(suites)
+    return {"selection": chosen, "reasons": {s: [f"{s} reads the change"] for s in suites if s != "all"}, "reason": reason,
+            "universe": ["README.md"]}
+
+
+class SkillSelectionPlanTests(unittest.TestCase):
+    """A change that reaches skill tests plans `make skill-test` for the suites it can reach (kjelly/pilot#430)."""
+
+    def commands(self, paths, skills):
+        return planner.plan(paths, PACKAGES, {}, skills)["commands"]
+
+    def test_a_selection_narrows_the_command_to_the_suites_it_names_and_prints_the_reasons(self):
+        result = planner.plan(["scripts/pr_loop.py"], PACKAGES, {}, selection("pr-ready", "_shared"))
+        self.assertEqual([["make", "skill-test", "SKILL_SUITES=_shared pr-ready"]], result["commands"])
+        self.assertEqual({"_shared": ["_shared reads the change"], "pr-ready": ["pr-ready reads the change"]},
+                         result["skill_suites"]["reasons"])
+        self.assertEqual(["_shared", "pr-ready"], result["skill_suites"]["selection"])
+
+    def test_every_suite_when_the_mapping_is_unknown_is_the_plain_command_with_the_reason(self):
+        result = planner.plan([".claude/zzz"], PACKAGES, {}, selection("all", reason=".claude/zzz is unattributed"))
+        self.assertEqual([["make", "skill-test"]], result["commands"])
+        self.assertEqual(".claude/zzz is unattributed", result["skill_suites"]["reason"])
+
+    def test_no_suite_reached_plans_no_skill_command(self):
+        self.assertEqual([], self.commands(["docs/evidence/x.md"], selection()))
+        # control: the same paths with a suite reached do plan it
+        self.assertEqual([["make", "skill-test", "SKILL_SUITES=issue-filing"]],
+                         self.commands(["AGENTS.md"], selection("issue-filing")))
+
+    def test_the_go_plan_is_the_same_whatever_the_skill_selection_is(self):
+        paths = ["internal/shared/a.go", ".agents/skills/pr-ready/SKILL.md"]
+        plain = planner.plan(paths, PACKAGES, {CMD: "TestAgent"})
+        narrow = planner.plan(paths, PACKAGES, {CMD: "TestAgent"}, selection("pr-ready"))
+        self.assertEqual(plain["packages"], narrow["packages"])
+        self.assertEqual(plain["commands"][:-1], narrow["commands"][:-1])
+        self.assertEqual(["make", "skill-test"], plain["commands"][-1])
+        self.assertEqual(["make", "skill-test", "SKILL_SUITES=pr-ready"], narrow["commands"][-1])
+
+    def test_a_change_with_no_selection_derived_keeps_the_whole_suite(self):
+        self.assertEqual([["make", "skill-test"]], self.commands([".agents/skills/pr-ready/SKILL.md"], None))
+        self.assertEqual([], self.commands(["cmd/pilot/main.go"], None))
+
+
+class PlannerEntryPointTests(unittest.TestCase):
+    """`local_test_plan.py --repo DIR --base B --head H` on a real scratch repository: git diff -> selection -> JSON."""
+
+    SUITE_A = ("import unittest\nfrom pathlib import Path\nROOT = Path(__file__).resolve().parents[4]\n"
+               "class T(unittest.TestCase):\n    def test_x(self):\n        (ROOT / 'README.md').read_text()\n")
+    SUITE_B = "import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        pass\n"
+
+    def repo(self):
+        r = Repo(self)
+        r.write(".agents/skills/a/tests/test_a.py", self.SUITE_A)
+        r.write(".agents/skills/b/tests/test_b.py", self.SUITE_B)
+        r.write("README.md", "one\n")
+        r.write("internal/x/x.go", "package x\n")
+        return r, r.commit("base")
+
+    def plan(self, r, base):
+        real = subprocess.check_output
+
+        def check_output(argv, **kwargs):
+            return b"" if argv[0] == "go" else real(argv, **kwargs)       # no Go toolchain is needed for these diffs
+        out = io.StringIO()
+        with patch.object(planner.subprocess, "check_output", side_effect=check_output), \
+                patch.object(sys, "argv", ["local_test_plan.py", "--repo", str(r.path), "--base", base]), \
+                contextlib.redirect_stdout(out):
+            code = planner.main()
+        return code, json.loads(out.getvalue())
+
+    def test_a_modified_file_a_suite_reads_plans_that_suite_only(self):
+        r, base = self.repo()
+        r.write("README.md", "two\n")
+        head = r.commit("edit the readme")
+        code, result = self.plan(r, base)
+        self.assertEqual((0, [["make", "skill-test", "SKILL_SUITES=a"]]), (code, result["commands"]))
+        self.assertEqual(["a"], result["skill_suites"]["selection"])
+        self.assertEqual((base, head), (result["skill_suites"]["base_sha"], result["skill_suites"]["head_sha"]))
+        self.assertIn("README.md", result["skill_suites"]["reasons"]["a"][0])
+        self.assertEqual((base, head), (result["base_sha"], result["head_sha"]))
+
+    def test_a_deleted_file_a_suite_reads_plans_every_suite(self):
+        r, base = self.repo()
+        r.git("rm", "-q", "README.md")
+        r.commit("remove the readme")
+        code, result = self.plan(r, base)
+        self.assertEqual((0, [["make", "skill-test"]]), (code, result["commands"]))
+        self.assertEqual("all", result["skill_suites"]["selection"])
+        self.assertIn("README.md has status D", result["skill_suites"]["reason"])
+
+    def test_a_go_only_change_plans_no_skill_suite(self):
+        r, base = self.repo()
+        r.write("internal/x/x.go", "package x\n\nvar V = 1\n")
+        r.commit("a go change")
+        code, result = self.plan(r, base)
+        self.assertEqual(0, code)
+        self.assertEqual([], [c for c in result["commands"] if c[:2] == ["make", "skill-test"]])
+        self.assertEqual([], result["skill_suites"]["selection"])
+
+    def test_a_change_inside_a_suite_plans_that_suite(self):
+        r, base = self.repo()
+        r.write(".agents/skills/b/tests/test_b.py", self.SUITE_B + "\n")
+        r.commit("touch the suite b")
+        code, result = self.plan(r, base)
+        self.assertEqual([["make", "skill-test", "SKILL_SUITES=b"]], result["commands"])
+
+    def test_a_suite_that_does_not_parse_plans_every_suite_even_for_a_go_change(self):
+        r, base = self.repo()
+        r.write(".agents/skills/b/tests/test_b.py", "def broken(:\n")
+        r.write("internal/x/x.go", "package x\n\nvar V = 2\n")
+        r.commit("a go change and a broken suite")
+        code, result = self.plan(r, base)
+        self.assertEqual([["make", "skill-test"]], result["commands"])
+        self.assertIn("cannot parse", result["skill_suites"]["reason"])
 
 
 class RoleStartupTests(unittest.TestCase):

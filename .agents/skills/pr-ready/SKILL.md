@@ -127,9 +127,11 @@ to answer. These rules remove that cost without weakening a gate:
 
 1. **Local receipts cover what the diff touches.** Run `go vet` and the tests of the Go
    packages the diff changes (plus the packages that import a changed shared helper), the
-   regressions the fix adds, `make skill-test` for `.agents/skills` changes (once per
-   candidate HEAD, as the receipt on the committed HEAD; while it works the Coder runs only
-   the tests of the skills it changed: `.agents/skills/_shared/local-validation.md`), and
+   regressions the fix adds, `make skill-test` for `.agents/skills` changes (the plan
+   narrows it to the suites the change can reach and prints the reason for each; CI runs the
+   full `make skill-test`; once per candidate HEAD, as the receipt on the committed HEAD;
+   while it works the Coder runs only the tests of the skills it changed:
+   `.agents/skills/_shared/local-validation.md`), and
    `make lint` (CI pins golangci-lint v2.12.1; `make lint` refuses a v1 binary). The whole
    suite is CI's `Go test` job: do not run `go test ./...` or `-race ./...` locally unless
    the user asks or CI is unavailable, and never beside a live vm-target run. A failure in
@@ -246,7 +248,7 @@ to answer. These rules remove that cost without weakening a gate:
 
 1. **Analyze first.** Gather GitHub context; derive acceptance criteria and reproduce reported failures. Triage every review comment as a claim (`valid`, `invalid`, `needs_evidence`, `nonblocking`) per [review comments](references/review-comments.md); only `valid` findings go to Coder. Check whether the PR already passes the entire quality gate.
 2. **SA (`pr-sa`)** independently diagnose root cause, architectural impact, design options, and regressions. Produce a concise evidence-backed diagnosis.
-3. **Coder (`pr-coder`)** owns implementation *only* in the verified checkout of that PR's head branch. Repair root cause, add or strengthen regressions, run tests, lint, and static analysis for the packages the diff touches (cycle-time rule 1; the whole suite is CI's job); for a skill change, that skill's tests (`make skill-test` runs once, as the receipt). Never weaken assertions, silence errors, skip meaningful checks, or hardcode expected results. Commit only changes belonging to this PR.
+3. **Coder (`pr-coder`)** owns implementation *only* in the verified checkout of that PR's head branch. Repair root cause, add or strengthen regressions, run tests, lint, and static analysis for the packages the diff touches (cycle-time rule 1; the whole suite is CI's job); for a skill change, that skill's tests (the planned `make skill-test`, for the suites the change can reach, runs once, as the receipt; CI runs the full `make skill-test`). Never weaken assertions, silence errors, skip meaningful checks, or hardcode expected results. Commit only changes belonging to this PR.
 4. **Reviewer (`pr-reviewer`)** must be an independent agent/context, not the Coder relabelled. Dispatch it on a commit that is already pushed, except one that adds real captures, which is reviewed first (cycle-time rule 9). Review current diff for correctness, architecture, security, concurrency, edge cases, semantic regressions and test adequacy. Use [the shared severity/origin rubric](../issue-to-pr/references/severity.md); return P0/P1/P2 blocking findings with precise file:line evidence and report P3/P4 separately. Origin is relative to the PR base, not the previous review. A fix is not closed until its regression and relevant target evidence are checked; an outdated thread alone is not proof. Give it each review comment Root would dispute with the comment and the code only, not Root's conclusion; the dispute stands only if the reviewer's own verdict agrees.
 5. If blocking findings remain, hand back to Coder; rerun impacted checks and reviewer on the new commit. A PASS with only P3/P4 remarks ends the round (cycle-time rule 3). After **three effective unsuccessful fix rounds**, reassign SA for a fresh diagnosis. If still stuck, record `DRAFT-BLOCKED`, preserve the PR, and end this invocation without starting another item.
 6. Push each commit as soon as it has been read and scanned for secrets, before its review and receipts (cycle-time rule 9, with its exception for real captures). Before pushing, verify branch identity, uncommitted changes, and remote movement. Push **only the original PR head branch** (no force). After any push, discard all previously successful CI results as evidence for the new HEAD. Prepare evidence, then keep the active invocation waiting with the command in step 7 until checks settle or a real blocker prevents completion. Pending alone does not end the invocation.
