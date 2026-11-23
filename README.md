@@ -226,7 +226,8 @@ commit a dry run cannot tell that the checkout has diverged from it; the real ru
 fetches it and says so). It does not check whether another runner holds the lock
 or whether a pane from an earlier run is still open, and only a real run notices a
 tracked `.gitignore` that overrides the exclude lines below. The phase timeout
-defaults to 7200 seconds.
+defaults to 14400 seconds (4 hours): a Draft phase that fixes a review finding, runs
+the checks and waits for CI can take more than two hours.
 
 Each dispatch writes `<checkout>/.pr-loop/<nonce>/task.json` and pastes
 `--pr-loop-task=<path>` after the prompt; the skill writes `result.json` beside
@@ -244,7 +245,7 @@ and nobody can answer in time. In a directory an agent does not trust, `claude`
 exits at once (its default answer is "No, exit") and the runner stops with an
 `agent exited` message that does not mention trust; `codex` loses the command,
 may record the directory as trusted, and the runner then waits silently until
-`--phase-timeout` (7200 seconds by default).
+`--phase-timeout` (14400 seconds by default).
 
 The runner dispatches the Ready phase only for a PR that carries a valid Ready
 signal at its current HEAD: the label `pr-ready-verified` and a comment that starts with

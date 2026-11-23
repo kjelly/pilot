@@ -73,6 +73,10 @@ import ready_signal  # only LABEL, assess and SignalError: this runner reads the
 # the run. Module constants, not flags.
 STABLE_POLLS = 2
 READ_ATTEMPTS = 3
+# What `--phase-timeout` defaults to, in seconds: the wait per phase. Four hours, because a Draft phase that fixes a review
+# finding, runs the checks and waits for CI took about two and a half hours in a real run, and 7200 seconds gave up on an agent
+# that was still working.
+PHASE_TIMEOUT = 14400
 
 # What `--checkout` defaults to, in the words of its help text and of the README.
 CHECKOUT_DEFAULT = "the root of the git work tree that contains the current directory"
@@ -1257,7 +1261,8 @@ def main():
     parser.add_argument("--ready-agent", default="codex")
     parser.add_argument("--draft-command", default="/pr-ready {pr}")
     parser.add_argument("--ready-command", default="$pr-review-merge {pr}")
-    parser.add_argument("--phase-timeout", type=seconds, default=7200, help="seconds waiting per phase (default: 7200)")
+    parser.add_argument("--phase-timeout", type=seconds, default=PHASE_TIMEOUT,
+                        help=f"seconds waiting per phase (default: {PHASE_TIMEOUT})")
     parser.add_argument("--startup-timeout", type=seconds, default=60, help="seconds waiting for a newly started agent's prompt (default: 60)")
     parser.add_argument("--poll-interval", type=seconds, default=10, help="seconds between GitHub reads (default: 10)")
     parser.add_argument("--max-actions", type=int, default=20, help="maximum dispatches per PR (default: 20)")

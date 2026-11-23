@@ -1989,6 +1989,9 @@ class DocumentationTests(unittest.TestCase):
              "the runner never updates the checkout", "run `git pull --ff-only` yourself: the runner never",
              "The runner never deletes, resets, cleans or stashes anything", "Everything here READS it, except two things",
              "at origin's tip, or the runner refuses",
+             # the default of --phase-timeout before it became four hours (a Draft phase that fixes a review finding, runs the
+             # checks and waits for CI took about two and a half hours)
+             "defaults to 7200 seconds", "(7200 seconds by default)",
              # the checkout on another branch (kjelly/pilot#425): the runner leaves it for the default branch and says how
              # to go back; the old requirement and the old advice about an interrupted agent no longer hold
              "HEAD is on the default branch that `origin` itself reports", "may leave the checkout on a PR branch or with "
@@ -2017,6 +2020,10 @@ class DocumentationTests(unittest.TestCase):
                    "git switch --no-guess --no-recurse-submodules --no-overwrite-ignore -- <b>",
                    "never created", "also a prunable one", "to go back: git -C <path> switch <x>",
                    "leaves for the default branch (the branch and its commits stay)")
+    # What the README says about --phase-timeout: the default the runner has (read from the code and spelled out) and why
+    PHASE_TIMEOUT_SAYS = (f"defaults to {pr_loop.PHASE_TIMEOUT} seconds (4 hours)", "defaults to 14400 seconds (4 hours)",
+                          "can take more than two hours", f"({pr_loop.PHASE_TIMEOUT} seconds by default)",
+                          "(14400 seconds by default)")
     # What the runner's docstring says about the session, which `--help` shows
     DOCSTRING_SAYS = ("pilot-pr-<directory name>-<8 hex>", "tmux attach -r -t", "is fast-forwarded to exactly the tip",
                       "one `git merge --ff-only`", "it switches the checkout to origin's default branch",
@@ -2104,6 +2111,24 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("python3 scripts/pr_loop.py", section, "control: this is the section about the runner")
         self.assertEqual([], self.missing(section) + self.stale(section),
                          "README.md, section 'Process a batch of pull requests'")
+
+    def test_the_readme_states_the_phase_timeout_the_runner_defaults_to_and_no_other(self):
+        section = self.section((ROOT / "README.md").read_text())
+        self.assertIsNotNone(section)
+        self.assertEqual([], self.missing(section, self.PHASE_TIMEOUT_SAYS), "README.md, section 'Process a batch'")
+        self.assertNotIn("7200", section, "the old default must not be stated anywhere in the section")
+        self.assertEqual([], [stale for stale in self.stale(section) if "7200" in stale])
+
+    def test_the_check_fails_when_the_readme_states_the_old_phase_timeout(self):
+        good = "The phase timeout defaults to 14400 seconds (4 hours): a phase can take more than two hours; (14400 seconds by default)."
+        self.assertEqual([], self.missing(good, self.PHASE_TIMEOUT_SAYS), "control: a text that says all of it is accepted")
+        self.assertEqual(len(self.PHASE_TIMEOUT_SAYS), len(self.missing("", self.PHASE_TIMEOUT_SAYS)))
+        for case, text in (("the first sentence", good.replace("14400", "7200", 1)),
+                           ("the parenthesis", good.replace("(14400 seconds by default)", "(7200 seconds by default)"))):
+            with self.subTest(case=case):
+                self.assertTrue(self.missing(text, self.PHASE_TIMEOUT_SAYS), "the new default is no longer stated")
+        self.assertIn("still says 'defaults to 7200 seconds'", "; ".join(self.stale("The phase timeout defaults to 7200 seconds.")))
+        self.assertIn("still says '(7200 seconds by default)'", "; ".join(self.stale("until `--phase-timeout` (7200 seconds by default).")))
 
     def test_the_runners_docstring_describes_the_checkout_the_agents_start_in(self):
         self.assertGreater(len(self.flat(pr_loop.__doc__ or "")), 500, "the docstring is missing: nothing was scanned")
@@ -6191,6 +6216,35 @@ class ProgramTests(unittest.TestCase):
         text = " ".join(done.stdout.split())
         self.assertIn("--checkout DIR", text)
         self.assertIn(f"(default: {pr_loop.CHECKOUT_DEFAULT})", text)
+
+    def parsed_args(self, *extra):
+        """What `main()` hands the Batch for this command line, with a Batch that starts nothing."""
+        seen = []
+
+        class Capture:
+            def __init__(self, repo, args):
+                seen.append(args)
+
+            def run(self):
+                return None
+        argv = ["pr_loop.py", "7", "--repo", "acme/demo", *extra]
+        with patch.object(sys, "argv", argv), patch.object(pr_loop, "Batch", Capture):
+            self.assertEqual(0, pr_loop.main())
+        self.assertEqual(1, len(seen))
+        return seen[0]
+
+    def test_the_phase_timeout_defaults_to_four_hours_and_the_flag_overrides_it(self):
+        self.assertEqual(14400, self.parsed_args().phase_timeout, "the value the runner would wait per phase")
+        self.assertEqual(14400, pr_loop.PHASE_TIMEOUT)
+        self.assertEqual(5.0, self.parsed_args("--phase-timeout", "5").phase_timeout)
+        self.assertEqual(7200.0, self.parsed_args("--phase-timeout", "7200").phase_timeout, "the old default is still allowed")
+        self.assertEqual(14400, self.parsed_args("--poll-interval", "1").phase_timeout, "another flag does not change it")
+
+    def test_the_help_of_phase_timeout_says_its_default(self):
+        done = subprocess.run([sys.executable, "-B", str(self.SCRIPT), "--help"], capture_output=True, text=True, timeout=60)
+        text = " ".join(done.stdout.split())
+        self.assertIn("--phase-timeout PHASE_TIMEOUT seconds waiting per phase (default: 14400)", text)
+        self.assertNotIn("(default: 7200)", text)
 
     def test_a_pr_that_cannot_be_read_stops_without_starting_anything(self):
         self.env.update_gh(seq=[{"exit": 1, "stderr": "synthetic outage"}])
