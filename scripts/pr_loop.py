@@ -78,7 +78,7 @@ READ_ATTEMPTS = 3
 # that was still working.
 PHASE_TIMEOUT = 14400
 
-# What `--checkout` defaults to, in the words of its help text and of the README.
+# What `--checkout` defaults to, in the words of its help text and of `.agents/skills/_shared/pr-loop.md`.
 CHECKOUT_DEFAULT = "the root of the git work tree that contains the current directory"
 LOCK_NAME = "pilot-pr-loop.lock"
 PANE_SESSION_PREFIX = "pilot-pr-"
