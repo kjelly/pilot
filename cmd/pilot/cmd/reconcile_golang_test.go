@@ -178,7 +178,7 @@ type fakeIPA struct {
 	login    string            // a captured login answer (status, headers, body) to replay instead of a session
 	answers  map[string]string // method (user_find/preserved for the preserved read) -> a captured fixture name, or an inline JSON body
 	noAdmins bool              // leave the reader out of admins
-	hang     map[string]bool   // JSON-RPC methods the server never answers (until the test ends)
+	hang     map[string]bool   // JSON-RPC methods the server never answers: not before the client gives up, not after (#313, see serve)
 	stop     chan struct{}     // closed when the test ends, to release hung requests
 	onHang   func(string)      // called, with the method, when a request the server never answers arrives
 	// respond, when set, sees each JSON-RPC request first and may answer it itself (the
@@ -284,7 +284,14 @@ func (f *fakeIPA) serve(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 		case <-f.stop:
 		}
-		return
+		// Never answer, also once the client has gone. Returning here makes
+		// net/http write an empty 200; the client's cancellation sends
+		// close_notify before it closes the connection (the tunnel's real close
+		// can come later), so that reply can reach a client whose connection is
+		// still open and be read in place of its own deadline ("decode
+		// response: incomplete response", #313). Aborting writes nothing and
+		// closes the connection.
+		panic(http.ErrAbortHandler)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if f.respond != nil {
