@@ -26,6 +26,10 @@ error path); listing coverage is judged by the prefix of a derived glob only; an
 by the check itself; data-dependent path sets are observed only for the data present in this run; a path that reaches the
 repository only through a symbolic link made outside it. The recorder wraps the public `unittest.TestCase.run` only to know
 which phase and test a read belongs to.
+
+Git improves precision: with `git ls-files` the check judges tracked files only; in a git-less export (`git archive | tar -x`)
+every file that exists counts, so a file a test creates inside the repository can show as a gap there, and the one assertion
+about git is skipped with its reason.
 """
 import atexit
 import json
@@ -289,6 +293,9 @@ class EndOfSuiteChecks:
     def result(self):
         self.assertEqual(self.SUITE, Path(self.THIS_FILE).resolve().parents[1].name,
                          "this module checks another suite than the one whose tests directory it is in")
+        # Before any skip: a recorder that is not installed must fail the suite, never turn the check into a skip
+        self.assertTrue(STATE["installed"], "the recorder is not installed: the suite's test_000_suite_reads_* module did not "
+                                            "call suite_reads.install() (it must be an unconditional top-level statement)")
         if not any(m != self.THIS_MODULE for m in STATE["modules"]):
             self.skipTest("no other test of the suite ran: this check judges the reads of a run")
         return check(self.SUITE, self.derivation())
@@ -301,11 +308,13 @@ class EndOfSuiteChecks:
 
     def test_the_recorder_saw_reads_made_by_test_bodies_and_fixtures(self):
         found = self.result()
-        self.assertTrue(STATE["installed"], "the recorder is not installed: the suite's test_000_suite_reads_* module did not run first")
         self.assertEqual(0, found["errors"], "the recorder failed on an event")
-        self.assertTrue(found["tracked"], "git ls-files did not run: the check cannot tell tracked files from others")
         self.assertGreater(found["body_files"], 0, "no read from a test body, setUp or a class fixture was recorded: the "
                                                    "recorder observes nothing, so the check below proves nothing")
+        with self.subTest("git ls-files"):
+            if not found["tracked"]:
+                self.skipTest("not a git checkout (a git-less export): the check counts the files that exist instead of the "
+                              "tracked ones, which is less precise but still compares every read")
 
     def test_dropping_a_source_the_run_read_from_a_test_body_is_reported(self):
         control = self.result()["control"]

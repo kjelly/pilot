@@ -83,6 +83,14 @@ MAX_REASONS = 8          # reasons listed per suite in a selection (the rest are
 RECURSION_LIMIT = 3000   # the evaluator recurses along the chains of names, calls and attributes it follows
 
 
+# A call on a line that ends in this comment is not followed as a read. It is for the evaluator's own probes of the tree it
+# analyses (`Analyzer.exists`): when a suite's tests import this module it is analysed like any other code, and a probe whose
+# argument is a name from the analysed program (`list`, `file`, `e`, a dotfile) would otherwise claim a repository path of
+# that name for the suite, so that a changed root file called `list` or `.gitignore` selected only `_shared` instead of every
+# suite. A probe is not a claim; the real reads of this module (the walks of `.agents`, `.claude` and `.codex`) stay followed.
+OPAQUE_MARK = re.compile(r"#\s*derive:\s*opaque\b")
+
+
 class DeriveError(Exception):
     """The derivation of a suite failed (a parse or evaluation error): the selection must not trust it."""
 
@@ -211,6 +219,7 @@ class Mod:
 
     def __init__(self, path, tree):
         self.path, self.tree = path, tree
+        self.opaque_lines: set = set()  # lines marked `# derive: opaque`: their calls are not reads (see OPAQUE_MARK)
         self.dir = posixpath.dirname(path) or "."
         self.scope = Scope("module", tree, None, self)
         self.calls: list = []          # (Call, Scope)
@@ -585,7 +594,7 @@ class Analyzer:
             raise DeriveError("evaluation budget exceeded")
 
     def exists(self, rel):
-        return os.path.isfile(os.path.join(self.repo, rel))
+        return os.path.isfile(os.path.join(self.repo, rel))  # derive: opaque (a probe of the analysed tree, not a claim)
 
     @staticmethod
     def terminal(func):
@@ -1887,6 +1896,8 @@ class Analyzer:
 
     # -- effects: where a value reaches the repository ------------------------------------------------------------------------
     def effects(self, mod, node, scope):
+        if getattr(node, "lineno", 0) in mod.opaque_lines:
+            return                                      # a probe marked `# derive: opaque`: not a claim on any path
         f = node.func
         q = self.qual(f, scope)
         args, kws = node.args, {k.arg: k.value for k in node.keywords if k.arg}
@@ -2136,7 +2147,10 @@ class ParseCache:
                 tree = ast.parse(source, rel)
             except (OSError, SyntaxError, ValueError) as exc:
                 raise DeriveError(f"cannot parse {rel}: {exc}")
-            mod = self.mods[rel] = Indexer(Mod(rel, tree)).run()
+            parsed = Mod(rel, tree)
+            parsed.opaque_lines = {n for n, line in enumerate(source.decode("utf-8", "replace").splitlines(), 1)
+                                   if OPAQUE_MARK.search(line)}
+            mod = self.mods[rel] = Indexer(parsed).run()
         return mod
 
 
@@ -2335,10 +2349,15 @@ def listed_directories(pattern):
 
 
 def listing_covered(directory, globs):
-    """Whether some derived glob lists `directory` (a repository-relative path, "." for the root)."""
+    """Whether some derived glob lists `directory` (a repository-relative path, "." for the root), or lists a directory below
+    it that the glob's literal prefix names."""
     for pattern in globs:
         for where, recursive in listed_directories(pattern):
             if matches(where, directory) or (recursive and (where == "." or matches(where + "/**", directory))):
+                return True
+            # Python 3.12's pathlib also lists the directories above the one a glob's literal prefix names (`scripts/*.py`
+            # lists the root as well); the ancestor of a listed directory is covered, a sibling is not
+            if not has_wild(where) and where != "." and (directory == "." or where.startswith(directory + "/")):
                 return True
     return False
 

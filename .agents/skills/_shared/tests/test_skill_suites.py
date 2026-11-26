@@ -533,6 +533,21 @@ class DerivationTests(Tree):
         self.assertNotIn(".agents/skills/s2/SKILL.md", plain["s1"]["files"])
         self.assertEqual("all", ss.select(change, plain)["selection"])
 
+    def test_a_call_marked_opaque_claims_no_path_and_the_same_call_unmarked_does(self):
+        helper = ".agents/skills/s1/tests/helper.py"
+        body = "from helper import probe\nprobe(ROOT, 'list')\nprobe(ROOT, '.hidden')\n"
+        text = "import os\n\ndef probe(root, name):\n    return os.path.isfile(os.path.join(root, name))%s\n"
+        marked = self.derive({S1: module(body), helper: text % "  # derive: opaque (a probe)"})
+        self.assertEqual({}, {k: v for k, v in marked["files"].items() if "helper.py" in v})
+        self.assertEqual({}, marked["globs"])
+        plain = self.derive({S1: module(body), helper: text % ""})
+        self.assertTrue({"list", ".hidden"} <= set(plain["files"]), plain["files"])      # control: it is a claim without the mark
+        # a mark is for that line only: a read on another line of the same module is still followed
+        two = text % "  # derive: opaque" + "\ndef other(root):\n    return os.path.isfile(os.path.join(root, 'README.md'))\n"
+        found = self.derive({S1: module(body + "from helper import other\nother(ROOT)\n"), helper: two})
+        self.assertIn("README.md", found["files"])
+        self.assertNotIn("list", found["files"])
+
     def test_a_module_that_does_not_parse_fails_the_derivation_and_selects_every_suite(self):
         files = {S1: module("(ROOT / 'README.md').read_text()\n"), S2: "def broken(:\n", "README.md": "x\n"}
         deps = ss.derive(str(self.tree(files)))
@@ -601,6 +616,7 @@ class RealTree(unittest.TestCase):
         result = self.select(("M", ".agents/skills/_shared/scripts/bounded_run.py"))
         self.assertEqual(["_shared", "issue-to-pr", "pr-ready", "pr-review-merge"], result["selection"])
         for suite in ("issue-batch-planner", "issue-filing"):
+            self.assertNotEqual("all", result["selection"])         # a substring test on the string "all" proves nothing
             self.assertNotIn(suite, result["selection"])
         self.assertTrue(any("bounded_run.py" in why for why in result["reasons"]["pr-ready"]), result["reasons"]["pr-ready"])
 
@@ -650,6 +666,23 @@ class RealTree(unittest.TestCase):
         for path in (".claude/zzz", ".agents/zzz/new.txt", ".codex/zzz.toml"):
             with self.subTest(path=path):
                 self.assertEqual(["_shared"], self.select(("A", path))["selection"])
+
+    def test_a_root_name_nothing_reads_selects_every_suite_whatever_it_looks_like(self):
+        # The derivation of `_shared` analyses skill_suites.py (its tests import it). Its own existence probe used to claim a
+        # path named like each string the analysed program handed it: `list`, `file`, `e`, and the glob `.*` for every root
+        # dotfile, so these changed paths selected `_shared` alone instead of every suite (the owner's rule: a path no suite
+        # has been seen to read selects the full suite).
+        for path in (".hidden-unknown-441", ".gitignore", ".golangci.yml", "list", "file", "e", "listing", "open", "test",
+                     "t.T.test_x", "unknown.dat", ".unknown/x"):
+            with self.subTest(path=path):
+                for status in ("A", "M"):
+                    result = self.select((status, path))
+                    self.assertEqual("all", result["selection"])
+                    self.assertIn(path, result["reason"])
+        for suite, info in self.deps.items():
+            self.assertEqual([], [g for g in info["globs"] if g == ".*"], suite)
+        # control: the real reads of that module stay followed, so a new path under the three trees is still `_shared`'s
+        self.assertEqual(["_shared"], self.select(("A", ".agents/zzz/new.txt"))["selection"])
 
     # -- the oracle ---------------------------------------------------------------------------------------------------
 
@@ -890,11 +923,14 @@ class RuntimeGapTests(Tree):
         self.assertEqual([], self.gaps("a", [observed("docs", kind="listing"), observed("internal/x/y", kind="listing"),
                                              observed("internal", kind="listing")]))
         found = self.gaps("a", [observed("scripts", kind="listing"), observed("docs/deeper", kind="listing"),
-                                observed(".", kind="listing")])
-        # `scripts/x.py` is a file source, not a glob; `docs/*.md` lists `docs` and does not descend into docs/deeper; no
-        # glob lists the root
-        self.assertEqual([("listing", "."), ("listing", "docs/deeper"), ("listing", "scripts")],
-                         [(g["kind"], g["path"]) for g in found])
+                                observed(".", kind="listing")])      # the root is above `docs` and `internal`: covered
+        # `scripts/x.py` is a file source, not a glob; `docs/*.md` lists `docs` and does not descend into docs/deeper
+        self.assertEqual([("listing", "docs/deeper"), ("listing", "scripts")], [(g["kind"], g["path"]) for g in found])
+        # the directories above a listed one are covered (Python 3.12's pathlib lists them too), a sibling is not
+        docs_only = dict(self.DEPS, a=sources(globs=["docs/*.md", "a/b/*.py"]))
+        self.assertEqual(["other"], [g["path"] for g in self.gaps("a", [
+            observed(".", kind="listing"), observed("a", kind="listing"), observed("a/b", kind="listing"),
+            observed("other", kind="listing")], deps=docs_only)])
         # a recursive glob at the root lists every directory, one level lists only the root, and `a/*/b.py` lists `a` alone
         recursive = dict(self.DEPS, a=sources(globs=["**/*.md"]))
         self.assertEqual([], self.gaps("a", [observed("anything/at/all", kind="listing"), observed(".", kind="listing")],
@@ -1075,13 +1111,16 @@ class InRunOracleControls(unittest.TestCase):
         raw = recorded_run("issue-batch-planner", "test_file_umbrella")
         self.assert_reported("issue-batch-planner", raw, path, ".agents/skills/issue-batch-planner/tests/test_file_umbrella.py")
         narrowed = self.selection_without_the_edge("issue-batch-planner", path)
+        self.assertNotEqual("all", narrowed)
         self.assertNotIn("issue-batch-planner", narrowed)
         self.assertIn("issue-batch-planner", ss.select([("M", path)], self.deps)["selection"])
 
     def test_nc_d_a_read_in_a_test_body_of_issue_filing(self):
         raw = recorded_run("issue-filing", "test_contract")
         self.assert_reported("issue-filing", raw, "AGENTS.md", ".agents/skills/issue-filing/tests/test_contract.py")
-        self.assertNotIn("issue-filing", self.selection_without_the_edge("issue-filing", "AGENTS.md"))
+        # no other suite reads AGENTS.md, so the dropped edge leaves an unknown path: every suite (the former assertNotIn on
+        # this value passed vacuously, as a substring test on the string "all")
+        self.assertEqual("all", self.selection_without_the_edge("issue-filing", "AGENTS.md"))
         self.assertIn("issue-filing", ss.select([("M", "AGENTS.md")], self.deps)["selection"])
 
     def test_nc_e_the_wide_site_covers_the_go_test_files_only_while_the_derivation_reports_it(self):
@@ -1121,10 +1160,26 @@ class InRunOracleControls(unittest.TestCase):
         self.assertTrue(any(r[0] == "open" and r[1].endswith("AGENTS.md") and r[4] == "test" for r in raw))
 
 
+def installs_unconditionally(source):
+    """Whether a module calls `suite_reads.install()` as a statement of its own at the top level (not in an `if`, a function, a
+    string or a comment, which a text search would accept)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in tree.body:
+        call = node.value if isinstance(node, ast.Expr) else None
+        if (isinstance(call, ast.Call) and not call.args and not call.keywords and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "install" and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "suite_reads"):
+            return True
+    return False
+
+
 def suite_reads_problems(skills_dir, deps):
     """What is wrong with the per-suite recorder modules of every suite of `deps` under `skills_dir` (empty when all is well):
-    a suite needs `test_000_suite_reads_<id>.py` (installs the recorder) sorting before, and `test_zzz_suite_reads_<id>.py`
-    (the check) sorting after, every other test module, and each names its own suite."""
+    a suite needs `test_000_suite_reads_<id>.py` (installs the recorder with an unconditional top-level call) sorting before,
+    and `test_zzz_suite_reads_<id>.py` (the check) sorting after, every other test module, and each names its own suite."""
     problems = []
     for suite in sorted(deps):
         ident = suite.lstrip("_").replace("-", "_")
@@ -1133,13 +1188,30 @@ def suite_reads_problems(skills_dir, deps):
         first, last = f"test_000_suite_reads_{ident}.py", f"test_zzz_suite_reads_{ident}.py"
         if first not in names or names[0] != first:
             problems.append(f"{suite}: {first} must exist and sort first")
-        elif "suite_reads.install()" not in (tests / first).read_text():
-            problems.append(f"{suite}: {first} does not install the recorder")
+        elif not installs_unconditionally((tests / first).read_text()):
+            problems.append(f"{suite}: {first} does not call suite_reads.install() as an unconditional top-level statement")
         if last not in names or names[-1] != last:
             problems.append(f"{suite}: {last} must exist and sort last")
         elif f'SUITE = "{suite}"' not in (tests / last).read_text() or "EndOfSuiteChecks" not in (tests / last).read_text():
             problems.append(f"{suite}: {last} does not run the check for {suite}")
     return problems
+
+
+ENDCHECK_CHILD = r"""
+import importlib.util, io, json, sys, unittest
+spec = importlib.util.spec_from_file_location("suite_reads", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+sys.modules["suite_reads"] = m
+spec.loader.exec_module(m)
+if sys.argv[3] == "installed":
+    m.install()
+class T(m.EndOfSuiteChecks, unittest.TestCase):
+    SUITE = "issue-filing"
+    THIS_MODULE = __name__
+    THIS_FILE = sys.argv[2]
+done = unittest.TextTestRunner(stream=io.StringIO()).run(unittest.defaultTestLoader.loadTestsFromTestCase(T))
+print(json.dumps({"run": done.testsRun, "bad": len(done.failures) + len(done.errors), "skipped": len(done.skipped)}))
+"""
 
 
 class SuiteReadsModuleTests(Tree):
@@ -1149,10 +1221,24 @@ class SuiteReadsModuleTests(Tree):
         deps = real_deps()
         self.assertEqual([], suite_reads_problems(REPO / SKILLS, deps))
 
+    def end_check(self, state):
+        done = subprocess.run([sys.executable, "-I", "-B", "-c", ENDCHECK_CHILD, str(HERE / "suite_reads.py"),
+                               str(REPO / SKILLS / "issue-filing" / "tests" / "test_zzz_suite_reads_issue_filing.py"), state],
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, done.returncode, done.stderr)
+        return json.loads(done.stdout.splitlines()[-1])
+
+    def test_a_check_with_no_recorder_installed_fails_instead_of_skipping(self):
+        # the review's mutation (`pass  # suite_reads.install()`): the recorder never installs, no test is wrapped, and the check
+        # used to see "no other test ran" and skip all three tests, so the suite passed with nothing recorded
+        self.assertEqual({"run": 3, "bad": 3, "skipped": 0}, self.end_check("not installed"))
+        # control: with the recorder installed and no other test of the suite run, the check skips (a partial run), not fails
+        self.assertEqual({"run": 3, "bad": 0, "skipped": 3}, self.end_check("installed"))
+
     def test_a_missing_misnamed_or_misplaced_module_is_reported(self):
         files = {}
         for suite in ("s1", "s2"):
-            files[f".agents/skills/{suite}/tests/test_000_suite_reads_{suite}.py"] = "suite_reads.install()\n"
+            files[f".agents/skills/{suite}/tests/test_000_suite_reads_{suite}.py"] = "import x\nsuite_reads.install()\n"
             files[f".agents/skills/{suite}/tests/test_zzz_suite_reads_{suite}.py"] = (
                 f'class T(suite_reads.EndOfSuiteChecks):\n    SUITE = "{suite}"\n')
             files[f".agents/skills/{suite}/tests/test_mid.py"] = "pass\n"
@@ -1167,6 +1253,16 @@ class SuiteReadsModuleTests(Tree):
             "not last": lambda: (skills / "s1/tests/test_zzz_suite_reads_s1.py").write_text("x") or
                                (skills / "s1/tests/test_zzzz.py").write_text("pass\n"),
             "no install": lambda: (skills / "s1/tests/test_000_suite_reads_s1.py").write_text("pass\n"),
+            "install commented out": lambda: (skills / "s1/tests/test_000_suite_reads_s1.py").write_text(
+                "pass  # suite_reads.install()\n"),
+            "install in a string": lambda: (skills / "s1/tests/test_000_suite_reads_s1.py").write_text(
+                "X = 'suite_reads.install()'\n"),
+            "install under an if": lambda: (skills / "s1/tests/test_000_suite_reads_s1.py").write_text(
+                "if False:\n    suite_reads.install()\n"),
+            "install in a function": lambda: (skills / "s1/tests/test_000_suite_reads_s1.py").write_text(
+                "def go():\n    suite_reads.install()\n"),
+            "install of another object": lambda: (skills / "s1/tests/test_000_suite_reads_s1.py").write_text(
+                "other.install()\n"),
             "another suite": lambda: (skills / "s1/tests/test_zzz_suite_reads_s1.py").write_text(
                 'class T(suite_reads.EndOfSuiteChecks):\n    SUITE = "s2"\n'),
         }

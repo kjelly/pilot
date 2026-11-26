@@ -80,7 +80,8 @@ the plan JSON next to the receipt, for the reviewers. Each suite's last test mod
 that every tracked file or directory the suite's own run read is a source the derivation names (a read from a test
 body, `setUp` or `setUpClass` included); it does not see descendant processes, existence probes, branches that
 did not run or data beyond that run. CI's `Skill and repository contracts`
-job still runs the full `make skill-test`, and Ready requires it. A CI failure in a suite the
+job skips `make skill-test` for a change in its `docs` profile and otherwise runs the full `make skill-test`; Ready
+requires the job's result. A CI failure in a suite the
 plan left out is a defect of the selection: repair the selection and the suite, and never
 list it as an `unrelated_failing_checks` entry. `pr-review-merge` ignores the selection: it
 runs the full suite on its own candidate. This section governs the Coder and the receipt of

@@ -89,7 +89,13 @@ SAYS = {
         "真實擷取的輸出等審查後才 push",
         "一輪交給一個 Coder（rule 10）",
     ),
-    "pr-ready/PROJECT-CHANGES.md": ("kjelly/pilot#432 items 2, 1 and 6", "2026-11-23, kjelly/pilot#430"),
+    "pr-ready/PROJECT-CHANGES.md": (
+        "kjelly/pilot#432 items 2, 1 and 6", "2026-11-23, kjelly/pilot#430",
+        "pr-review-merge's instructions and gate are unchanged and it still runs the full suite on its own candidate; its "
+        "tests/ gained the two recorder modules (test_000_suite_reads_pr_review_merge.py, "
+        "test_zzz_suite_reads_pr_review_merge.py), so its suite now runs the in-run check too"),
+    "pr-review-merge/PROJECT-CHANGES.md": ("kjelly/pilot#430", "Instructions, scripts and gate are unchanged; the suite still "
+                                           "runs in full on this skill's own candidate"),
     "issue-to-pr/SKILL.md": (
         "Only GATE-PASS for the currently checked-out HEAD authorizes the next stage: it authorizes the first push and "
         "the PR; a repair commit on an existing Draft is pushed after Root's read and scan (section 4)",
@@ -148,7 +154,8 @@ SAYS = {
         "a deleted, renamed or type-changed path, a path that is not canonical, and any error while deriving the suites, "
         "select all of them (the plain make skill-test); only an empty diff plans no skill command",
         "Keep the plan JSON next to the receipt, for the reviewers",
-        "CI's Skill and repository contracts job still runs the full make skill-test, and Ready requires it",
+        "CI's Skill and repository contracts job skips make skill-test for a change in its docs profile and otherwise runs "
+        "the full make skill-test; Ready requires the job's result",
         "A CI failure in a suite the plan left out is a defect of the selection: repair the selection and the suite, and "
         "never list it as an unrelated_failing_checks entry",
         "pr-review-merge ignores the selection: it runs the full suite on its own candidate",
@@ -165,6 +172,8 @@ STALE = (
     "Skill changes add make skill-test.",                                  # local-validation.md: the suite, no "once"
     "A narrower selection of suites is kjelly/pilot#430; until it changes this text the receipt is the whole suite",
     "No gate is weaker: that receipt still runs every suite on the exact HEAD the gate checks",
+    "CI's Skill and repository contracts job still runs the full make skill-test, and Ready requires it",
+    "pr-review-merge is unchanged and runs the full suite on its own candidate",
     "A deleted, renamed or unattributed path, and any error while deriving the suites, select all of them",
     "Skill changes add make skill-test (once, as the receipt: below).",
     "When the diff touches .agents/skills, the Coder's envelope carries a validation item",
