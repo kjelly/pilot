@@ -348,7 +348,11 @@ jobs:
     name: Skill and repository contracts
     needs: changes
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Slowest observed run: 909 s (run 45750335818, 2026-11-26, cancelled at the old 15m, so a lower
+    # bound; 109 runs of 2026-11-17..26 took 292..909 s). The slowest observed run stays within 70% of
+    # this budget (TestCIJobBudgetsCoverTheSlowestObservedRun). To shorten or split the job, see #432
+    # items 5 and 7.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
