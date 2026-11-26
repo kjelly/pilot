@@ -236,7 +236,9 @@ func runHotfixPlaybook(t *testing.T, hosts []hotfixHost, registry string, number
 		"ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False",
 		"ANSIBLE_INVENTORY_UNPARSED_WARNING=False", "ANSIBLE_DEPRECATION_WARNINGS=False",
 		// ANSIBLE_HOME stays the caller's: ansible-core 2.19.x resolves the json callback to ansible.posix.json,
-		// and the collections CI installs live under it (an isolated home cannot load the callback).
+		// which lives in a collection. CI installs the collections system-wide (/usr/share/ansible/collections,
+		// which an isolated home does not hide); a machine that has them only under its default home needs the
+		// caller's home, because an isolated one cannot load the callback.
 		"ANSIBLE_LOCAL_TEMP="+filepath.Join(root, "ansible-local"),
 		"ANSIBLE_CACHE_PLUGIN=memory", "ANSIBLE_GATHER_SUBSET=min", "ANSIBLE_FORKS=1")
 	write(filepath.Join(root, "ansible.cfg"), "[defaults]\nhost_key_checking = False\n", 0o644)
