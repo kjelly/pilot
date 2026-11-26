@@ -299,11 +299,17 @@ the same tmux server and still satisfy the five conditions with the same session
 window, start directory and start command; its process must be the one that was
 listed (a pane started again with `respawn-pane` is not closed), and a pane that
 was dead must not have come alive; it is read again and must still be dead, idle,
-or busy with `--include-busy`. `can't find pane` and a server that is gone count as
-closed; a pane ID that another tmux server answers for is left open. It never
-closes the pane the command runs in (`$TMUX_PANE` on the same server) nor a pane
-whose process is above the command's own (read from `/proc`; where it cannot be
-read, only dead panes are closed).
+or busy with `--include-busy`. The last read is the one that is sent with
+`kill-pane`: it shows the pane's dead flag, copy mode, foreground command and
+process, and they must be the ones the decision to close it rested on. A pane
+that was started again (a new process), put in copy mode or given another
+foreground command in the meantime is `left open: it changed right before it was
+to be closed`, is not counted as closed, and still keeps the next run from
+starting. `can't find pane` and a server that is gone count as closed; a pane ID
+that another tmux server answers for is left open. It never closes the pane the
+command runs in (`$TMUX_PANE` on the same server) nor a pane whose process is
+above the command's own (read from `/proc`; where it cannot be read, only dead
+panes are closed).
 
 The listing says what goes with a pane: the window when it is the window's last
 pane; the session when it is the session's last pane, which detaches a client
@@ -362,7 +368,11 @@ progress only: the next run can still refuse for another reason, such as an
 ### Limits
 
 `--clean` was verified on tmux 3.8 and on tmux 3.4. It closes a live pane only
-where it can read `/proc` (Linux); elsewhere it closes dead panes. tmux 3.4
+where it can read `/proc` (Linux); elsewhere it closes dead panes. The read that
+is sent with `kill-pane` and the `kill-pane` itself are two tmux commands (the
+runner never sends `if-shell`, which could make them one): what happens to the
+pane in the milliseconds between them is not covered, so a pane that is started
+again or put in copy mode in that gap is still closed. tmux 3.4
 records a `$` in a directory differently from 3.8, so a checkout whose path holds
 one is not recognised there (its panes are listed as not the runner's), and it
 does not quote a newline in a directory name, so a name made to look like a row

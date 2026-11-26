@@ -191,6 +191,13 @@ def respawn(state, pane):
     return True
 
 
+def set_status(state, pane, status):
+    """The operator changes what `pane` shows of itself, `status` being `dead|in_mode|foreground command` (put in copy mode: `0|1|claude`;
+    a shell in the foreground: `0|0|bash`), from now on."""
+    state["panes"].setdefault(pane, {})["status"] = [status]
+    return True
+
+
 def reborn(state, session, window, cwd, pane, command=""):
     """The operator kills the server and starts another one, whose first session is `session`, whose first pane has the ID `pane`
     (one the old server had: a new server numbers its panes again) and was started in `cwd` with the start command `command`
@@ -292,7 +299,7 @@ if not PATH:
     sys.exit(97)
 # The formats the runner uses; the fake answers these and refuses any other loudly.
 PANE_FORMAT = "#{pane_id}|#{pid}|#{start_time}"
-READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pid}|#{start_time}"
+READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pane_pid}|#{pid}|#{start_time}"
 ''' + "LIST_FORMAT = " + repr(LIST_FORMAT) + "\nSOCKET = " + repr(SOCKET) + "\nNO_SERVER_TEXT = " + repr(NO_SERVER) + MODEL + r'''
 
 def load():
@@ -474,8 +481,10 @@ elif cmd == "display-message":
     if pane_known(state, name):
         pane = pane_of(state, name)
         fields = take(pane["status"], "0|0|claude")
+        # The pane's own process (never the server's): none for a dead pane, as tmux 3.8 prints it
+        fields += "|" + ("" if fields.startswith("1|") else str(pane_pid(state, name)))
     else:
-        fields = "||"  # tmux answers a pane it does not have with empty fields and exit status 0
+        fields = "|||"  # tmux answers a pane it does not have with empty fields and exit status 0
     out = fields + "|" + server_identity(state) + "\n"
 elif cmd == "capture-pane":
     need_server(state)

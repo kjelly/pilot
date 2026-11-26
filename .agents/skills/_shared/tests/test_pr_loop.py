@@ -2015,6 +2015,38 @@ class ImportsTests(unittest.TestCase):
             with self.subTest(case=case):
                 self.assertIn(expected, "; ".join(self.tmux_calls(good + extra)[1]))
 
+    # The invariant of `--clean` (kjelly/pilot#442, #443): a pane is killed only after the read that gates the kill showed what
+    # the decision rested on (`close_pane(..., expect)`). That holds only while every kill-pane is sent by `close_pane`.
+    @classmethod
+    def kill_pane_sites(cls, source):
+        """The functions (`<module>` for a call outside any) that name the tmux subcommand `kill-pane` as a string, as a call of
+        tmux or in any other way (a variable that holds it, a table)."""
+        found = []
+
+        def visit(node, where):
+            for child in ast.iter_child_nodes(node):
+                here = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else where
+                if isinstance(child, ast.Constant) and child.value == "kill-pane":
+                    found.append(here)
+                visit(child, here)
+        visit(ast.parse(source), "<module>")
+        return sorted(found)
+
+    def test_every_kill_pane_is_sent_by_close_pane_which_checks_what_the_decision_rested_on(self):
+        self.assertEqual(["close_pane"], self.kill_pane_sites(self.SOURCE), "one place, the one that takes `expect`")
+        good = "def close_pane(pane, server, expect=None):\n    run(['tmux', 'kill-pane', '-t', pane])\n"
+        self.assertEqual(["close_pane"], self.kill_pane_sites(good), "control: what the runner does is accepted")
+        for case, extra in (("another function", "def close(self, pane):\n    run(['tmux', 'kill-pane', '-t', pane])\n"),
+                            ("a method of the cleaner", "class Clean:\n    def done(self, pane):\n"
+                                                        "        command('tmux', 'kill-pane', '-t', pane)\n"),
+                            ("outside any function", "run(['tmux', 'kill-pane', '-t', pane])\n"),
+                            ("a variable that holds it", "def finish(pane):\n    verb = 'kill-pane'\n    run(['tmux', verb])\n"),
+                            ("a table", "KILL = {'pane': 'kill-pane'}\n"),
+                            ("a nested function of close_pane", "def close_pane(p):\n    def again():\n        run(['tmux', "
+                                                                "'kill-pane'])\n")):
+            with self.subTest(case=case):
+                self.assertGreater(len(self.kill_pane_sites(good + extra)), 1, "a second place that kills a pane is found")
+
     def test_the_task_directory_is_named_once_in_the_shared_module(self):
         tree = ast.parse(self.SOURCE)
         imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
@@ -2108,6 +2140,9 @@ class DocumentationTests(unittest.TestCase):
                 "at least a second apart", "Busy panes are closed only with `--include-busy`",
                 "each with `kill-pane` on its ID and never a window or a session",
                 "a pane started again with `respawn-pane` is not closed", "It never closes the pane the command runs in",
+                # #443: the read that comes with `kill-pane` must show what the decision rested on, and the gap that stays
+                "is sent with `kill-pane`", "left open: it changed right before it was to be closed",
+                "the runner never sends `if-shell`", "put in copy mode in that gap is still closed",
                 "the lock is held by this run", "never a recursive delete", "do not paste a listing into GitHub or a chat")
     # What DOC says about --phase-timeout: the default the runner has (read from the code and spelled out) and why
     PHASE_TIMEOUT_SAYS = (f"defaults to {pr_loop.PHASE_TIMEOUT} seconds (4 hours)", "defaults to 14400 seconds (4 hours)",
@@ -2122,6 +2157,7 @@ class DocumentationTests(unittest.TestCase):
                       "still that pane on the same tmux server",
                       "`--clean --yes` takes the checkout's lock and closes the dead and idle panes",
                       "it never closes the pane the command itself runs in", "It never touches the git checkout",
+                      "put in copy mode or given another foreground command since it was judged is left open",
                       "`--remove-task-dirs` removes the task directories of finished runs")
 
     @staticmethod
@@ -3066,6 +3102,22 @@ class CloseTests(TmuxCase):
         self.env.update_tmux(answers={"kill-pane": [{"rc": 1, "stderr": NO_SERVER}]})
         agent.close()  # the server went in those milliseconds: the pane is as gone as it can be
 
+    def test_the_agent_of_a_run_is_closed_whatever_it_became_right_before_the_kill(self):
+        # The negative control of `--clean`'s check (`close_pane(..., expect)`): a run closes its OWN agent in whatever state
+        # it is in (started again, in copy mode, a shell in the foreground, dead), so its probe checks the server and the pane
+        # only; `--clean` compares the state it judged on, and the two are not the same thing.
+        for case, change in (("started again", {"call": "respawn", "args": ["%1"]}),
+                             ("put in copy mode", {"call": "set_status", "args": ["%1", "0|1|claude"]}),
+                             ("a shell in the foreground", {"call": "set_status", "args": ["%1", "0|0|bash"]}),
+                             ("dead", {"call": "set_status", "args": ["%1", "1|0|claude"]})):
+            with self.subTest(case=case):
+                self.setUp()
+                agent = self.agent()
+                self.env.update_tmux(before={"display-message": [change]})
+                agent.close()
+                self.assertEqual([["kill-pane", "-t", "%1"]], self.calls("kill-pane"))
+                self.assertEqual({}, self.env.live())
+
     def test_only_a_pane_that_is_gone_counts_as_closed(self):
         agent = self.agent()
         for case, answer in (("another pane", {"rc": 1, "stderr": "can't find pane: %9"}),
@@ -3077,6 +3129,53 @@ class CloseTests(TmuxCase):
                 with self.assertRaisesRegex(pr_loop.Stop, rf"^tmux kill-pane failed \({answer['rc']}\): "
                                                           f"{re.escape(answer['stderr'])}$"):
                     agent.close()
+
+
+class ProbePaneTests(unittest.TestCase):
+    """`probe_pane` over the text tmux 3.8 prints for READ_FORMAT (`dead|in_mode|command|pane process|server PID|start time`,
+    captured on a private server: a dead pane has an EMPTY pane process, a pane the server has not got has four empty fields),
+    fed to it as stdout."""
+    SERVER = ("4007", "1700000013")
+
+    def probe(self, text, server=SERVER):
+        done = SimpleNamespace(returncode=0, stdout=text + "\n", stderr="")
+        with patch.object(pr_loop, "run", lambda args, **kwargs: done):
+            return pr_loop.probe_pane("%1", server)
+
+    def test_what_tmux_prints_is_read_as_the_state_of_the_pane_with_its_own_process(self):
+        for text, expected in (
+                ("0|0|claude|2101|4007|1700000013", ("ours", (False, False, "claude", "2101"))),
+                ("0|1|claude|2101|4007|1700000013", ("ours", (False, True, "claude", "2101"))),
+                ("1|0|claude||4007|1700000013", ("ours", (True, False, "claude", ""))),  # tmux 3.8: a dead pane has no process
+                ("1|0|claude|2101|4007|1700000013", ("ours", (True, False, "claude", "2101"))),  # tmux 3.4: the one it had
+                ("0|0|-claude|2101|4007|1700000013", ("ours", (False, False, "claude", "2101"))),
+                ("0|0||2101|4007|1700000013", ("ours", (False, False, "", "2101"))),
+                ("||||4007|1700000013", ("gone", None)),
+                ("0|0|claude|2101|4008|1700000013", ("other server", None)),
+                ("0|0|claude|2101|4007|1700000014", ("other server", None)),
+                ("||||4008|1700000013", ("other server", None))):
+            with self.subTest(text=text):
+                self.assertEqual(expected, self.probe(text))
+
+    def test_text_that_is_not_that_shape_is_a_stop_and_the_pane_process_is_never_the_servers(self):
+        for text in ("0|0|claude|4007|1700000013", "0|0|claude|2101|4007|1700000013|x", "0|0|claude|21a1|4007|1700000013",
+                     "0|0|claude|-5|4007|1700000013", "0|0|claude| 5|4007|1700000013", "0|0|claude|2101||1700000013",
+                     "0|0|claude|2101|4007|", "0|0|claude|2101|x|1700000013", "|||2101|4007|1700000013",
+                     "2|0|claude|2101|4007|1700000013", "0|2|claude|2101|4007|1700000013", "garbage", ""):
+            with self.subTest(text=text), self.assertRaisesRegex(pr_loop.Stop, "tmux could not read pane %1"):
+                self.probe(text)
+        # a five-field answer, the old shape, must not be taken for a pane whose process is the server's PID
+        with self.assertRaises(pr_loop.Stop):
+            self.probe("0|0|claude|4007|1700000013")
+
+    def test_an_agents_status_is_still_the_three_fields_its_readers_take_apart(self):
+        env = FakeEnv(self)
+        told = patch.object(pr_loop, "tell", lambda *args: None)
+        told.start()
+        self.addCleanup(told.stop)
+        agent = pr_loop.Agent("claude", SimpleNamespace(path=env.root, session=pr_loop.session_name(env.root)), 7, "draft")
+        self.assertEqual((False, False, "claude"), agent.status())
+        self.assertEqual(("ours", (False, False, "claude", "1000001010")), agent.probe(), "the probe has the pane process too")
 
 
 class ServerIdentityTests(TmuxCase):
@@ -3308,9 +3407,19 @@ class FakeTmuxTests(unittest.TestCase):
     def test_a_pane_it_does_not_have_is_empty_fields_with_the_servers_identity_and_status_0(self):
         self.session("S")
         identity = self.env.server()
-        self.assertEqual((0, f"0|0|claude|{identity}\n", ""), self.read("%1"))
-        self.assertEqual((0, f"|||{identity}\n", ""), self.read("%77"),
+        self.assertEqual((0, f"0|0|claude|1000001010|{identity}\n", ""), self.read("%1"))
+        self.assertEqual((0, f"||||{identity}\n", ""), self.read("%77"),
                          "tmux 3.8 answers a pane it has not got with empty pane fields, exit status 0, server fields filled")
+
+    def test_a_pane_is_read_with_its_own_process_and_a_dead_one_has_none(self):
+        self.session("S")
+        identity = self.env.server()
+        self.env.set_pane("%1", status=["1|0|sleep"])
+        self.assertEqual((0, f"1|0|sleep||{identity}\n", ""), self.read("%1"), "tmux 3.8: a dead pane has no process")
+        self.env.operator("set_status", "%1", "0|1|claude")
+        self.assertEqual((0, f"0|1|claude|1000001010|{identity}\n", ""), self.read("%1"), "the pane's, never the server's")
+        self.env.operator("respawn", "%1")
+        self.assertEqual((0, f"0|0|claude|1000001011|{identity}\n", ""), self.read("%1"), "another process: another number")
 
     def test_the_server_goes_with_its_last_session_and_the_next_one_is_another_server_that_numbers_its_panes_again(self):
         self.session("S")
@@ -3325,7 +3434,7 @@ class FakeTmuxTests(unittest.TestCase):
         self.assertNotEqual(first, second, "another PID and start time")
         self.assertEqual((0, f"%1|{second}\n"), (rc, out), "and the pane IDs start again: %1 is another pane")
         self.assertEqual([], self.env.tmux()["panes"]["%1"].get("enter", []), "with nothing of the old pane's")
-        self.assertEqual((0, f"0|0|claude|{second}\n", ""), self.read("%1"))
+        self.assertEqual((0, f"0|0|claude|1000002010|{second}\n", ""), self.read("%1"))
 
     def test_a_server_that_exits_takes_its_buffers_with_it(self):
         self.session("S")
@@ -7329,6 +7438,86 @@ class CleanClosingTests(CleanCase):
         self.assertEqual([], self.kills(), "a pane that was dead when it was listed and runs again is not closed")
         self.assertIn("left open: it was dead when it was listed and runs again", self.line(lines, dead.pane))
 
+    # ---- rule: what it was judged on is what the read that comes with the kill shows ------------------------------------------
+    CHANGED = "left open: it changed right before it was to be closed"
+    # The calls of a run up to the read that comes with `kill-pane`: the listing, the (second) read of the screen, the listing
+    # right before, the read of the screen, and that read. A dead pane is not read again; a busy one has one read of its screen.
+    DEAD_READ = ["list-panes", "capture-pane", "list-panes", "display-message"]
+    BUSY_READ = ["list-panes", "capture-pane", "list-panes", "capture-pane", "display-message"]
+    IDLE_READ = ["list-panes", "capture-pane", "capture-pane", "list-panes", "capture-pane", "display-message"]
+    DEAD, IDLE, BUSY = {"status": ["1|0|claude"]}, {}, {"screens": [CleanCase.WORKING]}
+    # (the pane, the calls up to the read, how its line starts, the flags that make it a pane to close)
+    SHAPES = {"dead": (DEAD, DEAD_READ, "dead, claude", {}),
+              "dead, busy ones asked for": (DEAD, DEAD_READ, "dead, claude", {"include_busy": True}),
+              "idle": (IDLE, IDLE_READ, "alive, idle (at its prompt), claude", {}),
+              "idle, busy ones asked for": (IDLE, IDLE_READ, "alive, idle (at its prompt), claude", {"include_busy": True}),
+              "busy, busy ones asked for": (BUSY, BUSY_READ, "alive, busy (working), claude", {"include_busy": True})}
+
+    def at_the_last_read(self, shape, change):
+        """`--clean --yes` over one pane of that shape, with `change` (a function of the model and its arguments after the pane, or
+        None) done to the pane at the read that comes with `kill-pane` (the fake's hook of the next `display-message`: the only
+        one of the run, which the calls prove). `(pane, the lines, how its line starts)`."""
+        setup, read, what, flags = self.SHAPES[shape]
+        agent = self.agent(7, "draft", **setup)
+        self.env.keeper()
+        self.env.update_tmux(log=[], before={"display-message": [None if change is None else
+                                                                 {"call": change[0], "args": [agent.pane, *change[1:]]}]})
+        code, lines = self.clean(yes=True, **flags)
+        self.assertEqual(0, code)
+        calls = [call[0] for call in self.env.tmux_calls()]
+        self.assertEqual(read, calls[:len(read)], "the change came at the one read right before the kill-pane, after the listing")
+        return agent.pane, lines, what, calls[len(read):]
+
+    def test_a_pane_that_changes_right_before_it_is_closed_is_left_open_whatever_it_became(self):
+        for case, shape, change in (
+                ("a dead pane that is started again", "dead", ("respawn",)),
+                ("a dead pane that is started again, busy ones asked for", "dead, busy ones asked for", ("respawn",)),
+                ("a dead pane that comes alive with a shell", "dead", ("set_status", "0|0|bash")),
+                ("an idle pane that is started again: only its process is another", "idle", ("respawn",)),
+                ("an idle pane that is started again, busy ones asked for", "idle, busy ones asked for", ("respawn",)),
+                ("an idle pane that is put in copy mode", "idle", ("set_status", "0|1|claude")),
+                ("an idle pane whose foreground becomes a shell", "idle", ("set_status", "0|0|bash")),
+                ("a busy pane that is started again, busy ones asked for", "busy, busy ones asked for", ("respawn",))):
+            with self.subTest(case=case):
+                self.setUp()
+                pane, lines, what, rest = self.at_the_last_read(shape, change)
+                self.assertEqual(["list-panes"], rest, "no kill-pane: it is not the pane that was judged; the one list at the end")
+                self.assertEqual([], self.kills())
+                self.assertEqual(f"pane {pane} window 7-draft: {what}; {self.CHANGED}", self.line(lines, pane))
+                self.assertEqual(f"closed 0 panes and removed 0 task directories; the next run would still be refused ({pane})",
+                                 lines[-1], "it is not counted as closed, and it is alive: it keeps the next run from starting")
+                self.assertEqual({self.session: ["7-draft"], "operator": ["keeper"]}, self.env.live(), "the pane is still there")
+
+    def test_the_same_runs_close_a_pane_that_does_not_change(self):
+        for shape, why in (("dead", "it is dead"), ("dead, busy ones asked for", "it is dead"), ("idle", "it is idle"),
+                           ("idle, busy ones asked for", "it is idle"),
+                           ("busy, busy ones asked for", "it is busy, and --include-busy was given")):
+            with self.subTest(shape=shape):
+                self.setUp()
+                pane, lines, what, rest = self.at_the_last_read(shape, None)  # the hook is there and does nothing
+                self.assertEqual(["kill-pane", "list-panes"], rest)
+                self.assertEqual([pane], self.kills())
+                self.assertEqual(f"pane {pane} window 7-draft: {what}; closed: {why}",
+                                 self.line(lines, pane).split("; closing it ends")[0])
+                self.assertTrue(lines[-1].startswith("closed 1 panes and removed 0 task directories"))
+
+    def test_a_pane_that_changed_right_before_it_was_to_be_closed_is_judged_again_by_the_next_run(self):
+        pane, lines, what, rest = self.at_the_last_read("dead", ("respawn",))
+        self.assertEqual([], self.kills())
+        code, lines = self.clean(yes=True)  # nothing changes now: it is alive, at its prompt and the same as a second ago
+        self.assertEqual((0, [pane]), (code, self.kills()))
+        self.assertIn("closed: it is idle", self.line(lines, pane))
+
+    def test_a_change_after_the_read_that_comes_with_the_kill_is_not_seen_and_that_is_the_documented_limit(self):
+        # The read and `kill-pane` are two tmux commands, and the runner never sends `if-shell`: the milliseconds between them
+        # are not covered (pr-loop.md, Limits). This pins that it is that gap and no wider.
+        agent = self.agent(7, "draft")
+        self.env.keeper()
+        self.env.update_tmux(before={"kill-pane": [{"call": "respawn", "args": [agent.pane]}]})
+        code, lines = self.clean(yes=True)
+        self.assertEqual([agent.pane], self.kills())
+        self.assertIn("closed: it is idle", self.line(lines, agent.pane))
+
     def test_a_pane_that_was_renamed_after_it_was_listed_is_left_and_one_that_vanishes_while_it_is_read_counts_as_closed(self):
         alive = self.agent(7, "draft", screens=[self.WORKING])
         self.env.keeper()
@@ -7566,7 +7755,7 @@ class CleanTaskDirectoryTests(CleanCase):
         self.env.update_tmux(lock_path=str(lock))  # the fake tmux tries to take the lock when a pane is made
         seen = []
         real = pr_loop.close_pane
-        with patch.object(pr_loop, "close_pane", lambda *a: seen.append(pr_loop.lock_state(lock)) or real(*a)):
+        with patch.object(pr_loop, "close_pane", lambda *a, **k: seen.append(pr_loop.lock_state(lock)) or real(*a, **k)):
             self.clean(yes=True)
         self.assertEqual(["held by a running runner"], seen, "while a pane is closed, another runner would be refused")
         self.assertIsNone(pr_loop.lock_state(lock), "and when it has finished, it is free")

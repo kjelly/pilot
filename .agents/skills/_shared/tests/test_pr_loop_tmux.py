@@ -285,13 +285,15 @@ class RealTmuxServerIdentityTests(RealTmuxCase):
         pid, started = self.server()
         self.wait_for("the agent's script to reach sleep", lambda: self.tmux_ok(
             "display-message", "-p", "-t", agent.pane, "#{pane_current_command}") == "sleep")
-        self.assertEqual((0, f"0|0|sleep|{pid}|{started}\n", ""), self.tmux("display-message", "-p", "-t", agent.pane,
-                                                                            pr_loop.READ_FORMAT))
-        self.assertEqual((0, f"|||{pid}|{started}\n", ""), self.tmux("display-message", "-p", "-t", "%987", pr_loop.READ_FORMAT))
+        process = self.tmux_ok("display-message", "-p", "-t", agent.pane, "#{pane_pid}")
+        self.assertNotIn(process, ("", pid), "the pane's own process, not the server's")
+        self.assertEqual((0, f"0|0|sleep|{process}|{pid}|{started}\n", ""), self.tmux("display-message", "-p", "-t", agent.pane,
+                                                                                      pr_loop.READ_FORMAT))
+        self.assertEqual((0, f"||||{pid}|{started}\n", ""), self.tmux("display-message", "-p", "-t", "%987", pr_loop.READ_FORMAT))
         # The operator kills the session; the keeper keeps the server: the pane is gone on a server that is still there
         self.tmux_ok("kill-session", "-t", f"={checkout.session}")
-        self.assertEqual((0, f"|||{pid}|{started}\n", ""), self.tmux("display-message", "-p", "-t", agent.pane,
-                                                                    pr_loop.READ_FORMAT))
+        self.assertEqual((0, f"||||{pid}|{started}\n", ""), self.tmux("display-message", "-p", "-t", agent.pane,
+                                                                     pr_loop.READ_FORMAT))
         agent.close()
         with self.assertRaisesRegex(pr_loop.Stop, "is not the pane this agent was started in"):
             agent.status()
@@ -813,6 +815,158 @@ while True:
         self.assertEqual({split}, set(self.panes()), "the agent's pane is closed, and the split of yours is alive")
         self.assertEqual(f"closed 1 panes and removed 0 task directories; the next run would still be refused ({split})",
                          done.stdout.splitlines()[-1])
+
+
+class RealTmuxCloseGateTests(unittest.TestCase):
+    """`--clean --yes` closes a pane only when the read that comes with `kill-pane` shows what the decision to close it rested
+    on: the dead flag, copy mode, the foreground command and the pane's own process (kjelly/pilot#443). Real tmux, a private
+    server, `Clean` in-process. The operator's change is made synchronously, with the real tmux command, right BEFORE the first
+    `display-message` of the run (the one `close_pane` sends: for a dead pane, and for an alive one whose screen could be read,
+    it is the only one), and the test waits until the change has landed before that read goes out. The unchanged panes are the
+    controls: the same run closes them. What tmux does between that read and `kill-pane` is not covered (two tmux commands) and
+    is not tested here."""
+    repo = pr_loop.Repo.parse("acme/demo")
+    CHANGED = "left open: it changed right before it was to be closed"
+
+    def setUp(self):
+        if shutil.which("tmux") is None:
+            if os.environ.get("PR_LOOP_REQUIRE_TMUX") == "1":
+                self.fail("tmux is not installed and PR_LOOP_REQUIRE_TMUX=1: the real-tmux tests are required here")
+            self.skipTest("tmux is not installed")
+        self.env = FakeEnv(self, real_tmux=True)
+        self.env.write_agent("claude", RealTmuxCase.PROMPT_AGENT)
+        self.top = self.env.checkout
+        self.session = pr_loop.session_name(self.top)
+        self.told = []
+        for target, value in (("tell", self.told.append), ("SETTLE", 0.2)):
+            patcher = patch.object(pr_loop, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        with (self.top / ".git/info/exclude").open("a") as stream:
+            stream.write(f"/{pr_loop.TASK_DIR}/\n")
+
+    @staticmethod
+    def tmux(*args):
+        done = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        return done.returncode, done.stdout.strip(), done.stderr.strip()
+
+    def tmux_ok(self, *args):
+        rc, out, err = self.tmux(*args)
+        self.assertEqual(0, rc, f"tmux {' '.join(args)}: {err}")
+        return out
+
+    def wait_for(self, what, test, timeout=10.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            found = test()
+            if found:
+                return found
+            time.sleep(0.02)
+        self.fail(f"timed out waiting for {what}")
+
+    def field(self, pane, name):
+        return self.tmux_ok("display-message", "-p", "-t", pane, "#{" + name + "}")
+
+    def agent(self, foreground="sleep"):
+        """The runner's agent, the way a run starts it, at its prompt with `foreground` (by default `sleep`) in the foreground,
+        and its pane."""
+        agent = pr_loop.Agent("claude", SimpleNamespace(path=self.top, session=self.session), 7, "draft")
+        self.wait_for(f"the agent's script to reach {foreground}",
+                      lambda: self.field(agent.pane, "pane_current_command") == foreground)
+        self.wait_for("the prompt", lambda: "\u276f" in (pr_loop.capture_pane(agent.pane) or ""))
+        return agent.pane
+
+    def die(self, pane):
+        os.kill(int(self.field(pane, "pane_pid")), signal.SIGKILL)
+        self.wait_for("the pane to be dead", lambda: self.field(pane, "pane_dead") == "1")
+
+    def clean(self, change=None, wait=None):
+        """`--clean --yes` in-process. With `change`, it is run, and then `wait` is waited for, right before the first
+        `display-message`. `(lines, the display-message argvs, the tmux subcommands the run sent)`."""
+        real, sent, reads = pr_loop.run, [], []
+
+        def run(args, **kwargs):
+            if args[0] == "tmux":
+                sent.append(args[1])
+                if args[1] == "display-message":
+                    reads.append(list(args))
+                    if len(reads) == 1 and change is not None:
+                        change()
+                        self.wait_for("the change to have landed", wait)
+            return real(args, **kwargs)
+        args = SimpleNamespace(clean=True, yes=True, include_busy=False, remove_task_dirs=False, dry_run=False, pr=[],
+                               checkout=str(self.top), repo="acme/demo")
+        with patch.object(pr_loop, "run", run):
+            code = pr_loop.Clean(self.repo, args).run()
+        self.assertEqual(0, code)
+        return list(self.told), reads, sent
+
+    def alive(self, pane):
+        return pane in self.tmux_ok("list-panes", "-a", "-F", "#{pane_id}").split()
+
+    def left_open(self, pane, what, change, wait):
+        lines, reads, sent = self.clean(change, wait)
+        self.assertEqual([["tmux", "display-message", "-p", "-t", pane, pr_loop.READ_FORMAT]], reads,
+                         "the one read of the run: `close_pane`'s, which is where the change came")
+        self.assertNotIn("kill-pane", sent, "no kill-pane: it is not the pane that was judged")
+        self.assertIn(f"pane {pane} window 7-draft: {what}; {self.CHANGED}", lines)
+        self.assertEqual(f"closed 0 panes and removed 0 task directories; the next run would still be refused ({pane})", lines[-1])
+        self.assertTrue(self.alive(pane), "the pane is still there")
+
+    def closed(self, pane, what, why):
+        lines, reads, sent = self.clean()
+        self.assertEqual(1, len(reads))
+        self.assertEqual(1, sent.count("kill-pane"))
+        self.assertTrue(any(line.startswith(f"pane {pane} window 7-draft: {what}; closed: {why}") for line in lines), lines)
+        self.assertEqual("closed 1 panes and removed 0 task directories; the next run would start", lines[-1])
+        self.assertFalse(self.alive(pane))
+
+    def test_a_dead_pane_that_is_started_again_before_the_kill_is_left_open_and_one_that_is_not_is_closed(self):
+        pane = self.agent()
+        self.die(pane)
+        self.left_open(pane, "dead, claude", lambda: self.tmux_ok("respawn-pane", "-t", pane),
+                       lambda: self.field(pane, "pane_dead") == "0")
+
+    def test_a_dead_pane_that_stays_dead_is_closed(self):
+        pane = self.agent()
+        self.die(pane)
+        self.closed(pane, "dead, claude", "it is dead")
+
+    def test_an_idle_pane_that_is_started_again_before_the_kill_is_left_open_when_only_its_process_is_another(self):
+        pane = self.agent()
+        before = self.field(pane, "pane_pid")
+
+        def landed():
+            # the new process has another PID, and runs what the old one ran: its dead flag, copy mode and foreground command are
+            # what they were when the pane was judged, so the pane process is the only thing that tells the two apart
+            return self.field(pane, "pane_pid") != before and (
+                self.field(pane, "pane_current_command"), self.field(pane, "pane_dead"), self.field(pane, "pane_in_mode")
+            ) == ("sleep", "0", "0")
+        self.left_open(pane, "alive, idle (at its prompt), sleep", lambda: self.tmux_ok("respawn-pane", "-k", "-t", pane), landed)
+
+    def test_an_idle_pane_that_is_put_in_copy_mode_before_the_kill_is_left_open(self):
+        pane = self.agent()
+        self.left_open(pane, "alive, idle (at its prompt), sleep", lambda: self.tmux_ok("copy-mode", "-t", pane),
+                       lambda: self.field(pane, "pane_in_mode") == "1")
+
+    def test_an_idle_pane_whose_foreground_command_changes_before_the_kill_is_left_open_when_its_process_is_the_same(self):
+        # An agent that prints its prompt and, when told, `exec`s another program: the same process (`exec` keeps the PID), the
+        # same dead flag and copy mode, another foreground command.
+        trigger = self.env.root / "go"
+        self.env.write_agent("claude", "#!/usr/bin/env python3\nimport os, sys, time\nsys.stdout.write('\\u276f\\n')\n"
+                                       f"sys.stdout.flush()\nwhile not os.path.exists({str(trigger)!r}):\n    time.sleep(0.02)\n"
+                                       "os.execvp('sleep', ['sleep', '600'])\n")
+        pane = self.agent(foreground="python3")
+        before = self.field(pane, "pane_pid")
+
+        def landed():
+            return self.field(pane, "pane_current_command") == "sleep" and (
+                self.field(pane, "pane_pid"), self.field(pane, "pane_dead"), self.field(pane, "pane_in_mode")) == (before, "0", "0")
+        self.left_open(pane, "alive, idle (at its prompt), python3", trigger.touch, landed)
+
+    def test_an_idle_pane_that_stays_as_it_is_is_closed(self):
+        pane = self.agent()
+        self.closed(pane, "alive, idle (at its prompt), sleep", "it is idle")
 
 
 if __name__ == "__main__":

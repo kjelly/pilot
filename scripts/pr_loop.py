@@ -33,7 +33,8 @@ command `exec <absolute path>`), each dead, idle or busy, and the task directori
 runner's (another session, another window, a split of yours) is listed only when the next run would refuse because of
 it, and is left alone. It changes nothing, reads no GitHub and starts no agent. `--clean --yes` takes the checkout's
 lock and closes the dead and idle panes, one at a time with `kill-pane`, each after checking it again on the same tmux
-server; it never closes the pane the command itself runs in, and `--include-busy` closes busy ones too (the agent's
+server (a pane started again, put in copy mode or given another foreground command since it was judged is left open);
+it never closes the pane the command itself runs in, and `--include-busy` closes busy ones too (the agent's
 work is lost). `--remove-task-dirs` removes the task directories of finished runs, and only when no pane of the runner
 is left. It never touches the git checkout: uncommitted work is reported, and stays.
 
@@ -101,7 +102,7 @@ CREATE_ROUNDS = 3
 # pane ID is only unique within one server; the pair identifies the server. And what the runner reads of a pane in ONE
 # call, the server's identity beside the pane's fields.
 PANE_FORMAT = "#{pane_id}|#{pid}|#{start_time}"
-READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pid}|#{start_time}"
+READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pane_pid}|#{pid}|#{start_time}"
 # The only git subcommands that change the checkout (the startup fast-forward and switch to origin's default branch), and
 # how long each may run, in seconds. Every command this runner starts runs through `bounded_run.run` (see its docstring):
 # one that outlives its limit gets SIGTERM to its whole process group and, KILL_AFTER seconds later, SIGKILL to whatever is
@@ -1091,37 +1092,45 @@ def probe_pane(pane, server):
     """`(state, fields)` of the pane `pane` of the tmux server `server` (PID and start time): the one place that reads a
     pane in ONE `display-message` that also prints the identity of the tmux server answering. A pane ID is only unique
     within one tmux server, and a server exits with its last session: a later server can give the same ID to another
-    pane (the replacement of an agent, or yours). `state` is `ours` (`fields` are the pane's dead and in-mode flags and its
-    foreground command), `other server` (the server answering is not `server`), `gone` (that server has no such pane) or
-    `no server`. Output that cannot be read, or any other failure of tmux, is a Stop. The commands that follow act on
-    the pane by its ID: the milliseconds between this read and them are not covered."""
+    pane (the replacement of an agent, or yours). `state` is `ours` (`fields` are the pane's dead and in-mode flags, its
+    foreground command and its process: empty for a dead pane in tmux 3.8, the PID of the pane, never of the server),
+    `other server` (the server answering is not `server`), `gone` (that server has no such pane) or `no server`. Output
+    that cannot be read, or any other failure of tmux, is a Stop. The commands that follow act on the pane by its ID:
+    the milliseconds between this read and them are not covered."""
     done = run(["tmux", "display-message", "-p", "-t", pane, READ_FORMAT])
     if done.returncode != 0:
         if no_tmux_server(done.stderr):
             return "no server", None
         raise Stop(f"tmux display-message failed ({done.returncode}): {done.stderr.strip()[:500]}")
     parts = done.stdout.strip().split("|")
-    if len(parts) != 5 or not (parts[3].isdigit() and parts[4].isdigit()):
+    if len(parts) != 6 or not (re.fullmatch(r"[0-9]*", parts[3]) and parts[4].isdigit() and parts[5].isdigit()):
         raise Stop(f"tmux could not read pane {pane}")
-    if tuple(parts[3:]) != tuple(server):
+    if tuple(parts[4:]) != tuple(server):
         return "other server", None
-    if parts[:3] == ["", "", ""]:
+    if parts[:4] == ["", "", "", ""]:
         return "gone", None  # tmux answers a pane it does not have with empty fields and exit status 0
     if parts[0] not in ("0", "1") or parts[1] not in ("0", "1"):
         raise Stop(f"tmux could not read pane {pane}")
-    return "ours", (parts[0] == "1", parts[1] == "1", parts[2].lstrip("-"))
+    return "ours", (parts[0] == "1", parts[1] == "1", parts[2].lstrip("-"), parts[3])
 
 
-def close_pane(pane, server):
+def close_pane(pane, server, expect=None):
     """Close `pane`, and only the pane (`kill-pane` on its ID; never its window or its session, so that a pane you split off
-    in the window survives), and only after `probe_pane` found it is still a pane of `server`. Returns `ours` when it was
-    closed, which is what a pane that vanished meanwhile counts as, else why it was not: `gone` (already closed), `no
-    server` (the server is gone, which closes everything) or `other server` (a server that did not make this pane: the ID
-    may belong to another pane, and `kill-pane` is not sent). Any other failure is a Stop. The check and the `kill-pane`
-    are two commands: what happens between them is not covered."""
-    state = probe_pane(pane, server)[0]
+    in the window survives), and only after `probe_pane` found it is still a pane of `server`. With `expect`, the `fields`
+    a caller decided to close it on (dead flag, copy mode, foreground command, the pane's process), the read that gates
+    the `kill-pane` must show exactly those: this is the only read right before the kill, so it is the one that has to
+    agree with the decision, and a caller that compared in a read of its own would leave a gap between the two reads. Returns
+    `ours` when it was closed, which is what a pane that vanished meanwhile counts as, else why it was not: `gone` (already
+    closed), `no server` (the server is gone, which closes everything), `other server` (a server that did not make this pane:
+    the ID may belong to another pane) or `changed` (it is not what `expect` says any more), and `kill-pane` is not sent. Any
+    other failure is a Stop. Without `expect` (the agent of a run is closed whatever its state) any pane of `server` is
+    closed. The read and the `kill-pane` are two tmux commands (the runner never sends `if-shell`, which could make them one):
+    the milliseconds between them are not covered."""
+    state, fields = probe_pane(pane, server)
     if state != "ours":
         return state
+    if expect is not None and fields != expect:
+        return "changed"
     done = run(["tmux", "kill-pane", "-t", pane])
     if done.returncode != 0 and (done.returncode, done.stderr.strip()) != (1, f"can't find pane: {pane}") and \
        not (done.returncode == 1 and no_tmux_server(done.stderr)):
@@ -1185,14 +1194,14 @@ class Agent:
         return probe_pane(self.pane, self.server)
 
     def status(self):
-        """`(dead, in_mode, foreground command)` of the pane. A pane that is gone, or a tmux server that is not the one the
+        """`(dead, in_mode, foreground command)` of the pane (not its process: `probe_pane` reads that too). A pane that is gone, or a tmux server that is not the one the
         agent was started on, is a Stop that names the pane: nothing is ever done to the pane that now has the ID."""
         state, fields = self.probe()
         if state != "ours":
             raise Stop(f"agent pane {self.pane} (window {self.window} of tmux session {self.session}) is not the pane "
                        "this agent was started in: the tmux server it was started on or the pane itself is gone or was "
                        "replaced; nothing was done to it")
-        return fields
+        return fields[:3]
 
     def wait_for_prompt(self, timeout, *, allow_exit=False):
         end = time.monotonic() + timeout
@@ -1648,7 +1657,10 @@ class Clean:
         """Close the pane `listed`, after checking it again right before: the same tmux server, still a pane of the runner's
         with what it was listed with (not renamed, not started again: its process is the same, and a dead pane has not come
         alive), not the pane the command runs in, and read again: it must still be dead, or idle, or busy with
-        `--include-busy`. `(verdict, why, what closing it ended, the State)`: `closed` or `left open`."""
+        `--include-busy`. That second reading is what the decision rests on, and `close_pane` is told it (`expect`): the read
+        that comes with `kill-pane` must show the same dead flag, copy mode, foreground command and process, or the pane is
+        `left open` (a pane started again, put in copy mode or given another foreground command since is not the pane that was
+        judged). `(verdict, why, what closing it ended, the State)`: `closed` or `left open`."""
         panes, said = list_panes()
         if said:
             return "closed", "it was already gone: no tmux server runs any more", "", state
@@ -1680,14 +1692,18 @@ class Clean:
         closing, why = self.plan(now, state)
         if not closing:
             return "left open", why, "", state
-        return self.outcome(close_pane(now.pane, listed.server), why, self.ends(now, panes), state)
+        decided = (now.dead, now.in_mode, now.command.lstrip("-"), now.pid)  # what `probe_pane` returns for the same pane
+        return self.outcome(close_pane(now.pane, listed.server, decided), why, self.ends(now, panes), state)
 
     @staticmethod
     def outcome(done, why, ends, state):
         """`(verdict, why, ends, state)` for what `close_pane` answered: `ours` is closed, a pane or a server that is gone counts as
-        closed, and a server that is another one leaves the pane open."""
+        closed, a server that is another one and a pane that changed after it was judged leave it open (`state` stays what was
+        decided on; `left` reads the server again, so that the pane still blocks the next run)."""
         if done == "other server":
             return "left open", "another tmux server answers now, and the pane ID may belong to another pane", "", state
+        if done == "changed":
+            return "left open", "it changed right before it was to be closed", "", state
         return "closed", why if done == "ours" else "it was already gone", ends, state
 
     def left(self, ours, closed, panes):
