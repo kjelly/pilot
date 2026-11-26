@@ -293,9 +293,10 @@ func sharedInputsAtRuntime(t *testing.T, entry, identity []byte, setDomain, setJ
 	}
 	cmd := exec.Command("ansible-playbook", args...)
 	// ANSIBLE_HOME moves ansible's default collection path with it (<home>/collections), and the json stdout callback
-	// of ansible-core 2.19.15 lives in ansible.posix, which CI installs in the user's ~/.ansible/collections: with the
-	// override alone the callback cannot be loaded and ansible-playbook ends with status 1 and no output (CI run
-	// 42360313970). The user's collection directory stays on the path.
+	// of ansible-core 2.19.15 lives in ansible.posix, which CI installs in the system-wide collection directory (it used
+	// to be the user's ~/.ansible/collections): with the override alone the callback cannot be loaded and
+	// ansible-playbook ends with status 1 and no output (CI run 42360313970). The user's and the system-wide collection
+	// directories stay on the path.
 	cmd.Env = append(os.Environ(), "ANSIBLE_STDOUT_CALLBACK=json", "ANSIBLE_NOCOLOR=1", "ANSIBLE_LOCALHOST_WARNING=False",
 		"ANSIBLE_CACHE_PLUGIN_CONNECTION="+filepath.Join(dir, "factcache"), "ANSIBLE_HOME="+filepath.Join(dir, "home"),
 		"ANSIBLE_COLLECTIONS_PATH="+usersAnsibleCollectionsPath())
@@ -536,7 +537,10 @@ func TestRegression_AuthCacheEntryStructure(t *testing.T) {
 }
 
 // usersAnsibleCollectionsPath is the collection path a test that moves ANSIBLE_HOME still wants: the one the environment
-// names, then the default directory of the real home (what ansible-galaxy installs into without -p).
+// names, then the default directory of the real home (what ansible-galaxy installs into without -p), then the system-wide
+// directory (what CI's Go test job and images/Dockerfile.pilot-cli install into with -p). ANSIBLE_COLLECTIONS_PATH
+// replaces ansible-core's default list instead of extending it, so a directory that is only on the default list (the
+// system-wide one is, and it does not depend on HOME or ANSIBLE_HOME) is gone unless it is named here.
 func usersAnsibleCollectionsPath() string {
 	var dirs []string
 	if v := os.Getenv("ANSIBLE_COLLECTIONS_PATH"); v != "" {
@@ -545,5 +549,6 @@ func usersAnsibleCollectionsPath() string {
 	if home, err := os.UserHomeDir(); err == nil {
 		dirs = append(dirs, filepath.Join(home, ".ansible", "collections"))
 	}
+	dirs = append(dirs, "/usr/share/ansible/collections")
 	return strings.Join(dirs, string(os.PathListSeparator))
 }

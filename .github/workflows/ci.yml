@@ -70,15 +70,42 @@ jobs:
         with:
           python-version: '3.11'
 
-      # internal/spec runs the Wazuh Python harnesses (real Ansible tasks, PyYAML);
-      # TestWazuhHarnessPrerequisitesFailLoudly and TestCIProvisionsWazuhHarnessPrerequisites
-      # fail a shard that lacks them. The pin and collections follow the delivery image
-      # (cmd/pilot/cmd/ansible_core_pin_consistency_test.go).
-      - name: Install Ansible toolchain and PyYAML (Wazuh harnesses)
-        if: matrix.group == 'spec'
+      # Every Go test group runs against the Ansible the delivery image ships, never
+      # the one the runner image carries: cmd and rest used to take the image's pipx
+      # Ansible, which floats with the runner image. Runner image 20261122.9 moved it
+      # to 2.22.0, which masks vault values as $REDACTED$ in everything Ansible prints
+      # (ansible-inventory --list included), and one run mixed 2.21.x and 2.22.0 shards
+      # (kjelly/pilot#455). So there is no `if:` here and the step after it asserts
+      # what actually ended up on PATH. internal/spec also runs the Wazuh Python
+      # harnesses (real Ansible tasks, PyYAML): TestWazuhHarnessPrerequisitesFailLoudly
+      # and TestCIProvisionsWazuhHarnessPrerequisites fail a shard that lacks them.
+      # The pin, the collections and the collections path follow the delivery image
+      # (cmd/pilot/cmd/ansible_core_pin_consistency_test.go). Collections go to the
+      # system-wide path, as in images/Dockerfile.pilot-cli: pilot gives every run its
+      # own ANSIBLE_HOME, which hides ~/.ansible/collections, and the tests that go
+      # through that runtime (internal/identityreconcile, TestDiagnoseRunWire_*) need
+      # the collections to survive it.
+      - name: Install Ansible toolchain and PyYAML (pinned like the delivery image)
         run: |
           python3 -m pip install "ansible-core==2.19.*" pyyaml
-          ansible-galaxy collection install ansible.posix community.docker community.postgresql community.general
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /usr/share/ansible/collections
+          ansible-galaxy collection install -p /usr/share/ansible/collections ansible.posix community.docker community.postgresql community.general
+
+      # No `if:`, and before the first step that runs Go: a shard whose Ansible is not
+      # the pinned series fails here with the tool named, instead of in a test that
+      # sees $REDACTED$ where it expects a vault value. The series is the image pin's;
+      # TestAnsibleToolchainAssertionRejectsOtherSeries runs this very script against
+      # stand-in tools to prove it. The last line calls the JSON stdout callback the
+      # way pilot does, under an isolated ANSIBLE_HOME: it fails when the collections
+      # are only reachable through the default home.
+      - name: Assert the pinned Ansible toolchain
+        run: |
+          for tool in ansible ansible-config ansible-galaxy ansible-inventory ansible-playbook ansible-vault; do
+            path=$(command -v "$tool") || { echo "::error::$tool is not on PATH"; exit 1; }
+            version=$("$tool" --version | sed -n 1p); echo "$path: $version"
+            case "$version" in *"[core 2.19."*) ;; *) echo "::error::$path reports \"$version\", not the pinned 2.19 series"; exit 1;; esac
+          done
+          ANSIBLE_HOME="$(mktemp -d)" ANSIBLE_LOAD_CALLBACK_PLUGINS=1 ANSIBLE_STDOUT_CALLBACK=ansible.posix.json ansible localhost -c local -m ping >/dev/null
 
       - name: Download Go modules
         run: go mod download
