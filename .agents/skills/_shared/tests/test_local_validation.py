@@ -87,12 +87,13 @@ class SkillSelectionPlanTests(unittest.TestCase):
         self.assertEqual(["_shared", "pr-ready"], result["skill_suites"]["selection"])
 
     def test_every_suite_when_the_mapping_is_unknown_is_the_plain_command_with_the_reason(self):
-        result = planner.plan([".claude/zzz"], PACKAGES, {}, selection("all", reason=".claude/zzz is unattributed"))
+        result = planner.plan([".claude/zzz"], PACKAGES, {}, selection("all", reason=".claude/zzz is read by no suite the derivation knows of (an unknown path)"))
         self.assertEqual([["make", "skill-test"]], result["commands"])
-        self.assertEqual(".claude/zzz is unattributed", result["skill_suites"]["reason"])
+        self.assertEqual(".claude/zzz is read by no suite the derivation knows of (an unknown path)", result["skill_suites"]["reason"])
 
-    def test_no_suite_reached_plans_no_skill_command(self):
-        self.assertEqual([], self.commands(["docs/evidence/x.md"], selection()))
+    def test_an_empty_selection_plans_no_skill_command(self):
+        # `skill_suites.select` returns an empty selection only for an empty diff (a change is never "reached by no suite")
+        self.assertEqual([], self.commands([], selection()))
         # control: the same paths with a suite reached do plan it
         self.assertEqual([["make", "skill-test", "SKILL_SUITES=issue-filing"]],
                          self.commands(["AGENTS.md"], selection("issue-filing")))
@@ -108,6 +109,7 @@ class SkillSelectionPlanTests(unittest.TestCase):
 
     def test_a_change_with_no_selection_derived_keeps_the_whole_suite(self):
         self.assertEqual([["make", "skill-test"]], self.commands([".agents/skills/pr-ready/SKILL.md"], None))
+        # the legacy rule of before the selection (`main` never takes it: it always derives): .agents/.codex/.claude only
         self.assertEqual([], self.commands(["cmd/pilot/main.go"], None))
 
 
@@ -158,14 +160,61 @@ class PlannerEntryPointTests(unittest.TestCase):
         self.assertEqual("all", result["skill_suites"]["selection"])
         self.assertIn("README.md has status D", result["skill_suites"]["reason"])
 
-    def test_a_go_only_change_plans_no_skill_suite(self):
+    def skill_commands(self, result):
+        return [c for c in result["commands"] if c[:2] == ["make", "skill-test"]]
+
+    def test_a_go_only_change_plans_every_suite_because_no_suite_reads_it(self):
+        # Issue 430 / #432: an unknown path selects the full suite. The base planned none for a Go-only change; that cost is
+        # accepted, and the reason names the path
         r, base = self.repo()
         r.write("internal/x/x.go", "package x\n\nvar V = 1\n")
         r.commit("a go change")
         code, result = self.plan(r, base)
         self.assertEqual(0, code)
-        self.assertEqual([], [c for c in result["commands"] if c[:2] == ["make", "skill-test"]])
+        self.assertEqual([["make", "skill-test"]], self.skill_commands(result))
+        self.assertEqual("all", result["skill_suites"]["selection"])
+        self.assertIn("internal/x/x.go", result["skill_suites"]["reason"])
+
+    def test_an_unknown_added_file_at_the_root_plans_every_suite(self):
+        r, base = self.repo()
+        r.write("unknown-review-input-441.dat", "x\n")
+        r.commit("an unknown file")
+        code, result = self.plan(r, base)
+        self.assertEqual([["make", "skill-test"]], self.skill_commands(result))
+        self.assertIn("unknown-review-input-441.dat", result["skill_suites"]["reason"])
+
+    def test_a_deleted_and_an_added_go_file_outside_every_suite_plan_every_suite(self):
+        r, base = self.repo()
+        r.git("rm", "-q", "internal/x/x.go")
+        r.write("internal/x/y.go", "package x\n")
+        r.commit("delete one go file, add another")
+        code, result = self.plan(r, base)
+        self.assertEqual([["make", "skill-test"]], self.skill_commands(result))
+        self.assertEqual("all", result["skill_suites"]["selection"])
+
+    def test_a_git_mv_plans_every_suite(self):
+        r, base = self.repo()
+        r.git("mv", "internal/x/x.go", "internal/x/z.go")
+        r.commit("rename a go file")
+        code, result = self.plan(r, base)
+        self.assertEqual([["make", "skill-test"]], self.skill_commands(result))
+        self.assertIn("internal/x/x.go has status D", result["skill_suites"]["reason"])   # a rename arrives as D + A
+
+    def test_a_docs_only_change_plans_every_suite_and_names_the_path(self):
+        r, base = self.repo()
+        r.write("docs/evidence/x.md", "evidence\n")
+        r.commit("an evidence record")
+        code, result = self.plan(r, base)
+        self.assertEqual([["make", "skill-test"]], self.skill_commands(result))
+        self.assertIn("docs/evidence/x.md", result["skill_suites"]["reason"])
+
+    def test_an_empty_diff_plans_no_skill_command(self):
+        r, base = self.repo()
+        code, result = self.plan(r, base)                       # base == head
+        self.assertEqual(0, code)
+        self.assertEqual([], self.skill_commands(result))
         self.assertEqual([], result["skill_suites"]["selection"])
+        self.assertIsNone(result["skill_suites"]["reason"])
 
     def test_a_change_inside_a_suite_plans_that_suite(self):
         r, base = self.repo()

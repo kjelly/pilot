@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Compute local test scope; large cmd/spec packages require explicit regressions.
 
-This is a plan, not a coverage verdict. Full normal/race suites belong in CI. For a change that reaches skill tests the plan
-runs `make skill-test` for the suites the change can reach (skill_suites.py derives them, with the reason for each), or for
-all of them when the mapping is unknown; CI runs the whole `make skill-test` either way.
+This is a plan, not a coverage verdict. Full normal/race suites belong in CI. Every non-empty change plans `make skill-test`:
+for the suites the change can reach (skill_suites.py derives them, with the reason for each), or for all of them when a changed
+path is unknown (read by no suite: a Go-only, playbook-only or docs-only change has one, so it plans the plain `make
+skill-test`), deleted, renamed or type-changed, or the derivation fails. Only an empty diff plans no skill command. CI runs the
+whole `make skill-test` either way.
 """
 import argparse
 import json
@@ -45,8 +47,10 @@ def scope(paths, packages):
 
 
 def skill_command(skills, paths):
-    """The `make skill-test` command of a plan, or None when no skill test is needed. `skills` is the result of
-    `skill_suites.select` for the change, or None when it was not derived: the whole suite then, as before the selection."""
+    """The `make skill-test` command of a plan, or None for an empty diff (the only empty selection of `skill_suites.select`).
+    `skills` is the result of `skill_suites.select` for the change, or None when it was not derived: the legacy rule of before
+    the selection (the whole suite for a path under `.agents/`, `.codex/` or `.claude/`), which `main` never takes: it always
+    derives, and a failure to derive selects every suite."""
     if skills is None:
         return ["make", "skill-test"] if any(f.startswith((".agents/", ".codex/", ".claude/")) for f in paths) else None
     if skills["selection"] == "all":

@@ -2,7 +2,8 @@
 
 `make skill-test` runs every suite under `.agents/skills/*/tests`; the local receipt runs the suites a change can reach and CI
 runs them all. The invariant under test: the local receipt runs every skill suite whose tests can import, load or read a changed
-path, and all suites when the mapping is unknown, a file was deleted or renamed, or the derivation fails. Four groups:
+path, and all suites when a changed path is unknown (read by no suite), deleted, renamed or type-changed, or the derivation
+fails; only an empty diff selects none. Four groups:
 
 * the selector (`select`), on hand-written sources: one case per path class, each with the control that shows the case is not
   a constant answer (AGENTS.md section 5.12);
@@ -14,6 +15,7 @@ path, and all suites when the mapping is unknown, a file was deleted or renamed,
 * the Makefile: `make skill-test SKILL_SUITES="a b"` against a `python3` shim, next to the recipe it replaced.
 """
 import ast
+import copy
 import json
 import os
 import re
@@ -54,15 +56,52 @@ class SelectTests(unittest.TestCase):
     def select(self, *changes, deps=None):
         return ss.select(list(changes), self.DEPS if deps is None else deps)
 
-    def test_a_diff_with_no_path_in_the_universe_selects_nothing(self):
-        for changes in ((), (("M", "cmd/pilot/main.go"),), (("D", "internal/x/y.go"), ("A", "docs/new.txt")),
-                        (("M", ".github/workflows/ci.yml"),)):
+    def test_an_empty_diff_is_the_only_empty_selection(self):
+        result = self.select()
+        self.assertEqual([], result["selection"])
+        self.assertIsNone(result["reason"])
+        # a path no suite reads is an unknown path: it selects every suite, whatever its status or place in the repository
+        for changes in ((("M", "cmd/pilot/main.go"),), (("D", "internal/x/y.go"), ("A", "docs/new.txt")),
+                        (("M", ".github/workflows/ci.yml"),), (("A", "unknown-review-input-441.dat"),),
+                        (("M", "docs/runbooks/x.md"),), (("A", "internal/x/new.go"),)):
             with self.subTest(changes=changes):
                 result = self.select(*changes)
-                self.assertEqual([], result["selection"])
-                self.assertIsNone(result["reason"])
-        # control: the same kind of path IS selected once a suite reads it (the universe grows with what is read)
+                self.assertEqual("all", result["selection"])
+                self.assertIn(changes[0][1], result["reason"])
+        # control: the same kind of path IS selected narrowly once a suite reads it
         self.assertEqual(["alpha", "delta"], self.select(("M", "README.md"))["selection"])
+
+    def test_an_unknown_path_anywhere_selects_every_suite(self):
+        # the exact set of the merge-gate review of PR 441: an unknown added file, a deleted and an added Go file
+        reviewer = (("A", "unknown-review-input-441.dat"), ("D", "internal/unknown_old.go"), ("A", "internal/unknown_new.go"))
+        result = self.select(*reviewer)
+        self.assertEqual("all", result["selection"])
+        self.assertIn("unknown-review-input-441.dat", result["reason"])      # the first unknown path is named
+        for suite in self.DEPS:
+            self.assertEqual([f"all suites: {result['reason']}"], result["reasons"][suite])
+        # an unknown path among known ones still selects everything; the reason names it, not the known path
+        mixed = self.select(("M", "README.md"), ("A", "unknown/x.bin"))
+        self.assertEqual("all", mixed["selection"])
+        self.assertIn("unknown/x.bin", mixed["reason"])
+        self.assertNotIn("README.md", mixed["reason"])
+        # control: the known paths alone stay narrow
+        self.assertEqual(["alpha", "delta"], self.select(("M", "README.md"), ("A", "docs/new.md"))["selection"])
+
+    def test_every_status_outside_any_suite_selects_every_suite(self):
+        for status in ("D", "T", "U", "C", "X", "R100"):
+            with self.subTest(status=status):
+                result = self.select((status, "internal/x/y.go"))
+                self.assertEqual("all", result["selection"])
+                self.assertIn(status, result["reason"])
+        for status in ("A", "M"):                                     # control: the same path with a mapped status is only unknown
+            self.assertIn("unknown path", self.select((status, "internal/x/y.go"))["reason"])
+
+    def test_a_failed_derivation_is_reported_before_an_unknown_path(self):
+        broken = dict(self.DEPS, gamma=sources(error="cannot parse x.py: invalid syntax"))
+        result = self.select(("A", "unknown/x.bin"), deps=broken)
+        self.assertEqual("all", result["selection"])
+        self.assertIn("derivation failed for gamma", result["reason"])
+        self.assertNotIn("unknown/x.bin", result["reason"])
 
     def test_a_path_under_a_suite_selects_it_and_whoever_reads_that_path(self):
         self.assertEqual(["delta", "gamma"], self.select(("M", ".agents/skills/gamma/tests/test_x.py"))["selection"])
@@ -89,13 +128,14 @@ class SelectTests(unittest.TestCase):
 
     def test_a_glob_source_selects_what_it_matches_and_nothing_else(self):
         self.assertEqual(["alpha", "delta"], self.select(("A", "docs/new.md"))["selection"])
-        self.assertEqual([], self.select(("A", "docs/new.txt"))["selection"])
-        self.assertEqual([], self.select(("A", "docs/deeper/new.md"))["selection"])   # `*` stays inside one segment
+        self.assertEqual("all", self.select(("A", "docs/new.txt"))["selection"])      # no glob claims it: an unknown path
+        self.assertEqual("all", self.select(("A", "docs/deeper/new.md"))["selection"])   # `*` stays inside one segment
 
-    def test_a_suite_with_an_unbounded_read_is_selected_whenever_something_is_in_the_universe(self):
+    def test_a_suite_with_an_unbounded_read_is_selected_whenever_the_diff_selects_by_suite(self):
         self.assertIn("delta", self.select(("M", "README.md"))["selection"])
         self.assertIn("delta", self.select(("M", ".agents/skills/gamma/SKILL.md"))["selection"])
-        self.assertNotIn("delta", self.select(("M", "cmd/pilot/main.go"))["selection"])   # control: no universe path
+        # control: a path no suite reads does not select by suite: it selects every suite, the string "all", so compare by equality
+        self.assertEqual("all", self.select(("M", "cmd/pilot/main.go"))["selection"])
 
     def test_a_deleted_or_type_changed_file_selects_every_suite(self):
         for status in ("D", "T", "U", "R100", "C"):
@@ -104,13 +144,13 @@ class SelectTests(unittest.TestCase):
                 self.assertEqual("all", result["selection"])
                 self.assertIn(status, result["reason"])
         self.assertEqual("all", self.select(("D", ".agents/skills/gamma/SKILL.md"))["selection"])
-        # a deletion outside the universe changes nothing when the rest of the diff is outside it too ...
-        self.assertEqual([], self.select(("D", "internal/x/y.go"))["selection"])
-        # ... and selects everything when the diff also reaches the universe (a rename arrives as D + A, both judged)
+        # a deletion outside any suite selects everything, alone ...
+        self.assertEqual("all", self.select(("D", "internal/x/y.go"))["selection"])
+        # ... and with the rest of the diff (a rename arrives as D + A, both judged)
         renamed = self.select(("D", "internal/x/old.go"), ("A", "internal/x/new.go"), ("M", "README.md"))
         self.assertEqual("all", renamed["selection"])
-        # control: the same diff with the deletion removed is narrow
-        self.assertEqual(["alpha", "delta"], self.select(("A", "internal/x/new.go"), ("M", "README.md"))["selection"])
+        # control: a diff of known paths only is narrow
+        self.assertEqual(["alpha", "delta"], self.select(("A", "docs/new.md"), ("M", "README.md"))["selection"])
 
     def test_a_path_that_is_not_canonical_selects_every_suite(self):
         for spelling in ("/etc/passwd", "../outside.txt", "a/../README.md", "", "a\\b.md", "./README.md", "a//b", "a/./b"):
@@ -126,7 +166,7 @@ class SelectTests(unittest.TestCase):
                 self.assertEqual("all", self.select(("M", spelling), deps=broad)["selection"])
         self.assertEqual(["delta", "gamma"], self.select(("M", "x.md"), deps=broad)["selection"])      # control: canonical
 
-    def test_an_unattributed_path_of_the_universe_selects_every_suite(self):
+    def test_an_unclaimed_path_of_the_agent_trees_selects_every_suite(self):
         result = self.select(("M", ".claude/zzz"))
         self.assertEqual("all", result["selection"])
         self.assertIn(".claude/zzz", result["reason"])
@@ -143,11 +183,13 @@ class SelectTests(unittest.TestCase):
         self.assertEqual("all", result["selection"])
         self.assertIn("gamma", result["reason"])
         self.assertIn("cannot parse", result["reason"])
-        # what the failed suite reads is not known, so no path is known to be outside the universe: a Go-only diff selects all
-        self.assertEqual("all", self.select(("M", "cmd/pilot/main.go"), deps=broken)["selection"])
-        # control: with nothing changed there is nothing to run, and with nothing failed a Go-only diff selects nothing
+        # what the failed suite reads is not known: a Go-only diff selects all, with the failure as the reason
+        failed = self.select(("M", "cmd/pilot/main.go"), deps=broken)
+        self.assertEqual("all", failed["selection"])
+        self.assertIn("derivation failed", failed["reason"])
+        # control: with nothing changed there is nothing to run, and with nothing failed a Go-only diff is an unknown path
         self.assertEqual([], self.select(deps=broken)["selection"])
-        self.assertEqual([], self.select(("M", "cmd/pilot/main.go"))["selection"])
+        self.assertIn("unknown path", self.select(("M", "cmd/pilot/main.go"))["reason"])
 
     def test_no_suite_at_all_selects_nothing_to_narrow_to(self):
         self.assertEqual("all", ss.select([("M", ".agents/skills/new/SKILL.md")], {})["selection"])
@@ -550,10 +592,30 @@ class RealTree(unittest.TestCase):
         self.assertEqual(["issue-to-pr", "pr-review-merge"],
                          self.select(("M", "images/evidence-controller/Dockerfile"))["selection"])
 
-    def test_a_change_to_the_workflow_and_to_go_code_selects_nothing(self):
+    def test_a_change_to_the_workflow_and_to_go_code_selects_every_suite(self):
+        # no suite reads these: an unknown path selects the full suite (kjelly/pilot#430, #432), it never selects none
         for path in (".github/workflows/ci.yml", "cmd/pilot/cmd/deploy.go", "internal/spec/x_test.go"):
             with self.subTest(path=path):
-                self.assertEqual([], self.select(("M", path))["selection"])
+                result = self.select(("M", path))
+                self.assertEqual("all", result["selection"])
+                self.assertIn(path, result["reason"])
+
+    def test_the_set_of_the_merge_gate_review_selects_every_suite(self):
+        result = self.select(("A", "unknown-review-input-441.dat"), ("D", "internal/unknown_old.go"),
+                             ("A", "internal/unknown_new.go"))
+        self.assertEqual("all", result["selection"])
+        self.assertIn("unknown-review-input-441.dat", result["reason"])
+        self.assertEqual([], self.select()["selection"])                 # control: an empty diff is the only empty selection
+
+    def test_a_secret_scan_config_change_selects_the_suite_that_reads_it_and_dropping_the_edge_selects_every_suite(self):
+        # `_shared` reads .github/secret-scan.json in a test body (test_secret_scan.py): the dependency the in-run recorder
+        # of every suite checks (test_zzz_suite_reads.py). Without the edge the path is unknown: every suite, never none.
+        self.assertEqual(["_shared"], self.select(("M", ".github/secret-scan.json"))["selection"])
+        dropped = copy.deepcopy(self.deps)
+        del dropped["_shared"]["files"][".github/secret-scan.json"]
+        result = ss.select([("M", ".github/secret-scan.json")], dropped)
+        self.assertEqual("all", result["selection"])
+        self.assertIn(".github/secret-scan.json", result["reason"])
 
     def test_a_deleted_file_of_the_universe_selects_every_suite(self):
         result = self.select(("D", "README.md"))
@@ -565,7 +627,7 @@ class RealTree(unittest.TestCase):
 
     def test_the_suite_that_derives_the_selection_reads_the_three_trees_so_it_claims_what_is_new_in_them(self):
         # test_skill_suites.py walks .agents, .claude and .codex (symlinks(), on the real repository): a path nothing else reads
-        # is claimed by `_shared`, whose tests read it; the unattributed rule is for a tree no suite reads (the synthetic cases)
+        # is claimed by `_shared`, whose tests read it; the unknown-path rule is for a tree no suite reads (the synthetic cases)
         for path in (".claude/zzz", ".agents/zzz/new.txt", ".codex/zzz.toml"):
             with self.subTest(path=path):
                 self.assertEqual(["_shared"], self.select(("A", path))["selection"])

@@ -7,7 +7,8 @@ suite can read, and maps a diff to the suites that can reach a changed path. It 
 selection only decides what runs before a push, as the local receipt (`local_test_plan.py` prints it).
 
 The invariant: the local receipt runs every skill suite whose tests can import, load or read a changed path; all suites when
-the mapping is unknown, a file was deleted or renamed, or the derivation fails.
+any changed path is unknown (read by no suite), deleted, renamed or type-changed, or the derivation fails. Only an empty diff
+selects none.
 
 Derivation (`derive`). One abstract interpretation per suite, over the test modules `unittest discover -s tests -p test_*.py`
 loads and every module they import, load by path or run. Only ANCHORED values lead to the repository: `__file__`, the
@@ -24,16 +25,19 @@ error makes the suite's derivation fail, and a failed derivation selects every s
 
 An `unbounded` read is one no path names: a path taken from the live environment or argv by test code (a variable the tests
 set themselves is bounded), an import by a name nothing bounds, `exec` of text read from the repository, `git` run by a test in
-the repository's own working directory. A suite with an unbounded read is selected whenever the diff reaches the universe.
+the repository's own working directory. A suite with an unbounded read is selected whenever the diff selects by suite (a non-empty diff that is not already all).
 A path joined to the repository root from a value the evaluator cannot compute (a name read out of a file or a listing) is
 reported as `wide`, not followed.
 
-Selection (`select`). The input is `git diff --name-status --no-renames -z BASE HEAD` as (status, path) pairs. The universe is
-`.agents/`, `.claude/`, `.codex/` plus every path some suite provably reads. With no changed path in the universe the selection
-is empty (CI covers the rest). Otherwise: a status other than A or M, a path that is not canonical (absolute, `..`, empty,
-backslash) and a universe path no suite claims select every suite; `.agents/skills/<S>/...` selects S and every suite whose
-sources match the path; a suite with an unbounded read is selected. A suite whose derivation failed selects every suite for
-any non-empty diff: what it reads is not known, so nothing is known to be outside the universe.
+Selection (`select`). The input is `git diff --name-status --no-renames -z BASE HEAD` as (status, path) pairs. An empty diff is
+the ONLY empty selection. Any other diff selects every suite when it holds a status other than A or M (a deleted, renamed or
+type-changed path), a path that is not canonical (absolute, `..`, empty, backslash), an added or modified path no suite
+claims (an unknown path: not under `.agents/skills/<S>/` and matched by no derived file or glob), or when the derivation of any
+suite failed or no suite was found; the reason names the first such path or cause, and a failed derivation is reported before
+an unknown path. Otherwise `.agents/skills/<S>/...` selects S and every suite whose sources match the path; a suite with an
+unbounded read is selected. The consequence is plain: a Go-only, playbook-only or docs-only change reaches no suite, is an
+unknown path to every suite, and so selects the full suite (the local plan runs the plain `make skill-test` for it); CI's own
+`docs` profile that skips `make skill-test` for such a change is not consulted.
 
 Known limits (what the derivation cannot see; CI is the backstop): a path built from a bare literal, a value laundered through
 a function the evaluator cannot resolve (a callback, a method of a third-party object), a directory handed to such a function,
@@ -2234,7 +2238,11 @@ def select(changes, deps, suites=None):
     """The suites a change can reach.
 
     changes: [(status, path)]. deps: what `derive` returned. Returns {"selection": "all" | [suite, ...], "reasons":
-    {suite: [why, ...]}, "reason": why "all" (or None), "universe": [changed paths in the universe]}."""
+    {suite: [why, ...]}, "reason": why "all" (or None), "universe": [the changed paths judged]}.
+
+    Fail closed: an empty diff is the only empty selection. A changed path no suite claims (not under `.agents/skills/<S>/` and
+    matched by no derived file or glob), a status other than A or M anywhere, a path that is not canonical, a failed derivation
+    and "no suite found" all select every suite; the reason names the first such path or cause (a failed derivation first)."""
     suites = sorted(deps) if suites is None else sorted(suites)
     result = {"selection": [], "reasons": {}, "reason": None, "universe": []}
     changes = [(str(s), str(p)) for s, p in changes]
@@ -2255,21 +2263,13 @@ def select(changes, deps, suites=None):
         return why
 
     if not changes:
-        return result
+        return result                                  # nothing changed: the only empty selection
     failed = sorted(s for s in suites if "error" in (deps.get(s) or {}))
-    universe = []
-    for status, path in changes:
-        if not canonical(path):
-            universe.append(path)                      # unknown: judged as in the universe (fail closed)
-        elif path.startswith(UNIVERSE_PREFIXES) or claimed_by(path):
-            universe.append(path)
-    result["universe"] = universe
+    result["universe"] = [path for _status, path in changes]
     reason = None
     if failed:
-        # what a suite whose derivation failed reads is not known, so no path is known to be outside the universe
+        # what a suite whose derivation failed reads is not known, so no path is known to be outside what it reads
         reason = f"the derivation failed for {', '.join(failed)}: {deps[failed[0]]['error']}"
-    elif not universe:
-        return result
     elif not suites:
         reason = "no suite was found"
     else:
@@ -2280,11 +2280,9 @@ def select(changes, deps, suites=None):
             if not canonical(path):
                 reason = f"{path!r} is not a canonical repo-relative path"
                 break
-        else:
-            for path in universe:
-                if not claimed_by(path):
-                    reason = f"{path} is in the universe but no suite claims it (unattributed)"
-                    break
+            if not claimed_by(path):
+                reason = f"{path} is read by no suite the derivation knows of (an unknown path)"
+                break
     if reason is not None:
         result["selection"] = "all"
         result["reason"] = reason
@@ -2293,9 +2291,8 @@ def select(changes, deps, suites=None):
         return result
     reasons: dict = {}
     for _status, path in changes:
-        if path in universe:
-            for suite, why in claimed_by(path).items():
-                reasons.setdefault(suite, []).append(why)
+        for suite, why in claimed_by(path).items():
+            reasons.setdefault(suite, []).append(why)
     for suite in suites:
         info = deps.get(suite) or {}
         if info.get("unbounded"):

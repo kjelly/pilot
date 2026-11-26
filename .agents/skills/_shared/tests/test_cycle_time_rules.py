@@ -29,11 +29,13 @@ SAYS = {
         # rule 1 (item 2), rule 2 (order), step 3, step 4, step 6
         "once per candidate HEAD, as the receipt on the committed HEAD; while it works the Coder runs only the tests of "
         "the skills it changed: .agents/skills/_shared/local-validation.md",
-        "the plan narrows it to the suites the change can reach and prints the reason for each; CI runs the full make "
-        "skill-test;",
+        "every non-empty change plans it; a path no suite is known to read, such as a Go-only, playbook-only or docs-only "
+        "change, selects every suite; otherwise the plan narrows it to the suites the change can reach and prints the "
+        "reason for each; CI runs the full make skill-test;",
         "freeze the code and push it (rule 9), review it,",
-        "for a skill change, that skill's tests (the planned make skill-test, for the suites the change can reach, runs "
-        "once, as the receipt; CI runs the full make skill-test)",
+        "for a skill change, that skill's tests (the planned make skill-test, for the suites the change can reach or for "
+        "every suite when a changed path is unknown, deleted or renamed, runs once, as the receipt; CI runs the full make "
+        "skill-test)",
         "Dispatch it on a commit that is already pushed, except one that adds real captures, which is reviewed first "
         "(cycle-time rule 9)",
         "Push each commit as soon as it has been read and scanned for secrets, before its review and receipts "
@@ -66,7 +68,8 @@ SAYS = {
         "verified, or disputed, like a single one",
     ),
     "pr-ready/references/workflow.md": (
-        "When the diff touches .agents/skills, the Coder's envelope carries a validation item: \"" + ENVELOPE + "\"",
+        "The Coder's envelope carries a validation item (every non-empty change plans make skill-test, narrowed or whole, "
+        "so it is always there): \"" + ENVELOPE + "\"",
         "Parent owns GitHub mutations: the push of each scanned commit (SKILL.md, cycle-time rule 9) and Ready after "
         "the final gate.",
         "A round starts with one Coder dispatch that carries everything known that this PR must change",
@@ -75,12 +78,13 @@ SAYS = {
     ),
     "pr-ready/references/roles.md": (
         "for a skill change, the tests of the skills it changed: the one planned make skill-test, for the suites the "
-        "change can reach, is the receipt on the committed HEAD, and CI runs the full make skill-test "
-        "(.agents/skills/_shared/local-validation.md)",
+        "change can reach (every suite when a changed path is unknown, deleted or renamed), is the receipt on the "
+        "committed HEAD, and CI runs the full make skill-test (.agents/skills/_shared/local-validation.md)",
     ),
     "pr-ready/README.md": (
-        "plan 把 make skill-test 縮到變更碰得到的 suites 並印出每個的理由，那個 planned make skill-test 只在 committed HEAD "
-        "上以 receipt 跑一次（CI 仍跑完整的 make skill-test）",
+        "plan 把 make skill-test 縮到變更碰得到的 suites 並印出每個的理由（沒有任何 suite 讀的路徑、刪除、改名、類型變更或 "
+        "derivation 失敗則選全部，所以只動 Go、playbook 或文件的變更也計畫完整的 make skill-test；只有空 diff 沒有），"
+        "那個 planned make skill-test 只在 committed HEAD 上以 receipt 跑一次（CI 仍跑完整的 make skill-test）",
         "再派 Reviewer 並跑 receipts，讓 CI 與它們同時進行（Draft 不會被 pr-review-merge 與 merge train 處理；",
         "真實擷取的輸出等審查後才 push",
         "一輪交給一個 Coder（rule 10）",
@@ -89,12 +93,13 @@ SAYS = {
     "issue-to-pr/SKILL.md": (
         "Only GATE-PASS for the currently checked-out HEAD authorizes the next stage: it authorizes the first push and "
         "the PR; a repair commit on an existing Draft is pushed after Root's read and scan (section 4)",
-        "also a validation item: \"" + ENVELOPE + "\"",
+        "also, because every non-empty change plans make skill-test (narrowed or whole), a validation item: \"" + ENVELOPE + "\"",
         "Once the Draft exists, each repair commit is pushed first, as section 4 says, whatever its reason (a CI "
         "failure or a review finding); the first push stays after GATE-PASS",
         "the Coder runs that skill's tests while it works and the planned make skill-test (the suites the change can "
-        "reach, with the reason for each; CI runs the full make skill-test) runs once, as the receipt on the committed "
-        "HEAD (.agents/skills/_shared/local-validation.md)",
+        "reach, with the reason for each, or every suite when a changed path is unknown, deleted or renamed; CI runs "
+        "the full make skill-test) runs once, as the receipt on the committed HEAD "
+        "(.agents/skills/_shared/local-validation.md)",
         "Give the Coder every blocker of the review, with any other request known for this Issue, in one dispatch; a "
         "request whose answer changes another goes first",
         "The first push stays after GATE-PASS: create_pr.py pushes only once issue_gate.py passes (review and receipts "
@@ -115,8 +120,9 @@ SAYS = {
         "the new SHA run while its CI runs",
     ),
     "issue-to-pr/README.md": (
-        "the planned make skill-test (the suites the change can reach, with the reason for each; CI runs the full make "
-        "skill-test) runs once, as the receipt on the committed HEAD",
+        "the planned make skill-test (the suites the change can reach, with the reason for each, or every suite when a "
+        "changed path is unknown, deleted or renamed; CI runs the full make skill-test) runs once, as the receipt on the "
+        "committed HEAD",
         "one Coder dispatch carries every blocker, with any other request known for the Issue",
         "The first push stays after the gate (a branch with no PR gets no automatic CI; kjelly/pilot#433)",
         "push the scanned commit, repeat test/review while its CI runs and re-check CI on it",
@@ -128,15 +134,19 @@ SAYS = {
         "a branch with no PR gets no automatic CI",
     ),
     "_shared/local-validation.md": (
-        "Skill changes add make skill-test (once, as the receipt: below).",
+        "Every non-empty change adds make skill-test (once, as the receipt: below), narrowed to the suites the change can "
+        "reach; a path no suite is known to read selects every suite, so a Go-only, playbook-only or docs-only change "
+        "plans the plain make skill-test too.",
         "The plan's make skill-test runs once per candidate HEAD, as the run_check.py receipt on the committed HEAD "
         "(Root's, or the Coder's when it takes the receipt; never both)",
         "Root takes the receipt unless the dispatch envelope tells the Coder to; the Coder's envelope carries the "
         "validation item \"" + ENVELOPE + "\"",
         "The plan narrows make skill-test to the suites the change can reach and prints the reason for each",
         "Run the planned command exactly: a narrower command is not the receipt",
-        "A deleted, renamed or unattributed path, and any error while deriving the suites, select all of them (the plain "
-        "make skill-test)",
+        "A path no suite is known to read (anywhere in the repository: a Go-only, playbook-only or docs-only change has "
+        "one, and so plans the plain make skill-test",
+        "a deleted, renamed or type-changed path, a path that is not canonical, and any error while deriving the suites, "
+        "select all of them (the plain make skill-test); only an empty diff plans no skill command",
         "Keep the plan JSON next to the receipt, for the reviewers",
         "CI's Skill and repository contracts job still runs the full make skill-test, and Ready requires it",
         "A CI failure in a suite the plan left out is a defect of the selection: repair the selection and the suite, and "
@@ -155,6 +165,13 @@ STALE = (
     "Skill changes add make skill-test.",                                  # local-validation.md: the suite, no "once"
     "A narrower selection of suites is kjelly/pilot#430; until it changes this text the receipt is the whole suite",
     "No gate is weaker: that receipt still runs every suite on the exact HEAD the gate checks",
+    "A deleted, renamed or unattributed path, and any error while deriving the suites, select all of them",
+    "Skill changes add make skill-test (once, as the receipt: below).",
+    "When the diff touches .agents/skills, the Coder's envelope carries a validation item",
+    "when the diff touches .agents/skills, also a validation item",
+    "make skill-test for .agents/skills changes",
+    "plans all of them when a path is deleted, renamed or unattributed",
+    "all of them when the mapping is unknown or a path is deleted or renamed",
 )
 
 # The numbers other files cite ("cycle-time rule 3", "rule 9"): appended, never renumbered.
