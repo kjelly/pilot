@@ -1,0 +1,14 @@
+{
+  "result": null,
+  "error": {
+    "code": 4303,
+    "message": "service category cannot be set to 'all' while there are allowed services",
+    "data": {
+      "reason": "service category cannot be set to 'all' while there are allowed services"
+    },
+    "name": "MutuallyExclusiveError"
+  },
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

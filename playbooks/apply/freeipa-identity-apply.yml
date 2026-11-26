@@ -624,9 +624,13 @@
         ipa_sudo_rules: []
         ipa_netgroups: []
         ipa_hbac_rules_absent: []
-        ipa_hbac_services: "{{ (freeipa_roster.hbac | default({})).services | default([]) }}"
+        # pilot_identity_hbac_engine=go: pilot's Go engine owns the roster's HBAC services,
+        # rules and allow_all lockdown (docs/superpowers/specs/2026-11-19-freeipa-go-reconcile-phase3-hbac-spec.md
+        # section 3.3), so none of them is handed to the tasks below. The rules `pilot access`
+        # compiles (pilot_compiled_grant_hbac_rules) are not in the roster and stay here.
+        ipa_hbac_services: "{{ [] if (pilot_identity_hbac_engine | default('ansible')) == 'go' else ((freeipa_roster.hbac | default({})).services | default([])) }}"
         ipa_sudo_command_groups: "{{ (freeipa_roster.sudo | default({})).command_groups | default([]) }}"
-        ipa_hbac_disable_allow_all: "{{ (freeipa_roster.hbac | default({})).disable_allow_all | default(false) }}"
+        ipa_hbac_disable_allow_all: "{{ false if (pilot_identity_hbac_engine | default('ansible')) == 'go' else ((freeipa_roster.hbac | default({})).disable_allow_all | default(false)) }}"
       when: freeipa_roster.schema_version is defined
       no_log: true
       tags: [always]
@@ -696,6 +700,7 @@
       when:
         - freeipa_roster.schema_version is defined
         - item.state | default('present') == 'present'
+        - pilot_identity_hbac_engine | default('ansible') != 'go'
       tags: [always, C13, C14]
 
     # Static HBAC rule deletion (spec 2026-09-07-pilot-hbac-rule-deletion
@@ -716,6 +721,7 @@
       when:
         - freeipa_roster.schema_version is defined
         - item.state | default('present') == 'absent'
+        - pilot_identity_hbac_engine | default('ansible') != 'go'
       tags: [always, C13, C14]
 
     - name: "Normalize canonical sudo rules for the compatibility reconciler"
@@ -926,6 +932,37 @@
           `pilot reconcile --engine golang --scope full` does: without the observation file the
           run cannot say whether the authorization cache obligation was settled, and the users
           and groups would be skipped with nobody to write them.
+      tags: [always]
+
+    # The HBAC stage of the same mixed run (spec 2026-11-19 phase 3a, sections 3.3 and 7.1):
+    # `-e pilot_identity_hbac_engine=go` makes the roster's HBAC (services, rules, the
+    # allow_all lockdown) pilot's Go engine's, which runs after this playbook so that the
+    # hosts and hostgroups a rule refers to exist. Like the users/groups variable it is an
+    # `-e` variable and never an inventory one, and it only comes with the users/groups
+    # engine (whose gate brings the observation file). `-e pilot_identity_cache_settle=defer` is the first
+    # run of that pair: it does not refresh the clients' caches or acknowledge the
+    # obligation, because the Go HBAC stage writes after it; the second run is
+    # `--tags client-cache`, which does both. A deferral with nothing after it is refused:
+    # nothing would ever settle the obligation.
+    - name: "Gate: the HBAC engine is ansible or go, and go comes with the users/groups engine; settle is now or defer"
+      ansible.builtin.assert:
+        that:
+          - pilot_identity_hbac_engine | default('ansible') in ['ansible', 'go']
+          - >-
+            pilot_identity_hbac_engine | default('ansible') != 'go'
+            or pilot_identity_users_groups_engine | default('ansible') == 'go'
+          - pilot_identity_cache_settle | default('now') in ['now', 'defer']
+          - >-
+            pilot_identity_cache_settle | default('now') != 'defer'
+            or pilot_identity_hbac_engine | default('ansible') == 'go'
+        fail_msg: >-
+          pilot_identity_hbac_engine must be ansible (the default) or go, and go is only for the
+          mixed run of `pilot reconcile --engine golang --scope full`: it needs
+          pilot_identity_users_groups_engine=go, whose own gate brings the observation file
+          the settlement is reported in. pilot_identity_cache_settle must be now (the
+          default) or defer, and defer is only for a run with pilot_identity_hbac_engine=go,
+          which the Go HBAC stage and a `--tags client-cache` run follow: a deferral with
+          nothing after it leaves the authorization cache obligation unsettled.
       tags: [always]
 
   tasks:
@@ -4236,6 +4273,7 @@
           when:
             - not ansible_check_mode
             - ipa_identity_refresh_sssd_cache | bool
+            - pilot_identity_cache_settle | default('now') != 'defer'
           tags: [identity, client-cache]
 
         - name: "Refresh SSSD caches on enrolled FreeIPA clients"
@@ -4270,6 +4308,7 @@
           when:
             - not ansible_check_mode
             - ipa_identity_refresh_sssd_cache | bool
+            - pilot_identity_cache_settle | default('now') != 'defer'
             - (ipa_auth_cache_settle.stdout | from_json).dirty
           tags: [identity, client-cache]
 
@@ -4298,6 +4337,7 @@
           when:
             - not ansible_check_mode
             - ipa_identity_refresh_sssd_cache | bool
+            - pilot_identity_cache_settle | default('now') != 'defer'
             - (ipa_auth_cache_settle.stdout | from_json).dirty
           tags: [identity, client-cache]
 
@@ -4318,6 +4358,7 @@
           when:
             - not ansible_check_mode
             - ipa_identity_refresh_sssd_cache | bool
+            - pilot_identity_cache_settle | default('now') != 'defer'
             # The global receipt covers every enrolled client. A deferred
             # client has not received it; retain the dirty bit until a retry
             # delivers to all clients (failures already abort before this task).

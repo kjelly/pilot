@@ -49,6 +49,8 @@ type call struct {
 	batchNo int
 	// ctxErr is the context's error as the command arrived.
 	ctxErr error
+	// ctx is the context the command arrived on (set by fakeHBAC only).
+	ctx context.Context
 }
 
 type fakeIPA struct {

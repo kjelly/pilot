@@ -127,8 +127,9 @@ func zeroRequestProblems(t *testing.T, g func(context.Context, string) error) []
 }
 
 func TestWriteGateRefusesEveryWriteMethodAndBatchWithZeroRequests(t *testing.T) {
-	if got := writeMethods(); len(got) != 11 {
-		t.Fatalf("the allowlist has %d write methods %v; spec §7.1 names 11 (a new one needs this test and the spec read again)", len(got), got)
+	// 11 of Phase 2 (spec §7.1) and 12 of the HBAC stage (Phase 3a spec §5).
+	if got := writeMethods(); len(got) != 23 {
+		t.Fatalf("the allowlist has %d write methods %v; the specs name 11 and 12 (a new one needs this test and the specs read again)", len(got), got)
 	}
 	if problems := zeroRequestProblems(t, func(context.Context, string) error { return errGateClosed }); len(problems) != 0 {
 		t.Fatal(strings.Join(problems, "\n"))
@@ -244,5 +245,39 @@ func TestNewRefusesAWriterWithoutAGate(t *testing.T) {
 	gated.WriteGate = openGate
 	if _, err := New(gated); err != nil {
 		t.Fatalf("a client with a gate: %v", err)
+	}
+}
+
+// The HBAC stage's methods (Phase 3a P3-2) are in the allowlist as what they are: the
+// reads, hbactest and env among them, are reads, and the twelve commands that change a
+// rule or a service are writes, so that a read-only client refuses them and the write gate
+// asks about every one. The identity writer sends exactly these.
+func TestAllowlistHoldsTheHBACMethodsAsReadsAndWrites(t *testing.T) {
+	reads := []string{"hbacrule_show", "hbacrule_find", "hbacsvc_show", "hbacsvc_find", "host_find", "hostgroup_find", "hbactest", "env"}
+	writes := []string{
+		"hbacsvc_add", "hbacrule_add", "hbacrule_mod", "hbacrule_del", "hbacrule_add_host", "hbacrule_remove_host",
+		"hbacrule_add_user", "hbacrule_remove_user", "hbacrule_add_service", "hbacrule_remove_service",
+		"hbacrule_enable", "hbacrule_disable",
+	}
+	for _, m := range reads {
+		if k, ok := allowlist[m]; !ok || k != read {
+			t.Errorf("%s is %v in the allowlist (present %v), want a read", m, k, ok)
+		}
+	}
+	for _, m := range writes {
+		if k, ok := allowlist[m]; !ok || k != write {
+			t.Errorf("%s is %v in the allowlist (present %v), want a write", m, k, ok)
+		}
+	}
+	// Nothing else of the HBAC family, and no delete of a service or a host, is allowed.
+	for m := range allowlist {
+		if strings.HasPrefix(m, "hbac") && !slices.Contains(reads, m) && !slices.Contains(writes, m) {
+			t.Errorf("%s is in the allowlist and is not one of the HBAC stage's", m)
+		}
+	}
+	for _, m := range []string{"hbacsvc_del", "hbacsvc_mod", "hostgroup_del", "host_del", "host_add", "hbacsvcgroup_add"} {
+		if _, ok := allowlist[m]; ok {
+			t.Errorf("%s is in the allowlist", m)
+		}
 	}
 }

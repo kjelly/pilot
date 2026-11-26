@@ -1,5 +1,20 @@
 # FreeIPA Go reconcile 最新驗收
 
+## Phase 3a：HBAC 組件的 playbook 變更（PR #396）
+
+目前狀態：**PASS（playbook 的部分）**。驗收日期 2026-11-26，candidate `e66bf74ef4abfcf43705ea7d2f6fdba05ac04993`，tree `fc1be9f8902bdfb8aa497fc6754a933da658dd60`（已合併 main `3f898b53`，含 merge review 兩個 P2 的修正）。機器產生的 record 由 pilot 寫出，指標如下：
+
+| Record | Tested commit | Outcome | Finished (UTC) | Verify |
+|---|---|---|---|---|
+| [pr-396.md](pr-396.md) | `e66bf74ef4abfcf43705ea7d2f6fdba05ac04993` | success | 2026-11-26 10:07 | PASS 24/0/0 |
+
+- **範圍**：`freeipa-identity-apply.yml` 新增選用的 `-e pilot_identity_hbac_engine=go`、`-e pilot_identity_cache_settle=defer` 與對應 gate，並與 main 的憑證拆分（#142／#216）合併。Go 的 HBAC writer、lockdown 與 `ExecuteHBAC`（含這一輪的 H3 規則身分檢查與 H8 回滾預算修正）**沒有接到任何入口**，不能在 VM 上證明，只有假 server 的回歸測試。
+- **Target**：兩台拋棄式 `vm-target` VM：FreeIPA 4.13.4 server（AlmaLinux 9）與一台 enrolled client（Ubuntu 24.04）；沒有任何正式環境。
+- **結果**：預設模式的正式鏈 L1–L6 全部通過（L3 `changed=0`、L4 `changed=70`、`freeipa-identity.md` 24/0/0、L6 `changed=0`），並在 `-v` 下建立帶 `password.initial` 的使用者、輸出 0 筆秘密；同一 candidate 前兩次執行因 lab 名冊的錯誤在 L3（變更前）與 L4（自動 rollback 成功）失敗，寫在 record 的失敗路徑。go 模式的手動執行、gate 與 tag 的負向案例是在上一個 candidate `5882eaba` 做的，沒有重跑（playbook 與它讀的檔案逐位元組相同）。
+- **已知限制**：Go 的 HBAC 階段、H1–H8 stage、lockdown 證明與回滾、K9／K10、混合 run 的 transaction 與結束碼、登入 oracle 都不在這份 record（P3-5、P3-6）；手動執行不是正式鏈；只驗證 ansible-core 2.19.2 與單一 server。
+
+候選、逐項結果、失敗路徑與限制見 [PR #396 驗收紀錄](pr-396.md)。
+
 ## Issue #394：Go engine 送出單一 `{{ name }}` 形式的 `password.initial`
 
 目前狀態：**PASS**。驗收日期 2026-11-20，candidate `c58edf7e4c027e37ccd363b56b5d80eeafd62bfa`，tree `c2306ed5384e4207cfd707451295c82b3e72b1ce`（已合併 main `f9937741`）。

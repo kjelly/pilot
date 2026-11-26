@@ -1,0 +1,21 @@
+{
+  "result": {
+    "result": {
+      "description": [
+        "p3a capture"
+      ],
+      "ipaenabledflag": [
+        true
+      ],
+      "cn": [
+        "p3acap-r3"
+      ]
+    },
+    "value": "p3acap-r3",
+    "summary": "Modified HBAC rule \"p3acap-r3\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

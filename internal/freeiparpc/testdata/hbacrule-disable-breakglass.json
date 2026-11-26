@@ -1,0 +1,11 @@
+{
+  "result": {
+    "result": true,
+    "value": "p3acap-breakglass",
+    "summary": "Disabled HBAC rule \"p3acap-breakglass\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

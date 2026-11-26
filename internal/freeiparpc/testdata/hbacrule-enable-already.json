@@ -1,0 +1,11 @@
+{
+  "result": {
+    "result": true,
+    "value": "p3acap-r7",
+    "summary": "Enabled HBAC rule \"p3acap-r7\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

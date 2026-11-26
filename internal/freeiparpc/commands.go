@@ -15,8 +15,11 @@ const (
 	write
 )
 
-// allowlist holds the commands the users/groups engine needs. Writes are
-// marked so a failure after sending is reported as an unknown outcome.
+// allowlist holds the commands the identity engine needs: the users and groups of
+// Phase 2, and the HBAC stage of Phase 3a (docs/superpowers/specs/
+// 2026-11-19-freeipa-go-reconcile-phase3-hbac-spec.md §5). Writes are marked so a
+// failure after sending is reported as an unknown outcome. hbactest is a read: it
+// evaluates the rules and changes nothing. env reads the server's own settings.
 var allowlist = map[string]kind{
 	"ping":                read,
 	"user_show":           read,
@@ -34,6 +37,28 @@ var allowlist = map[string]kind{
 	"group_del":           write,
 	"group_add_member":    write,
 	"group_remove_member": write,
+
+	// Phase 3a: HBAC.
+	"hbacrule_show":           read,
+	"hbacrule_find":           read,
+	"hbacsvc_show":            read,
+	"hbacsvc_find":            read,
+	"host_find":               read,
+	"hostgroup_find":          read,
+	"hbactest":                read,
+	"env":                     read,
+	"hbacsvc_add":             write,
+	"hbacrule_add":            write,
+	"hbacrule_mod":            write,
+	"hbacrule_del":            write,
+	"hbacrule_add_host":       write,
+	"hbacrule_remove_host":    write,
+	"hbacrule_add_user":       write,
+	"hbacrule_remove_user":    write,
+	"hbacrule_add_service":    write,
+	"hbacrule_remove_service": write,
+	"hbacrule_enable":         write,
+	"hbacrule_disable":        write,
 }
 
 // ServerInfo is what ping reports.

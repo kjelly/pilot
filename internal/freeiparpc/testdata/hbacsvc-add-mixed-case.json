@@ -1,0 +1,26 @@
+{
+  "result": {
+    "result": {
+      "description": [
+        "p3a capture"
+      ],
+      "ipauniqueid": [
+        "cdba4732-e3ea-11f1-b5df-525400dff9fd"
+      ],
+      "objectclass": [
+        "ipaobject",
+        "ipahbacservice"
+      ],
+      "cn": [
+        "p3acap-casesvc"
+      ],
+      "dn": "cn=p3acap-casesvc,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "p3acap-casesvc",
+    "summary": "Added HBAC service \"p3acap-casesvc\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

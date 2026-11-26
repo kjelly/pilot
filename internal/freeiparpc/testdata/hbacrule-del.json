@@ -1,0 +1,15 @@
+{
+  "result": {
+    "result": {
+      "failed": []
+    },
+    "value": [
+      "p3acap-r2"
+    ],
+    "summary": "Deleted HBAC rule \"p3acap-r2\""
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

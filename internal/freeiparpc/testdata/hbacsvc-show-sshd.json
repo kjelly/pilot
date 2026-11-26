@@ -1,0 +1,26 @@
+{
+  "result": {
+    "result": {
+      "objectclass": [
+        "ipahbacservice",
+        "ipaobject"
+      ],
+      "ipauniqueid": [
+        "cb8d4ece-e3e9-11f1-856c-525400dff9fd"
+      ],
+      "cn": [
+        "sshd"
+      ],
+      "description": [
+        "sshd"
+      ],
+      "dn": "cn=sshd,cn=hbacservices,cn=hbac,dc=ipa,dc=pilot,dc=internal"
+    },
+    "value": "sshd",
+    "summary": null
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

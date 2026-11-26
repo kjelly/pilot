@@ -1,0 +1,25 @@
+{
+  "result": {
+    "result": [
+      {
+        "fqdn": [
+          "p3acap-h1.ipa.pilot.internal"
+        ],
+        "dn": "fqdn=p3acap-h1.ipa.pilot.internal,cn=computers,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      },
+      {
+        "fqdn": [
+          "p3acap-h2.ipa.pilot.internal"
+        ],
+        "dn": "fqdn=p3acap-h2.ipa.pilot.internal,cn=computers,cn=accounts,dc=ipa,dc=pilot,dc=internal"
+      }
+    ],
+    "count": 2,
+    "truncated": false,
+    "summary": "2 hosts matched"
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}

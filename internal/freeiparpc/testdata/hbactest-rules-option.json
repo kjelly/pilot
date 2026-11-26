@@ -1,0 +1,16 @@
+{
+  "result": {
+    "warning": null,
+    "matched": [
+      "p3acap-r8"
+    ],
+    "notmatched": null,
+    "error": null,
+    "summary": "Access granted: True",
+    "value": true
+  },
+  "error": null,
+  "id": 0,
+  "principal": "admin@IPA.PILOT.INTERNAL",
+  "version": "4.13.4"
+}
