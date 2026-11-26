@@ -3,8 +3,9 @@ for the scripts/pr_loop.py tests (not a test module).
 
 NOTHING here may reach the developer's real tmux server, real GitHub or the network. `FakeEnv` puts its own `tmux`,
 `gh`, `claude` and `codex` first on PATH and refuses to continue unless `shutil.which` resolves every one of them to
-the fakes; the fake `tmux` and `gh` also refuse to run without their own state file, and git is limited to local
-files (`GIT_ALLOW_PROTOCOL=file`). The screens, pane states and PR views they serve are SYNTHETIC: they are written
+the fakes (`real_tmux=True` is the one exception: it leaves tmux real and puts it on a private server, see `FakeEnv`);
+the fake `tmux` and `gh` also refuse to run without their own state file, and git is limited to local files
+(`GIT_ALLOW_PROTOCOL=file`). The screens, pane states and PR views they serve are SYNTHETIC: they are written
 for these tests, not captured from a real tmux, agent or GitHub session, and they only claim to exercise the parsing
 rules of scripts/pr_loop.py. The exceptions: the Ready signal's GitHub state (`signal_world`) is
 `ready_signal_world.World`, which builds the timeline events and labels in the shapes of the reduced real captures of
@@ -13,13 +14,18 @@ private tmux socket (kjelly/pilot#425): the error lines of `list-panes` (`NO_SER
 name in use (`duplicate session: S`), `new-window` and the way it resolves its target (`=S:` is exactly S; `S:` is S,
 else a session whose name merely starts with S; a target without a colon is a window name), `kill-pane` (a window
 goes with its last pane, a session with its last window, and a grouped twin of it with the session), the rows of
-`list-panes -a` (a dead pane has no path, a twin repeats the rows of its session) and `show-options -gv
-update-environment`. The model lives in `MODEL`, which is both embedded in the fake `tmux` and executed by the tests
-to set a state up (`FakeEnv.kill_session` and the like). git is always REAL: the checkout is a real clone of a real
-bare repository.
+`list-panes -a` (a dead pane has no path and no process, keeps its start path and command, a twin repeats the rows of its
+session; `#{q:...}` puts a backslash before every character special to a shell, a newline included; a start command that
+holds a space is shown between double quotes; kjelly/pilot#442, each asserted against a real tmux in
+tests/test_pr_loop_tmux.py, which runs on tmux 3.8 and on tmux 3.4.1: 3.4 differs from the fake in what `q:` quotes (not `{`, `}`
+or a newline), in a `$` (it writes a backslash before it in a directory and two in a command) and in a dead pane, which
+keeps its process there; scripts/pr_loop.py reads both) and `show-options -gv update-environment`. The model lives in
+`MODEL`, which is both embedded in the fake `tmux` and executed by the tests to set a state up (`FakeEnv.kill_session` and
+the like). git is always REAL: the checkout is a real clone of a real bare repository.
 """
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -41,6 +47,13 @@ HEAD = "a" * 40
 URL = "https://github.com/acme/demo/pull/7"
 # The fakes run with `python -S`: they need nothing but the standard library.
 SHEBANG = f"#!{sys.executable} -S\n"
+
+# What the runner asks `list-panes -a` for (scripts/pr_loop.py LIST_FORMAT; a test keeps the two equal).
+LIST_FORMAT = ("#{pane_id}|#{window_id}|#{pane_dead}|#{pane_in_mode}|#{pane_pid}|#{pid}|#{start_time}|#{q:socket_path}|"
+               "#{q:session_name}|#{q:window_name}|#{q:pane_start_path}|#{q:pane_start_command}|#{q:pane_current_path}|"
+               "#{q:pane_current_command}")
+# The socket tmux 3.8 printed for `#{socket_path}` on a server of the default name: the fake's server answers with it.
+SOCKET = "/tmp/tmux-1000/default"
 
 # What tmux 3.8 really prints (captured on a private socket) for `list-panes -a`, `display-message -p -t %N` and `kill-pane -t
 # %N` alike when no server is running: the socket is left behind (a server ran and was killed), or there is none. Both exit 1.
@@ -75,10 +88,11 @@ def server_exit(state):
 
 
 def server_start(state):
-    """A new server: another PID and start time (deterministic), pane IDs from the start again."""
+    """A new server: another PID and start time (deterministic), pane and window IDs from the start again."""
     n = state["incarnation"] = state.get("incarnation", 0) + 1
     state["server"] = {"pid": 4000 + 7 * n, "start": 1700000000 + 13 * n}
     state["next"] = 0
+    state["next_window"] = 0
 
 
 def server_identity(state):
@@ -98,14 +112,56 @@ def find_session(state, target):
     return (name if name in live_of(state) else None), "can't find session: " + name
 
 
-def make_session(state, name, window, cwd, pane):
+def q(text):
+    """tmux 3.8's `#{q:text}`: a backslash before every character that is special to a shell, a newline included."""
+    return "".join("\\" + char if char in "|&;<>()$`\\\"'*?[# =%{}\n" else char for char in text)
+
+
+def args_escape(arg):
+    """How tmux 3.8 shows one argument of a pane's start command (`args_escape`): between double quotes when it holds one of
+    ` #';${}%`, else between single quotes when it holds a space or a double quote; a backslash, a newline and a tab are written
+    C-style and, between double quotes, a double quote and a `$` get a backslash; a leading `~` gets one too."""
+    if arg == "":
+        return "''"
+    quotes = '"' if any(char in " #';${}%" for char in arg) else "'" if any(char in ' "' for char in arg) else ""
+    if len(arg) == 1 and arg != " " and (quotes or arg == "~"):
+        return "\\" + arg
+    body = "".join({"\\": "\\\\", "\n": "\\n", "\t": "\\t"}.get(char) or ("\\" + char if char in '"$' and quotes == '"' else
+                                                                         char if char.isprintable() else "\\%03o" % ord(char))
+                   for char in arg)
+    tilde = "\\" if body.startswith("~") and quotes != "'" else ""
+    return quotes + tilde + body + quotes
+
+
+def start_shown(args):
+    """The `pane_start_command` tmux 3.8 shows for a pane started with the arguments `args` (empty: a pane that runs the
+    default shell has none): each one as `args_escape` shows it, joined by a space."""
+    return " ".join(args_escape(arg) for arg in args)
+
+
+def pane_pid(state, pane):
+    """The process of a pane: synthetic, above the largest PID a system gives (so that it is never one of the test's own
+    ancestors), another one for the pane an ID has on another server, another again for a pane that was started again."""
+    meta = state["panes"].get(pane, {})
+    return meta.get("pid") or 1000000000 + 1000 * state.get("incarnation", 0) + 10 * int(pane[1:]) + meta.get("respawns", 0)
+
+
+def new_window(state, name, cwd, pane, command=""):
+    """A window with the pane `pane` in it, started in `cwd` with the start command `command` (as tmux shows it)."""
+    window = {"id": "@%d" % state.setdefault("next_window", 0), "name": name, "cwd": cwd, "panes": [pane]}
+    state["next_window"] += 1
+    state["panes"].setdefault(pane, {}).update(start_path=cwd, start_command=command)
+    return window
+
+
+def make_session(state, name, window, cwd, pane, command=""):
     if state.get("server") is None:
         server_start(state)
-    live_of(state)[name] = {"group": None, "windows": [{"name": window, "cwd": cwd, "panes": [pane]}]}
+    live_of(state)[name] = {"group": None, "windows": [new_window(state, window, cwd, pane, command)]}
 
 
-def add_window(state, session, window, cwd, pane):
-    live_of(state)[leader(state, session)]["windows"].append({"name": window, "cwd": cwd, "panes": [pane]})
+def add_window(state, session, window, cwd, pane, command=""):
+    live_of(state)[leader(state, session)]["windows"].append(new_window(state, window, cwd, pane, command))
 
 
 def add_twin(state, session, twin):
@@ -113,12 +169,51 @@ def add_twin(state, session, twin):
     live_of(state)[twin] = {"group": session, "windows": []}
 
 
-def add_split(state, pane, new):
-    """The operator splits the window of `pane`: `new` is a second pane of it."""
+def add_split(state, pane, new, command=None, path=None):
+    """The operator splits the window of `pane`: `new` is a second pane of it, started in `path` (default: the window's
+    directory) with the arguments `command` (default: none, the shell), whose start command tmux shows as `start_shown`."""
     for entry in live_of(state).values():
         for window in entry["windows"]:
             if pane in window["panes"]:
                 window["panes"].append(new)
+                state["panes"].setdefault(new, {}).update(start_path=path or window["cwd"],
+                                                          start_command=start_shown(command or []))
+                return True
+    return False
+
+
+def respawn(state, pane):
+    """The operator starts `pane` again (`respawn-pane -k`): a new process in the same pane, alive, with the command and
+    directory it was started with."""
+    meta = state["panes"].setdefault(pane, {})
+    meta["respawns"] = meta.get("respawns", 0) + 1
+    meta["status"] = ["0|0|claude"]
+    return True
+
+
+def set_status(state, pane, status):
+    """The operator changes what `pane` shows of itself, `status` being `dead|in_mode|foreground command` (put in copy mode: `0|1|claude`;
+    a shell in the foreground: `0|0|bash`), from now on."""
+    state["panes"].setdefault(pane, {})["status"] = [status]
+    return True
+
+
+def reborn(state, session, window, cwd, pane, command=""):
+    """The operator kills the server and starts another one, whose first session is `session`, whose first pane has the ID `pane`
+    (one the old server had: a new server numbers its panes again) and was started in `cwd` with the start command `command`
+    (as tmux shows it)."""
+    kill_server(state)
+    state["panes"][pane] = {}
+    make_session(state, session, window, cwd, pane, command)
+    return True
+
+
+def rename_window(state, pane, name):
+    """The operator renames the window of `pane`."""
+    for entry in live_of(state).values():
+        for window in entry["windows"]:
+            if pane in window["panes"]:
+                window["name"] = name
                 return True
     return False
 
@@ -171,15 +266,28 @@ def kill_pane(state, pane):
 
 
 def rows(state):
-    """`list-panes -a` as `(session, pane, dead, path)`, sorted by session name: a twin repeats the rows of its session,
-    and a dead pane has no path."""
+    """`list-panes -a` as one dict for each (session, pane), sorted by session name: a twin repeats the rows of its session,
+    a dead pane has no process and no current path and keeps what it was started with."""
     live, found = live_of(state), []
     for name in sorted(live):
         for window in live[leader(state, name)]["windows"]:
             for pane in window["panes"]:
-                dead = state["panes"].get(pane, {}).get("status", ["0|0|claude"])[0].split("|")[0] == "1"
-                found.append((name, pane, "1" if dead else "0", "" if dead else window["cwd"]))
+                meta = state["panes"].get(pane, {})
+                dead, in_mode, command = (meta.get("status", ["0|0|claude"])[0].split("|") + ["", ""])[:3]
+                start = meta.get("start_path", window["cwd"])
+                found.append({"session": name, "pane": pane, "window_id": window["id"], "window": window["name"],
+                              "dead": dead == "1", "in_mode": in_mode, "command": command, "start_path": start,
+                              "start_command": meta.get("start_command", ""),
+                              "pid": "" if dead == "1" else str(pane_pid(state, pane)),
+                              "path": "" if dead == "1" else meta.get("path", start)})
     return found
+
+
+def list_line(state, row, socket):
+    """One line of `list-panes -a -F LIST_FORMAT`."""
+    return "|".join((row["pane"], row["window_id"], "1" if row["dead"] else "0", row["in_mode"], row["pid"],
+                     server_identity(state), q(socket), q(row["session"]), q(row["window"]), q(row["start_path"]),
+                     q(row["start_command"]), q(row["path"]), q(row["command"])))
 '''
 
 FAKE_TMUX = r'''
@@ -191,9 +299,8 @@ if not PATH:
     sys.exit(97)
 # The formats the runner uses; the fake answers these and refuses any other loudly.
 PANE_FORMAT = "#{pane_id}|#{pid}|#{start_time}"
-READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pid}|#{start_time}"
-LIST_FORMAT = "#{session_name}|#{pane_id}|#{pane_dead}|#{pane_current_path}"
-''' + "NO_SERVER_TEXT = " + repr(NO_SERVER) + MODEL + r'''
+READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pane_pid}|#{pid}|#{start_time}"
+''' + "LIST_FORMAT = " + repr(LIST_FORMAT) + "\nSOCKET = " + repr(SOCKET) + "\nNO_SERVER_TEXT = " + repr(NO_SERVER) + MODEL + r'''
 
 def load():
     with open(PATH) as stream:
@@ -303,7 +410,8 @@ if code:
     sys.stderr.write("fake tmux: injected failure of " + cmd + "\n")
     sys.exit(code)
 # Something the operator (or another process) does between two calls of the runner: the next call of `cmd` finds
-# the state after it. {"kill_session": S} or {"create_session": S}; None: nothing this time.
+# the state after it. {"kill_session": S}, {"create_session": S} or {"call": function of the model, "args": [...]}; None:
+# nothing this time.
 hooks = state.get("before", {}).get(cmd)
 if hooks:
     hook = hooks.pop(0)
@@ -312,6 +420,8 @@ if hooks:
     if hook and "create_session" in hook:
         state["foreign"] = state.get("foreign", 900) + 1
         make_session(state, hook["create_session"], "operator", hook.get("cwd", "/"), "%" + str(state["foreign"]))
+    if hook and "call" in hook:  # any function of the model, with its arguments: {"call": "respawn", "args": ["%3"]}
+        globals()[hook["call"]](state, *hook.get("args", []))
 # An answer a test scripts for the next call of `cmd`, {"rc": 1, "stderr": "..."}: what tmux says for a state the model
 # does not make (None: this call goes to the model).
 scripted = state.get("answers", {}).get(cmd)
@@ -336,6 +446,7 @@ if cmd in ("new-session", "new-window"):
     # Without `-n` tmux names the window after the program in it (and keeps renaming it as the program changes).
     window = option(args, "-n") if "-n" in args else os.path.basename(args[-1].split()[-1])
     cwd = option(args, "-c")
+    shown = start_shown(args[args.index("--") + 1:] if "--" in args else [args[-1]])
     if cmd == "new-session":
         session = option(args, "-s")
         if session in live_of(state):
@@ -343,7 +454,7 @@ if cmd in ("new-session", "new-window"):
         if state.get("server") is None:
             server_start(state)  # the first session starts a server
         pane = next_pane(state)
-        make_session(state, session, window, cwd, pane)
+        make_session(state, session, window, cwd, pane, shown)
     else:
         need_server(state)
         target = option(args, "-t")
@@ -353,7 +464,7 @@ if cmd in ("new-session", "new-window"):
         if session is None:
             refuse(state, 1, error)
         pane = next_pane(state)
-        add_window(state, session, window, cwd, pane)
+        add_window(state, session, window, cwd, pane, shown)
     state["sessions"].append({"kind": cmd, "session": session, "window": window, "pane": pane, "cwd": cwd,
                               "command": args[-1], "env": [args[i + 1] for i, arg in enumerate(args) if arg == "-e"]})
     out = pane + "|" + server_identity(state) + "\n"
@@ -370,8 +481,10 @@ elif cmd == "display-message":
     if pane_known(state, name):
         pane = pane_of(state, name)
         fields = take(pane["status"], "0|0|claude")
+        # The pane's own process (never the server's): none for a dead pane, as tmux 3.8 prints it
+        fields += "|" + ("" if fields.startswith("1|") else str(pane_pid(state, name)))
     else:
-        fields = "||"  # tmux answers a pane it does not have with empty fields and exit status 0
+        fields = "|||"  # tmux answers a pane it does not have with empty fields and exit status 0
     out = fields + "|" + server_identity(state) + "\n"
 elif cmd == "capture-pane":
     need_server(state)
@@ -415,12 +528,12 @@ elif cmd == "set-option":
 elif cmd == "list-panes":
     if state.get("no_server"):
         refuse(state, 1, state["no_server"])
+    if args[1:] != ["-a", "-F", LIST_FORMAT]:
+        refuse(state, 98, "fake tmux: unexpected list-panes " + " ".join(args[1:]))
     listing = state.get("listing")
     if listing is None:
         need_server(state)
-        if args[1:] != ["-a", "-F", LIST_FORMAT]:
-            refuse(state, 98, "fake tmux: unexpected list-panes " + " ".join(args[1:]))
-        listing = ["|".join(row) for row in rows(state)]
+        listing = [list_line(state, row, state.get("socket", SOCKET)) for row in rows(state)]
     out = "".join(line + "\n" for line in listing)
 else:
     save(state)
@@ -518,6 +631,10 @@ class FakeTime:
     def monotonic(self):
         return self.now
 
+    def time(self):
+        """The wall clock: a fixed day, moved on by what was slept (the age of a file is read against it)."""
+        return 1700000000.0 + self.now - 1000.0
+
     def sleep(self, seconds):
         self.sleeps.append(seconds)
         if len(self.sleeps) > self.limit:
@@ -528,13 +645,20 @@ class FakeTime:
 class FakeEnv:
     """A directory of fakes, put first on PATH for the duration of a test (see `start`)."""
 
-    def __init__(self, test, *, remote_files=None):
+    def __init__(self, test, *, remote_files=None, real_tmux=False):
+        """`real_tmux`: the fake `tmux` is not installed. tmux is the real one, on a server of its own that lives in a private
+        directory (`TMUX_TMPDIR`) and is held open by a keeper session started with `-f /dev/null`; before anything is run the
+        socket a plain `tmux` reaches must be inside that directory, or the test fails (see `start_real_tmux`). The agents
+        `claude` and `codex` are then scripts a pane really runs (`write_agent`), not stubs."""
         self.temp = tempfile.TemporaryDirectory(prefix="pr-loop-fakes-")
         test.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
+        self.real_tmux = real_tmux
         self.bin = self.root / "bin"
         self.bin.mkdir()
         for name, source in (("tmux", FAKE_TMUX), ("gh", FAKE_GH), ("claude", AGENT_STUB), ("codex", AGENT_STUB)):
+            if name == "tmux" and real_tmux:
+                continue
             path = self.bin / name
             path.write_text(source if name in ("claude", "codex") else SHEBANG + source)
             path.chmod(0o755)
@@ -553,20 +677,59 @@ class FakeEnv:
         env = dict(self.git_env, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                    FAKE_TMUX_STATE=str(self.tmux_path), FAKE_GH_STATE=str(self.gh_path),
                    FAKE_RESULT_CLI=str(RESULT_CLI), XDG_STATE_HOME=str(self.state_home), GH_PROMPT_DISABLED="1", PYTHONDONTWRITEBYTECODE="1")
-        env.pop("TMUX", None)  # it would point a real tmux at the developer's server
+        for name in ("TMUX", "TMUX_PANE", "TMUX_TMPDIR"):
+            env.pop(name, None)  # they would point a real tmux at the developer's server (a test that wants one sets it itself)
         for name in UPDATE_ENVIRONMENT:
             env.pop(name, None)  # the developer's session variables: a test that wants one sets it itself
+        if real_tmux:
+            self.tmux_dir = self.root / "tmux"
+            env["TMUX_TMPDIR"] = str(self.tmux_dir)
         patcher = patch.dict(os.environ, env, clear=True)
         patcher.start()
         test.addCleanup(patcher.stop)
         # The safety net: a leaked call to the real tmux or gh would touch the developer's tmux server or GitHub.
         for name in ("tmux", "gh", "claude", "codex"):
             found = shutil.which(name)
+            if name == "tmux" and real_tmux:
+                assert found and not str(found).startswith(str(self.bin)), f"tmux resolves to {found}"
+                continue
             assert found == str(self.bin / name), f"{name} resolves to {found}, not to the fake in {self.bin}"
         self.environ = os.environ
+        if real_tmux:
+            self.start_real_tmux(test)
         # The runner works in the operator's checkout and keeps no state of its own: whatever a test did, nothing may
         # exist under XDG_STATE_HOME afterwards (the managed clones of an earlier design lived there).
         test.addCleanup(self._assert_no_state_directory)
+
+    SOCKET_LIMIT = 100  # a Unix socket path is limited to 107 bytes; stay well inside
+
+    def start_real_tmux(self, test):
+        """The real tmux on a private server: the socket is `<root>/tmux/tmux-<uid>/default`, a keeper session started with the
+        socket named explicitly and `-f /dev/null` (no configuration file) keeps the server alive when the last session of a
+        test goes, and the socket a PLAIN `tmux` reaches (which is what the runner runs) is checked to be that one before
+        anything of the runner starts. Whatever is on the socket at the end is killed with the socket named explicitly, never by
+        name or by default."""
+        self.socket = self.tmux_dir / f"tmux-{os.getuid()}" / "default"
+        if len(os.fsencode(self.socket)) >= self.SOCKET_LIMIT:
+            test.skipTest(f"the socket path {self.socket} would be {len(os.fsencode(self.socket))} bytes long")
+        self.socket.parent.mkdir(parents=True, mode=0o700)
+        done = subprocess.run(["tmux", "-S", str(self.socket), "-f", "/dev/null", "new-session", "-d", "-s", "keeper",
+                               "exec sleep 600"], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        assert done.returncode == 0, done.stderr
+        test.addCleanup(subprocess.run, ["tmux", "-S", str(self.socket), "kill-server"], capture_output=True, timeout=30,
+                        stdin=subprocess.DEVNULL)
+        done = subprocess.run(["tmux", "display-message", "-p", "-t", "=keeper:", "#{socket_path}"], capture_output=True,
+                              text=True, timeout=30, stdin=subprocess.DEVNULL)
+        assert (done.returncode, done.stdout.strip()) == (0, str(self.socket)), \
+            f"plain tmux does not reach the private server: {done.stdout!r} {done.stderr!r}"
+        assert os.path.realpath(done.stdout.strip()).startswith(os.path.realpath(self.root) + os.sep)
+
+    def write_agent(self, name, text):
+        """An executable of that name in the fakes' directory (it replaces the stub): what a pane of the real tmux runs."""
+        path = self.bin / name
+        path.write_text(text)
+        path.chmod(0o755)
+        return path
 
     def _assert_no_state_directory(self):
         assert not self.state_home.exists(), f"the runner created {self.state_home}: it keeps no state of its own"
@@ -704,6 +867,26 @@ class FakeEnv:
         self._write(self.tmux_path, state)
         return pane
 
+    def session(self, name, window="w", cwd="/", command=None):
+        """A session somebody else made (the operator, another tool, another checkout's runner) with one pane that was started in
+        `cwd` with the arguments `command` (default: the shell); its pane ID. It keeps the server alive, like `keeper`."""
+        state = self.tmux()
+        state["foreign"] = state.get("foreign", 900) + 1
+        pane = f"%{state['foreign']}"
+        _model["make_session"](state, name, window, str(cwd), pane, _model["start_shown"](command or []))
+        self._write(self.tmux_path, state)
+        return pane
+
+    def window(self, session, name, cwd, command=None):
+        """A window somebody else opened in `session` (started in `cwd` with the arguments `command`, by default the shell); its
+        pane ID."""
+        state = self.tmux()
+        state["foreign"] = state.get("foreign", 900) + 1
+        pane = f"%{state['foreign']}"
+        _model["add_window"](state, session, name, str(cwd), pane, _model["start_shown"](command or []))
+        self._write(self.tmux_path, state)
+        return pane
+
     def server(self):
         """`pid|start_time` of the server that runs, None when none does."""
         state = self.tmux()
@@ -712,14 +895,39 @@ class FakeEnv:
     def add_twin(self, session, twin):
         self.operator("add_twin", session, twin)
 
-    def add_split(self, pane):
-        """The operator splits the window of `pane`; the ID of the new pane."""
+    def add_split(self, pane, command=None, path=None):
+        """The operator splits the window of `pane` (a command as a list of arguments, a directory; by default the shell, in the
+        window's directory); the ID of the new pane."""
         state = self.tmux()
         state["foreign"] = state.get("foreign", 900) + 1
         new = f"%{state['foreign']}"
         self._write(self.tmux_path, state)
-        assert self.operator("add_split", pane, new), f"no window with {pane}"
+        assert self.operator("add_split", pane, new, command, None if path is None else str(path)), f"no window with {pane}"
         return new
+
+    def respawn(self, pane):
+        """The operator starts `pane` again: a new process, alive."""
+        self.operator("respawn", pane)
+
+    def rename_window(self, pane, name):
+        """The operator renames the window of `pane`."""
+        assert self.operator("rename_window", pane, name), f"no window with {pane}"
+
+    def row(self, session, pane, *, window="7-draft", dead=False, in_mode=False, pid=None, start_path=None,
+            start_command=None, path=None, command="claude", window_id="@1", server=None, socket=SOCKET):
+        """One line of `list-panes -a -F LIST_FORMAT` as tmux 3.8 would print it, for a test that scripts the whole listing
+        (`update_tmux(listing=[...])`): by default a live agent pane of the runner's in the checkout `start_path` and `path`
+        (both default to `self.checkout`), started with `exec <executable>`; `server` is `pid|start_time` (the fake's own by
+        default, 4007|1700000013 without one)."""
+        start_path = str(self.checkout) if start_path is None else str(start_path)
+        path = ("" if dead else start_path) if path is None else str(path)  # (a path that is given wins, for a rule's trigger case)
+        if start_command is None:
+            start_command = _model["start_shown"](["exec " + shlex.quote(str(self.bin / "claude"))])
+        identity = server or (self.server() or "4007|1700000013")
+        return "|".join((pane, window_id, "1" if dead else "0", "1" if in_mode else "0",
+                         "" if dead else str(1000000000 + int(pane[1:]) if pid is None else pid), identity, _model["q"](socket),
+                         _model["q"](session), _model["q"](window), _model["q"](start_path), _model["q"](start_command),
+                         _model["q"](path), _model["q"](command)))
 
     def live(self):
         """The sessions that exist: name -> the names of its windows (a grouped twin shows its group's)."""

@@ -11,9 +11,9 @@ default branch strictly behind is fast-forwarded to exactly the tip origin repor
 one local `git fetch .` that moves the branch to it (git refuses anything but a fast-forward) and one `git switch`
 (or, on the default branch itself, one `git merge --ff-only`), with hooks and automatic maintenance off; a checkout
 that is ahead, diverged, detached, without a commit, a partial clone, or whose update would touch a submodule or an
-ignored file is refused instead. Apart from that the runner never deletes, resets, cleans or stashes anything in it,
-and the branch it leaves keeps its commits; the task files it writes stay under the checkout's task directory (ignored
-by git), and the agent windows it started stay open when it stops.
+ignored file is refused instead. Apart from that a run never deletes, resets, cleans or stashes anything in it, and the
+branch it leaves keeps its commits; the task files it writes stay under the checkout's task directory (ignored by git),
+and the agent windows it started stay open when it stops: `--clean` lists them, and closes them on request (below).
 
 The agents run as windows (one per agent, named `<PR>-<phase>`) of ONE tmux session of the runner's own, never of one of
 yours: `pilot-pr-<directory name>-<8 hex>`, where the directory name is the checkout's, cut down to letters, digits, `_`
@@ -21,11 +21,22 @@ and `-`, and the hex is a hash of its full path, so that the name is the same on
 between checkouts. The first agent creates the session, every later one adds a window to it; the runner announces the
 name once and you watch from another terminal, read-only, with `tmux attach -r -t <session>`. The runner never kills
 or renames a window or a session. It adds a window to the session named for the checkout when that exists (also one an
-earlier run left), and it closes only the panes it started in this process, one pane at a time, after checking that
+earlier run left), and a run closes only the panes it started in this process, one pane at a time, after checking that
 each is still that pane on the same tmux server: pane IDs are only unique within one server, and a tmux server exits
 with its last session, so a later server can give the same ID to another pane. The dead windows of an earlier run
-stay where they are. The session ends with its last window, and a client attached to it is detached then (tmux's
-default).
+stay where they are until `--clean --yes` closes them. The session ends with its last window, and a client attached to
+it is detached then (tmux's default).
+
+`--clean` is for what a stopped or interrupted run left. It lists the panes that are provably the runner's (all of: the
+session named for the checkout, a window named `<PR>-draft` or `<PR>-ready`, started in the checkout itself with the
+command `exec <absolute path>`), each dead, idle or busy, and the task directories; a pane that is not provably the
+runner's (another session, another window, a split of yours) is listed only when the next run would refuse because of
+it, and is left alone. It changes nothing, reads no GitHub and starts no agent. `--clean --yes` takes the checkout's
+lock and closes the dead and idle panes, one at a time with `kill-pane`, each after checking it again on the same tmux
+server (a pane started again, put in copy mode or given another foreground command since it was judged is left open);
+it never closes the pane the command itself runs in, and `--include-busy` closes busy ones too (the agent's
+work is lost). `--remove-task-dirs` removes the task directories of finished runs, and only when no pane of the runner
+is left. It never touches the git checkout: uncommitted work is reported, and stays.
 
 The runner dispatches the Ready skill (pr-review-merge) only for a PR that carries a valid Ready signal at its
 current HEAD and for its latest Ready transition (`ready_signal.assess`): proof that pr-ready (or issue-to-pr's mark_ready.py) verified and signed it. A
@@ -52,6 +63,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 
@@ -64,7 +76,7 @@ from checkout_preflight import (HEX, GitError, check_checked_out_elsewhere, chec
 from gh_runtime import GitHubError, Repo, issue_comments, pr_view, timeline_events, viewer_login
 from list_ready import QUEUE_LABEL
 from needs_person import LABEL as PERSON_LABEL, latest_marker
-from pr_loop_result import OUTCOMES, SHA, TASK_DIR
+from pr_loop_result import NONCE, OUTCOMES, SHA, TASK_DIR
 import ready_signal  # only LABEL, assess and SignalError: this runner reads the signal, it never writes one
 
 
@@ -90,7 +102,7 @@ CREATE_ROUNDS = 3
 # pane ID is only unique within one server; the pair identifies the server. And what the runner reads of a pane in ONE
 # call, the server's identity beside the pane's fields.
 PANE_FORMAT = "#{pane_id}|#{pid}|#{start_time}"
-READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pid}|#{start_time}"
+READ_FORMAT = "#{pane_dead}|#{pane_in_mode}|#{pane_current_command}|#{pane_pid}|#{pid}|#{start_time}"
 # The only git subcommands that change the checkout (the startup fast-forward and switch to origin's default branch), and
 # how long each may run, in seconds. Every command this runner starts runs through `bounded_run.run` (see its docstring):
 # one that outlives its limit gets SIGTERM to its whole process group and, KILL_AFTER seconds later, SIGKILL to whatever is
@@ -337,6 +349,12 @@ def lock_checkout(top, path):
     return fd
 
 
+def git_path(top, name):
+    """Where git keeps `name` of the work tree at `top` (`git rev-parse --git-path`), as an absolute path."""
+    raw = git(top, "rev-parse", "--git-path", name).stdout.strip()
+    return Path(raw) if os.path.isabs(raw) else top / raw
+
+
 def session_name(path):
     """The tmux session of the runner in the checkout at `path` (absolute and resolved: `resolve_checkout`):
     `pilot-pr-<label>-<8 hex>`. The label is the directory name cut down to what tmux keeps as typed and can target
@@ -354,27 +372,165 @@ def no_tmux_server(stderr):
                                                       stderr) is not None
 
 
-_PANE = re.compile(r"(?P<session>.*)\|(?P<pane>%\d+)\|(?P<dead>[01])\|(?P<path>.*)")
+# What `list-panes -a -F` prints for each pane, `|` between fields: the ones of a fixed shape first (the pane's and its window's
+# ID, whether it is dead or in a mode, its process, and the PID and start time of the tmux server that answers), then the free
+# text of the operator's world, each value in tmux's `q:` quoting (a backslash before every character that is special to a
+# shell, and in tmux 3.8 before a newline too), so that no value ends its field or its row early. `pane_start_path` and
+# `pane_start_command` are what the pane was started with, which a dead pane keeps (it has no current path; tmux 3.8 gives it
+# no process, tmux 3.4 the one it had).
+LIST_TEXT = ("socket_path", "session_name", "window_name", "pane_start_path", "pane_start_command", "pane_current_path",
+             "pane_current_command")
+LIST_FORMAT = "|".join(("#{pane_id}", "#{window_id}", "#{pane_dead}", "#{pane_in_mode}", "#{pane_pid}", "#{pid}",
+                        "#{start_time}", *(f"#{{q:{name}}}" for name in LIST_TEXT)))
+_SHAPES = (re.compile(r"%[0-9]+"), re.compile(r"@[0-9]+"), re.compile(r"[01]"), re.compile(r"[01]"), re.compile(r"[0-9]*"),
+           re.compile(r"[0-9]+"), re.compile(r"[0-9]+"))
+# The windows the runner names for its agents: `<PR>-draft` and `<PR>-ready`.
+AGENT_WINDOW = re.compile(r"[1-9][0-9]*-(?:draft|ready)")
+
+
+class Pane(NamedTuple):
+    """One pane of the tmux server, as `list-panes -a` shows it (LIST_FORMAT), the free text unquoted. A pane of a grouped
+    session is shown once for every session of the group."""
+    pane: str
+    window_id: str
+    dead: bool
+    in_mode: bool
+    pid: str  # the pane's process; empty for a dead pane in tmux 3.8, the process it had in tmux 3.4
+    server: tuple  # (PID, start time) of the tmux server that listed it: a pane ID means this pane only on that server
+    socket: str
+    session: str
+    window: str
+    start_path: str
+    start_command: str
+    path: str  # where the pane is now; empty for a dead pane
+    command: str  # what runs in its foreground
+
+
+def unquote(text):
+    """`text` without the backslashes of tmux's `q:` quoting: a backslash makes the character after it a plain one."""
+    return re.sub(r"\\(.)", r"\1", text, flags=re.DOTALL)
+
+
+_ROW_START = re.compile(r"%[0-9]+\|@[0-9]+\|[01]\|[01]\|[0-9]*\|[0-9]+\|[0-9]+\|")
+
+
+def split_listing(text):
+    """The rows of a `list-panes` listing, each a list of fields, still quoted: a backslash makes the next character, a
+    newline too, part of its field (tmux 3.8 puts one before a newline in a value); a `|` that is not quoted ends a field; a
+    newline that is not quoted ends a row when what follows is the start of a row or the end of the text, and is otherwise part
+    of the field (tmux 3.4 does not quote a newline in a value: a directory name may hold one). None when the text ends inside
+    a row or inside a quoting: it cannot be read."""
+    rows, row, field, at = [], [], [], 0
+    while at < len(text):
+        char = text[at]
+        at += 1
+        if char == "\\":
+            if at == len(text):
+                return None
+            field += [char, text[at]]
+            at += 1
+        elif char == "|":
+            row.append("".join(field))
+            field = []
+        elif char == "\n" and (at == len(text) or _ROW_START.match(text, at)):
+            row.append("".join(field))
+            rows.append(row)
+            row, field = [], []
+        else:
+            field.append(char)
+    return rows if not row and not field else None
+
+
+def read_pane(fields):
+    """The Pane of one row of `split_listing`; a row of another shape is a Stop."""
+    if len(fields) != len(_SHAPES) + len(LIST_TEXT) or not all(shape.fullmatch(value) for shape, value in zip(_SHAPES, fields)):
+        raise Stop("tmux list-panes returned a line that cannot be read")
+    pane, window_id, dead, in_mode, pid, server_pid, start = fields[:7]
+    socket, session, window, start_path, start_command, path, command = (unquote(field) for field in fields[7:])
+    return Pane(pane, window_id, dead == "1", in_mode == "1", pid, (server_pid, start), socket, session, window, start_path,
+                start_command, path, command)
+
+
+def list_panes():
+    """`(panes, said)`: every pane of the tmux server, in the order tmux lists them, and the text tmux printed when no
+    server is running (`said`, with no panes). Any other failure, and a listing that cannot be read, is a Stop."""
+    done = run(["tmux", "list-panes", "-a", "-F", LIST_FORMAT])
+    if done.returncode != 0:
+        if no_tmux_server(done.stderr):
+            return [], done.stderr.strip()  # no tmux server, so no pane
+        raise Stop(f"tmux list-panes failed ({done.returncode}): {done.stderr.strip()[:500]}")
+    rows = split_listing(done.stdout)
+    if rows is None:
+        raise Stop("tmux list-panes returned a line that cannot be read")
+    return [read_pane(row) for row in rows], ""
+
+
+def distinct(panes, session):
+    """One row for every pane: tmux repeats the panes of a session in each session grouped with it. The row of `session`
+    wins, otherwise the first one does."""
+    kept = {}
+    for pane in panes:
+        have = kept.get(pane.pane)
+        if have is None or (pane.session == session and have.session != session):
+            kept[pane.pane] = pane
+    return list(kept.values())
+
+
+# How tmux 3.8 writes the characters it escapes in a command it shows between double quotes (vis(3), C style): `\\`, `\"`, `\$`,
+# the control characters with a name, and the others as three octal digits.
+_VIS = {"\\": "\\", '"': '"', "$": "$", "n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "v": "\v", "f": "\f"}
+
+
+def started_with(shown):
+    """The absolute path in `exec <path>` when that is the start command of a pane as tmux shows it, else None. tmux shows the
+    command it was given between double quotes when it holds a space (tmux 3.8), with the escapes of `_VIS`, or as it was given;
+    the runner's own command is `exec ` and the path quoted for a shell (`shlex.quote`), and nothing else is read as it: the text
+    must be exactly that, so a command that adds a word, a `;` or a second space is not the runner's."""
+    if len(shown) >= 2 and shown[0] == shown[-1] == '"':
+        shown = re.sub(r"\\(?:([\\\"$ntrabvf])|([0-7]{3}))", lambda found: _VIS[found[1]] if found[1] else chr(int(found[2], 8)),
+                       shown[1:-1])
+    try:
+        words = shlex.split(shown)
+    except ValueError:
+        return None
+    if len(words) == 2 and words[0] == "exec" and os.path.isabs(words[1]) and shown == "exec " + shlex.quote(words[1]):
+        return words[1]
+    return None
+
+
+def runners_own(pane, top, session):
+    """Whether `pane` is one this runner started for the checkout `top`: all of them on one row of the listing. Its session
+    is exactly `session`, its window is named `<PR>-draft` or `<PR>-ready`, it was started in `top` itself (not below it, not
+    a sibling whose name starts the same: the real paths are equal), and with the command `exec <absolute path>`, which is
+    how the runner starts every agent and not how a pane you open is started. The tmux server comes from the same row."""
+    return pane.session == session and AGENT_WINDOW.fullmatch(pane.window) is not None and \
+        bool(pane.start_path) and os.path.realpath(pane.start_path) == os.path.realpath(top) and \
+        started_with(pane.start_command) is not None
+
+
+def blocking_panes(top, panes=None):
+    """The panes that make the next run refuse to start in `top`, one for each: a live pane in a session whose name starts
+    with `pilot-pr-` whose directory is `top` or below it. Whoever started it: the lock died with the run that did, the pane
+    did not. `panes` are the rows of a listing already read; otherwise the server is asked. Dead panes, and panes elsewhere
+    or in other sessions, are not the runner's business."""
+    panes = list_panes()[0] if panes is None else panes
+    inside, found = os.path.realpath(top), {}
+    for pane in panes:
+        where = os.path.realpath(pane.path) if pane.path else None
+        if not pane.dead and pane.session.startswith(PANE_SESSION_PREFIX) and where and \
+           (where == inside or where.startswith(inside + os.sep)):
+            found.setdefault(pane.pane, pane)
+    return list(found.values())
 
 
 def check_panes(top):
-    """A pane an earlier run kept (`pilot-pr-*`, still alive) in the checkout is a second user of it: the lock died with
-    that run, the pane did not. Panes of other sessions, dead panes and panes elsewhere are not the runner's business."""
-    done = run(["tmux", "list-panes", "-a", "-F", "#{session_name}|#{pane_id}|#{pane_dead}|#{pane_current_path}"])
-    if done.returncode != 0:
-        if no_tmux_server(done.stderr):
-            return  # no tmux server, so no pane
-        raise Stop(f"tmux list-panes failed ({done.returncode}): {done.stderr.strip()[:500]}")
-    inside = os.path.realpath(top)
-    for line in done.stdout.splitlines():
-        found = _PANE.fullmatch(line)
-        if not found:
-            raise Stop("tmux list-panes returned a line that cannot be read")
-        where = os.path.realpath(found["path"]) if found["path"] else None
-        if found["dead"] == "0" and found["session"].startswith(PANE_SESSION_PREFIX) and where and \
-           (where == inside or where.startswith(inside + os.sep)):
-            raise Stop(f"agent pane {found['pane']} (session {found['session']}) is still running in {top}; "
-                       "inspect and close it before starting the runner again")
+    """A pane an earlier run kept (`pilot-pr-*`, still alive) in the checkout is a second user of it: the next run refuses,
+    and says that `--clean` lists it."""
+    blocking = blocking_panes(top)
+    if blocking:
+        raise Stop(f"agent pane {blocking[0].pane} (session {printable(blocking[0].session)}) is still running in {top}; "
+                   "inspect and close it before starting the runner again "
+                   "(python3 scripts/pr_loop.py --clean lists what an earlier run left)")
 
 
 def printable(text):
@@ -444,8 +600,7 @@ class Checkout:
         self.ignore_task_files()  # last: it judges the .gitignore of the tree the agents will see
 
     def git_path(self, name):
-        raw = git(self.path, "rev-parse", "--git-path", name).stdout.strip()
-        return Path(raw) if os.path.isabs(raw) else self.path / raw
+        return git_path(self.path, name)
 
     def config_values(self, key):
         done = git(self.path, "config", "--get-all", "-z", key, ok=(0, 1))
@@ -914,7 +1069,73 @@ class Checkout:
 PROMPT = re.compile(r"^(?:[›❯](?:\s.*)?|>)$")
 CHOICE = re.compile(r"^[›❯>]\s*\d+[.)]\s")
 BUSY = re.compile(r"(?:esc|ctrl\+c) to interrupt(?:\))?$", re.IGNORECASE)
+# `--clean` is stricter than BUSY, which wants the words at the end of a line: they are busy wherever they stand.
+INTERRUPT = re.compile(r"to interrupt", re.IGNORECASE)
 SHELLS = {"bash", "sh", "zsh", "fish", "dash", "ksh", "nu"}
+SCREEN_LINES = 16
+
+
+def screen_state(screen, *, strict=False):
+    """What the last SCREEN_LINES non-blank lines of an agent's screen say: `working` (they end in `esc to interrupt`; with
+    `strict`, they say `to interrupt` anywhere), `asking` (a numbered choice), `prompt` (the input prompt is among the
+    last six) or `unknown`. The one place that reads a screen: `wait_for_prompt` waits for `prompt`, `--clean` also
+    reads the other three."""
+    recent = [line.strip() for line in screen.splitlines() if line.strip()][-SCREEN_LINES:]
+    if any(BUSY.search(line) or (strict and INTERRUPT.search(line)) for line in recent):
+        return "working"
+    if any(CHOICE.match(line) for line in recent):
+        return "asking"
+    return "prompt" if any(PROMPT.fullmatch(line) for line in recent[-6:]) else "unknown"
+
+
+def probe_pane(pane, server):
+    """`(state, fields)` of the pane `pane` of the tmux server `server` (PID and start time): the one place that reads a
+    pane in ONE `display-message` that also prints the identity of the tmux server answering. A pane ID is only unique
+    within one tmux server, and a server exits with its last session: a later server can give the same ID to another
+    pane (the replacement of an agent, or yours). `state` is `ours` (`fields` are the pane's dead and in-mode flags, its
+    foreground command and its process: empty for a dead pane in tmux 3.8, the PID of the pane, never of the server),
+    `other server` (the server answering is not `server`), `gone` (that server has no such pane) or `no server`. Output
+    that cannot be read, or any other failure of tmux, is a Stop. The commands that follow act on the pane by its ID:
+    the milliseconds between this read and them are not covered."""
+    done = run(["tmux", "display-message", "-p", "-t", pane, READ_FORMAT])
+    if done.returncode != 0:
+        if no_tmux_server(done.stderr):
+            return "no server", None
+        raise Stop(f"tmux display-message failed ({done.returncode}): {done.stderr.strip()[:500]}")
+    parts = done.stdout.strip().split("|")
+    if len(parts) != 6 or not (re.fullmatch(r"[0-9]*", parts[3]) and parts[4].isdigit() and parts[5].isdigit()):
+        raise Stop(f"tmux could not read pane {pane}")
+    if tuple(parts[4:]) != tuple(server):
+        return "other server", None
+    if parts[:4] == ["", "", "", ""]:
+        return "gone", None  # tmux answers a pane it does not have with empty fields and exit status 0
+    if parts[0] not in ("0", "1") or parts[1] not in ("0", "1"):
+        raise Stop(f"tmux could not read pane {pane}")
+    return "ours", (parts[0] == "1", parts[1] == "1", parts[2].lstrip("-"), parts[3])
+
+
+def close_pane(pane, server, expect=None):
+    """Close `pane`, and only the pane (`kill-pane` on its ID; never its window or its session, so that a pane you split off
+    in the window survives), and only after `probe_pane` found it is still a pane of `server`. With `expect`, the `fields`
+    a caller decided to close it on (dead flag, copy mode, foreground command, the pane's process), the read that gates
+    the `kill-pane` must show exactly those: this is the only read right before the kill, so it is the one that has to
+    agree with the decision, and a caller that compared in a read of its own would leave a gap between the two reads. Returns
+    `ours` when it was closed, which is what a pane that vanished meanwhile counts as, else why it was not: `gone` (already
+    closed), `no server` (the server is gone, which closes everything), `other server` (a server that did not make this pane:
+    the ID may belong to another pane) or `changed` (it is not what `expect` says any more), and `kill-pane` is not sent. Any
+    other failure is a Stop. Without `expect` (the agent of a run is closed whatever its state) any pane of `server` is
+    closed. The read and the `kill-pane` are two tmux commands (the runner never sends `if-shell`, which could make them one):
+    the milliseconds between them are not covered."""
+    state, fields = probe_pane(pane, server)
+    if state != "ours":
+        return state
+    if expect is not None and fields != expect:
+        return "changed"
+    done = run(["tmux", "kill-pane", "-t", pane])
+    if done.returncode != 0 and (done.returncode, done.stderr.strip()) != (1, f"can't find pane: {pane}") and \
+       not (done.returncode == 1 and no_tmux_server(done.stderr)):
+        raise Stop(f"tmux kill-pane failed ({done.returncode}): {done.stderr.strip()[:500]}")
+    return state
 
 
 class Agent:
@@ -969,38 +1190,18 @@ class Agent:
         return [arg for name in names for arg in ("-e", f"{name}={os.environ[name]}")]
 
     def probe(self):
-        """`(state, fields)`: the one place that reads this agent's pane, in ONE `display-message` that also prints the
-        identity of the tmux server answering. A pane ID is only unique within one tmux server, and a server exits with its
-        last session: a later server can give the same ID to another pane (this agent's replacement, or the operator's).
-        `state` is `ours` (`fields` are the pane's dead and in-mode flags and its foreground command), `other server`
-        (the server answering is not the one that made the pane), `gone` (that server has no such pane) or `no server`.
-        Output that cannot be read, or any other failure of tmux, is a Stop. The commands that follow act on the pane by
-        its ID: the milliseconds between this read and them are not covered."""
-        done = run(["tmux", "display-message", "-p", "-t", self.pane, READ_FORMAT])
-        if done.returncode != 0:
-            if no_tmux_server(done.stderr):
-                return "no server", None
-            raise Stop(f"tmux display-message failed ({done.returncode}): {done.stderr.strip()[:500]}")
-        parts = done.stdout.strip().split("|")
-        if len(parts) != 5 or not (parts[3].isdigit() and parts[4].isdigit()):
-            raise Stop(f"tmux could not read pane {self.pane}")
-        if tuple(parts[3:]) != self.server:
-            return "other server", None
-        if parts[:3] == ["", "", ""]:
-            return "gone", None  # tmux answers a pane it does not have with empty fields and exit status 0
-        if parts[0] not in ("0", "1") or parts[1] not in ("0", "1"):
-            raise Stop(f"tmux could not read pane {self.pane}")
-        return "ours", (parts[0] == "1", parts[1] == "1", parts[2].lstrip("-"))
+        """`(state, fields)` of this agent's pane, as `probe_pane` reads it against the tmux server that made it."""
+        return probe_pane(self.pane, self.server)
 
     def status(self):
-        """`(dead, in_mode, foreground command)` of the pane. A pane that is gone, or a tmux server that is not the one the
+        """`(dead, in_mode, foreground command)` of the pane (not its process: `probe_pane` reads that too). A pane that is gone, or a tmux server that is not the one the
         agent was started on, is a Stop that names the pane: nothing is ever done to the pane that now has the ID."""
         state, fields = self.probe()
         if state != "ours":
             raise Stop(f"agent pane {self.pane} (window {self.window} of tmux session {self.session}) is not the pane "
                        "this agent was started in: the tmux server it was started on or the pane itself is gone or was "
                        "replaced; nothing was done to it")
-        return fields
+        return fields[:3]
 
     def wait_for_prompt(self, timeout, *, allow_exit=False):
         end = time.monotonic() + timeout
@@ -1011,10 +1212,7 @@ class Agent:
                     return False
                 raise Stop(f"agent exited during startup in {self.pane}")
             if process and process not in SHELLS and not in_mode:
-                screen = command("tmux", "capture-pane", "-p", "-J", "-t", self.pane)
-                recent = [line.strip() for line in screen.splitlines() if line.strip()][-16:]
-                if not any(BUSY.search(line) or CHOICE.match(line) for line in recent) and \
-                   any(PROMPT.fullmatch(line) for line in recent[-6:]):
+                if screen_state(command("tmux", "capture-pane", "-p", "-J", "-t", self.pane)) == "prompt":
                     return True
             time.sleep(0.25)
         raise Stop(f"agent did not return to its input prompt in {self.pane}; inspect window {self.window} of tmux "
@@ -1039,18 +1237,11 @@ class Agent:
         command("tmux", "send-keys", "-t", self.pane, "Enter")
 
     def close(self):
-        """Close the agent's pane, and only its pane (`kill-pane` on its ID; never its window or its session, so that a
-        pane the operator split off in the window survives), and only after `probe` found it is still this agent's pane
-        on the tmux server that made it. A pane that is already gone, a tmux server that is gone (the operator killed the
-        session, and no other session kept the server alive) and a server that is not the one that made the pane are all
-        closed, which is what this asks for, and `kill-pane` is not sent: the ID may belong to another pane now. Any other
-        failure is a Stop. The check and the `kill-pane` are two commands: what happens between them is not covered."""
-        if self.probe()[0] != "ours":
-            return
-        done = run(["tmux", "kill-pane", "-t", self.pane])
-        if done.returncode != 0 and (done.returncode, done.stderr.strip()) != (1, f"can't find pane: {self.pane}") and \
-           not (done.returncode == 1 and no_tmux_server(done.stderr)):
-            raise Stop(f"tmux kill-pane failed ({done.returncode}): {done.stderr.strip()[:500]}")
+        """Close the agent's pane, and only its pane, and only when it is still this agent's pane on the tmux server that made
+        it (`close_pane`). A pane that is already gone, a tmux server that is gone (you killed the session, and no other
+        session kept the server alive) and a server that is not the one that made the pane are all closed, which is what this
+        asks for, and `kill-pane` is not sent. Any other failure is a Stop."""
+        close_pane(self.pane, self.server)
 
 
 def check_result(path, task, head):
@@ -1073,6 +1264,516 @@ def check_result(path, task, head):
         kind = report.get("wait_kind")
         detail = f" ({kind})" if kind in ("person", "transient") else ""
         raise Stop(f"PR #{task['pr']} {outcome}{detail} at {head[:12]}: {reason}")
+
+
+# ---- `--clean`: what a stopped or interrupted run left -----------------------------------------------------------------
+
+# How long the screen of a pane must stay as it is before the pane counts as idle (seconds), and how much of it a listing
+# shows. Module constants, not flags.
+SETTLE = 1.0
+SHOWN_LINES, SHOWN_WIDTH = 3, 120
+TASK_FILES = ("task.json", "result.json")
+READ_LIMIT = 4097  # a task or a result is at most 4096 bytes (pr_loop_result.py); one more byte tells that it is longer
+
+
+class State(NamedTuple):
+    """What a pane of the runner's is: `dead`, `idle` or `busy`, the reason, and the last read of its screen."""
+    kind: str
+    reason: str
+    screen: str
+
+
+class TaskDir(NamedTuple):
+    """One directory of the task directory that holds an entry named like a nonce: what it says, how old it is, what the
+    skill answered, why it must not be removed (None when it may be) and the names of what it holds."""
+    nonce: str
+    subject: str
+    age: float
+    result: str
+    problem: str
+    names: tuple
+
+
+def header_line(top, session, socket):
+    """The first line of the listing, with the tmux socket the panes were listed on (None when no server runs)."""
+    return f"Residue of earlier runs in {top} (tmux session {session}" + (f" on {printable(socket)}" if socket else "") + "):"
+
+
+def pane_line(pane, state, verdict, why, ends=""):
+    """The line of a pane of the runner's: `verdict` is `would close`, `closed` or `left open`, `why` the reason, `ends` what
+    closing it ends beyond the pane."""
+    what = "dead" if state.kind == "dead" else f"alive, {state.kind} ({state.reason})"
+    return (f"pane {pane.pane} window {printable(pane.window)}: {what}, {printable(pane.command) or '-'}; {verdict}: {why}"
+            + (f"; closing it ends {ends}" if ends else ""))
+
+
+def foreign_line(pane):
+    """The line of a pane that is not provably the runner's and blocks the next run: it is left alone."""
+    return (f"not the runner's: pane {pane.pane} (session {printable(pane.session)}, window {printable(pane.window)}) in "
+            f"{printable(pane.path)}: left alone; the next run refuses because of it")
+
+
+def task_line(task, verdict, why):
+    """The line of a task directory: `verdict` is `would remove`, `removed` or `kept`."""
+    return f"task {task.nonce}: {task.subject}, {age_text(task.age)} old, result {task.result}; {verdict}: {why}"
+
+
+def summary_line(acting, closed, removed, refused):
+    """The last line: what was (or would be) closed and removed, and whether the next run would start (`refused` says what
+    would still stop it)."""
+    done = f"closed {closed} panes and removed {removed} task directories" if acting else \
+        f"would close {closed} panes and remove {removed} task directories"
+    return f"{done}; " + (f"the next run would still be refused ({', '.join(refused)})" if refused else
+                          "the next run would start")
+
+
+def age_text(seconds):
+    """`45s`, `12m`, `3h 20m` or `2d 4h`: how long ago something was."""
+    seconds = int(max(0, seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h {seconds % 3600 // 60}m"
+    return f"{seconds // 86400}d {seconds % 86400 // 3600}h"
+
+
+def excerpt(screen):
+    """The last SHOWN_LINES non-blank lines of a screen, printable, each cut to SHOWN_WIDTH characters and shown after `  | `.
+    They are whatever the agent displayed: they are not checked for anything but control characters."""
+    lines = [line.strip() for line in screen.splitlines() if line.strip()][-SHOWN_LINES:]
+    return [f"  | {printable(line)[:SHOWN_WIDTH]}" for line in lines]
+
+
+def capture_pane(pane):
+    """The screen of `pane` as text, or None when the pane (or the tmux server) is gone. Any other failure is a Stop."""
+    done = run(["tmux", "capture-pane", "-p", "-J", "-t", pane])
+    if done.returncode != 0:
+        if no_tmux_server(done.stderr) or done.stderr.strip() == f"can't find pane: {pane}":
+            return None
+        raise Stop(f"tmux capture-pane failed ({done.returncode}): {done.stderr.strip()[:500]}")
+    return done.stdout
+
+
+def tmux_client():
+    """`(pane, server PID or None)` of the pane this command runs in, from $TMUX_PANE and $TMUX (`socket,PID,index`), or None
+    when it does not run in tmux."""
+    pane, raw = os.environ.get("TMUX_PANE"), os.environ.get("TMUX")
+    if not pane:
+        return None
+    parts = raw.rsplit(",", 2) if raw else []
+    return pane, (parts[1] if len(parts) == 3 and re.fullmatch(r"[0-9]+", parts[1]) else None)
+
+
+def ancestors():
+    """The PIDs of this process and of every process above it, from /proc; None when /proc cannot be read (then nothing can be
+    said about which process runs below which)."""
+    found, pid = set(), os.getpid()
+    while pid > 0 and pid not in found:
+        found.add(pid)
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as stream:
+                pid = int(stream.read().rsplit(b")", 1)[1].split()[1])  # the field after the state: the parent
+        except (OSError, IndexError, ValueError):
+            return None
+    return found
+
+
+def lock_state(path):
+    """None when nobody holds the checkout's lock `path`, else what the probe found. The probe is a shared, non-blocking
+    `flock` on a read-only descriptor that does not create the file: a missing file is a lock nobody holds."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"cannot be probed ({exc.strerror or exc})"
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "cannot be probed (not a regular file)"
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError as exc:
+        return "held by a running runner" if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN) else \
+            f"cannot be probed ({exc.strerror or exc})"
+    finally:
+        os.close(fd)
+    return None
+
+
+def worktree_notes(top):
+    """What in the checkout the next run refuses, as lines (read-only: nothing of the checkout is changed): uncommitted work
+    or a git operation in progress. A state that cannot be read is said too."""
+    try:
+        busy, dirty = check_in_progress(top), check_dirty(top)
+    except GitError as exc:
+        return [f"the state of the checkout cannot be read ({printable(str(exc))}): left alone"]
+    notes = []
+    if busy:
+        notes.append(f"a git operation is in progress in the checkout ({', '.join(busy[0]['paths'])}): left alone; the next "
+                     "run refuses until you finish or abort it")
+    if dirty:
+        names = [re.sub(r"^[ MADRCUT?!]{2} ", "", entry) for entry in dirty[0]["paths"][:3]]
+        notes.append(f"the checkout has uncommitted changes or untracked files ({dirty[0]['count']} paths, e.g. "
+                     f"{printable(', '.join(names))}): left alone; the next run refuses until you commit or remove them")
+    return notes
+
+
+def read_small(dir_fd, name):
+    """`(bytes, mtime)` of the regular file `name` of the directory `dir_fd`, at most READ_LIMIT bytes, never through a
+    symlink. A file that is not there is a FileNotFoundError, anything else that is wrong an OSError."""
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file")
+        return os.read(fd, READ_LIMIT), info.st_mtime
+    finally:
+        os.close(fd)
+
+
+def read_task_directory(fd, nonce):
+    """The TaskDir of the directory `nonce`, opened as `fd` (read through descriptors: nothing here follows a symlink). `problem`
+    is why it must not be removed, the first of: it is not the user's, `task.json` is missing, unreadable or another task's,
+    it holds anything but `task.json` and `result.json`, one of those two is not a regular file."""
+    info, problems = os.fstat(fd), []
+    names = tuple(sorted(os.listdir(fd)))
+    if info.st_uid != os.getuid():
+        problems.append("it is not owned by this user")
+    task, stamp, subject = None, info.st_mtime, ""
+    try:
+        data, stamp = read_small(fd, "task.json")
+        task = json.loads(data) if len(data) < READ_LIMIT else None
+        if not isinstance(task, dict) or task.get("nonce") != nonce or type(task.get("pr")) is not int or \
+           task.get("phase") not in OUTCOMES:
+            subject = "task.json is not this directory's task"
+            problems.append("its task.json is not this directory's task")
+        else:
+            subject = f"PR #{task['pr']} {task['phase']}"
+    except FileNotFoundError:
+        subject = "no task.json"
+        problems.append("it has no task.json")
+    except (OSError, ValueError) as exc:
+        subject = "task.json unreadable"
+        problems.append(f"its task.json cannot be read ({getattr(exc, 'strerror', None) or exc})")
+    result = "none"
+    try:
+        data, _ = read_small(fd, "result.json")
+        report = json.loads(data) if len(data) < READ_LIMIT else None
+        outcome = report.get("outcome") if isinstance(report, dict) else None
+        result = outcome if isinstance(task, dict) and outcome in OUTCOMES.get(task.get("phase"), ()) else "unreadable"
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        result = "unreadable"
+    others = [name for name in names if name not in TASK_FILES]
+    if others:
+        problems.append(f"it holds other files ({printable(', '.join(others[:3]))})")
+    problems += [f"{name} is not a regular file" for name in names
+                 if name in TASK_FILES and not stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode)]
+    return TaskDir(nonce, subject, time.time() - stamp, result, problems[0] if problems else None, names)
+
+
+def remove_task_directory(base_fd, nonce):
+    """Remove the directory `nonce` of the task directory `base_fd` and what it holds, which is only `task.json` and
+    `result.json`: each is unlinked through the descriptor of the directory and the empty directory is removed, never a
+    tree. It is read again first. This is the ONE place that deletes anything (tests/test_pr_loop.py::ImportsTests). Returns
+    None when it was removed, else why it was not."""
+    try:
+        fd = os.open(nonce, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=base_fd)
+    except OSError as exc:
+        return f"it cannot be opened as a directory ({exc.strerror or exc})"
+    try:
+        found = read_task_directory(fd, nonce)
+        if found.problem:
+            return found.problem
+        for name in reversed(TASK_FILES):  # the result first: an interrupted removal leaves a directory that is still a task
+            if name in found.names:
+                os.unlink(name, dir_fd=fd)
+    except OSError as exc:
+        return f"it could not be removed ({exc.strerror or exc})"
+    finally:
+        os.close(fd)
+    try:
+        os.rmdir(nonce, dir_fd=base_fd)
+    except OSError as exc:
+        return f"its files were removed but the directory could not be ({exc.strerror or exc})"
+    return None
+
+
+class Clean:
+    """`--clean`: what earlier runs left in the checkout, listed, and with `--yes` closed and removed as far as it is provably
+    the runner's own. The checkout is resolved and its lock found (`git rev-parse --git-path`) and that is all this reads of
+    git, apart from the state it reports; it never builds a `Checkout`, which would refuse on the very panes this is for and
+    could fast-forward or switch the checkout. Without `yes` it changes nothing (tmux is asked `list-panes` and
+    `capture-pane` only, GitHub not at all) and every line says what the same command with `--yes` would do; with it the
+    checkout's lock is held for the whole run, so that no runner starts or runs meanwhile."""
+
+    def __init__(self, repo, args):
+        self.args, self.acting = args, bool(args.yes)
+        self.top = resolve_checkout(repo, args.checkout)
+        self.session = session_name(self.top)
+        self.lock_path = git_path(self.top, LOCK_NAME)
+        self.held, self.worktree = None, []  # what `notes` found: the lock's state, and what is in the checkout's way
+        self.above, self.above_us = False, None  # whether `ancestors` has been read, and what it said
+
+    def run(self):
+        """The whole command: the lock first when acting, then the report."""
+        if not self.acting:
+            return self.report()
+        fd = lock_checkout(self.top, self.lock_path)
+        try:
+            return self.report()
+        finally:
+            os.close(fd)
+
+    def report(self):
+        """Read the tmux server and the task directory, say what is there, do what `--yes` asks, and say what is left."""
+        panes, said = list_panes()
+        tell(header_line(self.top, self.session, panes[0].socket if panes else None))
+        if said:
+            tell(printable(said))
+        for note in self.notes():
+            tell(note)
+        ours = [pane for pane in distinct(panes, self.session) if runners_own(pane, self.top, self.session)]
+        states = self.read_states(ours)
+        closed = self.close_panes(ours, states, panes)
+        listed = {pane.pane for pane in ours}
+        for pane in blocking_panes(self.top, panes):
+            if pane.pane not in listed:
+                tell(foreign_line(pane))
+        keeping, blocking = self.left(ours, closed, panes)
+        removed = self.task_directories(keeping)
+        tell(summary_line(self.acting, len(closed), removed, self.refused(blocking)))
+        return 0
+
+    def notes(self):
+        """The lines about the checkout's lock (a preview only: an acting run holds it) and about its state."""
+        self.held = None if self.acting else lock_state(self.lock_path)
+        self.worktree = worktree_notes(self.top)
+        return ([f"lock {self.lock_path}: {self.held}; --clean --yes would be refused"] if self.held else []) + self.worktree
+
+    # ---- the panes -----------------------------------------------------------------------------------------------
+    @staticmethod
+    def look(pane, screen):
+        """The State of an alive pane from ONE read of its screen (None: it could not be read): busy with the reason, or None
+        when it may be idle, which takes a second read."""
+        text = screen or ""
+        if pane.in_mode:
+            return State("busy", "copy-mode", text)
+        if not pane.command or pane.command.lstrip("-") in SHELLS:
+            return State("busy", "unknown: no agent in the foreground", text)
+        if screen is None:
+            return State("busy", "unknown: its screen could not be read", text)
+        seen = screen_state(screen, strict=True)
+        if seen == "unknown":
+            return State("busy", "unknown: no input prompt on the screen", text)
+        return None if seen == "prompt" else State("busy", seen, text)
+
+    def read_states(self, ours):
+        """`{pane ID: State}` of the panes of the runner's. A dead pane is dead. An alive one is read; one that is at its
+        prompt is read again SETTLE seconds after the last first read, and is idle only when the second read is the first:
+        an agent that is working changes its screen (a spinner, an elapsed time)."""
+        states, first = {}, {}
+        for pane in ours:
+            if pane.dead:
+                states[pane.pane] = State("dead", "", capture_pane(pane.pane) or "")  # what it showed last, for the listing
+                continue
+            first[pane.pane] = capture_pane(pane.pane)
+            states[pane.pane] = self.look(pane, first[pane.pane])
+        maybe = [pane for pane in ours if states[pane.pane] is None]
+        if maybe:
+            time.sleep(max(0.0, SETTLE))
+        for pane in maybe:
+            again = capture_pane(pane.pane)
+            states[pane.pane] = State("idle", "at its prompt", again) if again == first[pane.pane] else \
+                State("busy", "the screen is still changing", again or "")
+        return states
+
+    def holds_the_command(self, pane):
+        """Why this command must not close `pane`, or None: it runs in it (its $TMUX_PANE, on the same tmux server), one of its
+        processes is above this one, or that cannot be told (an alive pane whose process is unknown, /proc unreadable)."""
+        mine = tmux_client()
+        if mine and mine[0] == pane.pane and mine[1] in (None, pane.server[0]):
+            return "the command runs in this pane"
+        if pane.dead:
+            return None
+        if not pane.pid:
+            return "its process is unknown, so it cannot be told whether the command runs in it"
+        if not self.above:
+            self.above, self.above_us = True, ancestors()
+        if self.above_us is None:
+            return "/proc cannot be read, so it cannot be told whether the command runs in it"
+        return "the command runs below this pane's process" if int(pane.pid) in self.above_us else None
+
+    def plan(self, pane, state):
+        """`(close, why)`: whether the pane is to be closed, and the reason either way."""
+        refusal = self.holds_the_command(pane)
+        if refusal:
+            return False, refusal
+        if state.kind == "dead":
+            return True, "it is dead"
+        if state.kind == "idle":
+            return True, "it is idle"
+        if self.args.include_busy:
+            return True, "it is busy, and --include-busy was given"
+        return False, "it is busy; busy panes are closed only with --include-busy"
+
+    def ends(self, pane, panes):
+        """What closing `pane` ends beyond the pane, in words: its window when it is the window's last pane, then its session
+        when it is the session's last, and the sessions grouped with it, which go with it. Empty when it ends only the pane."""
+        if [other for other in distinct(panes, self.session) if other.window_id == pane.window_id and other.pane != pane.pane]:
+            return ""
+        what = f"window {printable(pane.window)}"
+        if [other for other in panes if other.session == pane.session and other.pane != pane.pane]:
+            return what
+        grouped = sorted({other.session for other in panes if other.pane == pane.pane} - {pane.session})
+        sessions = f"session {printable(pane.session)}" + \
+            (f" and the sessions grouped with it ({', '.join(map(printable, grouped))})" if grouped else "")
+        return f"{what} and {sessions}; an attached client is detached"
+
+    def close_panes(self, ours, states, panes):
+        """Say what is to be done with each pane of the runner's and, when acting, do it, one pane at a time. The IDs of the
+        panes that are (would be) closed."""
+        closed = []
+        for pane in ours:
+            state = states[pane.pane]
+            closing, why = self.plan(pane, state)
+            ends = ""
+            if not closing:
+                verdict = "left open"
+            elif self.acting:
+                verdict, why, ends, state = self.close(pane, state)
+            else:
+                verdict, ends = "would close", self.ends(pane, panes)
+            if verdict in ("closed", "would close"):
+                closed.append(pane.pane)
+            tell(pane_line(pane, state, verdict, why, ends))
+            for line in excerpt(state.screen):
+                tell(line)
+        return closed
+
+    def close(self, listed, state):
+        """Close the pane `listed`, after checking it again right before: the same tmux server, still a pane of the runner's
+        with what it was listed with (not renamed, not started again: its process is the same, and a dead pane has not come
+        alive), not the pane the command runs in, and read again: it must still be dead, or idle, or busy with
+        `--include-busy`. That second reading is what the decision rests on, and `close_pane` is told it (`expect`): the read
+        that comes with `kill-pane` must show the same dead flag, copy mode, foreground command and process, or the pane is
+        `left open` (a pane started again, put in copy mode or given another foreground command since is not the pane that was
+        judged). `(verdict, why, what closing it ended, the State)`: `closed` or `left open`."""
+        panes, said = list_panes()
+        if said:
+            return "closed", "it was already gone: no tmux server runs any more", "", state
+        if panes and panes[0].server != listed.server:
+            return "left open", "another tmux server answers now, and the pane ID may belong to another pane", "", state
+        now = next((pane for pane in distinct(panes, self.session) if pane.pane == listed.pane), None)
+        if now is None:
+            return "closed", "it was already gone", "", state
+        same = (now.session, now.window_id, now.window, now.start_path, now.start_command) == \
+            (listed.session, listed.window_id, listed.window, listed.start_path, listed.start_command)
+        if not same or not runners_own(now, self.top, self.session):
+            return "left open", "it is not the pane that was listed any more", "", state
+        if listed.dead and not now.dead:
+            return "left open", "it was dead when it was listed and runs again", "", state
+        if not listed.dead and not now.dead and now.pid != listed.pid:
+            return "left open", "it was started again since it was listed", "", state
+        if now.dead:
+            state = State("dead", "", state.screen)
+        else:
+            screen = capture_pane(now.pane)
+            gone = probe_pane(now.pane, listed.server)[0] if screen is None else "ours"
+            if gone != "ours":
+                return self.outcome(gone, "", "", state)  # it went while it was being read
+            # Idle again only if it was idle when listed and has not changed since: a pane that was not at rest then is not
+            # shown to be at rest by a second read that may follow the first at once (and is not reported as idle).
+            state = self.look(now, screen) or (State("idle", "at its prompt", screen)
+                                               if state.kind == "idle" and screen == state.screen else
+                                               State("busy", "the screen is still changing", screen or ""))
+        closing, why = self.plan(now, state)
+        if not closing:
+            return "left open", why, "", state
+        decided = (now.dead, now.in_mode, now.command.lstrip("-"), now.pid)  # what `probe_pane` returns for the same pane
+        return self.outcome(close_pane(now.pane, listed.server, decided), why, self.ends(now, panes), state)
+
+    @staticmethod
+    def outcome(done, why, ends, state):
+        """`(verdict, why, ends, state)` for what `close_pane` answered: `ours` is closed, a pane or a server that is gone counts as
+        closed, a server that is another one and a pane that changed after it was judged leave it open (`state` stays what was
+        decided on; `left` reads the server again, so that the pane still blocks the next run)."""
+        if done == "other server":
+            return "left open", "another tmux server answers now, and the pane ID may belong to another pane", "", state
+        if done == "changed":
+            return "left open", "it changed right before it was to be closed", "", state
+        return "closed", why if done == "ours" else "it was already gone", ends, state
+
+    def left(self, ours, closed, panes):
+        """`(keeping, blocking)`: the IDs of the panes that are still there once the panes to be closed are, in the order of their
+        IDs. `keeping` are those that must keep a task directory in place, an agent that may still write there: live panes of the
+        runner's, and panes in its way. `blocking` are the panes in the way of the next run. (When acting the server is read again:
+        this is what is there now.)"""
+        if self.acting:
+            panes = list_panes()[0]
+            ours = [pane for pane in distinct(panes, self.session) if runners_own(pane, self.top, self.session)]
+            closed = []
+        blocking = {pane.pane for pane in blocking_panes(self.top, panes) if pane.pane not in closed}
+        alive = {pane.pane for pane in ours if not pane.dead and pane.pane not in closed}
+        order = lambda found: sorted(found, key=lambda name: int(name[1:]))
+        return order(alive | blocking), order(blocking)
+
+    def refused(self, blocking):
+        """What would still make the next run refuse: panes, uncommitted work, a git operation in progress."""
+        return [*blocking, *("a git operation in progress" if note.startswith("a git operation") else
+                         "uncommitted work" if note.startswith("the checkout has") else "the state of the checkout"
+                         for note in self.worktree)]
+
+    # ---- the task directories ------------------------------------------------------------------------------------
+    def keep_reason(self, task, left):
+        """Why the task directory must stay, or None when it may be removed (it is only removed with `--remove-task-dirs`)."""
+        if task.problem:
+            return task.problem
+        if not self.args.remove_task_dirs:
+            return "task directories are removed only with --remove-task-dirs"
+        if self.held:
+            return f"the checkout's lock is not free: {self.held}"
+        if left:
+            return f"a pane of the runner is left ({', '.join(left)}) and its agent may still write there"
+        return None
+
+    def task_directories(self, left):
+        """List the task directories, oldest first, and when acting with `--remove-task-dirs` remove the ones that may be. How
+        many are (would be) removed."""
+        where = self.top / TASK_DIR
+        try:
+            base = os.open(where, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return 0
+        except OSError as exc:
+            tell(f"task directory {where}: {exc.strerror or exc}: left alone; nothing in it is listed or removed")
+            return 0
+        removed = 0
+        try:
+            found = []
+            for nonce in sorted(name for name in os.listdir(base) if NONCE.fullmatch(name)):
+                try:
+                    fd = os.open(nonce, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=base)
+                except OSError as exc:
+                    found.append(TaskDir(nonce, "not a directory", 0.0, "none", f"it is not a real directory "
+                                         f"({exc.strerror or exc})", ()))
+                    continue
+                try:
+                    found.append(read_task_directory(fd, nonce))
+                finally:
+                    os.close(fd)
+            for task in sorted(found, key=lambda entry: (-entry.age, entry.nonce)):
+                why = self.keep_reason(task, left)
+                if why is None and self.acting:
+                    why = remove_task_directory(base, task.nonce)
+                verdict = "kept" if why else "removed" if self.acting else "would remove"
+                removed += verdict != "kept"
+                tell(task_line(task, verdict, why or "no pane of the runner is left and it holds only its task and result"))
+        finally:
+            os.close(base)
+        return removed
 
 
 class Batch:
@@ -1255,7 +1956,7 @@ def seconds(value):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("pr", metavar="PR", type=int, nargs="+")
+    parser.add_argument("pr", metavar="PR", type=int, nargs="*")
     parser.add_argument("--repo", default="kjelly/pilot", help="GitHub repository (default: kjelly/pilot)")
     parser.add_argument("--draft-agent", default="claude")
     parser.add_argument("--ready-agent", default="codex")
@@ -1273,14 +1974,36 @@ def main():
                              f"origin's tip), whose origin is --repo (default: {CHECKOUT_DEFAULT})")
     parser.add_argument("--dry-run", action="store_true", help="show current PR states and whether the checkout would be "
                                                               "accepted, without starting agents or writing anything")
+    parser.add_argument("--clean", action="store_true",
+                        help="list what earlier runs left in the checkout: the agent panes that are provably this runner's "
+                             "(dead, idle or busy), the task directories, and the panes that would stop the next run; it "
+                             "changes nothing, reads no GitHub and takes no PR numbers")
+    parser.add_argument("--yes", action="store_true",
+                        help="with --clean: close the dead and idle panes of the runner's, one at a time (the checkout's "
+                             "lock is held meanwhile)")
+    parser.add_argument("--include-busy", action="store_true",
+                        help="with --clean: close busy panes too; the agent's work in them is lost (needs --yes to act)")
+    parser.add_argument("--remove-task-dirs", action="store_true",
+                        help="with --clean: remove the task directories of finished runs, when no pane of the runner is left "
+                             "(needs --yes to act)")
     args = parser.parse_args()
-    if any(n <= 0 for n in args.pr) or len(set(args.pr)) != len(args.pr) or args.max_actions <= 0:
-        parser.error("PR numbers must be positive and unique, and --max-actions must be positive")
-    if any(not template.strip() or not template.isprintable() for template in (args.draft_command, args.ready_command)):
-        parser.error("agent commands must be nonempty single lines")
+    if args.clean:
+        if args.pr or args.dry_run:
+            parser.error("--clean takes no PR numbers and no --dry-run: without --yes it only lists")
+    else:
+        if not args.pr:
+            parser.error("the following arguments are required: PR")
+        if args.yes or args.include_busy or args.remove_task_dirs:
+            parser.error("--yes, --include-busy and --remove-task-dirs go with --clean")
+        if any(n <= 0 for n in args.pr) or len(set(args.pr)) != len(args.pr) or args.max_actions <= 0:
+            parser.error("PR numbers must be positive and unique, and --max-actions must be positive")
+        if any(not template.strip() or not template.isprintable() for template in (args.draft_command, args.ready_command)):
+            parser.error("agent commands must be nonempty single lines")
     os.environ.setdefault("GH_PROMPT_DISABLED", "1")
     batch = None
     try:
+        if args.clean:
+            return Clean(Repo.parse(args.repo), args).run()
         batch = Batch(Repo.parse(args.repo), args)
         batch.run()
         return 0
@@ -1296,6 +2019,8 @@ def main():
                         f"{batch.checkout.way_back(batch.checkout.path, other)}.")
             print(f"Interrupted; any agent window still open in tmux session {batch.checkout.session} and the task "
                   f"files under {batch.checkout.path / TASK_DIR}/ were kept.{back}", file=sys.stderr)
+        elif args.clean:
+            print("Interrupted; the lines above say what was closed or removed so far.", file=sys.stderr)
         else:
             print("Interrupted; nothing was written.", file=sys.stderr)
         return 130
