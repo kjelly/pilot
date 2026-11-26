@@ -44,16 +44,22 @@ class GateError(RuntimeError):
     pass
 
 
+class GateTimeout(GateError):
+    """A gh or git read outlived its limit and its process group was ended. A GateError, so that every place that refuses on
+    a GateError still does; a place that falls back on one ("nothing proves it") has to let this one through, because a
+    timeout is not an answer."""
+
+
 def bounded(argv: list[str], *, limit: float, label: str, kill_after: float | None = None,
             text: bool = True) -> subprocess.CompletedProcess:
     """`argv` run through bounded_run.run with `limit` seconds, stdin closed. A command that exited is judged by its
     exit code, whatever something it started does with its output. One that did not finish in time has its whole process
-    group ended and is a GateError that names it (`label`), the limit and how it was ended: never a CompletedProcess, so
+    group ended and is a GateTimeout that names it (`label`), the limit and how it was ended: never a CompletedProcess, so
     `allow_nonzero_json` and `empty_if` cannot be handed a made-up exit code and a half-written answer."""
     try:
         return bounded_run.run(argv, limit=limit, text=text, kill_after=kill_after)
     except bounded_run.Timeout as exc:
-        raise GateError(f"{label} timed out after {exc.timeout:g} s and its process group was ended ({exc.ended})") from None
+        raise GateTimeout(f"{label} timed out after {exc.timeout:g} s and its process group was ended ({exc.ended})") from None
 
 
 def cmd(argv: list[str], *, allow_nonzero_json: bool = False, empty_if: re.Pattern[str] | None = None) -> Any:
@@ -513,11 +519,14 @@ def log_artifact_problem(log_base: Path, logfile: str, head: str) -> str | None:
 
     A log the PR head commits as a regular file exists as that Git blob, so the answer is the
     same whichever branch is checked out. Any other log (the ignored `.pr-ready` receipts) must
-    be a file inside the worktree.
+    be a file inside the worktree. A head tree that cannot be read falls back on that worktree check; a git that
+    outlives its limit (GateTimeout) is not "cannot be read" and is raised.
     """
     given = Path(logfile)
     try:
         entry = tracked_entry(log_base, head, given if given.is_absolute() else log_base / given)
+    except GateTimeout:
+        raise  # git did not answer: that is not "the head does not track it"
     except GateError:
         entry = None  # nothing proves it at the head: the worktree check below decides
     if entry is not None and entry[1] in REGULAR_FILE_MODES:

@@ -67,7 +67,8 @@ case "$FAKE_MODE" in
 esac
 '''
 # The fake `git` is the real one, except for a call whose arguments contain $FAKE_GIT_MATCH: that call hangs ("hang"), ignores
-# SIGTERM ("stubborn"), or runs the real git and leaves a descendant that holds its output ("leaked"). Nothing else is touched,
+# SIGTERM ("stubborn"), runs the real git and leaves a descendant that holds its output ("leaked"), or fails with exit 128 at
+# once ("fail"). Nothing else is touched,
 # so the scratch repositories of a test are built by the real git, and the unbounded callers of git in the gate's process
 # (the secret scanner) never meet a hang.
 FAKE_GIT = r'''#!/bin/sh
@@ -93,6 +94,9 @@ case "$FAKE_GIT_MODE" in
         echo $! > "$root/child"
         "$REAL_GIT" "$@"
         exit $? ;;
+    fail)
+        echo "fatal: injected failure" >&2
+        exit 128 ;;
 esac
 '''
 
@@ -174,7 +178,7 @@ class Processes:
             yield
 
     def timed_out(self, error, what, limit=0.4):
-        self.assertIsInstance(error, GateError, error)
+        self.assertIsInstance(error, gate.GateTimeout, error)
         self.assertIn(f"{what} timed out after {limit:g} s and its process group was ended", str(error))
 
 
@@ -304,6 +308,27 @@ class GateReadsAgainstRealProcesses(Processes, unittest.TestCase):
         with self.fast():
             error, _ = self.bounded(lambda: self.raised(gate.tracked_entry, self.repo, self.head, self.repo / "code.txt"))
         self.timed_out(error, f"git ls-tree {self.head[:12]} code.txt")
+        self.assertGone("leader")
+        self.assertGone("child")
+
+    def test_a_log_artifact_check_raises_a_git_that_timed_out_and_still_falls_back_on_one_that_failed(self):
+        # log_artifact_problem asks tracked_entry whether the PR head tracks the log and, when git cannot say (a GateError
+        # of rc != 0), lets the worktree check decide. A git that never answered is not "cannot say": swallowed there, the
+        # timeout became the worktree rule's answer, here the text of a log that is missing from the checkout.
+        log = "docs/evidence/run.md"  # tracked at the head
+        (self.repo / log).unlink()  # the checkout no longer has it: only the head's tree proves it
+        self.assertIsNone(gate.log_artifact_problem(self.repo, log, self.head), "control: the real git proves it at the head")
+        self.mode(git="fail", match="ls-tree")
+        self.assertEqual(f"log artifact missing/unreadable: {log}", gate.log_artifact_problem(self.repo, log, self.head),
+                         "control: ls-tree fails (rc 128): the worktree check decides, as before")
+        (self.repo / log).write_text("evidence\n")
+        self.assertIsNone(gate.log_artifact_problem(self.repo, log, self.head), "control: and the file is in the worktree")
+        (self.repo / log).unlink()
+        self.mode(git="hang", match="ls-tree")
+        with self.fast():
+            error, took = self.bounded(lambda: self.raised(gate.log_artifact_problem, self.repo, log, self.head))
+        self.timed_out(error, f"git ls-tree {self.head[:12]} {log}")
+        self.assertLess(took, 4)
         self.assertGone("leader")
         self.assertGone("child")
 
