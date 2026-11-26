@@ -22,6 +22,20 @@ sys.dont_write_bytecode = True
 import repo_evidence  # noqa: E402
 import umbrella as umbrella_mode  # noqa: E402
 
+# `bounded_run` lives in the `_shared` bundle directory: it goes on the import path LAST and only when absent (a caller
+# may have put its own directories first and pop index 0 afterwards, as pr_gate.merge_gate_modules does).
+_SHARED_SCRIPTS = str(Path(__file__).resolve().parents[2] / "_shared" / "scripts")
+if _SHARED_SCRIPTS not in sys.path:
+    sys.path.append(_SHARED_SCRIPTS)
+import bounded_run  # noqa: E402  (every command below goes through it: tests/test_bounded_run_lint.py)
+
+# Seconds one command may run, read when the command starts (the tests patch them); SIGKILL for a group that ignores
+# SIGTERM follows up to bounded_run.KILL_AFTER + DRAIN later. A command that outlives its limit is a GateError that names
+# it: nothing it printed is used, and no caller can read it as an answer (a "no", an absent branch, an empty list).
+GH_TIMEOUT = 75
+GIT_TIMEOUT = 60
+REMOTE_TIMEOUT = 75  # `git ls-remote` goes over the network, like `gh`
+
 SHA = re.compile(r"[0-9a-fA-F]{40}\Z")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 ALLOWED_CATEGORIES = {"regression", "unit", "integration", "lint", "static-analysis", "security", "build", "other"}
@@ -76,13 +90,25 @@ def check_secrets(worktree: Path, base_ref: str, head: str,
     return scanner.refusal_messages(result), result.summary()
 
 
+def bounded(argv: list[str], *, limit: float, label: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    """`argv` run through bounded_run.run with `limit` seconds, stdin closed. A command that exited is judged by its exit
+    code, whatever something it started does with its output. One that did not finish in time has its whole process
+    group ended and is a GateError that names it (`label`), the limit and how it was ended: never a CompletedProcess, so
+    that `allow_nonzero_json` and `empty_if` cannot be handed a made-up exit code and a half-written answer."""
+    try:
+        return bounded_run.run(argv, limit=limit, cwd=cwd)
+    except bounded_run.Timeout as exc:
+        raise GateError(f"{label} timed out after {exc.timeout:g} s and its process group was ended ({exc.ended})") from None
+
+
 def command(argv: list[str], *, cwd: Path | None = None, allow_nonzero_json: bool = False,
             empty_if: re.Pattern[str] | None = None) -> Any:
     """Run argv and parse its stdout as JSON. `empty_if` is the one tolerated failure: exit 1 with
     nothing on stdout and stderr that is exactly that message means "empty list". It is never matched
-    against stdout, so a valid JSON answer is always parsed, and never as a substring of other output."""
+    against stdout, so a valid JSON answer is always parsed, and never as a substring of other output.
+    A command that outlives GH_TIMEOUT is a GateError (see `bounded`)."""
     try:
-        p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+        p = bounded(argv, limit=GH_TIMEOUT, label=" ".join(argv[:4]), cwd=cwd)
     except OSError as exc:
         raise GateError(f"Missing executable {argv[0]}: {exc}") from exc
     if empty_if is not None and p.returncode == 1 and not p.stdout.strip() and empty_if.fullmatch(p.stderr):
@@ -97,7 +123,7 @@ def command(argv: list[str], *, cwd: Path | None = None, allow_nonzero_json: boo
 
 def git(worktree: Path, *args: str) -> str:
     try:
-        p = subprocess.run(["git", "-C", str(worktree), *args], capture_output=True, text=True)
+        p = bounded(["git", "-C", str(worktree), *args], limit=GIT_TIMEOUT, label=f"git {' '.join(args[:4])}")
     except OSError as exc:
         raise GateError(f"Cannot execute git: {exc}") from exc
     if p.returncode:
@@ -107,9 +133,10 @@ def git(worktree: Path, *args: str) -> str:
 
 def git_answer(worktree: Path, *args: str) -> bool:
     """A git yes/no command (`merge-base --is-ancestor`): exit 0 is True, exit 1 is False. Any other
-    exit is an error, never read as "no" (`git()` cannot tell the two apart)."""
+    exit is an error, never read as "no" (`git()` cannot tell the two apart), and so is a git that
+    outlives GIT_TIMEOUT."""
     try:
-        p = subprocess.run(["git", "-C", str(worktree), *args], capture_output=True, text=True)
+        p = bounded(["git", "-C", str(worktree), *args], limit=GIT_TIMEOUT, label=f"git {' '.join(args[:4])}")
     except OSError as exc:
         raise GateError(f"Cannot execute git: {exc}") from exc
     if p.returncode in (0, 1):
@@ -776,9 +803,11 @@ def gh_issue_and_duplicates(repo: str, issue: int, branch: str, own_pr: int | No
 
 
 def remote_head(worktree: Path, remote: str, branch: str) -> str | None:
+    """The remote's SHA of `branch`; None only when git says the branch is not there (exit 2). A `git ls-remote` that
+    outlives REMOTE_TIMEOUT (a network that stalls) is a GateError, never None: "absent" is an answer, a timeout is not."""
     try:
-        p = subprocess.run(["git", "-C", str(worktree), "ls-remote", "--exit-code", remote,
-                            f"refs/heads/{branch}"], capture_output=True, text=True)
+        p = bounded(["git", "-C", str(worktree), "ls-remote", "--exit-code", remote, f"refs/heads/{branch}"],
+                    limit=REMOTE_TIMEOUT, label=f"git ls-remote refs/heads/{branch}")
     except OSError as exc:
         raise GateError(f"Remote check failed: {exc}") from exc
     if p.returncode == 2:

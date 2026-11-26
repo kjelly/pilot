@@ -29,6 +29,11 @@ Usage:
 
 Prints one JSON object. Exit 0 = PASS, 3 = DRIFT, 1 = STOP (fail closed). Any
 other non-zero exit (argument errors) is not a pass either.
+
+Every git call has a time limit (GIT_TIMEOUT) and so has the `tar` that extracts the snapshot (TAR_TIMEOUT). Each runs in a
+process group of its own through bounded_run.py: a command that outlives its limit has its whole group ended and is a STOP that
+names it and the limit (never "the bundle path is missing", never a pass); one that exited is judged by its exit code, whatever
+something it started does with its output. A `tar` that timed out leaves the partly extracted directory, as a failed one does.
 """
 from __future__ import annotations
 
@@ -42,6 +47,20 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Run from a snapshot, this script must not add `__pycache__` there (`verify` counts any added file, and a `.pyc` is code
+# CPython would load), and under `python3 -I` (how the tests and the skills run it) its own directory is not on sys.path.
+# So: no bytecode, and the directory goes on the path (last, so that nothing in it shadows the standard library) before
+# the import.
+sys.dont_write_bytecode = True
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.append(_HERE)
+import bounded_run  # noqa: E402  (every git and tar call below goes through it: tests/test_bounded_run_lint.py)
+
+# Seconds one call may run. Read when the call starts (the tests patch them); SIGKILL for a group that ignores SIGTERM
+# follows up to bounded_run.KILL_AFTER + DRAIN later. `git archive` of the bundle takes well under a second.
+GIT_TIMEOUT = 60
+TAR_TIMEOUT = 60
 BUNDLE_PATHS = (
     ".agents/skills/_shared",
     ".agents/skills/pilot-code-review",
@@ -68,7 +87,10 @@ class Stop(Exception):
 
 def git(repo: Path, *args: str, ok: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess:
     env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C")
-    p = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, env=env)
+    try:
+        p = bounded_run.run(["git", "-C", str(repo), *args], limit=GIT_TIMEOUT, env=env, text=False)
+    except bounded_run.Timeout as exc:  # never a return code: `ok` below would read 128 as "the path is missing"
+        raise Stop(f"git {' '.join(args)} timed out after {GIT_TIMEOUT:g} s and was ended ({exc.ended})") from None
     if p.returncode not in ok:
         raise Stop(f"git {' '.join(args)} failed (rc={p.returncode}): "
                    f"{p.stderr.decode(errors='replace').strip()[:300]}")
@@ -125,7 +147,11 @@ def create(repo: Path, out_parent: Path | None) -> dict:
         raise Stop(f"snapshot directory must be outside the checkout ({top})")
     snapshot = Path(tempfile.mkdtemp(prefix="single-item-skills-", dir=parent))
     archive = git(top, "archive", "--format=tar", "HEAD", "--", *BUNDLE_PATHS).stdout
-    p = subprocess.run(["tar", "-x", "-C", str(snapshot)], input=archive, capture_output=True)
+    try:
+        p = bounded_run.run(["tar", "-x", "-C", str(snapshot)], limit=TAR_TIMEOUT, input=archive, text=False)
+    except bounded_run.Timeout as exc:
+        raise Stop(f"tar extraction timed out after {TAR_TIMEOUT:g} s and was ended ({exc.ended}); "
+                   f"{snapshot} holds a partly extracted snapshot") from None
     if p.returncode:
         raise Stop(f"tar extraction failed: {p.stderr.decode(errors='replace').strip()[:300]}")
     files = scan(snapshot)

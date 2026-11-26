@@ -20,7 +20,9 @@ CEILING. The helper is checked too: exactly one `Popen`, in a session of its own
 What it cannot see: a computed `getattr` name, `exec`/`eval`, `ctypes`, `sys.modules[...]`, a start inside an imported module
 outside the covered set, whether a reason is true or a limit is adequate, and shell scripts. The five sites that were
 unbounded when this lint was written (checkout_preflight.git, pr_loop.run, pr_loop.git_change, merge_train.Train._run_git,
-gh_runtime.run_gh) are migrated; the rest of the allowlist is kjelly/pilot#428, and it only shrinks.
+gh_runtime.run_gh) are migrated, and so are the fourteen read paths of the gates and the snapshot (pr_gate, issue_gate,
+repo_evidence, skill_snapshot: kjelly/pilot#428, first slice); the rest of the allowlist is kjelly/pilot#428 too (or #296,
+the secret scanner), and it only shrinks.
 """
 import ast
 import collections
@@ -42,6 +44,14 @@ STARTERS = {
 POOLS = {"ProcessPoolExecutor"}
 FORBIDDEN_MODULES = {"multiprocessing"}
 HELPER_MODULE = "bounded_run"
+# The fourteen read paths that kjelly/pilot#428's first slice moved: `file -> (the module's wrapper, or None, its sites)`.
+GATE_READ_SITES = {
+    ".agents/skills/pr-ready/scripts/pr_gate.py": ("bounded", ("cmd", "check_local.git", "tracked_entry", "checkout_head",
+                                                               "tracked_pin", "fetched_base")),
+    ".agents/skills/issue-to-pr/scripts/issue_gate.py": ("bounded", ("command", "git", "git_answer", "remote_head")),
+    ".agents/skills/issue-to-pr/scripts/repo_evidence.py": (None, ("git", "Context.read_file")),
+    ".agents/skills/_shared/scripts/skill_snapshot.py": (None, ("git", "create")),
+}
 
 # The process starts that are not yet bounded: `path::Qualname -> (references, reason)`. Every reason names the issue that
 # bounds it. The list only shrinks: migrate a site and delete its entry, lower the count of one that lost a start, lower CEILING.
@@ -53,8 +63,6 @@ ALLOWLIST = {
                                                                             "pipe; its budget is #296, not #428"),
     ".agents/skills/_shared/scripts/secret_scan.py::_Scan._walk": (1, "the scanner's `git` walk of a range; its budget is #296"),
     ".agents/skills/_shared/scripts/secret_scan.py::_run_git": (1, f"{GIT_READ}, in the secret scanner: #296"),
-    ".agents/skills/_shared/scripts/skill_snapshot.py::create": (1, "`tar -x` of the snapshot, no time limit: #428"),
-    ".agents/skills/_shared/scripts/skill_snapshot.py::git": (1, f"{GIT_READ}: #428"),
     ".agents/skills/issue-batch-planner/scripts/file_umbrella.py::run_command": (1, "a gh/git write with a leader-only timeout "
                                                                                  "(a finished write can be reported as a "
                                                                                  "timeout): #428"),
@@ -62,29 +70,17 @@ ALLOWLIST = {
     ".agents/skills/issue-filing/scripts/create_issue.py::gh": (1, "a `gh` call with no time limit: #428"),
     ".agents/skills/issue-to-pr/scripts/claim.py::run": (1, "a claim command with a leader-only timeout: #428"),
     ".agents/skills/issue-to-pr/scripts/create_pr.py::execute": (1, "the PR-creating commands, no time limit: #428"),
-    ".agents/skills/issue-to-pr/scripts/issue_gate.py::command": (1, "a gate command with no time limit: #428"),
-    ".agents/skills/issue-to-pr/scripts/issue_gate.py::git": (1, f"{GIT_READ}: #428"),
-    ".agents/skills/issue-to-pr/scripts/issue_gate.py::git_answer": (1, f"{GIT_READ}: #428"),
-    ".agents/skills/issue-to-pr/scripts/issue_gate.py::remote_head": (1, "`git ls-remote` over the network, no time limit: #428"),
-    ".agents/skills/issue-to-pr/scripts/repo_evidence.py::Context.read_file": (1, "`git show`, no time limit: #428"),
-    ".agents/skills/issue-to-pr/scripts/repo_evidence.py::git": (1, f"{GIT_READ}: #428"),
     ".agents/skills/issue-to-pr/scripts/run_check.py::git": (1, f"{GIT_READ}: #428"),
     ".agents/skills/issue-to-pr/scripts/run_check.py::run_check": (1, "runs the repository's own test command, which may "
                                                                      "legitimately be long: its bound is a design decision "
                                                                      "of #428"),
     ".agents/skills/issue-to-pr/scripts/umbrella.py::gh_view": (1, "a `gh issue view` with a leader-only timeout: #428"),
-    ".agents/skills/pr-ready/scripts/pr_gate.py::check_local.git": (1, f"{GIT_READ}: #428"),
-    ".agents/skills/pr-ready/scripts/pr_gate.py::checkout_head": (1, f"{GIT_READ}: #428"),
-    ".agents/skills/pr-ready/scripts/pr_gate.py::cmd": (1, "a gate command with no time limit: #428"),
-    ".agents/skills/pr-ready/scripts/pr_gate.py::fetched_base": (1, f"{GIT_READ}: #428"),
     ".agents/skills/pr-ready/scripts/pr_gate.py::main": (2, "`gh pr ready` and the restore command, no time limit: #428"),
-    ".agents/skills/pr-ready/scripts/pr_gate.py::tracked_entry": (1, f"{GIT_READ}: #428"),
-    ".agents/skills/pr-ready/scripts/pr_gate.py::tracked_pin": (1, f"{GIT_READ}: #428"),
     ".agents/skills/pr-ready/scripts/run_check.py::main": (1, "runs the repository's own test command, which may "
                                                                "legitimately be long: its bound is a design decision of #428"),
     ".agents/skills/pr-ready/scripts/run_check.py::rev": (1, f"{GIT_READ}: #428"),
 }
-CEILING = 31  # the sum of the counts above: lower it when a site migrates; raising it needs a reason in review
+CEILING = 17  # the sum of the counts above: lower it when a site migrates; raising it needs a reason in review
 FOLLOW_UP = {"secret_scan.py": "#296"}  # every other entry names #428
 DEFAULT_FOLLOW_UP = "#428"
 
@@ -195,6 +191,49 @@ def helper_problems(source):
     return problems
 
 
+def functions(tree):
+    """`Qualname -> node` of every function of a module: a method is `Class.name`, a nested function `outer.inner`."""
+    found = {}
+
+    def visit(node, quals):
+        for child in ast.iter_child_nodes(node):
+            inner = quals + [child.name] if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else quals
+            if inner is not quals and not isinstance(child, ast.ClassDef):
+                found[".".join(inner)] = child
+            visit(child, inner)
+    visit(tree, [])
+    return found
+
+
+def calls_of(node, name):
+    """The calls inside `node` (nested functions included) of a function called `name`: `f(...)` or `x.f(...)`."""
+    return [n for n in ast.walk(node) if isinstance(n, ast.Call)
+            and (getattr(n.func, "id", None) == name or getattr(n.func, "attr", None) == name)]
+
+
+def site_problems(source, rel, wrapper, sites):
+    """What is wrong with `sites` (qualnames in `rel`) that must start their command through the helper. A module whose
+    sites share one `wrapper` (a function of its own that holds the only `bounded_run.run(..., limit=)` call) has each site
+    call it, naming `limit=`; a module without one has each site call `bounded_run.run` itself. The allowlist alone
+    would pass a site that simply stopped running its command, and a wrapper that no longer calls the helper."""
+    _, calls, _ = scan(source, rel)
+    found = functions(ast.parse(source, rel))
+    problems = []
+    if wrapper is not None and calls[f"{rel}::{wrapper}"] != 1:
+        problems.append(f"{rel}::{wrapper} must hold the one bounded_run.run(..., limit=...) call; it holds {calls[f'{rel}::{wrapper}']}")
+    for site in sites:
+        if site not in found:
+            problems.append(f"{rel}::{site} is not a function of the module")
+        elif wrapper is None:
+            if calls[f"{rel}::{site}"] != 1:
+                problems.append(f"{rel}::{site} must call bounded_run.run(..., limit=...) once; it calls it {calls[f'{rel}::{site}']} times")
+        elif not (made := calls_of(found[site], wrapper)):
+            problems.append(f"{rel}::{site} does not call {wrapper}(): it no longer runs its command through the helper")
+        elif not all(any(k.arg == "limit" for k in call.keywords) for call in made):
+            problems.append(f"{rel}::{site} calls {wrapper}() with no limit=<seconds>")
+    return problems
+
+
 def allowlist_problems(found, allow, ceiling):
     """The differences between the starts found and the allowlist, as one sentence each."""
     problems = []
@@ -255,7 +294,8 @@ class RepositoryTests(unittest.TestCase):
 
     def test_the_allowlist_only_shrinks_and_every_entry_gives_its_reason(self):
         self.assertEqual(CEILING, sum(count for count, _ in ALLOWLIST.values()))
-        self.assertLessEqual(CEILING, 31, "31 at kjelly/pilot#427; #428 lowers it, and nothing may raise it without a review reason")
+        self.assertLessEqual(CEILING, 17, "31 at kjelly/pilot#427, 17 after the gates' read paths; #428 lowers it further, and "
+                                          "nothing may raise it without a review reason")
         for key, (count, reason) in ALLOWLIST.items():
             with self.subTest(key=key):
                 self.assertGreaterEqual(count, 1)
@@ -269,6 +309,44 @@ class RepositoryTests(unittest.TestCase):
             with self.subTest(site=f"{rel}::{qualname}"):
                 _, calls, _ = scan((ROOT / rel).read_text(), rel)
                 self.assertEqual(1, calls[f"{rel}::{qualname}"], "one bounded_run.run(..., limit=...) call")
+
+    def test_the_fourteen_gate_read_sites_run_through_the_helper(self):
+        self.assertEqual(14, sum(len(sites) for _, sites in GATE_READ_SITES.values()))
+        for rel, (wrapper, sites) in GATE_READ_SITES.items():
+            with self.subTest(file=rel):
+                self.assertEqual([], site_problems((ROOT / rel).read_text(), rel, wrapper, sites))
+
+    def test_the_lint_fails_on_the_fourteen_gate_read_sites_before_they_were_migrated(self):
+        # Shapes of the code of kjelly/pilot 7a2623e1, each under the name the allowlist would have to carry.
+        git = "subprocess.run(['git', *args], capture_output=True)"
+        before = {
+            ".agents/skills/pr-ready/scripts/pr_gate.py": (
+                "import subprocess\ndef cmd(argv):\n    return subprocess.run(argv, text=True, capture_output=True)\n"
+                f"def check_local(worktree):\n    def git(*args):\n        return {git}\n    return git\n"
+                + "".join(f"def {name}(root):\n    args = ()\n    return {git}\n"
+                          for name in ("tracked_entry", "checkout_head", "tracked_pin", "fetched_base"))),
+            ".agents/skills/issue-to-pr/scripts/issue_gate.py": (
+                "import subprocess\n" + "".join(f"def {name}(worktree, *args):\n    return {git}\n"
+                                                 for name in ("command", "git", "git_answer", "remote_head"))),
+            ".agents/skills/issue-to-pr/scripts/repo_evidence.py": (
+                f"import subprocess\ndef git(worktree, *args):\n    return {git}\n"
+                f"class Context:\n    def read_file(self, *args):\n        return {git}\n"),
+            ".agents/skills/_shared/scripts/skill_snapshot.py": (
+                f"import subprocess\ndef git(repo, *args):\n    return {git}\n"
+                "def create(repo):\n    return subprocess.run(['tar', '-x'], input=b'', capture_output=True)\n"),
+        }
+        found = collections.Counter()
+        for rel, source in before.items():
+            found.update(scan(source, rel)[0])
+        expected = sorted(f"{rel}::{site}" for rel, (_, sites) in GATE_READ_SITES.items() for site in sites)
+        self.assertEqual(14, len(expected))
+        named = sorted(problem.split(": ")[0] for problem in allowlist_problems(found, {}, 0) if "not on the allowlist" in problem)
+        self.assertEqual(expected, named)
+        with_this_allowlist = allowlist_problems(found, ALLOWLIST, CEILING)
+        for key in found:
+            self.assertTrue([p for p in with_this_allowlist if p.startswith(key + ":") and "not on the allowlist" in p], key)
+        for rel, (wrapper, sites) in GATE_READ_SITES.items():
+            self.assertTrue(site_problems(before[rel], rel, wrapper, sites), f"{rel}: the call check sees the old shape")
 
     def test_the_lint_fails_on_the_five_sites_before_they_were_migrated(self):
         # Shapes of the code of kjelly/pilot 7e183d3d, each under the name the allowlist would have to carry.
@@ -417,6 +495,33 @@ class LintSelfTests(unittest.TestCase):
                 ("no run", self.GOOD_HELPER.replace("def run(", "def go("), "must define one run()")):
             with self.subTest(case=case):
                 self.assertIn(expected, "; ".join(helper_problems(source)))
+
+    WRAPPER = "import bounded_run\ndef bounded(argv, *, limit):\n    return bounded_run.run(argv, limit=limit)\n"
+
+    def test_a_site_must_call_the_helper_or_the_wrapper_that_does(self):
+        ok = self.WRAPPER + "def site(a):\n    return bounded(a, limit=5)\ndef other(a):\n    return bounded(a, limit=6)\n"
+        self.assertEqual([], site_problems(ok, "x/y.py", "bounded", ("site", "other")), "control: a wrapper")
+        direct = "import bounded_run\nclass C:\n    def site(self, a):\n        return bounded_run.run(a, limit=5)\n"
+        self.assertEqual([], site_problems(direct, "x/y.py", None, ("C.site",)), "control: no wrapper")
+        nested = "import bounded_run\ndef outer():\n    def site(a):\n        return bounded_run.run(a, limit=5)\n    return site\n"
+        self.assertEqual([], site_problems(nested, "x/y.py", None, ("outer.site",)), "control: a nested function")
+        for case, source, wrapper, expected in (
+                ("a site that stopped running its command", self.WRAPPER + "def site(a):\n    return None\n", "bounded",
+                 "x/y.py::site does not call bounded()"),
+                ("a site that names no limit", self.WRAPPER + "def site(a):\n    return bounded(a)\n", "bounded",
+                 "x/y.py::site calls bounded() with no limit"),
+                ("a wrapper that no longer starts anything", "def bounded(argv, *, limit):\n    return None\n"
+                 "def site(a):\n    return bounded(a, limit=5)\n", "bounded", "x/y.py::bounded must hold the one"),
+                ("a wrapper that runs twice", "import bounded_run\ndef bounded(argv, *, limit):\n"
+                 "    bounded_run.run(argv, limit=limit)\n    return bounded_run.run(argv, limit=limit)\n"
+                 "def site(a):\n    return bounded(a, limit=5)\n", "bounded", "x/y.py::bounded must hold the one"),
+                ("a site that is gone", self.WRAPPER, "bounded", "x/y.py::site is not a function"),
+                ("a direct site with no call", "import bounded_run\ndef site(a):\n    return None\n", None,
+                 "x/y.py::site must call bounded_run.run(..., limit=...) once; it calls it 0 times"),
+                ("a direct site with two calls", "import bounded_run\ndef site(a):\n    bounded_run.run(a, limit=1)\n"
+                 "    return bounded_run.run(a, limit=1)\n", None, "it calls it 2 times")):
+            with self.subTest(case=case):
+                self.assertIn(expected, "; ".join(site_problems(source, "x/y.py", wrapper, ("site",))))
 
     def test_the_allowlist_must_match_exactly(self):
         found = collections.Counter({"a/b.py::f": 1, "a/b.py::g": 2})

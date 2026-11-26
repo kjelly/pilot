@@ -30,6 +30,11 @@ The evidence JSON then carries `repo_required_evidence`: one entry per required 
 
 Run `python3 repo_evidence.py --worktree WT --base-ref origin/main` to print the manifest as the
 gate sees it.
+
+Every git call has a time limit (GIT_TIMEOUT) and runs in a process group of its own through
+`_shared/scripts/bounded_run.py`. One that does not finish raises `TimeoutError` (an `OSError`), naming the command and
+the limit; it is never turned into a return code or an absent answer, because a read of the manifest that timed out would
+otherwise read as "no manifest" and drop `required_evidence`. A git that finished is judged by its exit code.
 """
 from __future__ import annotations
 
@@ -38,11 +43,23 @@ import copy
 import json
 import hashlib
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+# Running from the skill snapshot must not add __pycache__ there (`skill_snapshot.py verify` counts any added file and would
+# STOP every later step): set before the import of the helper. `bounded_run` lives in the `_shared` bundle directory, which
+# goes on the import path LAST and only when absent: the gates that load this file by path (pr_gate, review_gate) put their
+# own directories first and pop them again, so nothing here may insert at the front.
+sys.dont_write_bytecode = True
+_SHARED_SCRIPTS = str(Path(__file__).resolve().parents[2] / "_shared" / "scripts")
+if _SHARED_SCRIPTS not in sys.path:
+    sys.path.append(_SHARED_SCRIPTS)
+import bounded_run  # noqa: E402  (every git call below goes through it: tests/test_bounded_run_lint.py)
+
+# Seconds one git call may run, read when the call starts (the tests patch it); SIGKILL for a group that ignores SIGTERM
+# follows up to bounded_run.KILL_AFTER + DRAIN later.
+GIT_TIMEOUT = 60
 MANIFEST_PATH = ".github/pr-evidence.json"
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
@@ -137,9 +154,16 @@ REGULAR = ("100644", "100755")
 INCOMPLETE = "closure has unresolved or external inputs; "
 
 
+def timed_out(args: tuple[str, ...], exc: "bounded_run.Timeout") -> TimeoutError:
+    return TimeoutError(f"git {' '.join(args)} timed out after {exc.timeout:g} s and its process group was ended "
+                        f"({exc.ended}); the repository evidence rules cannot be read")
+
+
 def git(worktree: Path, *args: str) -> tuple[int, str]:
     try:
-        p = subprocess.run(["git", "-C", str(worktree), *args], capture_output=True, text=True, check=False)
+        p = bounded_run.run(["git", "-C", str(worktree), *args], limit=GIT_TIMEOUT)
+    except bounded_run.Timeout as exc:  # not a return code: rc 127 and rc != 0 both read as "absent" below
+        raise timed_out(args, exc) from None
     except OSError:
         return 127, ""
     return p.returncode, p.stdout
@@ -425,8 +449,11 @@ class Context:
     def read_file(self, revision: str, path: str) -> bytes | None:
         if not safe_path(path):
             return None
-        proc = subprocess.run(["git", "-C", str(self.worktree), "show", f"{revision}:{path}"],
-                              capture_output=True, check=False)
+        args = ("show", f"{revision}:{path}")
+        try:
+            proc = bounded_run.run(["git", "-C", str(self.worktree), *args], limit=GIT_TIMEOUT, text=False)
+        except bounded_run.Timeout as exc:  # not None: None is "the file is not there"
+            raise timed_out(args, exc) from None
         return None if proc.returncode else proc.stdout
 
     def commit_tree(self, revision: str) -> str | None:
