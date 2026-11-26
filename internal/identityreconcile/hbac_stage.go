@@ -566,6 +566,8 @@ func (r *hbacRunner) prepareRemovals(idxs []int, rules map[string]LiveHBACRule, 
 			r.conflict(i, "the rule is not there any more")
 		case !declared:
 			r.conflict(i, "the rule is no longer declared in the roster")
+		case r.sameRule(lower(op.Object), live) != "":
+			r.conflict(i, r.sameRule(lower(op.Object), live))
 		default:
 			liveNames, wantNames := r.liveAndWant(op.Kind, live, want)
 			if extra := difference(difference(liveNames, wantNames), op.Members); len(extra) > 0 {
@@ -595,7 +597,10 @@ func (r *hbacRunner) prepareRemovals(idxs []int, rules map[string]LiveHBACRule, 
 }
 
 // sameRule says why the rule the re-read shows is not the one Plan₂ observed ("" when it
-// is). A rule this run created has no earlier observation and need only exist.
+// is): the same ipauniqueid, which a rule deleted and created again does not keep. It
+// fails closed like the users' and groups' sameUser and sameGroup: a rule that is not in the
+// observation, or an observation or a re-read without an ipauniqueid, cannot show it and
+// does not pass. A rule this run created has no earlier observation and need only exist.
 func (r *hbacRunner) sameRule(name string, live LiveHBACRule) string {
 	if r.created[name] {
 		return ""
@@ -604,17 +609,22 @@ func (r *hbacRunner) sameRule(name string, live LiveHBACRule) string {
 		if lower(o.Name) != name {
 			continue
 		}
-		if o.UniqueID != "" && live.UniqueID != "" && o.UniqueID != live.UniqueID {
+		switch {
+		case o.UniqueID == "" || live.UniqueID == "":
+			return "the rule has no ipauniqueid to tell it from one deleted and created again"
+		case o.UniqueID != live.UniqueID:
 			return "the rule is not the one the plan was made from (it was deleted and created again)"
 		}
 		return ""
 	}
-	return ""
+	return "the rule was not in the observation the plan was made from"
 }
 
 // prepareDisables checks each disable against the rule as the re-read shows it: it must
-// still be the one the plan observed (a rule this run created has only to exist), and one
-// that is already disabled needs nothing and is not a conflict. Disabling narrows access,
+// still be the one the plan observed (a rule this run created has only to exist; the
+// identity is checked before anything else, so a rule deleted and created again is a
+// conflict even when it is already disabled), and one that is already disabled needs
+// nothing and is not a conflict. Disabling narrows access,
 // which is why it is checked; enabling (H6) widens it and has no check of its own.
 func (r *hbacRunner) prepareDisables(idxs []int, rules map[string]LiveHBACRule, readErr error) (items []hbacPending, conflicted bool) {
 	for _, i := range idxs {
@@ -629,13 +639,14 @@ func (r *hbacRunner) prepareDisables(idxs []int, rules map[string]LiveHBACRule, 
 			r.conflict(i, "the rule is not there any more")
 			conflicted = true
 			continue
-		case !live.Enabled:
-			r.settle(i, classified{Outcome: OutcomeNoop, Detail: "the rule is already disabled"})
-			continue
 		}
 		if why := r.sameRule(lower(op.Object), live); why != "" {
 			r.conflict(i, why)
 			conflicted = true
+			continue
+		}
+		if !live.Enabled {
+			r.settle(i, classified{Outcome: OutcomeNoop, Detail: "the rule is already disabled"})
 			continue
 		}
 		cmd, err := hbacCommandFor(op)

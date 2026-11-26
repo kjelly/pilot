@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/kjelly/pilot/internal/freeiparpc"
 )
@@ -32,6 +33,22 @@ type LockdownReport struct {
 	Rollback string `json:"rollback,omitempty"`
 	// Detail says what happened, in words.
 	Detail string `json:"detail,omitempty"`
+}
+
+// lockdownProofTimeout bounds the proof after the disable and lockdownRollbackTimeout each
+// rollback. They are separate so that a proof that uses up its time cannot take the
+// rollback's with it: the enable must always get a budget of its own. The worst case of
+// the stage after the disable is therefore about twice VerifyTimeout. They are variables
+// only so that tests can shorten them.
+var (
+	lockdownProofTimeout    = VerifyTimeout
+	lockdownRollbackTimeout = VerifyTimeout
+)
+
+// detached returns a context that outlives the run's cancellation, bounded by timeout and
+// built when it is called, not derived from any other bounded context.
+func (r *hbacRunner) detached(timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(r.ctx), timeout)
 }
 
 // lockdownService is the service the proofs ask about: what the break-glass rule is for.
@@ -167,22 +184,28 @@ func (r *hbacRunner) runLockdown(idxs []int) {
 	}
 	r.sent = true
 	c := classifyHBAC(op, raw, err)
-	// Everything after this point is on a context that outlives the run's cancellation.
-	wctx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), VerifyTimeout)
-	defer cancel()
+	// Everything after this point is on contexts that outlive the run's cancellation. The
+	// proof and each rollback have a budget of their own, built when they run.
+	rollback := func() string {
+		rctx, cancel := r.detached(lockdownRollbackTimeout)
+		defer cancel()
+		return r.rollback(rctx)
+	}
 
 	var rpcErr *freeiparpc.RPCError
 	switch {
 	case c.Outcome == OutcomeSuccess:
 		rep.Disabled = true
-		granted, rep.After = r.proof(wctx)
+		pctx, cancel := r.detached(lockdownProofTimeout)
+		granted, rep.After = r.proof(pctx)
+		cancel()
 		if granted {
 			r.settle(i, c)
 			rep.Detail = "allow_all is disabled and admin is still granted"
 			r.afterSending(H8, n, id, items, rep)
 			return
 		}
-		rep.Rollback = r.rollback(wctx)
+		rep.Rollback = rollback()
 		c = classified{Outcome: OutcomeFailed, Error: "lockdown failed", Detail: fmt.Sprintf("hbactest after the disable: %s for %s on %s; %s", rep.After, hbacAdminUser, r.opts.TestHost, rollbackSentence(rep.Rollback))}
 	case errors.As(err, &rpcErr):
 		// The server answered and refused: allow_all was not disabled, nothing to put back.
@@ -191,7 +214,7 @@ func (r *hbacRunner) runLockdown(idxs []int) {
 	default:
 		// The disable may have left (an unknown outcome) or the answer says nothing: put
 		// allow_all back, and say how that went.
-		rep.Rollback = r.rollback(wctx)
+		rep.Rollback = rollback()
 		c = classified{Outcome: OutcomeFailed, Error: c.Error, Detail: fmt.Sprintf("the disable of allow_all did not end as success (%s %s); %s", c.Outcome, c.Detail, rollbackSentence(rep.Rollback))}
 	}
 	rep.Detail = c.Detail

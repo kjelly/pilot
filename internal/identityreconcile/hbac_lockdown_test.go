@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kjelly/pilot/internal/freeiparpc"
 )
@@ -378,6 +379,151 @@ func TestExecuteHBACLockdownStillProvesAndRollsBackAfterTheRunWasCancelled(t *te
 		if c.method == "hbacrule_enable" && c.ctxErr != nil {
 			t.Errorf("the rollback went out on a cancelled context: %v", c.ctxErr)
 		}
+	}
+}
+
+// shortenLockdownBudgets makes the proof's and the rollback's budgets short enough to use up.
+func shortenLockdownBudgets(t *testing.T, proof, rollback time.Duration) {
+	t.Helper()
+	p, r := lockdownProofTimeout, lockdownRollbackTimeout
+	lockdownProofTimeout, lockdownRollbackTimeout = proof, rollback
+	t.Cleanup(func() { lockdownProofTimeout, lockdownRollbackTimeout = p, r })
+}
+
+// blockUntilDone makes the n-th call of method (1 is the first) wait until its context is
+// done, as a server that does not answer does, and fail with the context's error.
+func blockUntilDone(e *hbacEnv, method string, n int) {
+	count := 0
+	prev := e.f.intercept
+	e.f.intercept = func(f *fakeHBAC, c call) (json.RawMessage, error, bool) {
+		if c.method == method {
+			count++
+			if count == n {
+				<-c.ctx.Done()
+				return nil, c.ctx.Err(), true
+			}
+		}
+		if prev != nil {
+			return prev(f, c)
+		}
+		return nil, nil, false
+	}
+}
+
+func (e *hbacEnv) callsOf(method string, arg string) []call {
+	e.f.mu.Lock()
+	defer e.f.mu.Unlock()
+	var out []call
+	for _, c := range e.f.calls {
+		if c.method == method && (arg == "" || (len(c.args) > 0 && c.args[0] == arg)) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func TestExecuteHBACLockdownRollsBackEvenWhenTheProofUsedUpItsTime(t *testing.T) {
+	// The proof after the disable never answers and uses up its whole budget. The enable
+	// of allow_all must still go out, on a context with time left (spec §6 step 5).
+	shortenLockdownBudgets(t, 50*time.Millisecond, VerifyTimeout)
+	e := newHBACEnv(t, lockdownRoster, nil)
+	blockUntilDone(e, "hbactest", 2)
+	res, err := e.execute()
+	if !errors.Is(err, ErrWrites) {
+		t.Fatalf("err %v", err)
+	}
+	rep := res.Lockdown
+	if rep == nil || !rep.Disabled || !strings.HasPrefix(rep.After, "error:") || !strings.Contains(rep.After, "deadline") {
+		t.Fatalf("report %+v", rep)
+	}
+	enables := e.callsOf("hbacrule_enable", "allow_all")
+	if len(enables) != 1 {
+		t.Fatalf("%d hbacrule_enable allow_all writes, want the rollback's one (writes %v)", len(enables), e.writeMethods())
+	}
+	if enables[0].ctxErr != nil {
+		t.Errorf("the rollback went out on a context that was done: %v", enables[0].ctxErr)
+	}
+	if rep.Rollback != "re-enabled" || !e.allowAllEnabled() {
+		t.Errorf("rollback %q, allow_all enabled %v", rep.Rollback, e.allowAllEnabled())
+	}
+	o := res.op("hbac.allow_all.disable:allow_all")
+	if o.Final() != OutcomeFailed || !strings.Contains(o.Detail, "allow_all was re-enabled") {
+		t.Errorf("outcome %+v", o)
+	}
+}
+
+func TestExecuteHBACLockdownRollbackIsBoundedAndSaysSoWhenItUsesUpItsTime(t *testing.T) {
+	// The branches that put allow_all back: the proof after the disable denies, and the
+	// disable's outcome is unknown. In both the enable is the one that never answers, and
+	// the stage ends within the rollback's own budget with the rollback FAILED, not
+	// re-enabled.
+	for name, setup := range map[string]func(e *hbacEnv){
+		"the proof after denies": func(e *hbacEnv) { answerHBACTest(t, e, 2, "hbactest-denied-user") },
+		"the disable is unknown": func(e *hbacEnv) {
+			prev := e.f.intercept
+			e.f.intercept = func(f *fakeHBAC, c call) (json.RawMessage, error, bool) {
+				if c.method == "hbacrule_disable" && c.args[0] == "allow_all" {
+					return nil, &freeiparpc.OutcomeUnknownError{Method: c.method, Err: errors.New("connection lost")}, true
+				}
+				if prev != nil {
+					return prev(f, c)
+				}
+				return nil, nil, false
+			}
+		},
+	} {
+		shortenLockdownBudgets(t, VerifyTimeout, 50*time.Millisecond)
+		e := newHBACEnv(t, lockdownRoster, nil)
+		setup(e)
+		blockUntilDone(e, "hbacrule_enable", 1)
+		start := time.Now()
+		res, err := e.execute()
+		if !errors.Is(err, ErrWrites) {
+			t.Fatalf("%s: err %v", name, err)
+		}
+		if time.Since(start) > 10*time.Second {
+			t.Errorf("%s: the stage took %v", name, time.Since(start))
+		}
+		rep := res.Lockdown
+		if rep == nil || !strings.HasPrefix(rep.Rollback, "FAILED:") || !strings.Contains(rep.Rollback, "deadline") {
+			t.Errorf("%s: report %+v", name, rep)
+			continue
+		}
+		o := res.op("hbac.allow_all.disable:allow_all")
+		if o.Final() != OutcomeFailed || !strings.Contains(o.Detail, "check HBAC access now") || strings.Contains(o.Detail, "was re-enabled") {
+			t.Errorf("%s: outcome %+v", name, o)
+		}
+	}
+}
+
+func TestExecuteHBACLockdownProofAndRollbackEachHaveAContextOfTheirOwn(t *testing.T) {
+	// The rollback does not run on the proof's context: not the same one (a proof that used
+	// its time up would take the rollback's with it), and bounded by a deadline of its own.
+	e := newHBACEnv(t, lockdownRoster, nil)
+	answerHBACTest(t, e, 2, "hbactest-denied-user")
+	res, err := e.execute()
+	if !errors.Is(err, ErrWrites) || res.Lockdown == nil || res.Lockdown.Rollback != "re-enabled" {
+		t.Fatalf("err %v report %+v", err, res.Lockdown)
+	}
+	proofs := e.hbactestCalls()
+	enables := e.callsOf("hbacrule_enable", "allow_all")
+	if len(proofs) != 2 || len(enables) != 1 {
+		t.Fatalf("%d proofs, %d enables", len(proofs), len(enables))
+	}
+	proof, rollback := proofs[1].ctx, enables[0].ctx
+	if proof.Done() == rollback.Done() {
+		t.Error("the rollback ran on the proof's context")
+	}
+	if _, ok := proof.Deadline(); !ok {
+		t.Error("the proof after the disable has no deadline of its own")
+	}
+	rd, ok := rollback.Deadline()
+	if !ok {
+		t.Fatal("the rollback has no deadline")
+	}
+	pd, _ := proof.Deadline()
+	if !rd.After(pd) {
+		t.Errorf("the rollback's deadline %v is not later than the proof's %v: it was not built when the rollback ran", rd, pd)
 	}
 }
 

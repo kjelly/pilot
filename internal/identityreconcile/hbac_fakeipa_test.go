@@ -44,6 +44,9 @@ type fakeHBAC struct {
 	groups     map[string]bool
 	seq        int
 	batches    int
+	// noUniqueID makes the rules' entries leave out ipauniqueid, as a server that does not
+	// return it would.
+	noUniqueID bool
 
 	// writeGate is the WriteGate of the client the fake stands for.
 	writeGate func(ctx context.Context, method string) error
@@ -110,6 +113,9 @@ func (f *fakeHBAC) ruleEntry(r *hRule) map[string]any {
 	e := map[string]any{
 		"cn": list(r.name), "ipauniqueid": list(r.uuid), "ipaenabledflag": []any{r.enabled},
 		"objectclass": list("ipaassociation", "ipahbacrule"), "accessruletype": list("allow"),
+	}
+	if f.noUniqueID {
+		delete(e, "ipauniqueid")
 	}
 	for key, cat := range map[string]string{"hostcategory": r.hostCat, "servicecategory": r.svcCat, "usercategory": r.userCat} {
 		if cat != "" {
@@ -268,6 +274,11 @@ func jsonOf(v any) json.RawMessage {
 
 func (f *fakeHBAC) execLocked(ctx context.Context, c call) (json.RawMessage, error) {
 	c.ctxErr = ctx.Err()
+	c.ctx = ctx
+	// Done is made now, so that two contexts that are cancelled later still have channels
+	// of their own to tell them apart by (a context's channel is made on first use, and a
+	// context cancelled before that shares one closed channel with all the others).
+	_ = ctx.Done()
 	f.calls = append(f.calls, c)
 	if f.intercept != nil {
 		if raw, err, handled := f.intercept(f, c); handled {

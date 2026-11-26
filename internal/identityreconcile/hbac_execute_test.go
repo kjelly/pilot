@@ -476,6 +476,35 @@ func TestExecuteHBACRechecksARemovalBeforeSendingIt(t *testing.T) {
 		t.Errorf("a stage after the conflict ran: %s", describeHBACOps(res))
 	}
 
+	// The rule is deleted and created again under the same name between the second plan and
+	// the removal, and bob is on the new one too: the removal was planned for the old rule,
+	// so it is not sent (spec P3-2 (3)), and the stages after it do not run.
+	e = newHBACEnv(t, hbacRosterDoc, setup)
+	e.f.ruleNamed("break-glass").enabled = false
+	e.f.onFind = func(f *fakeHBAC, n int) {
+		if n == 3 {
+			f.ruleNamed("Login-Team").uuid = "00000000-0000-0000-0000-777777777777"
+		}
+	}
+	res, err = e.execute()
+	if !errors.Is(err, ErrWrites) || res.Stop == nil || res.Stop.Stage != "H3" {
+		t.Fatalf("recreated rule: err %v stop %v\n%s", err, res.Stop, describeHBACOps(res))
+	}
+	for _, c := range e.f.writes() {
+		if c.method == "hbacrule_remove_user" {
+			t.Errorf("a removal was sent to a rule that is not the plan's: %v", c.args)
+		}
+	}
+	if o := res.op("hbac.rule.member_user.remove:login-team"); o.Outcome != OutcomeConflictFailed || !strings.Contains(o.Detail, "deleted and created again") {
+		t.Errorf("removal outcome %+v", o)
+	}
+	if !e.f.ruleNamed("Login-Team").users["bob"] {
+		t.Error("bob was removed from the recreated rule")
+	}
+	if res.outcomeOf("hbac.rule.enable:break-glass") != OutcomeNotExecuted {
+		t.Errorf("a stage after the conflict ran: %s", describeHBACOps(res))
+	}
+
 	// The member has already left: nothing is sent for it, and that is not a conflict.
 	e = newHBACEnv(t, hbacRosterDoc, setup)
 	e.f.onFind = func(f *fakeHBAC, n int) {
