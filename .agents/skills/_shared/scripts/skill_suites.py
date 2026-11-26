@@ -39,6 +39,16 @@ unbounded read is selected. The consequence is plain: a Go-only, playbook-only o
 unknown path to every suite, and so selects the full suite (the local plan runs the plain `make skill-test` for it); CI's own
 `docs` profile that skips `make skill-test` for such a change is not consulted.
 
+Two oracles keep the derivation honest. `test_skill_suites.py` loads every suite's test modules under an audit hook and checks
+that every file the LOAD touches is a derived source (it sees import-time reads only). Each suite also records what its own
+RUN reads (`_shared/tests/suite_reads.py`: an audit hook installed by the suite's `test_000_suite_reads_<suite>.py`) and its
+`test_zzz_suite_reads_<suite>.py` compares that with the derivation in a child process (`runtime_gaps`): a tracked file a test
+body, `setUp` or `setUpClass` opened, imported or passed to a process, or a directory it listed, that no derived source names
+is a failing test. The run oracle does NOT see: reads made by descendant processes (scripts, git, make, tmux, sh); existence
+probes (`exists`, `is_file`, `stat`: CPython raises no audit event); branches that did not run (a skip, an error path); data
+beyond what that run had; and a listing is judged by the directories the derived globs list. A read at a `wide` site is
+accepted only when no other suite claims the path (an unclaimed path selects every suite).
+
 Known limits (what the derivation cannot see; CI is the backstop): a path built from a bare literal, a value laundered through
 a function the evaluator cannot resolve (a callback, a method of a third-party object), a directory handed to such a function,
 an attribute of an object whose class it cannot tell, a data-dependent path under the repository root (`wide`), `getattr` with
@@ -2303,6 +2313,170 @@ def select(changes, deps, suites=None):
     result["selection"] = sorted(reasons)
     result["reasons"] = {s: reasons[s] for s in sorted(reasons)}
     return result
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# runtime gaps: what a suite's own run read that its derivation does not name (kjelly/pilot#430, the in-run oracle)
+# --------------------------------------------------------------------------------------------------------------------
+LISTING_EVENTS = ("os.listdir", "os.scandir", "glob.glob", "shutil.copytree")
+WIDE_SITE = re.compile(r" at (\S+):(\d+)\Z")
+
+
+def listed_directories(pattern):
+    """[(directory pattern, recursive)]: the directories a glob lists when it runs ("." is the repository root). A literal
+    segment is looked up, not listed; a segment with a wildcard lists the directory before it, and `**` lists everything below
+    it (recursive). `docs/*.md` lists `docs`; `a/*/b.py` lists `a`; `.*` lists the root; `x/**` lists `x` and all below."""
+    segments = pattern.split("/")
+    found = []
+    for i, segment in enumerate(segments):
+        if has_wild(segment):
+            found.append(("/".join(segments[:i]) or ".", segment == "**"))
+    return found
+
+
+def listing_covered(directory, globs):
+    """Whether some derived glob lists `directory` (a repository-relative path, "." for the root)."""
+    for pattern in globs:
+        for where, recursive in listed_directories(pattern):
+            if matches(where, directory) or (recursive and (where == "." or matches(where + "/**", directory))):
+                return True
+    return False
+
+
+def normalise_observed(repo, raw, tracked=None):
+    """Raw records of an in-run recorder -> what `runtime_gaps` judges.
+
+    raw: [[event, path, site_file, site_line, phase, test], ...] as `suite_reads.py` records them (absolute, as spelled).
+    tracked: the repository's tracked files (`git ls-files`), or None when there is no git (a file that exists then counts).
+    Returns [{"event", "kind" ("file" | "listing"), "path" (repo-relative, symbolic links resolved), "site" ("path:line"),
+    "phase", "test"}]; whatever lies outside the repository, under `.git` or `__pycache__`, or is not a tracked file (a
+    listing names a directory) is dropped. Only the realpath of a path is taken: no process is started."""
+    real = os.path.realpath(repo)
+    tracked_set = None if tracked is None else set(tracked)
+    out = []
+    for event, path, site_file, site_line, phase, test in raw:
+        full = os.path.realpath(path)
+        if full != real and not full.startswith(real + os.sep):
+            continue
+        rel = "." if full == real else os.path.relpath(full, real)
+        parts = rel.split("/")
+        if parts[0] == ".git" or "__pycache__" in parts:
+            continue
+        kind = "listing" if event in LISTING_EVENTS else "file"
+        if kind == "file":
+            if tracked_set is not None:
+                if rel not in tracked_set:
+                    continue
+            elif not os.path.isfile(full):
+                continue
+        site = None
+        if site_file:
+            sreal = os.path.realpath(site_file)
+            if sreal.startswith(real + os.sep):
+                site = f"{os.path.relpath(sreal, real)}:{site_line}"
+        out.append({"event": event, "kind": kind, "path": rel, "site": site, "phase": phase, "test": test})
+    return out
+
+
+def statement_starts(repo):
+    """A function (path, line) -> the first line of the innermost statement that holds the line. Python 3.10 and 3.11 report a
+    different line for a call that spans lines; a site and a derived `wide` entry are compared by the statement they sit in.
+    A file that cannot be parsed, or a line outside every statement, maps to itself (the comparison then fails closed)."""
+    cache: dict = {}
+
+    def starts(path, line):
+        spans = cache.get(path)
+        if spans is None:
+            spans = []
+            try:
+                with open(os.path.join(repo, path), "rb") as handle:
+                    tree = ast.parse(handle.read(), path)
+                spans = sorted((n.lineno, getattr(n, "end_lineno", n.lineno) or n.lineno) for n in ast.walk(tree)
+                               if isinstance(n, ast.stmt))
+            except (OSError, SyntaxError, ValueError):
+                pass
+            cache[path] = spans
+        best = None
+        for lo, hi in spans:
+            if lo <= line <= hi and (best is None or lo >= best[0]):
+                best = (lo, hi)
+        return best[0] if best else line
+
+    return starts
+
+
+def site_key(site, statement=None):
+    """A site "path:line" as (path, first line of its statement); None for no site."""
+    if not site:
+        return None
+    path, _, line = site.rpartition(":")
+    return (path, statement(path, int(line)) if statement else int(line))
+
+
+def wide_sites(info, statement=None):
+    """The sites of the `wide` entries of one suite's derivation: {(path, first line of the statement)}."""
+    found = set()
+    for text in info.get("wide", []):
+        match = WIDE_SITE.search(text)
+        if match:
+            found.add(site_key(f"{match.group(1)}:{match.group(2)}", statement))
+    return found
+
+
+def runtime_gaps(suite, observed, deps, statement=None, all_deps=None):
+    """The reads of a suite's own run that its derivation does not name: [{"kind", "path", "site", "phase", "test", "why"}].
+
+    observed: `normalise_observed` output of the run of `suite`. deps: what `derive` returned (at least for `suite`).
+    statement: `statement_starts(repo)` (a site and a `wide` entry are compared by the statement they sit in); None compares
+    the lines as they are. all_deps: a function returning the derivation of every suite, called only when a read at a `wide`
+    site needs to know whether another suite claims the path (None: `deps` holds every suite).
+
+    A file read is a gap unless the suite's files or globs name it, or it sits under the suite's own directory, or it was made
+    at a `wide` site the derivation reported (a data-dependent path it does not follow) and no other suite claims the path
+    (then a change to it is an unknown path and selects every suite; a path another suite claims would select only that suite).
+    A listing of a directory is a gap unless a derived glob lists it (`listed_directories`). A suite whose derivation
+    failed is a gap of its own (a failed derivation selects every suite, but nothing is known to compare against)."""
+    info = deps.get(suite)
+    if info is None or "error" in info:
+        why = "no derivation" if info is None else f"the derivation failed: {info['error']}"
+        return [{"kind": "derivation", "path": suite, "site": None, "phase": None, "test": None, "why": why}]
+    own = f"{SKILLS_DIR}/{suite}"
+    files = set(info.get("files", {}))
+    globs = sorted(info.get("globs", {}))
+    wide = wide_sites(info, statement)
+
+    def at_wide_site(site):
+        return site_key(site, statement) in wide
+
+    def claimed_elsewhere(path):
+        everything = all_deps() if all_deps else deps
+        for other, other_info in sorted(everything.items()):
+            if other == suite or "error" in other_info:
+                continue
+            if path.startswith(f"{SKILLS_DIR}/{other}/") or any(
+                    matches(pat, path) for pat in {**other_info.get("files", {}), **other_info.get("globs", {})}):
+                return True
+        return False
+
+    gaps, seen = [], set()
+    for record in observed:
+        path, kind = record["path"], record["kind"]
+        if path == own or path.startswith(own + "/") or (kind, path) in seen:
+            continue
+        if kind == "file":
+            if path in files or any(matches(g, path) for g in globs):
+                continue
+            if at_wide_site(record["site"]) and not claimed_elsewhere(path):
+                continue
+            why = "read by the run, named by no file or glob of the derivation"
+        else:
+            if listing_covered(path, globs):
+                continue
+            why = "listed by the run, by no glob of the derivation"
+        seen.add((kind, path))
+        gaps.append({"kind": kind, "path": path, "site": record["site"], "phase": record["phase"], "test": record["test"],
+                     "why": why})
+    return sorted(gaps, key=lambda g: (g["path"], g["kind"]))
 
 
 # --------------------------------------------------------------------------------------------------------------------

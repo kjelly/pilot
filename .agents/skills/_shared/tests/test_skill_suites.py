@@ -13,6 +13,14 @@ fails; only an empty diff selects none. Four groups:
   hook and checks that every repository file the load touches outside the suite is a derived source of it (a derivation that
   loses an edge fails here, and the oracle itself is shown to fail on a lost edge);
 * the Makefile: `make skill-test SKILL_SUITES="a b"` against a `python3` shim, next to the recipe it replaced.
+
+The load oracle above sees only import-time reads. The run oracle (`suite_reads.py`, the pure `runtime_gaps`) compares what a
+suite's own run read, from test bodies, `setUp` and `setUpClass` too, with its derivation: `RuntimeGapTests` pins its rules on
+written-out records, `InRunOracleControls` (NC-a to NC-g) mutates the derivation of this checkout on the records of REAL runs
+of real tests (each control is first shown on the unmutated derivation), and `SuiteReadsModuleTests` (NC-h) pins that every
+suite has the recorder first and the check last, and that the recorder widens no selection. What the run oracle does not see
+(descendant processes, existence probes, branches that did not run, data beyond the run, listing coverage beyond the globs'
+directories) is stated in `suite_reads.py` and `skill_suites.py`; CI runs the whole suite as the backstop.
 """
 import ast
 import copy
@@ -35,6 +43,17 @@ SCRIPTS = HERE.parent / "scripts"
 REPO = HERE.parents[3]
 ss = load_module(SCRIPTS / "skill_suites.py")
 SKILLS = ".agents/skills"
+
+
+_REAL = []
+
+
+def real_deps():
+    """The derivation of this checkout, computed once per process (it takes about 13 s) and shared by the classes that read
+    it; they must not modify it (a control deep-copies before it mutates)."""
+    if not _REAL:
+        _REAL.append(ss.derive(str(REPO)))
+    return _REAL[0]
 
 
 def sources(files=(), globs=(), unbounded=(), error=None):
@@ -563,7 +582,7 @@ class RealTree(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.deps = ss.derive(str(REPO))
+        cls.deps = real_deps()
 
     def select(self, *changes):
         return ss.select(list(changes), self.deps)
@@ -834,6 +853,348 @@ class MakefileTests(unittest.TestCase):
                        "for skill in .agents/skills/*/; do", "printf '── %s\\n' \"$$skill\""):
             self.assertIn(needle, "\n".join(block), needle)
         self.assertNotIn("$(SKILL_SUITES)", text)                               # the value is read by the shell, not by make
+
+
+def observed(path, kind="file", site=None, phase="test", test="t.T.test_x"):
+    """One normalised record of an in-run recorder, as `normalise_observed` returns it."""
+    return {"event": "os.listdir" if kind == "listing" else "open", "kind": kind, "path": path, "site": site, "phase": phase,
+            "test": test}
+
+
+class RuntimeGapTests(Tree):
+    """`runtime_gaps` and `normalise_observed` (the pure core of the in-run oracle), one case per rule, each with the control
+    that shows the rule is not a constant answer (AGENTS.md section 5.12)."""
+
+    DEPS = {"a": sources(files=["README.md", "scripts/x.py"], globs=["docs/*.md", "internal/**/*.go"]),
+            "b": sources(files=[".github/extra.json"], globs=["data/*.json"])}
+
+    def gaps(self, suite, records, deps=None, statement=None):
+        return ss.runtime_gaps(suite, records, self.DEPS if deps is None else deps, statement)
+
+    def test_a_file_the_derivation_names_is_not_a_gap_and_one_it_does_not_name_is(self):
+        self.assertEqual([], self.gaps("a", [observed("README.md"), observed("docs/x.md"), observed("internal/a/b.go")]))
+        found = self.gaps("a", [observed("images/Dockerfile", site="t.py:3", phase="between", test=None)])
+        self.assertEqual([("file", "images/Dockerfile", "t.py:3", "between")],
+                         [(g["kind"], g["path"], g["site"], g["phase"]) for g in found])
+
+    def test_the_own_directory_of_the_suite_is_never_a_gap(self):
+        records = [observed(".agents/skills/a/tests/fixtures/x.json"), observed(".agents/skills/a/SKILL.md"),
+                   observed(".agents/skills/a/scripts", kind="listing")]
+        self.assertEqual([], self.gaps("a", records))
+        # control: the directory of another suite is a read like any other
+        self.assertEqual([".agents/skills/b/SKILL.md"], [g["path"] for g in self.gaps("a", [observed(".agents/skills/b/SKILL.md")])])
+        # and a name that only starts like the suite's directory is not under it
+        self.assertEqual([".agents/skills/ab/x.md"], [g["path"] for g in self.gaps("a", [observed(".agents/skills/ab/x.md")])])
+
+    def test_a_listing_is_covered_only_by_a_glob_that_lists_that_directory(self):
+        self.assertEqual([], self.gaps("a", [observed("docs", kind="listing"), observed("internal/x/y", kind="listing"),
+                                             observed("internal", kind="listing")]))
+        found = self.gaps("a", [observed("scripts", kind="listing"), observed("docs/deeper", kind="listing"),
+                                observed(".", kind="listing")])
+        # `scripts/x.py` is a file source, not a glob; `docs/*.md` lists `docs` and does not descend into docs/deeper; no
+        # glob lists the root
+        self.assertEqual([("listing", "."), ("listing", "docs/deeper"), ("listing", "scripts")],
+                         [(g["kind"], g["path"]) for g in found])
+        # a recursive glob at the root lists every directory, one level lists only the root, and `a/*/b.py` lists `a` alone
+        recursive = dict(self.DEPS, a=sources(globs=["**/*.md"]))
+        self.assertEqual([], self.gaps("a", [observed("anything/at/all", kind="listing"), observed(".", kind="listing")],
+                                       deps=recursive))
+        one_level = dict(self.DEPS, a=sources(globs=[".*", "a/*/b.py"]))
+        self.assertEqual(["a/x", "docs"], [g["path"] for g in self.gaps(
+            "a", [observed(".", kind="listing"), observed("a", kind="listing"), observed("a/x", kind="listing"),
+                  observed("docs", kind="listing")], deps=one_level)])
+
+    def test_a_read_at_a_wide_site_is_covered_only_when_no_other_suite_claims_the_path(self):
+        wide = dict(self.DEPS, a=dict(sources(files=["README.md"]), wide=["read_bytes of an unknown path at t.py:7"]))
+        at_site = lambda path: [observed(path, site="t.py:7")]
+        self.assertEqual([], self.gaps("a", at_site("internal/x_test.go"), deps=wide))              # nobody claims it: unknown
+        for claimed in (".github/extra.json", "data/x.json"):                                       # `b` claims these
+            with self.subTest(path=claimed):
+                self.assertEqual([claimed], [g["path"] for g in self.gaps("a", at_site(claimed), deps=wide)])
+        # control: the same unclaimed path read at another site, or at a site that is not wide, is a gap
+        self.assertEqual(["internal/x_test.go"], [g["path"] for g in self.gaps(
+            "a", [observed("internal/x_test.go", site="t.py:9")], deps=wide)])
+        self.assertEqual(["internal/x_test.go"], [g["path"] for g in self.gaps("a", [observed("internal/x_test.go")], deps=wide)])
+        # a suite whose derivation failed claims nothing, and a path under another suite's directory is claimed
+        self.assertEqual([".agents/skills/b/x.md"], [g["path"] for g in self.gaps(
+            "a", at_site(".agents/skills/b/x.md"), deps=wide)])
+
+    def test_all_deps_is_asked_only_for_a_read_at_a_wide_site(self):
+        asked = []
+        wide = {"a": dict(sources(files=["README.md"]), wide=["x at t.py:7"])}
+
+        def everything():
+            asked.append(1)
+            return dict(wide, b=sources(files=["internal/x_test.go"]))
+        ss.runtime_gaps("a", [observed("README.md"), observed("zzz.md")], wide, None, everything)
+        self.assertEqual([], asked)
+        found = ss.runtime_gaps("a", [observed("internal/x_test.go", site="t.py:7")], wide, None, everything)
+        self.assertEqual([1], asked)
+        self.assertEqual(["internal/x_test.go"], [g["path"] for g in found])      # b claims it: the lazy view is used
+
+    def test_a_wide_site_and_a_runtime_line_are_compared_by_the_statement_they_sit_in(self):
+        root = self.tree({"t.py": "x = call(\n    a,\n    b)\ny = 2\n"})
+        statement = ss.statement_starts(str(root))
+        self.assertEqual([1, 1, 1, 4], [statement("t.py", n) for n in (1, 2, 3, 4)])
+        self.assertEqual(7, statement("missing.py", 7))                        # unknown file: the line itself (fails closed)
+        wide = {"a": dict(sources(), wide=["read of an unknown path at t.py:1"])}
+        for line in (1, 2, 3):                                                  # 3.10 and 3.11 disagree on which line of a call
+            with self.subTest(line=line):
+                self.assertEqual([], ss.runtime_gaps("a", [observed("p.go", site=f"t.py:{line}")], wide, statement))
+        found = ss.runtime_gaps("a", [observed("p.go", site="t.py:4")], wide, statement)          # control: another statement
+        self.assertEqual(["p.go"], [g["path"] for g in found])
+        # without the statement mapping the three lines are three different sites (the mapping is what makes them one)
+        self.assertEqual(["p.go", "p.go"], [g["path"] for line in (2, 3) for g in
+                                            ss.runtime_gaps("a", [observed("p.go", site=f"t.py:{line}")], wide)])
+
+    def test_a_suite_whose_derivation_failed_is_a_gap_of_its_own(self):
+        found = ss.runtime_gaps("a", [observed("README.md")], {"a": sources(error="cannot parse")})
+        self.assertEqual([("derivation", "a")], [(g["kind"], g["path"]) for g in found])
+        self.assertIn("cannot parse", found[0]["why"])
+        self.assertEqual("derivation", ss.runtime_gaps("zzz", [], self.DEPS)[0]["kind"])          # no derivation at all
+        self.assertEqual([], ss.runtime_gaps("a", [observed("README.md")], self.DEPS))             # control
+
+    def test_the_same_path_is_reported_once_with_the_first_site(self):
+        found = self.gaps("a", [observed("x.bin", site="t.py:1"), observed("x.bin", site="t.py:2"),
+                                observed("x.bin", kind="listing", site="t.py:3")])
+        self.assertEqual([("file", "t.py:1"), ("listing", "t.py:3")], [(g["kind"], g["site"]) for g in found])
+
+    def test_the_directories_a_glob_lists_are_those_before_its_wildcard_segments(self):
+        for pattern, listed in (("docs/*.md", [("docs", False)]), ("*.md", [(".", False)]), ("a/b/c.py", []),
+                                ("a/*/c.py", [("a", False)]), ("a/**/c.py", [("a", True)]),
+                                ("**/x", [(".", True)]), (".agents/**", [(".agents", True)]),
+                                ("a/*/*/c", [("a", False), ("a/*", False)])):
+            with self.subTest(pattern=pattern):
+                self.assertEqual(listed, ss.listed_directories(pattern)[:len(listed)])
+                self.assertEqual(listed != [], ss.listing_covered(listed[0][0] if listed else "zzz", [pattern]))
+
+    def raw(self, root, path, event="open", site=("t.py", 3), phase="test"):
+        return [event, str(path), str(root / site[0]), site[1], phase, "t.T.test_x"]
+
+    def test_normalisation_keeps_tracked_files_and_directories_listed_and_drops_the_rest(self):
+        root = self.tree({"README.md": "x\n", "docs/a.md": "x\n", "untracked.txt": "x\n", "t.py": "pass\n",
+                          ".git/config": "x\n", "docs/__pycache__/a.pyc": "x\n"})
+        outside = Path(tempfile.mkdtemp(prefix="skill-suites-outside-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(outside, ignore_errors=True))
+        (outside / "o.txt").write_text("x\n")
+        os.symlink(root / "docs" / "a.md", root / "alias.md")
+        records = [self.raw(root, root / "README.md"), self.raw(root, root / "untracked.txt"), self.raw(root, root / "docs"),
+                   self.raw(root, root / "docs", event="os.listdir"), self.raw(root, outside / "o.txt"),
+                   self.raw(root, root / ".git" / "config"), self.raw(root, root / "docs/__pycache__/a.pyc"),
+                   self.raw(root, root / "alias.md"), self.raw(root, root / "README.md", site=("t.py", 5))]
+        tracked = ["README.md", "docs/a.md", "t.py"]
+        found = ss.normalise_observed(str(root), records, tracked)
+        self.assertEqual([("file", "README.md", "t.py:3"), ("listing", "docs", "t.py:3"), ("file", "docs/a.md", "t.py:3"),
+                          ("file", "README.md", "t.py:5")], [(o["kind"], o["path"], o["site"]) for o in found])
+        # without git (tracked None) a file that exists counts, an untracked one too: the check can only say less
+        loose = ss.normalise_observed(str(root), records, None)
+        self.assertIn("untracked.txt", [o["path"] for o in loose])
+        self.assertNotIn("docs", [o["path"] for o in loose if o["kind"] == "file"])          # a directory is no file
+        self.assertNotIn(str(outside), json.dumps(found))
+
+    def test_a_site_outside_the_repository_is_no_site(self):
+        root = self.tree({"README.md": "x\n"})
+        found = ss.normalise_observed(str(root), [["open", str(root / "README.md"), "/usr/lib/python3/x.py", 9, "load", None]],
+                                      ["README.md"])
+        self.assertEqual([None], [o["site"] for o in found])
+
+
+def tracked_files():
+    """`git ls-files` of this checkout, or None when it is not a git checkout (a file that exists then counts)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    done = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z"], capture_output=True, env=env, timeout=120)
+    return [x.decode() for x in done.stdout.split(b"\0") if x] if done.returncode == 0 else None
+
+
+def recorded_run(suite, *tests):
+    """The records of a real run of some tests of a suite: the suite's own recorder runs in a child and dumps what it saw."""
+    suite_dir = REPO / SKILLS / suite
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": "tests", "PILOT_SUITE_READS_DUMP": "1"}
+    mod = "test_000_suite_reads_" + suite.lstrip("_").replace("-", "_")
+    done = subprocess.run([sys.executable, "-B", "-m", "unittest", mod, *tests], cwd=suite_dir, env=env, capture_output=True,
+                          text=True, timeout=300)
+    if done.returncode:
+        raise AssertionError(f"the producer run of {suite} {tests} failed:\n{done.stderr[-3000:]}")
+    marker = "SUITE_READS_DUMP "
+    lines = [line for line in done.stderr.splitlines() if line.startswith(marker)]
+    if len(lines) != 1:
+        raise AssertionError(f"the recorder of {suite} dumped {len(lines)} times:\n{done.stderr[-2000:]}")
+    return json.loads(lines[0][len(marker):])
+
+
+class InRunOracleControls(unittest.TestCase):
+    """The negative controls of the in-run oracle (kjelly/pilot#430), on REAL runs of real tests: each producer runs a suite's
+    own tests with the suite's own recorder, the derivation of this checkout is mutated the way the reviewer of PR 441 mutated
+    it, and the oracle must report the lost edge. Each control is shown first on the unmutated derivation (nothing reported:
+    the control is not a constant answer), and where the mutated derivation would narrow the selection, that too."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.deps = real_deps()
+        cls.tracked = tracked_files()
+        cls.statement = staticmethod(ss.statement_starts(str(REPO)))
+
+    def gaps(self, suite, raw, deps):
+        return ss.runtime_gaps(suite, ss.normalise_observed(str(REPO), raw, self.tracked), deps, self.statement, lambda: deps)
+
+    def dropped(self, suite, path):
+        deps = copy.deepcopy(self.deps)
+        self.assertIn(path, deps[suite]["files"], "the derivation no longer names the edge this control drops")
+        del deps[suite]["files"][path]
+        return deps
+
+    def assert_reported(self, suite, raw, path, site_file):
+        self.assertEqual([], self.gaps(suite, raw, self.deps), "the unmutated derivation names everything the run read")
+        found = [g for g in self.gaps(suite, raw, self.dropped(suite, path)) if g["path"] == path]
+        self.assertEqual(1, len(found), f"dropping {path} from {suite} was not reported")
+        self.assertIn(found[0]["phase"], ("test", "between"), "the read came from a test body or fixture, not from the load")
+        self.assertTrue(found[0]["site"] and found[0]["site"].startswith(site_file), found[0]["site"])
+
+    def selection_without_the_edge(self, suite, path):
+        return ss.select([("M", path)], self.dropped(suite, path))["selection"]
+
+    def test_nc_a_the_secret_scan_config_read_in_a_test_body_of_shared(self):
+        raw = recorded_run("_shared", "test_secret_scan.Consistency.test_the_committed_exemptions_are_valid_and_each_is_still_needed")
+        self.assert_reported("_shared", raw, ".github/secret-scan.json", ".agents/skills/_shared/tests/test_secret_scan.py")
+        # the reviewer's mutation, as the reviewer ran it: it left every test green and the selection empty; now an unknown path
+        self.assertEqual("all", self.selection_without_the_edge("_shared", ".github/secret-scan.json"))
+        self.assertEqual(["_shared"], ss.select([("M", ".github/secret-scan.json")], self.deps)["selection"])        # control
+
+    def test_nc_b_a_lazy_import_in_a_test_body_of_issue_to_pr(self):
+        path = ".agents/skills/pr-review-merge/scripts/gh_runtime.py"
+        raw = recorded_run("issue-to-pr", "test_mark_ready")
+        self.assert_reported("issue-to-pr", raw, path, ".agents/skills/")
+        # another suite still claims the path, so without the oracle the selection narrows and omits issue-to-pr: fail-open
+        narrowed = self.selection_without_the_edge("issue-to-pr", path)
+        self.assertNotEqual("all", narrowed)
+        self.assertNotIn("issue-to-pr", narrowed)
+        self.assertIn("issue-to-pr", ss.select([("M", path)], self.deps)["selection"])                           # control
+
+    def test_nc_c_a_load_by_path_in_a_test_body_of_the_batch_planner(self):
+        path = ".agents/skills/issue-to-pr/scripts/umbrella.py"
+        raw = recorded_run("issue-batch-planner", "test_file_umbrella")
+        self.assert_reported("issue-batch-planner", raw, path, ".agents/skills/issue-batch-planner/tests/test_file_umbrella.py")
+        narrowed = self.selection_without_the_edge("issue-batch-planner", path)
+        self.assertNotIn("issue-batch-planner", narrowed)
+        self.assertIn("issue-batch-planner", ss.select([("M", path)], self.deps)["selection"])
+
+    def test_nc_d_a_read_in_a_test_body_of_issue_filing(self):
+        raw = recorded_run("issue-filing", "test_contract")
+        self.assert_reported("issue-filing", raw, "AGENTS.md", ".agents/skills/issue-filing/tests/test_contract.py")
+        self.assertNotIn("issue-filing", self.selection_without_the_edge("issue-filing", "AGENTS.md"))
+        self.assertIn("issue-filing", ss.select([("M", "AGENTS.md")], self.deps)["selection"])
+
+    def test_nc_e_the_wide_site_covers_the_go_test_files_only_while_the_derivation_reports_it(self):
+        if self.tracked is None:
+            self.skipTest("not a git checkout: the test that reads the Go files skips itself without git")
+        raw = recorded_run("_shared", "test_secret_scan.Consistency.test_the_committed_exemptions_are_valid_and_each_is_still_needed")
+        self.assertEqual([], self.gaps("_shared", raw, self.deps))
+        deps = copy.deepcopy(self.deps)
+        site = "read_bytes of an unknown path under the repository root at .agents/skills/_shared/tests/test_secret_scan.py:"
+        removed = [w for w in deps["_shared"]["wide"] if w.startswith(site)]
+        self.assertTrue(removed, "the wide sites this control drops moved")
+        deps["_shared"]["wide"] = [w for w in deps["_shared"]["wide"] if w not in removed]
+        found = self.gaps("_shared", raw, deps)
+        self.assertTrue(found)
+        self.assertEqual([], [g["path"] for g in found if not g["path"].endswith("_test.go")])
+        self.assertIn("internal/loginprobe/redact_test.go", [g["path"] for g in found])
+        # no suite claims these files, so a change to one selects every suite (the wide rule is only sound because of that)
+        self.assertEqual("all", ss.select([("M", "internal/loginprobe/redact_test.go")], self.deps)["selection"])
+
+    def test_nc_f_a_dropped_glob_is_reported_as_the_listing_of_its_directory(self):
+        raw = recorded_run("_shared", "test_ready_readers")
+        self.assertEqual([], self.gaps("_shared", raw, self.deps))
+        deps = copy.deepcopy(self.deps)
+        self.assertIn("scripts/*.py", deps["_shared"]["globs"])
+        del deps["_shared"]["globs"]["scripts/*.py"]
+        found = self.gaps("_shared", raw, deps)
+        self.assertIn(("listing", "scripts"), [(g["kind"], g["path"]) for g in found])
+        self.assertTrue(any(g["kind"] == "file" and g["path"].startswith("scripts/") for g in found), found)
+
+    def test_nc_g_the_oracle_itself_is_pinned_by_the_rules_it_is_made_of(self):
+        # A recorder that records nothing, one that ignores body reads, and a check that drops the "no other suite claims it"
+        # condition each turn a control above or in RuntimeGapTests red (proved in a scratch copy, not here): the records of
+        # a real run must hold reads from bodies, and the real run is what the controls above consume.
+        raw = recorded_run("issue-filing", "test_contract")
+        phases = {record[4] for record in raw}
+        self.assertTrue({"load", "test"} <= phases, phases)
+        self.assertTrue(any(r[0] == "open" and r[1].endswith("AGENTS.md") and r[4] == "test" for r in raw))
+
+
+def suite_reads_problems(skills_dir, deps):
+    """What is wrong with the per-suite recorder modules of every suite of `deps` under `skills_dir` (empty when all is well):
+    a suite needs `test_000_suite_reads_<id>.py` (installs the recorder) sorting before, and `test_zzz_suite_reads_<id>.py`
+    (the check) sorting after, every other test module, and each names its own suite."""
+    problems = []
+    for suite in sorted(deps):
+        ident = suite.lstrip("_").replace("-", "_")
+        tests = Path(skills_dir) / suite / "tests"
+        names = sorted(p.name for p in tests.iterdir() if ss.TEST_PATTERN.match(p.name))
+        first, last = f"test_000_suite_reads_{ident}.py", f"test_zzz_suite_reads_{ident}.py"
+        if first not in names or names[0] != first:
+            problems.append(f"{suite}: {first} must exist and sort first")
+        elif "suite_reads.install()" not in (tests / first).read_text():
+            problems.append(f"{suite}: {first} does not install the recorder")
+        if last not in names or names[-1] != last:
+            problems.append(f"{suite}: {last} must exist and sort last")
+        elif f'SUITE = "{suite}"' not in (tests / last).read_text() or "EndOfSuiteChecks" not in (tests / last).read_text():
+            problems.append(f"{suite}: {last} does not run the check for {suite}")
+    return problems
+
+
+class SuiteReadsModuleTests(Tree):
+    """Every suite carries the recorder and the end-of-suite check (NC-h), and the check does not widen any selection."""
+
+    def test_every_suite_has_both_modules_first_and_last_naming_its_own_suite(self):
+        deps = real_deps()
+        self.assertEqual([], suite_reads_problems(REPO / SKILLS, deps))
+
+    def test_a_missing_misnamed_or_misplaced_module_is_reported(self):
+        files = {}
+        for suite in ("s1", "s2"):
+            files[f".agents/skills/{suite}/tests/test_000_suite_reads_{suite}.py"] = "suite_reads.install()\n"
+            files[f".agents/skills/{suite}/tests/test_zzz_suite_reads_{suite}.py"] = (
+                f'class T(suite_reads.EndOfSuiteChecks):\n    SUITE = "{suite}"\n')
+            files[f".agents/skills/{suite}/tests/test_mid.py"] = "pass\n"
+        root = self.tree(files)
+        skills = root / SKILLS
+        deps = {"s1": {}, "s2": {}}
+        self.assertEqual([], suite_reads_problems(skills, deps))                                  # control
+        cases = {
+            "removed first": lambda: (skills / "s1/tests/test_000_suite_reads_s1.py").unlink(),
+            "renamed last": lambda: (skills / "s1/tests/test_zzz_suite_reads_s1.py").rename(skills / "s1/tests/test_zzz_reads.py"),
+            "not first": lambda: (skills / "s1/tests/test_000_suite_reads_s1.py").rename(skills / "s1/tests/test_a_suite_reads_s1.py"),
+            "not last": lambda: (skills / "s1/tests/test_zzz_suite_reads_s1.py").write_text("x") or
+                               (skills / "s1/tests/test_zzzz.py").write_text("pass\n"),
+            "no install": lambda: (skills / "s1/tests/test_000_suite_reads_s1.py").write_text("pass\n"),
+            "another suite": lambda: (skills / "s1/tests/test_zzz_suite_reads_s1.py").write_text(
+                'class T(suite_reads.EndOfSuiteChecks):\n    SUITE = "s2"\n'),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(case=label):
+                fresh = self.tree(files)
+                skills = fresh / SKILLS
+                mutate()
+                self.assertTrue(suite_reads_problems(skills, deps), label)
+
+    def test_the_recorder_does_not_widen_the_selection_of_any_suite(self):
+        deps = real_deps()
+        shared = ".agents/skills/_shared"
+        # A change to the recorder or to the module the check runs reaches every suite: they load it, or run it
+        for path in (f"{shared}/tests/suite_reads.py", f"{shared}/scripts/skill_suites.py"):
+            self.assertEqual(sorted(deps), ss.select([("M", path)], deps)["selection"], path)
+        # A change that no suite reads through the recorder keeps its precision: skill_suites is run in a child, never
+        # imported by a suite other than `_shared`, so the tree walks of its derivation do not become sources of the others
+        self.assertEqual(["_shared", "pr-ready"], ss.select([("M", ".agents/skills/pr-ready/SKILL.md")], deps)["selection"])
+        self.assertEqual(["_shared", "issue-to-pr", "pr-ready", "pr-review-merge"],
+                         ss.select([("M", f"{shared}/scripts/bounded_run.py")], deps)["selection"])
+        # the two edges every suite gets from the recorder are those two files and nothing else (no glob, no unbounded read)
+        for suite in sorted(deps):
+            if suite != "_shared":
+                through = {k for k, why in {**deps[suite]["files"], **deps[suite]["globs"]}.items()
+                           if "suite_reads.py" in why or "test_000_suite_reads" in why}
+                self.assertEqual({f"{shared}/scripts/skill_suites.py", f"{shared}/tests/suite_reads.py"}, through, suite)
+                self.assertEqual([], [u for u in deps[suite]["unbounded"] if "suite_reads" in u], suite)
 
 
 class PurityTests(unittest.TestCase):

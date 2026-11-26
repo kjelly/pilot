@@ -76,7 +76,10 @@ playbook-only or docs-only change has one, and so plans the plain `make skill-te
 before the selection planned none for it), a deleted, renamed or type-changed path, a path that is not canonical, and
 any error while deriving the suites, select all of them (the plain `make skill-test`); only an
 empty diff plans no skill command. CI's own `docs` profile, which skips the suites for such a change, is not consulted. Keep
-the plan JSON next to the receipt, for the reviewers. CI's `Skill and repository contracts`
+the plan JSON next to the receipt, for the reviewers. Each suite's last test module (`test_zzz_suite_reads_<suite>.py`) checks
+that every tracked file or directory the suite's own run read is a source the derivation names (a read from a test
+body, `setUp` or `setUpClass` included); it does not see descendant processes, existence probes, branches that
+did not run or data beyond that run. CI's `Skill and repository contracts`
 job still runs the full `make skill-test`, and Ready requires it. A CI failure in a suite the
 plan left out is a defect of the selection: repair the selection and the suite, and never
 list it as an `unrelated_failing_checks` entry. `pr-review-merge` ignores the selection: it
