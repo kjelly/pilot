@@ -33,8 +33,10 @@ Use the snapshot's `.agents/skills/_shared/scripts/local_test_plan.py --repo DIR
 --base BASE_SHA --head HEAD_SHA` on the committed candidate. It reports changed
 Go packages and their transitive importers, including test imports; go.mod/go.sum
 changes expand scope to all packages. Workflow/build/skill changes also select
-the command package's repository consistency tests. Skill changes add
-`make skill-test`.
+the command package's repository consistency tests. Every non-empty change adds
+`make skill-test` (once, as the receipt: below), narrowed to the suites the change can reach; a
+path no suite is known to read selects every suite, so a Go-only, playbook-only or docs-only
+change plans the plain `make skill-test` too.
 Test-only Go changes select their own package without expanding to importers.
 
 The large `cmd/pilot/cmd` and `internal/spec` packages require explicit
@@ -56,3 +58,32 @@ unchanged source, environment and test-contract receipts need not be repeated
 just to create a new copy. Existing gate rules decide whether receipts can be
 reused across evidence-only changes. Startup acknowledgements are not independent
 code reviews, and source changes still invalidate affected checks.
+
+## While the Coder works, and the one receipt (kjelly/pilot#432, kjelly/pilot#430)
+
+While the Coder works it runs the tests of what it changed (the selected Go tests; for a
+skill, that skill's `tests/` or the changed test modules). The plan's `make skill-test` runs
+once per candidate HEAD, as the `run_check.py` receipt on the committed HEAD (Root's, or the
+Coder's when it takes the receipt; never both). Root takes the receipt unless the dispatch
+envelope tells the Coder to; the Coder's envelope carries the validation item "the tests of
+what it changed; not the planned `make skill-test` (Root runs that once, as the receipt)".
+
+The plan narrows `make skill-test` to the suites the change can reach and prints the reason
+for each (`skill_suites` in its JSON: which changed path reaches which suite, through which
+import, load or read), as `make skill-test SKILL_SUITES="a b"`. Run the planned command
+exactly: a narrower command is not the receipt. A path no suite is known to read (anywhere in the repository: a Go-only,
+playbook-only or docs-only change has one, and so plans the plain `make skill-test`, where the plan
+before the selection planned none for it), a deleted, renamed or type-changed path, a path that is not canonical, and
+any error while deriving the suites, select all of them (the plain `make skill-test`); only an
+empty diff plans no skill command. CI's own `docs` profile, which skips the suites for such a change, is not consulted. Keep
+the plan JSON next to the receipt, for the reviewers. Each suite's last test module (`test_zzz_suite_reads_<suite>.py`) checks
+that every tracked file or directory the suite's own run read is a source the derivation names (a read from a test
+body, `setUp` or `setUpClass` included); it does not see descendant processes, existence probes, branches that
+did not run or data beyond that run. CI's `Skill and repository contracts`
+job skips `make skill-test` for a change in its `docs` profile and otherwise runs the full `make skill-test`; Ready
+requires the job's result. A CI failure in a suite the
+plan left out is a defect of the selection: repair the selection and the suite, and never
+list it as an `unrelated_failing_checks` entry. `pr-review-merge` ignores the selection: it
+runs the full suite on its own candidate. This section governs the Coder and the receipt of
+`issue-to-pr` and `pr-ready`; the `make skill-test` that `pr-review-merge` runs (its
+SKILL.md) is a separate gate on a separate candidate, and this section does not change it.

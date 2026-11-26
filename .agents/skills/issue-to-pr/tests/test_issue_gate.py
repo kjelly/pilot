@@ -17,6 +17,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "_shared" / "tests"))
 import secret_fixtures as fx  # noqa: E402
+import ready_signal_world as rw  # noqa: E402  (the shared model of the Ready signal's GitHub state)
 import create_pr   # noqa: E402
 import issue_gate  # noqa: E402
 import mark_ready  # noqa: E402
@@ -609,13 +610,15 @@ class DisputedIssueClaimTests(LocalGitFixture):
         pr = {"number": 9, "state": "OPEN", "isDraft": True, "headRefName": "issue/123-fix",
               "headRefOid": self.sha, "mergeable": "MERGEABLE", "url": "u", "body": body}
         calls = []
+        world = rw.World(head=self.sha)  # the Ready signal's GitHub state (the signal is written after `gh pr ready`)
         with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), \
              patch.object(issue_gate, "gh_issue_thread", return_value=self.thread), \
              patch.object(issue_gate, "remote_head", return_value=self.sha), \
              patch.object(mark_ready, "command", side_effect=[pr, NO_REVIEW_THREADS,
                                                               {"isDraft": False, "headRefOid": self.sha, "url": "u"}]), \
              patch.object(mark_ready.pr_ci, "inspect", return_value={"status": "CI_PASSED"}), \
-             patch.object(mark_ready, "execute", side_effect=lambda a, cwd: calls.append(a) or ""):
+             patch.object(mark_ready, "execute", side_effect=rw.pr_ready_executor(world, calls)), \
+             rw.mark_ready_signal(mark_ready, world):
             result = mark_ready.mark_ready(repo="OWNER/REPO", issue=123, pr=9, worktree=self.worktree,
                                            evidence=self.path, confirm_complete=True)
         return result, calls
@@ -869,12 +872,14 @@ class SecretScanGateTests(LocalGitFixture):
 
         def mark(**kwargs):
             calls = []
+            world = rw.World(head=head)  # the Ready signal's GitHub state
             with patch.object(issue_gate, "gh_issue_and_duplicates", return_value=[]), \
                     patch.object(issue_gate, "remote_head", return_value=head), \
                     patch.object(mark_ready, "command", side_effect=[pr, NO_REVIEW_THREADS,
                                                                      {"isDraft": False, "headRefOid": head, "url": "u"}]), \
                     patch.object(mark_ready.pr_ci, "inspect", return_value={"status": "CI_PASSED"}), \
-                    patch.object(mark_ready, "execute", side_effect=lambda a, cwd: calls.append(a) or ""):
+                    patch.object(mark_ready, "execute", side_effect=rw.pr_ready_executor(world, calls)), \
+                    rw.mark_ready_signal(mark_ready, world):
                 result = mark_ready.mark_ready(repo="OWNER/REPO", issue=123, pr=9, worktree=self.worktree,
                                                evidence=self.path, confirm_complete=True, **kwargs)
             return result, calls

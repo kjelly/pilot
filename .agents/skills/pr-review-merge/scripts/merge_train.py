@@ -47,9 +47,19 @@ and the run looks at the PR again (`RETRY`). `tests/test_merge_train_guard.py` c
 write in the class. After the merge is read back as MERGED the saved entry is dropped and the label is
 removed, both inside that guard and neither able to change the outcome.
 
+The train needs no Ready signal and never reads one. The actor refuses a PR without a valid signal before it
+saves the entry and labels the PR, so the saved entry (`enqueued_head`, plus the commits in `train_commits`) is
+what the train trusts; the integration commits it pushes itself would make a signal bound to the enqueued HEAD
+stale, and a PR queued before the signal existed is merged as it was queued. The one thing it does with the
+signal's label is take it off a PR it returned to Draft (hygiene: the PR is Ready again only through pr-ready,
+which signs it afresh); that never changes an outcome. `review_gate.evaluate`, which the train calls on its own
+commits, reads no signal either (tests/test_merge_train.py `NoSignalRequirementTests`).
+
 Every git command has a time limit (`--fetch-timeout`, `--push-timeout`, `--git-timeout`) and runs in
-its own process group: on expiry the group gets SIGTERM (git removes its lock files), then SIGKILL.
-A stalled network call therefore holds neither the consumer lock nor the mutation lock for longer.
+its own process group (`_shared/scripts/bounded_run.py`): on expiry the group gets SIGTERM (git removes its lock files),
+then SIGKILL, also to a member that ignores SIGTERM when git itself has already gone. A git that exited is judged by its
+exit code, whatever its descendants do with its pipes. A stalled network call therefore holds neither the consumer lock
+nor the mutation lock for longer.
 
 The consumer never touches a working tree: it fetches into private refs (`refs/merge-train/*`),
 builds the merge commit with `git merge-tree`/`git commit-tree` and pushes the commit object. Use a
@@ -63,7 +73,6 @@ import fcntl
 import hashlib
 import json
 import os
-import signal
 import subprocess
 import sys
 import tempfile
@@ -78,6 +87,7 @@ from typing import Any, Callable, Sequence
 sys.dont_write_bytecode = True
 import gh_runtime  # noqa: E402
 from gh_runtime import GitHubError, MutationLockHeld, Repo  # noqa: E402
+import bounded_run  # noqa: E402  (gh_runtime has put the shared scripts on the import path; every git call goes through it)
 import review_gate  # noqa: E402
 
 QUEUE_LABEL = "merge-queue"
@@ -391,53 +401,19 @@ class Train:
         return proc
 
     def _run_git(self, args: tuple[str, ...], limit: float) -> subprocess.CompletedProcess[str]:
-        # Its own session: no terminal to prompt on, and one process group to signal, so that what git
-        # started (ssh, the remote helper, a hook) ends with it. GIT_TERMINAL_PROMPT=0 makes a credential
-        # prompt fail instead of waiting for a person who is not there.
-        child = subprocess.Popen(["git", "-C", str(self.worktree), *args], stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, text=True, start_new_session=True,
-                                 env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        # `bounded_run`: its own session and process group, no terminal to prompt on, and one deadline for the whole
+        # group, so that what git started (ssh, the remote helper, a hook) ends with it: SIGTERM first (git removes
+        # its own lock and temporary files on it), SIGKILL `git_kill_grace` seconds later to whatever is still in the
+        # group, also when git itself has already gone. A git that exited is judged by its exit code, also when a
+        # descendant still holds its output (read for at most `drain` seconds, then the pipes are closed). An
+        # interrupt ends the group before it goes on. GIT_TERMINAL_PROMPT=0 makes a credential prompt fail instead of
+        # waiting for a person who is not there.
         try:
-            out, err = child.communicate(timeout=limit)
-        except subprocess.TimeoutExpired:
-            ended = self._end_group(child)
-            raise GitTimeout(f"git {args[0]} did not finish within {limit:g} s and was ended ({ended})") from None
-        except BaseException:
-            self._end_group(child)  # an interrupt must not leave git running in a session of its own
-            raise
-        return subprocess.CompletedProcess(child.args, child.returncode, out, err)
-
-    def _end_group(self, child: "subprocess.Popen[str]") -> str:
-        """End `child` and everything it started: SIGTERM to its process group first (git removes its own
-        lock and temporary files on it), SIGKILL after `git_kill_grace` seconds. Returns how it ended.
-
-        Only our own group is signalled (it exists because `_run_git` made the child a session leader),
-        and only while the leader has not been reaped: a reaped leader's id may be anyone's by now."""
-        def signal_group(number: int) -> None:
-            if child.returncode is None:
-                try:
-                    os.killpg(child.pid, number)
-                except ProcessLookupError:
-                    pass
-        signal_group(signal.SIGTERM)
-        try:
-            child.communicate(timeout=self.git_kill_grace)
-            return "SIGTERM"
-        except subprocess.TimeoutExpired:
-            pass
-        signal_group(signal.SIGKILL)
-        try:
-            child.communicate(timeout=self.git_kill_grace)
-        except subprocess.TimeoutExpired:
-            # Something left the group and still holds the pipes: give up on its output.
-            for pipe in (child.stdout, child.stderr):
-                if pipe is not None:
-                    pipe.close()
-            try:
-                child.wait(timeout=self.git_kill_grace)
-            except subprocess.TimeoutExpired:
-                pass
-        return "SIGTERM, then SIGKILL"
+            return bounded_run.run(["git", "-C", str(self.worktree), *args], limit=limit,
+                                   env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, kill_after=self.git_kill_grace,
+                                   drain=min(bounded_run.DRAIN, self.git_kill_grace))
+        except bounded_run.Timeout as exc:
+            raise GitTimeout(f"git {args[0]} did not finish within {limit:g} s and was ended ({exc.ended})") from None
 
     def fetch(self, number: int, base: str) -> tuple[str, str]:
         """Bring the PR head and the base branch into private refs; (fetched PR head, fetched base tip).
@@ -590,6 +566,13 @@ class Train:
         if not isinstance(labels, list):
             raise GitHubError("gh pr view did not report the PR's labels")
         return any(isinstance(label, dict) and label.get("name") == QUEUE_LABEL for label in labels)
+
+    @staticmethod
+    def _shows_label(view: dict[str, Any], name: str) -> bool:
+        """Whether a PR view lists the label `name` (a read: a view without labels shows none)."""
+        labels = view.get("labels")
+        return isinstance(labels, list) and any(isinstance(label, dict) and label.get("name") == name
+                                                for label in labels)
 
     def label_gone(self, number: int, entry: dict[str, Any] | None) -> dict[str, Any] | _Signal:
         """Removing the label withdraws the PR: drop the saved entry and touch nothing on GitHub. The
@@ -1012,6 +995,15 @@ class Train:
                         # Only a confirmed Draft takes the PR out of the queue, and only then the label goes.
                         self.client.edit_label(self.repo, number, QUEUE_LABEL, add=False)
                         drop_entry(self.repo, number)
+                        if self._shows_label(after, review_gate.READY_LABEL):
+                            # Housekeeping after the Draft stands: it never changes the outcome (a failure is
+                            # logged, never an infrastructure failure), and pr-ready removes the label again
+                            # before the PR is Ready.
+                            try:
+                                self.client.edit_label(self.repo, number, review_gate.READY_LABEL, add=False)
+                            except GitHubError as exc:
+                                self.log.append(f"#{number}: returned to Draft, but the "
+                                                f"`{review_gate.READY_LABEL}` label could not be removed: {exc}")
                 else:
                     self.log.append(f"#{number}: the Draft comment for HEAD {head[:12]} was posted, then "
                                     f"{CHANGED[held.reason]}: voided; the PR was not converted")

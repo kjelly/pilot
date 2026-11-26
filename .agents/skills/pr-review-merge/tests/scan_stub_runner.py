@@ -8,6 +8,7 @@ any repository). The tests that exercise the scan call the scripts directly, wit
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -21,4 +22,9 @@ if __name__ == "__main__":
     sys.argv = [str(script), *sys.argv[2:]]
     # Import the script as a module (not run_path): apply_decision and review_gate then share the one
     # review_gate module whose scan was replaced.
-    sys.exit(importlib.import_module(script.stem).main())
+    module = importlib.import_module(script.stem)
+    # PRM_TEST_READ_INTERVAL: the seconds the actor waits between two reads of a write GitHub shows late (a
+    # test of the bound on those reads must not take them).
+    if "PRM_TEST_READ_INTERVAL" in os.environ and hasattr(module, "READ_INTERVAL"):
+        module.READ_INTERVAL = float(os.environ["PRM_TEST_READ_INTERVAL"])
+    sys.exit(module.main())

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Select conservative PR validation and check every planned job's result.
 
-Only agent skills and accompanying design/evidence Markdown have a fast path.
+Only agent skills, the PR-loop runner scripts/pr_loop.py (read only by the
+skills job's tests) and accompanying design/evidence Markdown have a fast path.
 Everything else (including runtime specs, Go tests, CI and dependencies) is full.
 Read the frozen merge's real parents, never an API file listing or moving ref.
 """
@@ -24,14 +25,25 @@ HEAVY_JOBS = {
 }
 RESULT_JOBS = HEAVY_JOBS | {"changes", "skills", "ci-receipt"}
 
+# What path_kind gives a reduced profile; cmd/pilot/cmd/ci_impact_test.go reads
+# these constants, so a new entry is checked against every heavy job's inputs
+# and every Go test that reads the repository without a second list.
+SKILL_PREFIXES = (".agents/skills/", ".claude/skills/", ".claude/agents/")
+# Exact paths, never prefixes: scripts/pr_loop.py/x.go is a compiled Go package
+# directory that go build, vet and test must still see.
+SKILL_FILES = frozenset({"scripts/pr_loop.py"})
+# Only Markdown below these directories is a documentation change.
+DOC_PREFIXES = ("docs/superpowers/plans/", "docs/superpowers/specs/", "docs/evidence/")
+
 
 def path_kind(path):
     parts = PurePosixPath(path).parts
     if not path or path.startswith("/") or ".." in parts:
         return "full"
-    if path.startswith((".agents/skills/", ".claude/skills/", ".claude/agents/")):
+    # No normalization: git prints canonical paths, any other spelling stays full.
+    if path.startswith(SKILL_PREFIXES) or path in SKILL_FILES:
         return "skills"
-    if path.endswith(".md") and path.startswith(("docs/superpowers/plans/", "docs/superpowers/specs/", "docs/evidence/")):
+    if path.endswith(".md") and path.startswith(DOC_PREFIXES):
         return "docs"
     return "full"
 

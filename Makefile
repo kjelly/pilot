@@ -146,9 +146,22 @@ ci-workflow-test: ## Verify CI impact selection, candidate reuse and shard evide
 ci-go-runtime-test: ## Verify Go CI evidence against small real race binaries
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_ci_go_test_shards_runtime.py'
 
-skill-test:    ## Run the unit tests of every project-local agent skill (.agents/skills/*/tests; CI runs this)
-	@for skill in .agents/skills/*/; do \
+.PHONY: skill-test
+skill-test:    ## Run the unit tests of every project-local agent skill (.agents/skills/*/tests; CI runs this); SKILL_SUITES="a b" on the command line runs only those suites
+	@set -f; \
+	if [ "$(origin SKILL_SUITES)" = "environment" ] || [ "$(origin SKILL_SUITES)" = "environment override" ]; then \
+	  echo "skill-test: SKILL_SUITES is set in the environment; pass it on the command line: make skill-test SKILL_SUITES=\"a b\"" >&2; exit 2; \
+	fi; \
+	set -- $$SKILL_SUITES; set +f; \
+	chosen=" "; \
+	for name in "$$@"; do \
+	  case "$$name" in ''|-*|*[!A-Za-z0-9_-]*) echo "skill-test: bad suite name '$$name'" >&2; exit 2;; esac; \
+	  [ -d ".agents/skills/$$name/tests" ] || { echo "skill-test: no suite '$$name' (.agents/skills/$$name/tests)" >&2; exit 2; }; \
+	  chosen="$$chosen$$name "; \
+	done; \
+	for skill in .agents/skills/*/; do \
 	  [ -d "$$skill/tests" ] || continue; \
+	  if [ $$# -gt 0 ]; then name=$${skill%/}; case "$$chosen" in *" $${name##*/} "*) ;; *) continue;; esac; fi; \
 	  printf '── %s\n' "$$skill"; \
 	  (cd "$$skill" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py') || exit 1; \
 	done
@@ -224,7 +237,7 @@ freeipa-server-pool-test: ## Include tasks/freeipa-server-pool.yml twice on one 
 
 .PHONY: freeipa-server-pool-test
 
-site-day2-roles-test: ## Run the real freeipa-server-replica pre_tasks (G-ip, G-pool and G-resolve gates and its serial: 1, issue 362) and ask real ansible-playbook which tasks the site.yml tags of the two imported day-2 roles select, with mandatory real Ansible.
+site-day2-roles-test: ## Run the real freeipa-server-replica pre_tasks (G-ip, G-pool and G-resolve gates and its serial: 1, issue 362) and its rsyslog-follows-the-hostname probe and restart (round-32 F3, issue 343), and ask real ansible-playbook which tasks the site.yml tags of the two imported day-2 roles select, with mandatory real Ansible.
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestRegression_SiteDay2Roles' ./internal/spec/
 	PILOT_REQUIRE_CONTAINER_TESTS=1 go test -count=1 -v -timeout 10m -run '^TestSiteYMLDay2RolesTagsSelectTheirTasksInAnsible$$' ./cmd/pilot/cmd/
 

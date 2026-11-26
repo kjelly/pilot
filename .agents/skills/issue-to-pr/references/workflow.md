@@ -24,10 +24,10 @@ DISCOVERED -> CLAIMED -> BRANCH_CHECKED_OUT -> ANALYZED -> IMPLEMENTING
 ```
 
 - A P0–P2 review finding returns `REVIEWED -> IMPLEMENTING`. A new commit invalidates `CHECKED` and `REVIEWED` receipts.
-- `GATE_PASS` is not a permanent certificate. Repeat checks if HEAD or Issue/PR state changes.
+- `GATE_PASS` is not a permanent certificate. Repeat checks if HEAD or Issue/PR state changes. It authorizes the first push and the PR; once the Draft exists, a repair commit goes `COMMITTED -> PUSHED` after Root's read and scan, and `CHECKED` and `REVIEWED` on the new SHA run while its CI runs (SKILL.md, section 4).
 - `PUSHED` is not a completed task. Confirm PR exists and references the intended issue/HEAD.
 - `INVALID` and `NEEDS_DECISION` need the reviewer's independent verdict and a reply on the Issue first ([Issue claims](issue-claims.md)). A claim raised again without new evidence after a confirmed dispute is `NEEDS_DECISION`, not another implementation or reply round.
-- If a post-PR CI check fails, repair on the same Draft PR branch; if unresolved report DRAFT_CI_BLOCKED and leave it Draft. Do not claim CI success. Only `mark_ready.py` moves a PR to Ready, and only after CI_PASSED on the exact HEAD with all follow-ups done.
+- If a post-PR CI check fails, repair on the same Draft PR branch; if unresolved report DRAFT_CI_BLOCKED and leave it Draft. Do not claim CI success. Only `mark_ready.py` moves a PR to Ready, and only after CI_PASSED on the exact HEAD with all follow-ups done; it also signs the PR (the Ready signal `pr-review-merge` and `scripts/pr_loop.py` require).
 
 ## Existing-PR disposition
 
@@ -120,8 +120,8 @@ PR creation should be safe to rerun: it must detect and report an existing PR ra
 ## Post-creation verification
 
 - A Draft PR is work in progress: it is **not** yet claimed to be merge-quality. Run `pr_ci.py` on the confirmed remote HEAD and capture the result.
-- If CI fails: Coder changes current Issue branch, commits; Root invalidates old evidence; checks/review on new SHA; push; verify same PR head and rerun CI.
+- If CI fails: Coder changes current Issue branch, commits; Root invalidates old evidence, reads the added lines, runs the secret scan and pushes; checks and review on the new SHA run while its CI runs; verify same PR head, then re-check CI on it.
 - If CI never starts or cannot be observed: report `DRAFT_PENDING` / CI unknown, not `CI_PASSED`, and keep the PR Draft.
 - Before any retry, query the existing PR using branch and Issue refs to prevent duplicates.
-- When CI is `CI_PASSED` on the exact HEAD and every follow-up is done (final independent review of the whole head diff, every review comment answered, accurate PR body, evidence/doc follow-ups, no conflicts), run `mark_ready.py --confirm-complete`; checkpoint `phase: READY_FOR_REVIEW`. A new commit afterwards invalidates the Ready claim: re-verify immediately.
+- When CI is `CI_PASSED` on the exact HEAD and every follow-up is done (final independent review of the whole head diff, every review comment answered, accurate PR body, evidence/doc follow-ups, no conflicts), run `mark_ready.py --confirm-complete`; checkpoint `phase: READY_FOR_REVIEW` only when it reports `READY_FOR_REVIEW`. It also writes the Ready signal (marker comment, then the `pr-ready-verified` label, read back as valid); a signal it cannot confirm, or a PR that is already Ready without one, is `READY_UNVERIFIED`: report it, and the recovery is a person converting the PR to Draft and running `mark_ready.py` again. A new commit afterwards invalidates the Ready claim and the signal (it names the HEAD and the Ready transition it signed), and so does a later Draft/Ready cycle: re-verify immediately.
 - Never auto-merge, request auto-merge, or bypass branch protection.

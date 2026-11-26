@@ -66,6 +66,19 @@ rotated files. Override the limits with `PILOT_ANSIBLE_LOG_MAX_BYTES` and
 This is defense in depth; playbooks must still use Ansible `no_log: true` for
 secret-bearing tasks.
 
+## Process a batch of pull requests
+
+`scripts/pr_loop.py` runs `pr-ready` and then `pr-review-merge` for the pull
+requests you name. The agents run in tmux windows of your own checkout.
+
+```bash
+python3 scripts/pr_loop.py 371 372 --repo kjelly/pilot
+```
+
+It works in your own checkout, so read
+[`.agents/skills/_shared/pr-loop.md`](.agents/skills/_shared/pr-loop.md) before
+the first run.
+
 ## Command map
 
 ### Authoring, inventory, and delivery

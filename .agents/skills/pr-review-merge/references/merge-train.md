@@ -98,6 +98,22 @@ Notes on the table:
   confirmed, and when it merges one, after the PR reads back as `MERGED` (the queue lists open PRs
   only, so a label left on a merged PR was harmless, but it no longer is).
 
+## The Ready signal: not required here
+
+The actor refuses a PR without a valid Ready signal (`review_gate.ready_signal_gate`, SKILL.md "Ready
+signal") before it saves the entry and adds the label, so what reaches the queue was signed. The train
+itself requires no signal and never reads one (`tests/test_merge_train.py`, `NoSignalRequirementTests`):
+
+- It trusts the saved entry, bound to `enqueued_head` and its own `train_commits` (Binding, above), as it
+  always did.
+- The integration commit it pushes is exactly what would make a signal bound to the enqueued HEAD stale. It creates no Ready event, so the Ready transition the signal certifies still matches.
+- A PR enqueued before the check existed is merged as it was enqueued. One that leaves the queue is an
+  ordinary Ready PR again: it follows the signal rules, and a PR without a valid signal needs Draft and
+  `pr-ready`.
+- `review_gate.evaluate()`, which the train calls on its own commits, reads no signal either: the check is
+  the separate top-level `ready_signal_gate`, called by the command line and by the actor.
+- The only thing the train does with the signal is take its label off a PR it returned to Draft (above).
+
 ## Every write is guarded
 
 The train decides on what it read, then waits for the repository mutation lock, and someone else may
@@ -137,8 +153,9 @@ steps then give the outcome that fits what changed:
 What each write does under the guard:
 
 - **Draft.** Guard, comment, read again under the same lock, mark Draft, confirm `isDraft`, remove the
-  label, drop the entry. Only a confirmed Draft takes the label off, so a conversion GitHub did not
-  perform leaves the PR enqueued (`ERROR`, counted).
+  label, drop the entry, then take the Ready-signal label (`pr-ready-verified`) off a PR that shows it
+  (housekeeping: a failure is logged, never an outcome and never `INFRA`). Only a confirmed Draft takes
+  a label off, so a conversion GitHub did not perform leaves the PR enqueued (`ERROR`, counted).
 - **A voided comment.** A comment cannot be taken back. When the PR changed after the Draft comment was
   posted, the train does not mark it Draft and does not touch the label. It posts a second comment,
   "Draft comment superseded", that names the HEAD the first one judged and says the train did not
@@ -198,10 +215,20 @@ python3 "$SNAP/.agents/skills/pr-review-merge/scripts/merge_train.py" status --r
   `--push-timeout` (120 s; a push runs under the mutation lock) and `--git-timeout` (120 s; everything
   local). A command runs in its own process group and session (so ssh, the remote helper and hooks end
   with it, and nothing can prompt on a terminal: `GIT_TERMINAL_PROMPT=0`). At the limit the group gets
-  SIGTERM, which lets git remove its own lock and temporary files, and SIGKILL 30 s later if it is still
-  there; the result is `GitTimeout`, an infrastructure failure. A stalled network call therefore holds
-  neither the consumer lock nor the mutation lock for longer than its limit, and the PR stays enqueued.
-  `gh` calls have their own limit (75 s) and fail as GitHub errors.
+  SIGTERM, which lets git remove its own lock and temporary files, and SIGKILL 30 s later (`GIT_KILL_GRACE`)
+  to whatever is still in the group: also when git itself has already gone and a member that ignores SIGTERM
+  stays. What is then left in git's pipes is read for at most 5 s (the grace,
+  when it is shorter) and the pipes are closed, so that a process that left the group cannot hold the train.
+  The result is `GitTimeout` ("... was ended (SIGTERM)" or "(SIGTERM, then SIGKILL)"), an infrastructure
+  failure. A stalled network call therefore holds neither the consumer lock nor the mutation lock for longer
+  than its limit plus the grace and the read, and the PR stays enqueued. A git that exits is judged by its
+  exit code, not by what it left behind: a descendant that keeps git's output open (a hook's background job)
+  is not waited for beyond that read and is not signalled, and its git is not a timeout.
+  `gh` calls have their own limit (75 s, `gh_runtime.GH_TIMEOUT`) and fail as GitHub errors; their group is ended
+  and a finished `gh` is judged the same way. All of it is one implementation,
+  `.agents/skills/_shared/scripts/bounded_run.py`, which `scripts/pr_loop.py` and `checkout_preflight.py` use too.
+  A command's session is its own, so a signal sent to the process group of the train itself (`timeout(1)`, a
+  tool's time limit) does not reach git; there is no SIGTERM handler yet (kjelly/pilot#309).
 - **Exit codes.** 0: the run ended with nothing failed (any of MERGED, DRAFTED, DEQUEUED, SKIP, WAITING,
   `NOT_AT_HEAD`, `BUSY`). 1: a PR ended in `ERROR`. 2: status `INFRA`, or an exception nobody
   classified (never a traceback with exit 1, which would be taken for a PR's `ERROR`).
