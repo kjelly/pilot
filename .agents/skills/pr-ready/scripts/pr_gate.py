@@ -22,6 +22,20 @@ from pathlib import Path
 from typing import Any, Sequence
 
 sys.dont_write_bytecode = True
+# `bounded_run` lives in the `_shared` bundle directory: it goes on the import path LAST and only when absent
+# (`merge_gate_modules` below puts another directory at index 0 and pops index 0 again).
+_SHARED_SCRIPTS = str(Path(__file__).resolve().parents[2] / "_shared" / "scripts")
+if _SHARED_SCRIPTS not in sys.path:
+    sys.path.append(_SHARED_SCRIPTS)
+import bounded_run  # noqa: E402  (every gh and git read below goes through it: tests/test_bounded_run_lint.py)
+
+# Seconds one read may run, read when the command starts (the tests patch them). A `gh` read gets bounded_run's own
+# SIGKILL grace (up to KILL_AFTER + DRAIN more, as gh_runtime.run_gh); a git read gets this KILL_AFTER, as the landing
+# preflight does (git removes its lock files on SIGTERM and is done long before). A read that outlives its limit is a
+# GateError, the same refusal as a gh HTTP 503: nothing it printed is used, and no caller reads it as an absent answer.
+GH_TIMEOUT = 75
+GIT_TIMEOUT = 60
+KILL_AFTER = 10
 
 SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -30,12 +44,31 @@ class GateError(RuntimeError):
     pass
 
 
+class GateTimeout(GateError):
+    """A gh or git read outlived its limit and its process group was ended. A GateError, so that every place that refuses on
+    a GateError still does; a place that falls back on one ("nothing proves it") has to let this one through, because a
+    timeout is not an answer."""
+
+
+def bounded(argv: list[str], *, limit: float, label: str, kill_after: float | None = None,
+            text: bool = True) -> subprocess.CompletedProcess:
+    """`argv` run through bounded_run.run with `limit` seconds, stdin closed. A command that exited is judged by its
+    exit code, whatever something it started does with its output. One that did not finish in time has its whole process
+    group ended and is a GateTimeout that names it (`label`), the limit and how it was ended: never a CompletedProcess, so
+    `allow_nonzero_json` and `empty_if` cannot be handed a made-up exit code and a half-written answer."""
+    try:
+        return bounded_run.run(argv, limit=limit, text=text, kill_after=kill_after)
+    except bounded_run.Timeout as exc:
+        raise GateTimeout(f"{label} timed out after {exc.timeout:g} s and its process group was ended ({exc.ended})") from None
+
+
 def cmd(argv: list[str], *, allow_nonzero_json: bool = False, empty_if: re.Pattern[str] | None = None) -> Any:
     """Run argv and parse its stdout as JSON. `empty_if` is the one tolerated failure: exit 1 with
     nothing on stdout and stderr that is exactly that message means "empty list". It is never matched
-    against stdout, so a valid JSON answer is always parsed, and never as a substring of other output."""
+    against stdout, so a valid JSON answer is always parsed, and never as a substring of other output.
+    A command that outlives GH_TIMEOUT is a GateError (see `bounded`)."""
     try:
-        p = subprocess.run(argv, text=True, capture_output=True, check=False)
+        p = bounded(argv, limit=GH_TIMEOUT, label=" ".join(argv[:4]))
     except OSError as exc:
         raise GateError(f"Cannot execute {argv[0]}: {exc}") from exc
     if empty_if is not None and p.returncode == 1 and not p.stdout.strip() and empty_if.fullmatch(p.stderr):
@@ -147,7 +180,8 @@ def evidence_context(worktree: Path | None, head: Any, base_name: Any, remote: s
     None keeps the strict rule (every receipt and the review must name HEAD). The context is
     only ever built from the verified checkout and the PR's base branch as fetched from
     `remote`; a base ref missing locally yields a context with no patterns, which accepts
-    nothing but HEAD.
+    nothing but HEAD. A git that outlives its limit while the rules are read (repo_evidence raises TimeoutError) is a
+    GateError, not None: None would accept HEAD alone, as if the repository declared no evidence rules.
     """
     if worktree is None or not isinstance(head, str) or not SHA.fullmatch(head):
         return None
@@ -158,6 +192,8 @@ def evidence_context(worktree: Path | None, head: Any, base_name: Any, remote: s
         return None
     try:
         return module.Context.load(worktree, head, f"refs/remotes/{remote}/{base_name}", integrated_base=True)
+    except TimeoutError as exc:  # a git that timed out is not "the rules cannot be read": None would accept HEAD alone
+        raise GateError(str(exc)) from None
     except (OSError, RuntimeError, ValueError):
         return None
 
@@ -170,22 +206,29 @@ def covers_head(ctx: Any, value: Any, sha: Any, label: str) -> bool:
 def review_covers_head(ctx: Any, value: Any, sha: Any, label: str) -> bool:
     """A review (never a check receipt) taken at `value` covers HEAD: `covers_head`, or every
     change since is evidence-only or a pure import of the base manifest's non_execution_paths.
-    Check receipts stay on `covers_head`: imported test files must run against the PR's code."""
+    Check receipts stay on `covers_head`: imported test files must run against the PR's code. A git that outlives its
+    limit is a GateError, not False."""
     if value == sha:
         return True
     if ctx is None:
         return False
     try:
         return ctx.accepts_review(value, label)
+    except TimeoutError as exc:  # not "does not cover HEAD": that would hide the timeout behind a stale-review message
+        raise GateError(str(exc)) from None
     except (OSError, RuntimeError, ValueError):
         return False
 
 
 def stale_detail(ctx: Any, value: Any, *, review: bool = False) -> str:
+    """The reason evidence taken at `value` is stale, for the refusal message (empty when there is none to give). A git that
+    outlives its limit is a GateError, not an empty detail."""
     if ctx is None or not isinstance(value, str):
         return ""
     try:
         return " (" + (ctx.review_stale_reason(value) if review else ctx.stale_reason(value)) + ")"
+    except TimeoutError as exc:  # not "no detail": the refusal must say that git did not answer
+        raise GateError(str(exc)) from None
     except (OSError, RuntimeError, ValueError):
         return ""
 
@@ -405,7 +448,8 @@ def check_local(worktree: Path) -> tuple[str, str, list[str]]:
         raise GateError(f"Worktree does not exist: {worktree}")
 
     def git(*arguments: str) -> str:
-        p = subprocess.run(["git", "-C", str(worktree), *arguments], capture_output=True, text=True)
+        p = bounded(["git", "-C", str(worktree), *arguments], limit=GIT_TIMEOUT, kill_after=KILL_AFTER,
+                    label=f"git {' '.join(arguments)}")
         if p.returncode:
             raise GateError(f"git {' '.join(arguments)} failed: {p.stderr.strip()[:400]}")
         return p.stdout.strip()
@@ -450,8 +494,8 @@ def tracked_entry(root: Path, head: Any, path: Path) -> tuple[str, str, str, str
     if rel == "." or "\0" in rel:
         return None
     # Literal pathspecs: a report summary such as ":(glob)x" must be a name, never pathspec magic.
-    p = subprocess.run(["git", "--literal-pathspecs", "-C", str(root), "ls-tree", "-z", head, "--", rel],
-                       capture_output=True, check=False)
+    p = bounded(["git", "--literal-pathspecs", "-C", str(root), "ls-tree", "-z", head, "--", rel],
+                limit=GIT_TIMEOUT, kill_after=KILL_AFTER, text=False, label=f"git ls-tree {head[:12]} {rel}")
     if p.returncode:
         raise GateError(f"Cannot read {rel} in PR head {head[:12]}: {p.stderr.decode(errors='replace').strip()[:300]}")
     for row in filter(None, p.stdout.split(b"\0")):
@@ -463,7 +507,10 @@ def tracked_entry(root: Path, head: Any, path: Path) -> tuple[str, str, str, str
 
 
 def checkout_head(root: Path) -> str | None:
-    p = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
+    """The checked-out commit, lower case; None when git fails (the callers read that as "not at the PR head"). A git
+    that outlives GIT_TIMEOUT is a GateError, never None."""
+    p = bounded(["git", "-C", str(root), "rev-parse", "HEAD"], limit=GIT_TIMEOUT, kill_after=KILL_AFTER,
+                label="git rev-parse HEAD")
     return p.stdout.strip().lower() if p.returncode == 0 else None
 
 
@@ -472,11 +519,14 @@ def log_artifact_problem(log_base: Path, logfile: str, head: str) -> str | None:
 
     A log the PR head commits as a regular file exists as that Git blob, so the answer is the
     same whichever branch is checked out. Any other log (the ignored `.pr-ready` receipts) must
-    be a file inside the worktree.
+    be a file inside the worktree. A head tree that cannot be read falls back on that worktree check; a git that
+    outlives its limit (GateTimeout) is not "cannot be read" and is raised.
     """
     given = Path(logfile)
     try:
         entry = tracked_entry(log_base, head, given if given.is_absolute() else log_base / given)
+    except GateTimeout:
+        raise  # git did not answer: that is not "the head does not track it"
     except GateError:
         entry = None  # nothing proves it at the head: the worktree check below decides
     if entry is not None and entry[1] in REGULAR_FILE_MODES:
@@ -958,8 +1008,8 @@ def tracked_pin(root: Path, head: str, entry: tuple[str, str, str, str], path: P
     if mode not in REGULAR_FILE_MODES:
         raise GateError(f"Wait artifact {rel} is a tracked {kind} (mode {mode}) at PR head, not a regular file")
     if checkout_head(root) == head.lower():
-        hashed = subprocess.run(["git", "-C", str(root), "hash-object", f"--path={rel}", "--", str(path)],
-                                capture_output=True, text=True, check=False)
+        hashed = bounded(["git", "-C", str(root), "hash-object", f"--path={rel}", "--", str(path)],
+                         limit=GIT_TIMEOUT, kill_after=KILL_AFTER, label=f"git hash-object {rel}")
         if hashed.returncode:
             raise GateError(f"Tracked artifact {rel} cannot be read from the worktree: {hashed.stderr.strip()[:200]}")
         if hashed.stdout.strip() != oid:
@@ -1008,8 +1058,10 @@ def artifact_pins(evidence_path: Path, evidence: dict[str, Any], root: Path,
 
 
 def fetched_base(worktree: Path, remote: str, base: str) -> str | None:
-    p = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify",
-                        f"refs/remotes/{remote}/{base}"], capture_output=True, text=True)
+    """The fetched base ref's commit; None when git cannot resolve it (the strict HEAD-only policy). A git that
+    outlives GIT_TIMEOUT is a GateError, never None."""
+    p = bounded(["git", "-C", str(worktree), "rev-parse", "--verify", f"refs/remotes/{remote}/{base}"],
+                limit=GIT_TIMEOUT, kill_after=KILL_AFTER, label=f"git rev-parse --verify refs/remotes/{remote}/{base}")
     if p.returncode:
         # A missing fetched base keeps the existing strict HEAD-only policy.
         return None
