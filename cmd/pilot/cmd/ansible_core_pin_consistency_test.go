@@ -341,25 +341,30 @@ var ansibleToolchainTools = []string{"ansible", "ansible-config", "ansible-galax
 // ansibleToolchainNotNeededByGoJobs lists the CI jobs that run Go tests
 // without installing the pinned Ansible, with the reason each does not need
 // it. An entry that stops being true (the job is gone, no longer runs Go
-// tests, or installs the pin) fails, so the list cannot rot.
+// tests, or installs the pin) fails, so the list cannot rot. The list used to
+// have mcp-remote: its pilot_diagnose_delivery test starts `ansible` and
+// `ansible-inventory`, so the job installs the pin and asserts it, as `test` does.
 var ansibleToolchainNotNeededByGoJobs = map[string]string{
 	"root-tests": "make root-test runs only the roster ownership tests of internal/inventory under sudo; the only Ansible they touch is ansible-vault encrypting, decrypting and viewing a roster file, which does not change with the series",
-	"skills":     "runs the agent skill layout test and two repo-wide lints that read files; none of them starts Ansible",
-	"mcp-remote": "runs pilot-mcp against a local sshd with a stand-in docker; no Ansible is started",
+	"skills":     "runs the Python skill unit tests, the agent skill layout test and two repo-wide lints that read files; none of them starts Ansible",
 }
 
 type ansibleToolchainStep struct {
-	Name string `yaml:"name"`
-	If   string `yaml:"if"`
-	Run  string `yaml:"run"`
-	Uses string `yaml:"uses"`
+	Name            string    `yaml:"name"`
+	If              string    `yaml:"if"`
+	Run             string    `yaml:"run"`
+	Uses            string    `yaml:"uses"`
+	ContinueOnError yaml.Node `yaml:"continue-on-error"`
+	Env             yaml.Node `yaml:"env"`
 }
 
 type ansibleToolchainJob struct {
 	Strategy struct {
 		Matrix yaml.Node `yaml:"matrix"`
 	} `yaml:"strategy"`
-	Steps []ansibleToolchainStep `yaml:"steps"`
+	ContinueOnError yaml.Node              `yaml:"continue-on-error"`
+	Env             yaml.Node              `yaml:"env"`
+	Steps           []ansibleToolchainStep `yaml:"steps"`
 }
 
 func parseAnsibleToolchainJobs(ciYAML string) (map[string]ansibleToolchainJob, error) {
@@ -565,13 +570,13 @@ func (p *ciIfParser) or() (ciIfValue, error) {
 }
 
 func (p *ciIfParser) and() (ciIfValue, error) {
-	v, err := p.unary()
+	v, err := p.comparison()
 	if err != nil {
 		return v, err
 	}
 	for p.peekOp("&&") {
 		p.pos++
-		r, err := p.unary()
+		r, err := p.comparison()
 		if err != nil {
 			return v, err
 		}
@@ -580,13 +585,10 @@ func (p *ciIfParser) and() (ciIfValue, error) {
 	return v, nil
 }
 
-func (p *ciIfParser) unary() (ciIfValue, error) {
-	if p.peekOp("!") {
-		p.pos++
-		v, err := p.unary()
-		return ciIfValue{isBool: true, b: !v.truthy()}, err
-	}
-	left, err := p.primary()
+// comparison is == or != between two unary operands: as in GitHub Actions,
+// ! binds tighter than the comparison, so `!a == b` is `(!a) == b`.
+func (p *ciIfParser) comparison() (ciIfValue, error) {
+	left, err := p.unary()
 	if err != nil {
 		return left, err
 	}
@@ -595,7 +597,7 @@ func (p *ciIfParser) unary() (ciIfValue, error) {
 			continue
 		}
 		p.pos++
-		right, err := p.primary()
+		right, err := p.unary()
 		if err != nil {
 			return left, err
 		}
@@ -610,6 +612,15 @@ func (p *ciIfParser) unary() (ciIfValue, error) {
 		return ciIfValue{isBool: true, b: equal == (op == "==")}, nil
 	}
 	return left, nil
+}
+
+func (p *ciIfParser) unary() (ciIfValue, error) {
+	if p.peekOp("!") {
+		p.pos++
+		v, err := p.unary()
+		return ciIfValue{isBool: true, b: !v.truthy()}, err
+	}
+	return p.primary()
 }
 
 func (p *ciIfParser) primary() (ciIfValue, error) {
@@ -780,9 +791,91 @@ func checkAnsibleToolchainIsAssertedBeforeGoTests(t *testing.T, ciYAML, makefile
 	return nil
 }
 
-// galaxyInstallPaths returns the collections path (-p / --collections-path) of
-// every `ansible-galaxy collection install` command in the script; "" for an
-// option with no value. A command without one contributes nothing.
+// ansibleToolchainPlainFalse reports whether a `continue-on-error` node is
+// absent or the literal false. A truthy value, a quoted "false" and a
+// `${{ }}` expression are not: the step's or job's failure could then be
+// ignored.
+func ansibleToolchainPlainFalse(n yaml.Node) bool {
+	return n.Kind == 0 || n.Kind == yaml.ScalarNode && n.Tag == "!!bool" && strings.EqualFold(n.Value, "false")
+}
+
+// ansibleToolchainYAMLText shows a `continue-on-error` value; a string that
+// only looks like a boolean is marked, so the message does not read as if the
+// value were fine.
+func ansibleToolchainYAMLText(n yaml.Node) string {
+	switch {
+	case n.Kind == yaml.ScalarNode && n.Tag == "!!bool":
+		return n.Value
+	case n.Kind == yaml.ScalarNode:
+		return n.Value + " (a string, not a boolean)"
+	}
+	return "(not a plain value)"
+}
+
+// ansibleToolchainEnvSetsPath reports whether an `env:` node sets PATH, or is
+// not a mapping this check can read (an expression): either could put another
+// Ansible first on PATH after the install.
+func ansibleToolchainEnvSetsPath(n yaml.Node) bool {
+	switch n.Kind {
+	case 0:
+		return false
+	case yaml.ScalarNode:
+		return n.Tag != "!!null" // `env:` with nothing under it sets nothing
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if strings.EqualFold(n.Content[i].Value, "PATH") {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// checkAnsibleToolchainCannotBeDisarmed: in every job that installs the pinned
+// Ansible and runs Go tests, a failure of an install step or of the assertion
+// step must fail the job, and nothing may change PATH between the install and
+// the tests. So neither those steps nor the job set `continue-on-error` to
+// anything but the literal false, and neither sets PATH in `env:` (a job-level
+// PATH reaches every step, a step-level one reaches that step: either could
+// make the assertion look at one Ansible and the tests run another).
+func checkAnsibleToolchainCannotBeDisarmed(t *testing.T, ciYAML, makefile string) error {
+	t.Helper()
+	jobs, err := parseAnsibleToolchainJobs(ciYAML)
+	if err != nil {
+		return err
+	}
+	for _, name := range slices.Sorted(maps.Keys(jobs)) {
+		job := jobs[name]
+		installs := job.installSteps()
+		if len(installs) == 0 || job.firstGoTestStep(t, makefile) < 0 {
+			continue
+		}
+		if !ansibleToolchainPlainFalse(job.ContinueOnError) {
+			return fmt.Errorf("CI job %s has `continue-on-error: %s`: a failed toolchain install or assertion would not fail the workflow", name, ansibleToolchainYAMLText(job.ContinueOnError))
+		}
+		if ansibleToolchainEnvSetsPath(job.Env) {
+			return fmt.Errorf("CI job %s sets PATH in its `env:`: the tests could run another Ansible than the one the assertion step checked", name)
+		}
+		for _, i := range append(slices.Clone(installs), job.assertSteps()...) {
+			step := job.Steps[i]
+			if !ansibleToolchainPlainFalse(step.ContinueOnError) {
+				return fmt.Errorf("CI job %s: step %q has `continue-on-error: %s`: its failure must fail the job", name, step.Name, ansibleToolchainYAMLText(step.ContinueOnError))
+			}
+			if ansibleToolchainEnvSetsPath(step.Env) {
+				return fmt.Errorf("CI job %s: step %q sets PATH in its `env:`: the install and the assertion must see the PATH the tests run with", name, step.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// galaxyInstallPaths returns one entry for every `ansible-galaxy collection
+// install` command in the script: its collections path (-p /
+// --collections-path; the last one, as the command takes), or "" when it has
+// none or the option has no value. A command without a path must show, so a
+// job that installs into the system-wide path once and into the default home
+// once does not look like one that installs only into the former.
 func galaxyInstallPaths(content string) []string {
 	var paths []string
 	for line := range strings.SplitSeq(joinShellContinuations(content), "\n") {
@@ -790,6 +883,7 @@ func galaxyInstallPaths(content string) []string {
 		if !ok {
 			continue
 		}
+		path := ""
 		fields := strings.Fields(rest)
 		for i := 0; i < len(fields); i++ {
 			f := fields[i]
@@ -798,16 +892,16 @@ func galaxyInstallPaths(content string) []string {
 			}
 			switch {
 			case f == "-p" || f == "--collections-path":
+				path = ""
 				if i+1 < len(fields) {
-					paths = append(paths, fields[i+1])
+					path = fields[i+1]
 					i++
-				} else {
-					paths = append(paths, "")
 				}
 			case strings.HasPrefix(f, "--collections-path="):
-				paths = append(paths, strings.TrimPrefix(f, "--collections-path="))
+				path = strings.TrimPrefix(f, "--collections-path=")
 			}
 		}
+		paths = append(paths, path)
 	}
 	return paths
 }
@@ -820,10 +914,13 @@ func TestAnsibleToolchainGalaxyInstallPaths(t *testing.T) {
 		{"short option", "ansible-galaxy collection install -p /srv/collections a.b c.d", []string{"/srv/collections"}},
 		{"long option", "ansible-galaxy collection install --collections-path /srv/c a.b", []string{"/srv/c"}},
 		{"long option with =", "ansible-galaxy collection install --collections-path=/srv/c a.b", []string{"/srv/c"}},
-		{"no option", "ansible-galaxy collection install a.b c.d", nil},
+		{"no option", "ansible-galaxy collection install a.b c.d", []string{""}},
+		{"the last path of one command wins", "ansible-galaxy collection install -p /one a.b --collections-path /two", []string{"/two"}},
+		{"a second install without a path", "ansible-galaxy collection install -p /one a.b\nansible-galaxy collection install c.d", []string{"/one", ""}},
+		{"no install at all", "echo nothing", nil},
 		{"continuation lines", "RUN x \\\n    && ansible-galaxy collection install -p /srv/c \\\n        a.b \\\n        c.d", []string{"/srv/c"}},
-		{"comment lines are not commands", "# ansible-galaxy collection install -p /nowhere a.b\nansible-galaxy collection install a.b", nil},
-		{"option after the next command is not ours", "ansible-galaxy collection install a.b && tool -p /elsewhere", nil},
+		{"comment lines are not commands", "# ansible-galaxy collection install -p /nowhere a.b\nansible-galaxy collection install a.b", []string{""}},
+		{"option after the next command is not ours", "ansible-galaxy collection install a.b && tool -p /elsewhere", []string{""}},
 		{"option without a value", "ansible-galaxy collection install a.b -p", []string{""}},
 		{"two commands", "ansible-galaxy collection install -p /one a.b\nansible-galaxy collection install -p /two c.d", []string{"/one", "/two"}},
 	} {
@@ -1149,6 +1246,9 @@ func ansibleToolchainChecks(in ansibleToolchainInputs, notNeeded map[string]stri
 		{name: "install and assertion come first", run: func(t *testing.T) error {
 			return checkAnsibleToolchainIsAssertedBeforeGoTests(t, in.ci, in.makefile)
 		}},
+		{name: "install and assertion cannot be disarmed", run: func(t *testing.T) error {
+			return checkAnsibleToolchainCannotBeDisarmed(t, in.ci, in.makefile)
+		}},
 		{name: "collections path matches the image", run: func(t *testing.T) error {
 			return checkAnsibleCollectionsPathMatchesImage(t, in.image, in.ci, in.makefile)
 		}},
@@ -1208,6 +1308,14 @@ func TestAnsibleToolchainStepConditionEvaluator(t *testing.T) {
 		{"!(matrix.group == 'spec')", "cmd", true},
 		{"${{ matrix.group == 'cmd' }}", "cmd", true},
 		{"matrix.group == 'SPEC'", "spec", true}, // GitHub compares strings case-insensitively
+		// ! binds tighter than ==: `!x == y` is `(!x) == y`, not `!(x == y)`.
+		{"!(matrix.group == 'spec') == true", "spec", false},
+		{"!(matrix.group == 'spec') == true", "cmd", true},
+		{"!(matrix.group == 'spec') == false", "spec", true},
+		{"!matrix.group == true", "spec", false},
+		{"!matrix.group == true", "", true},
+		{"!!matrix.group == true", "spec", true},
+		{"!(matrix.group == 'spec') != true", "spec", true},
 		{"true", "", true},
 		{"false", "spec", false},
 		{"matrix.group == 'it''s'", "it's", true},
@@ -1234,6 +1342,8 @@ func TestAnsibleToolchainStepConditionEvaluator(t *testing.T) {
 		"matrix.group 'spec'",
 		"matrix.group == true",
 		"matrix.group = 'spec'",
+		"!matrix.group == 'spec'", // (!matrix.group) == 'spec' compares a boolean with a string; not guessed
+		"matrix.group == 'spec' == true",
 	} {
 		t.Run("unreadable/"+cond, func(t *testing.T) {
 			if got, err := ciStepRunsForGroup(cond, "spec"); err == nil || !strings.Contains(err.Error(), "cannot evaluate") {
@@ -1252,6 +1362,49 @@ func mustReplaceOnce(t *testing.T, s, old, new string) string {
 		t.Fatalf("mutation target %q occurs %d times, want 1: the control would not test anything", old, n)
 	}
 	return strings.Replace(s, old, new, 1)
+}
+
+var ciJobHeaderRE = regexp.MustCompile(`\n  [A-Za-z0-9_-]+:\n`)
+
+// mutateRealJob applies mutate to the text of one job of ci.yml (from its
+// `  name:` line to the next job's), so a control can break one job of the real
+// workflow although the same step text appears in another job.
+func mutateRealJob(t *testing.T, ci, job string, mutate func(region string) string) string {
+	t.Helper()
+	header := "\n  " + job + ":\n"
+	start := strings.Index(ci, header)
+	if start < 0 || strings.Count(ci, header) != 1 {
+		t.Fatalf("ci.yml must have exactly one job %q", job)
+	}
+	start++
+	end := len(ci)
+	if loc := ciJobHeaderRE.FindStringIndex(ci[start:]); loc != nil {
+		end = start + loc[0] + 1
+	}
+	return ci[:start] + mutate(ci[start:end]) + ci[end:]
+}
+
+// withoutStep removes the step with the given name from a job's text, up to
+// the next step.
+func withoutStep(t *testing.T, region, name string) string {
+	t.Helper()
+	head := "      - name: " + name + "\n"
+	start := strings.Index(region, head)
+	if start < 0 || strings.Count(region, head) != 1 {
+		t.Fatalf("the job must have exactly one step named %q", name)
+	}
+	end := len(region)
+	if next := strings.Index(region[start+1:], "\n      - "); next >= 0 {
+		end = start + 1 + next + 1
+	}
+	return region[:start] + region[end:]
+}
+
+// afterStepName inserts lines (already indented) right after a step's name line.
+func afterStepName(t *testing.T, region, name, lines string) string {
+	t.Helper()
+	head := "      - name: " + name + "\n"
+	return mustReplaceOnce(t, region, head, head+lines)
 }
 
 // ansibleToolchainJobYAML renders one job of a synthetic workflow. goMatrix
@@ -1325,6 +1478,19 @@ func TestAnsibleToolchainGuardCatchesDrift(t *testing.T) {
 	withExtraGroup := append(slices.Clone(in.groups), "extra")
 	const specCmdRest = "matrix.group == 'spec' || matrix.group == 'cmd' || matrix.group == 'rest'"
 	const installP = "-p /usr/share/ansible/collections"
+	const installName = "Install Ansible toolchain and PyYAML (pinned like the delivery image)"
+	// inRealJob mutates one job of the real ci.yml.
+	inRealJob := func(job string, mutate func(region string) string) string {
+		return mutateRealJob(t, in.ci, job, mutate)
+	}
+	realStepLines := func(job, step, lines string) string {
+		return inRealJob(job, func(r string) string { return afterStepName(t, r, step, lines) })
+	}
+	realJobLines := func(job, lines string) string {
+		return inRealJob(job, func(r string) string {
+			return mustReplaceOnce(t, r, "    timeout-minutes:", lines+"    timeout-minutes:")
+		})
+	}
 
 	for _, tc := range []struct {
 		name      string
@@ -1339,7 +1505,8 @@ func TestAnsibleToolchainGuardCatchesDrift(t *testing.T) {
 		{name: "the same steps in a synthetic workflow", ci: workflow(good)},
 		{name: "a third job with a matching install and the assertion", ci: workflow(good, ansibleToolchainJobYAML("third", false, install, assert, ansibleToolchainStep{Name: "go test", Run: "go test ./x/"}))},
 		{name: "a job that runs no Go tests needs nothing", ci: workflow(good, ansibleToolchainJobYAML("lint", false, notAnsible))},
-		{name: "a job that runs Go tests and is listed with a reason", ci: workflow(good, ansibleToolchainJobYAML("sshd", false, ansibleToolchainStep{Name: "t", Run: "go test ./x/"})), notNeeded: map[string]string{"sshd": "no Ansible"}},
+		{name: "a job that runs Go tests and is listed with a reason", ci: workflow(good, ansibleToolchainJobYAML("listed", false, ansibleToolchainStep{Name: "t", Run: "go test ./x/"})), notNeeded: map[string]string{"listed": "no Ansible"}},
+		{name: "continue-on-error: false on the assertion step", ci: realStepLines("test", ansibleToolchainAssertStepName, "        continue-on-error: false\n"), notNeeded: ansibleToolchainNotNeededByGoJobs},
 
 		// The install must reach every group.
 		{name: "the spec-only if is back", ci: workflow(testJob(withIf(install, "matrix.group == 'spec'"), assert, vet, gotest)), want: "group(s): cmd, rest"},
@@ -1377,6 +1544,38 @@ func TestAnsibleToolchainGuardCatchesDrift(t *testing.T) {
 		{name: "collections go to the default home", ci: workflow(testJob(withRun(install, mustReplaceOnce(t, installRun, installP, "-p ~/.ansible/collections")), assert, vet, gotest)), want: "installs collections into"},
 		{name: "collections go to the default path with no -p", ci: workflow(testJob(withRun(install, mustReplaceOnce(t, installRun, installP+" ", "")), assert, vet, gotest)), want: "installs collections into"},
 		{name: "the image installs collections with no -p", ci: good, image: mustReplaceOnce(t, in.image, installP+" ", ""), want: "images/Dockerfile.pilot-cli: want one"},
+
+		{name: "a second install into the default path", ci: workflow(testJob(withRun(install, installRun+"ansible-galaxy collection install community.general\n"), assert, vet, gotest)), want: `installs collections into ["/usr/share/ansible/collections" ""]`},
+
+		// Jobs of the real ci.yml that start Ansible (mcp-remote: pilot_diagnose_delivery runs ansible and ansible-inventory).
+		{name: "mcp-remote loses its assertion step", ci: inRealJob("mcp-remote", func(r string) string { return withoutStep(t, r, ansibleToolchainAssertStepName) }), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: "CI job mcp-remote installs the pinned Ansible and runs Go tests, so it needs exactly one step named"},
+		{name: "mcp-remote loses its install step", ci: inRealJob("mcp-remote", func(r string) string { return withoutStep(t, r, installName) }), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: "CI job mcp-remote runs Go tests without installing the pinned Ansible"},
+		{name: "mcp-remote's install has a group if", ci: realStepLines("mcp-remote", installName, "        if: matrix.group == 'spec'\n"), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: "CI job mcp-remote: step"},
+		{name: "mcp-remote is listed as not needing it again", ci: in.ci, notNeeded: map[string]string{"mcp-remote": "x", "root-tests": "x", "skills": "x"},
+			want: "lists mcp-remote, but the job installs the pinned Ansible now"},
+
+		// A failure of the install or the assertion has to fail the job, and PATH has to stay what the install made it.
+		{name: "continue-on-error on the assertion step", ci: realStepLines("test", ansibleToolchainAssertStepName, "        continue-on-error: true\n"), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: `step "` + ansibleToolchainAssertStepName + `" has ` + "`continue-on-error: true`"},
+		{name: "continue-on-error on mcp-remote's assertion step", ci: realStepLines("mcp-remote", ansibleToolchainAssertStepName, "        continue-on-error: true\n"), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: "CI job mcp-remote: step"},
+		{name: "continue-on-error on the install step", ci: realStepLines("test", installName, "        continue-on-error: true\n"), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: `step "` + installName + `" has ` + "`continue-on-error: true`"},
+		{name: "continue-on-error is an expression", ci: realStepLines("test", ansibleToolchainAssertStepName, "        continue-on-error: ${{ matrix.group == 'cmd' }}\n"), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: "continue-on-error: ${{ matrix.group == 'cmd' }} (a string, not a boolean)"},
+		{name: "continue-on-error is the string false", ci: realStepLines("test", ansibleToolchainAssertStepName, "        continue-on-error: \"false\"\n"), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: "continue-on-error: false (a string, not a boolean)"},
+		{name: "continue-on-error on the job", ci: realJobLines("test", "    continue-on-error: true\n"), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: "CI job test has `continue-on-error: true`"},
+		{name: "PATH set in the env of the assertion step", ci: realStepLines("test", ansibleToolchainAssertStepName, "        env:\n          PATH: /opt/pipx_bin:${{ env.PATH }}\n"), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: `step "` + ansibleToolchainAssertStepName + `" sets PATH in its ` + "`env:`"},
+		{name: "PATH set in the env of the job", ci: realJobLines("test", "    env:\n      PATH: /opt/pipx_bin\n"), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: "CI job test sets PATH in its `env:`"},
+		{name: "an env that is an expression", ci: realStepLines("test", ansibleToolchainAssertStepName, "        env: ${{ fromJSON(needs.changes.outputs.profile) }}\n"), notNeeded: ansibleToolchainNotNeededByGoJobs,
+			want: "sets PATH in its `env:`"},
 
 		{name: "a malformed workflow", ci: "jobs: [", want: "parse CI workflow"},
 	} {
