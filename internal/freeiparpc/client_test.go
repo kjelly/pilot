@@ -522,6 +522,106 @@ func TestLostAnswers(t *testing.T) {
 	})
 }
 
+// stallAfterPrefix answers method with the first half of the captured answer
+// fixture and then holds the response open, so a deadline passes while the
+// body is half read. The header declares the length of the whole body unless
+// chunked. The returned channel is closed once the prefix has been flushed.
+func stallAfterPrefix(t *testing.T, f *fakeServer, method, fixture string, chunked bool) <-chan struct{} {
+	t.Helper()
+	fx := loadFixture(t, fixture)
+	release := make(chan struct{})
+	// Registered after the server's Close, so it runs first: Close waits for
+	// the held request.
+	t.Cleanup(func() { close(release) })
+	sent := make(chan struct{})
+	var once sync.Once
+	f.hook = func(w http.ResponseWriter, m string) bool {
+		if m != method {
+			return false
+		}
+		for k, v := range fx.headers {
+			w.Header().Set(k, v)
+		}
+		if !chunked {
+			w.Header().Set("Content-Length", strconv.Itoa(len(fx.body)))
+		}
+		w.WriteHeader(fx.status)
+		_, _ = w.Write(fx.body[:len(fx.body)/2])
+		w.(http.Flusher).Flush()
+		once.Do(func() { close(sent) })
+		<-release
+		panic(http.ErrAbortHandler)
+	}
+	return sent
+}
+
+// An answer cut short when the request's deadline passes is the deadline: the
+// part of the body that arrived is never decoded, because ErrIncompleteResponse
+// is for a complete answer that lacks fields. A write that may have been
+// applied stays an unknown outcome, caused by the deadline. The control is a
+// complete HTTP answer with an empty body, which the client reports as
+// ErrIncompleteResponse and not as the deadline: it is what the fake FreeIPA of
+// cmd/pilot/cmd once wrote for a method it was told never to answer, and the
+// preview reported it instead of the deadline (#313).
+func TestAnswerCutShortByTheDeadlineIsTheDeadline(t *testing.T) {
+	// Long enough that a stalled CI runner still gets the start of the answer
+	// before the deadline passes; the rows run in parallel, so it costs 3 s once.
+	const deadline = 3 * time.Second
+	for _, tc := range []struct {
+		name, method, fixture string
+		write, chunked        bool
+	}{
+		{"a read with a Content-Length", "user_show", "user-show", false, false},
+		{"a read, chunked", "user_show", "user-show", false, true},
+		{"a write with a Content-Length", "user_mod", "user-mod", true, false},
+		{"a write, chunked", "user_mod", "user-mod", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, c := loggedIn(t, nil)
+			sent := stallAfterPrefix(t, f, tc.method, tc.fixture, tc.chunked)
+			ctx, cancel := context.WithTimeout(context.Background(), deadline)
+			defer cancel()
+			_, err := c.Call(ctx, Command{Method: tc.method, Args: []any{"p0-alice"}})
+			select {
+			case <-sent:
+			default:
+				t.Fatalf("the deadline passed before the server sent the start of its answer (%v): not the case under test", err)
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("err = %v, want the deadline", err)
+			}
+			if errors.Is(err, ErrIncompleteResponse) {
+				t.Fatalf("err = %v: the part of the answer that arrived was decoded", err)
+			}
+			var unknown *OutcomeUnknownError
+			if got := errors.As(err, &unknown); got != tc.write || (got && unknown.Method != tc.method) {
+				t.Fatalf("err = %v, want an unknown outcome for %s only if it is a write", err, tc.method)
+			}
+			wantUnknown := 0
+			if tc.write {
+				wantUnknown = 1
+			}
+			if s := c.Stats(); s.Unknown != wantUnknown || s.ReadRetries != 0 {
+				t.Fatalf("stats = %+v, want %d unknown and no resend after the deadline", s, wantUnknown)
+			}
+			if got := f.methods(); !slices.Equal(got, []string{tc.method}) {
+				t.Fatalf("sent %v, want %s once", got, tc.method)
+			}
+		})
+	}
+	for _, method := range []string{"user_show", "user_mod"} {
+		t.Run("control: an empty 200 to "+method, func(t *testing.T) {
+			f, c := loggedIn(t, nil)
+			injectBody(f, "")
+			_, err := c.Call(context.Background(), Command{Method: method, Args: []any{"p0-alice"}})
+			if !errors.Is(err, ErrIncompleteResponse) || errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("err = %v, want an incomplete answer, not a deadline", err)
+			}
+		})
+	}
+}
+
 // TLS fails before any request (and so the password) leaves.
 func TestTLSRejectsTheWrongServer(t *testing.T) {
 	t.Run("certificate for another name", func(t *testing.T) {
